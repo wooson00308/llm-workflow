@@ -51,3 +51,5 @@ src-tauri/src/
 - `main`의 버전 커밋에 `vX.Y.Z` 태그를 생성하면 Windows/Linux/macOS 드래프트 릴리스가 빌드됩니다.
 
 자세한 내용은 [릴리스 가이드](docs/releasing.md)와 [제품·기술 기준](docs/planning/product-concept.md)을 참고하세요.
+
+외부 LLM이 작성해야 하는 frontmatter와 사용자 결정 규칙은 [파일 계약](docs/file-contract.md)에 정의되어 있습니다.

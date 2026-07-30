@@ -22,6 +22,7 @@ const project: ProjectSummary = {
       status: "active",
       createdAt: "2026-07-30T00:00:00Z",
       counts: { ideas: 0, specs: 0, decisions: 0, tasks: 0, reports: 0 },
+      items: { ideas: [], specs: [], tasks: [] },
     },
   ],
 };
@@ -41,6 +42,8 @@ describe("useProjectWorkspace", () => {
           },
         ],
       }),
+      readSpec: vi.fn().mockResolvedValue(null),
+      decideSpec: vi.fn().mockResolvedValue(project),
       migrate: vi.fn().mockResolvedValue(project),
     };
     const recentStore: RecentProjectStore = {

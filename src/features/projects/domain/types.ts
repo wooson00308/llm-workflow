@@ -19,7 +19,30 @@ export interface WorkflowSummary {
   status: "active" | "archived";
   createdAt: string;
   counts: WorkflowCounts;
+  items: WorkflowItems;
 }
+
+export interface WorkflowItems {
+  ideas: WorkflowItemSummary[];
+  specs: WorkflowItemSummary[];
+  tasks: WorkflowItemSummary[];
+}
+
+export interface WorkflowItemSummary {
+  fileName: string;
+  id: string;
+  title: string;
+  status: string;
+  updatedAt: string | null;
+  excerpt: string;
+}
+
+export interface SpecDocument {
+  summary: WorkflowItemSummary;
+  body: string;
+}
+
+export type SpecDecisionOutcome = "approved" | "rejected";
 
 export interface AgentLeaseSummary {
   leaseId: string;
@@ -52,6 +75,18 @@ export interface ProjectGateway {
     path: string,
     workflowDirectory: string,
     content: string,
+  ): Promise<ProjectSummary>;
+  readSpec(
+    path: string,
+    workflowDirectory: string,
+    fileName: string,
+  ): Promise<SpecDocument>;
+  decideSpec(
+    path: string,
+    workflowDirectory: string,
+    fileName: string,
+    outcome: SpecDecisionOutcome,
+    comment: string,
   ): Promise<ProjectSummary>;
   migrate(path: string): Promise<ProjectSummary>;
 }
