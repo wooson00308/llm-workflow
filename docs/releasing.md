@@ -8,8 +8,8 @@
 4. `main` 병합 후 같은 버전의 태그를 만든다.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 ## GitHub 설정
@@ -33,8 +33,10 @@ GitHub Actions secret:
 
 Tauri updater 서명은 업데이트 산출물의 무결성을 확인하지만 macOS/Windows의 개발자 신뢰 서명을 대체하지 않는다.
 
+현재 첫 공개 배포의 macOS 번들은 Developer ID 인증서 없이 생성한다. 따라서 신규 설치 시 macOS Gatekeeper 경고가 나타날 수 있다. 유효한 인증서가 준비되면 Apple 서명·notarization 환경 변수를 릴리스 워크플로에 다시 연결하고 검증한다.
+
 ## 배포 방식
 
-`v*` 태그는 GitHub Actions에서 Linux, Windows, macOS universal 빌드와 `latest.json`을 생성한다. 릴리스는 드래프트로 만들어지며 설치 확인 후 사람이 게시한다. 앱 내부 updater는 게시된 최신 릴리스만 확인한다.
+`v*` 태그는 GitHub Actions에서 Linux, Windows, macOS universal 빌드와 `latest.json`을 생성한다. 릴리스는 드래프트로 만들어지며 설치 확인 후 사람이 게시한다. 앱 내부 updater는 공개 저장소에 게시된 최신 릴리스만 확인한다.
 
 앱 업데이트는 프로젝트 Markdown을 자동으로 마이그레이션하지 않는다. 문서 마이그레이션은 프로젝트를 열 때 별도의 백업·lease 확인 절차로 실행한다.
