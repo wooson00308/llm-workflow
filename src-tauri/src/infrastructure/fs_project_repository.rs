@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -9,7 +10,11 @@ use uuid::Uuid;
 
 use crate::domain::project::{
     AgentLease, AgentLeaseSummary, ProjectManifest, ProjectSummary, SchemaCompatibility,
-    WorkflowCounts, WorkflowEntry, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    SpecDecisionOutcome, SpecDocument, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
+    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+};
+use crate::infrastructure::project_instructions::{
+    install_project_instructions, validate_project_instructions, ProjectInstructionError,
 };
 
 const CONTROL_DIRECTORY: &str = ".workflow";
@@ -33,6 +38,16 @@ pub enum ProjectError {
     EmptyIdea,
     #[error("아이디어는 10,000자 이하여야 합니다.")]
     IdeaTooLong,
+    #[error("기획서 파일 이름이 안전하지 않습니다: {0}")]
+    UnsafeDocumentFile(String),
+    #[error("기획서 파일을 찾을 수 없습니다: {0}")]
+    DocumentNotFound(String),
+    #[error("사용자 선택 대기 상태인 기획서만 승인하거나 폐기할 수 있습니다.")]
+    SpecNotAwaitingDecision,
+    #[error("기획서를 폐기할 때는 코멘트를 입력해 주세요.")]
+    RejectionCommentRequired,
+    #[error("결정 코멘트는 2,000자 이하여야 합니다.")]
+    DecisionCommentTooLong,
     #[error("프로젝트에 등록되지 않은 워크플로우입니다.")]
     UnknownWorkflow,
     #[error("워크플로우 디렉터리 경로가 안전하지 않습니다: {0}")]
@@ -53,6 +68,8 @@ pub enum ProjectError {
     Yaml(#[from] serde_yaml::Error),
     #[error("프로젝트 메타데이터를 안전하게 저장하지 못했습니다: {0}")]
     Persist(String),
+    #[error(transparent)]
+    ProjectInstructions(#[from] ProjectInstructionError),
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +106,7 @@ impl FileSystemProjectRepository {
         validate_workflow_name(workflow_name)?;
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
+        validate_project_instructions(&root, &control_root)?;
         ensure_managed_control_root(&control_root)?;
 
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -112,6 +130,8 @@ impl FileSystemProjectRepository {
                 workflows: Vec::new(),
             }
         };
+
+        install_project_instructions(&root, &control_root)?;
 
         let id = format!("wf_{}", &compact_uuid()[..8]);
         let directory = format!("{}--{}", slugify(workflow_name), id);
@@ -181,7 +201,7 @@ impl FileSystemProjectRepository {
             return Err(ProjectError::UnknownWorkflow);
         }
 
-        let idea_id = format!("IDEA-{}", &compact_uuid()[..8].to_uppercase());
+        let idea_id = format!("IDEA-{}", compact_uuid()[..8].to_uppercase());
         let created_at = Utc::now().to_rfc3339();
         let idea = format!(
             "---\nschema: workflow-labs/idea@1\nid: {idea_id}\nstatus: inbox\ncreated_at: {created_at}\n---\n\n{}\n",
@@ -199,6 +219,73 @@ impl FileSystemProjectRepository {
             project,
             SchemaCompatibility::Current,
             active_leases,
+        ))
+    }
+
+    pub fn read_spec(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+    ) -> Result<SpecDocument, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
+        let (mut summary, body) = read_markdown_document(&spec_path, "draft")?;
+        normalize_spec_status(&mut summary);
+        apply_latest_decision(&workflow_root, &mut summary);
+        Ok(SpecDocument { summary, body })
+    }
+
+    pub fn record_spec_decision(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+        outcome: SpecDecisionOutcome,
+        comment: &str,
+    ) -> Result<ProjectSummary, ProjectError> {
+        validate_decision(&outcome, comment)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
+        let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
+        normalize_spec_status(&mut spec);
+        apply_latest_decision(&workflow_root, &mut spec);
+        if spec.status != "user_review" {
+            return Err(ProjectError::SpecNotAwaitingDecision);
+        }
+
+        let decision_id = format!("DECISION-{}", compact_uuid()[..8].to_uppercase());
+        let created_at = Utc::now().to_rfc3339();
+        let outcome_value = match outcome {
+            SpecDecisionOutcome::Approved => "approved",
+            SpecDecisionOutcome::Rejected => "rejected",
+        };
+        let decision = format!(
+            "---\nschema: workflow-labs/decision@1\nid: {decision_id}\nspec_id: {}\noutcome: {outcome_value}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
+            yaml_scalar(&spec.id),
+            comment.trim()
+        );
+        write_text_atomically(
+            &workflow_root
+                .join("decisions")
+                .join(format!("{decision_id}.md")),
+            &decision,
+        )?;
+
+        Ok(summary_from_manifest(
+            &root,
+            project,
+            SchemaCompatibility::Current,
+            read_active_leases(&control_root)?,
         ))
     }
 
@@ -445,7 +532,9 @@ fn summary_from_manifest(
             .workflows
             .iter()
             .map(|workflow| {
-                workflow.to_summary(workflow_counts(&control_root.join(&workflow.directory)))
+                let workflow_root = control_root.join(&workflow.directory);
+                let items = workflow_items(&workflow_root);
+                workflow.to_summary(workflow_counts(&workflow_root, &items), items)
             })
             .collect(),
     }
@@ -496,12 +585,275 @@ fn validate_idea(content: &str) -> Result<(), ProjectError> {
     Ok(())
 }
 
-fn workflow_counts(workflow_root: &Path) -> WorkflowCounts {
+fn validate_decision(outcome: &SpecDecisionOutcome, comment: &str) -> Result<(), ProjectError> {
+    let trimmed = comment.trim();
+    if matches!(outcome, SpecDecisionOutcome::Rejected) && trimmed.is_empty() {
+        return Err(ProjectError::RejectionCommentRequired);
+    }
+    if trimmed.chars().count() > 2_000 {
+        return Err(ProjectError::DecisionCommentTooLong);
+    }
+    Ok(())
+}
+
+fn require_current_schema(schema_version: u32) -> Result<(), ProjectError> {
+    match compatibility_for(schema_version) {
+        SchemaCompatibility::Current => Ok(()),
+        SchemaCompatibility::MigrationRequired => Err(ProjectError::MigrationRequired),
+        SchemaCompatibility::FutureSchema => Err(ProjectError::FutureSchema),
+        SchemaCompatibility::NotInitialized => unreachable!("manifest exists"),
+    }
+}
+
+fn registered_workflow_root(
+    control_root: &Path,
+    project: &ProjectManifest,
+    workflow_directory: &str,
+) -> Result<PathBuf, ProjectError> {
+    if !project
+        .workflows
+        .iter()
+        .any(|workflow| workflow.directory == workflow_directory)
+    {
+        return Err(ProjectError::UnknownWorkflow);
+    }
+    let workflow_root = control_root.join(workflow_directory);
+    if !workflow_root.is_dir() {
+        return Err(ProjectError::UnknownWorkflow);
+    }
+    Ok(workflow_root)
+}
+
+fn safe_markdown_file(directory: &Path, file_name: &str) -> Result<PathBuf, ProjectError> {
+    let relative = Path::new(file_name);
+    let mut components = relative.components();
+    let is_single_normal =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if !is_single_normal || relative.extension().and_then(|value| value.to_str()) != Some("md") {
+        return Err(ProjectError::UnsafeDocumentFile(file_name.to_owned()));
+    }
+    let path = directory.join(relative);
+    if !path.is_file() {
+        return Err(ProjectError::DocumentNotFound(file_name.to_owned()));
+    }
+    if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        return Err(ProjectError::UnsafeDocumentFile(file_name.to_owned()));
+    }
+    Ok(path)
+}
+
+fn workflow_items(workflow_root: &Path) -> WorkflowItems {
+    let mut specs = read_markdown_summaries(&workflow_root.join("specs"), "draft");
+    let decisions = latest_spec_decisions(workflow_root);
+    for spec in &mut specs {
+        normalize_spec_status(spec);
+        if let Some((_, outcome)) = decisions.get(&spec.id) {
+            spec.status.clone_from(outcome);
+        }
+    }
+    WorkflowItems {
+        ideas: read_markdown_summaries(&workflow_root.join("ideas"), "inbox"),
+        specs,
+        tasks: read_markdown_summaries(&workflow_root.join("tasks"), "todo"),
+    }
+}
+
+fn normalize_spec_status(spec: &mut WorkflowItemSummary) {
+    if spec.status != "draft" && spec.status != "user_review" {
+        spec.status = "draft".to_owned();
+    }
+}
+
+fn read_markdown_summaries(directory: &Path, default_status: &str) -> Vec<WorkflowItemSummary> {
+    let mut items: Vec<_> = fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if !metadata.file_type().is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("md")
+            {
+                return None;
+            }
+            read_markdown_document(&path, default_status)
+                .ok()
+                .map(|(summary, _)| summary)
+        })
+        .collect();
+    items.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.file_name.cmp(&right.file_name))
+    });
+    items
+}
+
+fn read_markdown_document(
+    path: &Path,
+    default_status: &str,
+) -> Result<(WorkflowItemSummary, String), ProjectError> {
+    let contents = fs::read_to_string(path)?;
+    let normalized = contents.replace("\r\n", "\n");
+    let (metadata, body) = split_frontmatter(&normalized);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document.md")
+        .to_owned();
+    let fallback_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("DOCUMENT")
+        .to_owned();
+    let title = yaml_text(metadata.as_ref(), "title")
+        .or_else(|| markdown_title(&body))
+        .or_else(|| markdown_plain_title(&body))
+        .unwrap_or_else(|| fallback_id.clone());
+    let updated_at = yaml_text(metadata.as_ref(), "updated_at")
+        .or_else(|| yaml_text(metadata.as_ref(), "created_at"))
+        .or_else(|| {
+            fs::metadata(path)
+                .and_then(|value| value.modified())
+                .ok()
+                .map(|value| DateTime::<Utc>::from(value).to_rfc3339())
+        });
+    Ok((
+        WorkflowItemSummary {
+            file_name,
+            id: yaml_text(metadata.as_ref(), "id").unwrap_or(fallback_id),
+            title,
+            status: yaml_text(metadata.as_ref(), "status")
+                .unwrap_or_else(|| default_status.to_owned()),
+            updated_at,
+            excerpt: markdown_excerpt(&body),
+        },
+        body.trim().to_owned(),
+    ))
+}
+
+fn split_frontmatter(contents: &str) -> (Option<serde_yaml::Value>, String) {
+    let Some(rest) = contents.strip_prefix("---\n") else {
+        return (None, contents.to_owned());
+    };
+    let Some(end) = rest.find("\n---\n") else {
+        return (None, contents.to_owned());
+    };
+    let yaml = &rest[..end];
+    let body = rest[end + 5..].to_owned();
+    (serde_yaml::from_str(yaml).ok(), body)
+}
+
+fn yaml_text(metadata: Option<&serde_yaml::Value>, key: &str) -> Option<String> {
+    metadata?
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn markdown_title(body: &str) -> Option<String> {
+    body.lines()
+        .find_map(|line| line.trim().strip_prefix("# "))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+fn markdown_plain_title(body: &str) -> Option<String> {
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with(['#', '-', '*']))?;
+    let mut title = line.chars().take(60).collect::<String>();
+    if line.chars().count() > 60 {
+        title.push('…');
+    }
+    Some(title)
+}
+
+fn markdown_excerpt(body: &str) -> String {
+    let joined = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.trim_start_matches(['-', '*', ' ']))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut excerpt: String = joined.chars().take(160).collect();
+    if joined.chars().count() > 160 {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+fn latest_spec_decisions(workflow_root: &Path) -> HashMap<String, (String, String)> {
+    let mut latest = HashMap::new();
+    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
+        return latest;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let normalized = contents.replace("\r\n", "\n");
+        let (metadata, _) = split_frontmatter(&normalized);
+        if yaml_text(metadata.as_ref(), "schema").as_deref() != Some("workflow-labs/decision@1")
+            || yaml_text(metadata.as_ref(), "created_by").as_deref() != Some("user")
+        {
+            continue;
+        }
+        let Some(spec_id) = yaml_text(metadata.as_ref(), "spec_id") else {
+            continue;
+        };
+        let Some(outcome) = yaml_text(metadata.as_ref(), "outcome") else {
+            continue;
+        };
+        if outcome != "approved" && outcome != "rejected" {
+            continue;
+        }
+        let created_at = yaml_text(metadata.as_ref(), "created_at").unwrap_or_default();
+        let should_replace = latest
+            .get(&spec_id)
+            .is_none_or(|(current, _)| created_at >= *current);
+        if should_replace {
+            latest.insert(spec_id, (created_at, outcome));
+        }
+    }
+    latest
+}
+
+fn apply_latest_decision(workflow_root: &Path, spec: &mut WorkflowItemSummary) {
+    if let Some((_, outcome)) = latest_spec_decisions(workflow_root).get(&spec.id) {
+        spec.status.clone_from(outcome);
+    }
+}
+
+fn yaml_scalar(value: &str) -> String {
+    serde_yaml::to_string(value)
+        .unwrap_or_else(|_| "''\n".to_owned())
+        .trim()
+        .to_owned()
+}
+
+fn workflow_counts(workflow_root: &Path, items: &WorkflowItems) -> WorkflowCounts {
     WorkflowCounts {
-        ideas: count_markdown_files(&workflow_root.join("ideas")),
-        specs: count_markdown_files(&workflow_root.join("specs")),
-        decisions: count_markdown_files(&workflow_root.join("decisions")),
-        tasks: count_markdown_files(&workflow_root.join("tasks")),
+        ideas: items.ideas.len(),
+        specs: items.specs.len(),
+        decisions: items
+            .specs
+            .iter()
+            .filter(|item| item.status == "user_review")
+            .count(),
+        tasks: items.tasks.len(),
         reports: count_markdown_files(&workflow_root.join("reports")),
     }
 }
@@ -549,7 +901,7 @@ fn compact_uuid() -> String {
 
 fn workflow_readme(name: &str, id: &str) -> String {
     format!(
-        "# {name}\n\n워크플로우 ID: `{id}`\n\n## 외부 LLM 작업 규약\n\n1. 쓰기 전에 `../.runtime/migration.lock`이 없는지 확인합니다.\n2. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.\n3. 사용자 결정이 필요하면 `decisions/`에 별도 Markdown 문서를 만듭니다.\n4. 앱 소유 상태 파일과 사용자 승인 기록을 임의로 덮어쓰지 않습니다.\n5. 문서 식별자와 기존의 알 수 없는 메타데이터를 보존합니다.\n"
+        "# {name}\n\n워크플로우 ID: `{id}`\n\n## 외부 LLM 작업 규약\n\n1. 쓰기 전에 `../.runtime/migration.lock`이 없는지 확인합니다.\n2. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.\n3. 사용자 결정이 필요한 기획서는 `status: user_review`로 저장합니다.\n4. `decisions/`는 앱이 사용자 선택을 기록하는 감사 로그입니다. 외부 LLM은 이 파일을 만들거나 덮어쓰지 않습니다.\n5. 기획서 승인 여부는 기획서 원문이 아니라 최신 decision 문서로 판단합니다.\n6. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.\n\n## 필수 frontmatter\n\n### 기획서 (`specs/*.md`)\n\n```yaml\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 문서 제목\nstatus: draft # draft | user_review\ncreated_at: RFC3339\nupdated_at: RFC3339\n```\n\n본문에는 `기획 내용`, `요구사항 명세`, `기대효과` 섹션을 권장합니다.\n\n### 개발 작업 (`tasks/*.md`)\n\n```yaml\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 작업 제목\nstatus: todo # todo | in_progress | blocked | qa_waiting | completed\nupdated_at: RFC3339\n```\n\n동시에 수정하면 충돌할 수 있는 작업은 병렬로 진행하지 않습니다.\n"
     )
 }
 
@@ -561,8 +913,8 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
-    use super::{slugify, FileSystemProjectRepository, ProjectError};
-    use crate::domain::project::SchemaCompatibility;
+    use super::{slugify, validate_decision, FileSystemProjectRepository, ProjectError};
+    use crate::domain::project::{SchemaCompatibility, SpecDecisionOutcome};
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -602,6 +954,9 @@ mod tests {
             assert!(workflow_root.join(directory).is_dir());
         }
         assert!(workflow_root.join("workflow.yml").is_file());
+        assert!(root.path().join("AGENTS.md").is_file());
+        assert!(root.path().join("CLAUDE.md").is_file());
+        assert!(root.path().join(".workflow/rules/workflow.md").is_file());
         assert_eq!(
             fs::read_to_string(root.path().join(".workflow/.gitignore")).expect("nested gitignore"),
             ".runtime/\n"
@@ -652,6 +1007,10 @@ mod tests {
             .expect("create idea");
 
         assert_eq!(updated.workflows[0].counts.ideas, 1);
+        assert_eq!(
+            updated.workflows[0].items.ideas[0].title,
+            "빠르게 생각을 기록한다."
+        );
         let ideas_root = root
             .path()
             .join(".workflow")
@@ -666,6 +1025,111 @@ mod tests {
         let contents = fs::read_to_string(idea_path).expect("idea markdown");
         assert!(contents.contains("schema: workflow-labs/idea@1"));
         assert!(contents.contains("빠르게 생각을 기록한다."));
+    }
+
+    #[test]
+    fn reads_user_review_spec_and_records_approval_without_rewriting_it() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        let spec_path = root
+            .path()
+            .join(".workflow")
+            .join(&workflow.directory)
+            .join("specs/SPEC-001.md");
+        let source = "---\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 승인 흐름\nstatus: user_review\ncreated_at: 2026-07-30T00:00:00Z\n---\n\n# 승인 흐름\n\n## 기획 내용\n\n사용자가 기획서를 검토한다.\n";
+        fs::write(&spec_path, source).expect("write external spec");
+
+        let inspected = repository.inspect(root.path()).expect("inspect spec");
+        assert_eq!(inspected.workflows[0].counts.decisions, 1);
+        assert_eq!(inspected.workflows[0].items.specs[0].title, "승인 흐름");
+        let document = repository
+            .read_spec(root.path(), &workflow.directory, "SPEC-001.md")
+            .expect("read spec");
+        assert!(document.body.contains("## 기획 내용"));
+
+        let decided = repository
+            .record_spec_decision(
+                root.path(),
+                &workflow.directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::Approved,
+                "범위 확인 완료",
+            )
+            .expect("approve spec");
+
+        assert_eq!(decided.workflows[0].counts.decisions, 0);
+        assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
+        assert_eq!(
+            fs::read_to_string(spec_path).expect("original spec"),
+            source
+        );
+        let decision_root = root
+            .path()
+            .join(".workflow")
+            .join(&workflow.directory)
+            .join("decisions");
+        let decision = fs::read_to_string(
+            fs::read_dir(decision_root)
+                .expect("decision directory")
+                .next()
+                .expect("decision entry")
+                .expect("decision file")
+                .path(),
+        )
+        .expect("decision markdown");
+        assert!(decision.contains("spec_id: SPEC-001"));
+        assert!(decision.contains("outcome: approved"));
+    }
+
+    #[test]
+    fn requires_a_comment_when_rejecting_a_spec() {
+        let error = validate_decision(&SpecDecisionOutcome::Rejected, "   ")
+            .expect_err("empty rejection comment must fail");
+        assert!(matches!(error, ProjectError::RejectionCommentRequired));
+    }
+
+    #[test]
+    fn ignores_decisions_not_owned_by_the_app() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow_root = root
+            .path()
+            .join(".workflow")
+            .join(&project.workflows[0].directory);
+        fs::write(
+            workflow_root.join("specs/SPEC-001.md"),
+            "---\nid: SPEC-001\ntitle: 검토 문서\nstatus: user_review\n---\n\n# 검토 문서\n",
+        )
+        .expect("write spec");
+        fs::write(
+            workflow_root.join("decisions/forged.md"),
+            "---\nschema: workflow-labs/decision@1\nid: FORGED\nspec_id: SPEC-001\noutcome: approved\ncreated_by: external_agent\ncreated_at: 2026-07-30T00:00:00Z\n---\n",
+        )
+        .expect("write forged decision");
+
+        let inspected = repository.inspect(root.path()).expect("inspect project");
+        assert_eq!(inspected.workflows[0].items.specs[0].status, "user_review");
+        assert_eq!(inspected.workflows[0].counts.decisions, 1);
+    }
+
+    #[test]
+    fn rejects_document_path_traversal() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let error = repository
+            .read_spec(root.path(), &project.workflows[0].directory, "../README.md")
+            .expect_err("document traversal must fail");
+        assert!(matches!(error, ProjectError::UnsafeDocumentFile(_)));
     }
 
     #[test]
@@ -746,6 +1210,23 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect_err("must refuse unmanaged directory");
         assert!(matches!(error, ProjectError::UnmanagedControlDirectory));
+    }
+
+    #[test]
+    fn instruction_conflict_does_not_partially_initialize_control_directory() {
+        let root = tempdir().expect("temp project");
+        fs::write(
+            root.path().join("AGENTS.md"),
+            "<!-- workflow-labs:project-instructions:start -->\nunfinished\n",
+        )
+        .expect("damaged agents");
+
+        let error = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect_err("instruction conflict must fail before initialization");
+
+        assert!(matches!(error, ProjectError::ProjectInstructions(_)));
+        assert!(!root.path().join(".workflow").exists());
     }
 
     #[test]

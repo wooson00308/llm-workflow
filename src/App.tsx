@@ -52,7 +52,9 @@ export default function App() {
       updater={updater}
       onAddIdea={workspace.createIdea}
       onAddWorkflow={workspace.createWorkflow}
+      onDecideSpec={workspace.decideSpec}
       onMigrate={workspace.migrate}
+      onReadSpec={workspace.readSpec}
       onRefresh={workspace.refresh}
       onSwitchProject={workspace.closeProject}
     />

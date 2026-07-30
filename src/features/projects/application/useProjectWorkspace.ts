@@ -4,6 +4,7 @@ import type {
   ProjectSummary,
   RecentProject,
   RecentProjectStore,
+  SpecDecisionOutcome,
 } from "../domain/types";
 
 interface Dependencies {
@@ -110,6 +111,54 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     if (project) await inspect(project.rootPath);
   }, [inspect, project]);
 
+  const readSpec = useCallback(
+    async (workflowDirectory: string, fileName: string) => {
+      if (!project) return null;
+      setError(null);
+      try {
+        return await gateway.readSpec(
+          project.rootPath,
+          workflowDirectory,
+          fileName,
+        );
+      } catch (reason) {
+        setError(messageFrom(reason));
+        return null;
+      }
+    },
+    [gateway, project],
+  );
+
+  const decideSpec = useCallback(
+    async (
+      workflowDirectory: string,
+      fileName: string,
+      outcome: SpecDecisionOutcome,
+      comment: string,
+    ) => {
+      if (!project) return false;
+      setBusy(true);
+      setError(null);
+      try {
+        const next = await gateway.decideSpec(
+          project.rootPath,
+          workflowDirectory,
+          fileName,
+          outcome,
+          comment,
+        );
+        setProject(next);
+        return true;
+      } catch (reason) {
+        setError(messageFrom(reason));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
   const migrate = useCallback(async () => {
     if (!project) return false;
     setBusy(true);
@@ -142,6 +191,8 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     openRecent,
     createWorkflow,
     createIdea,
+    readSpec,
+    decideSpec,
     refresh,
     migrate,
     closeProject: () => {

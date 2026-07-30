@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ProjectSummary, WorkflowSummary } from "../domain/types";
+import type {
+  ProjectSummary,
+  SpecDecisionOutcome,
+  SpecDocument,
+  WorkflowItemSummary,
+  WorkflowSummary,
+} from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
+import { DevelopmentBoard } from "./DevelopmentBoard";
+import { IdeaComposer } from "./IdeaComposer";
+import { IdeaInbox } from "./IdeaInbox";
+import { SpecWorkspace } from "./SpecWorkspace";
 
 interface Props {
   busy: boolean;
@@ -11,7 +21,17 @@ interface Props {
   updater: AppUpdaterState;
   onAddIdea(workflowDirectory: string, content: string): Promise<boolean>;
   onAddWorkflow(name: string): Promise<boolean>;
+  onDecideSpec(
+    workflowDirectory: string,
+    fileName: string,
+    outcome: SpecDecisionOutcome,
+    comment: string,
+  ): Promise<boolean>;
   onMigrate(): Promise<boolean>;
+  onReadSpec(
+    workflowDirectory: string,
+    fileName: string,
+  ): Promise<SpecDocument | null>;
   onRefresh(): void;
   onSwitchProject(): void;
 }
@@ -23,6 +43,14 @@ const stages = [
   { key: "reports", label: "완료", icon: "archive" as const },
 ] as const;
 
+const viewLabels = {
+  today: "오늘",
+  ideas: "아이디어",
+  specs: "기획서",
+  tasks: "개발",
+  archive: "보관함",
+} as const;
+
 export function WorkspaceShell({
   busy,
   error,
@@ -30,16 +58,22 @@ export function WorkspaceShell({
   updater,
   onAddIdea,
   onAddWorkflow,
+  onDecideSpec,
   onMigrate,
+  onReadSpec,
   onRefresh,
   onSwitchProject,
 }: Props) {
   const [selectedDirectory, setSelectedDirectory] = useState(
     project.workflows[0]?.directory ?? "",
   );
-  const [idea, setIdea] = useState("");
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
+  const [view, setView] = useState<
+    "today" | "ideas" | "specs" | "tasks" | "archive"
+  >("today");
+  const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
+  const [specLoading, setSpecLoading] = useState(false);
 
   useEffect(() => {
     if (!project.workflows.some((item) => item.directory === selectedDirectory)) {
@@ -47,15 +81,18 @@ export function WorkspaceShell({
     }
   }, [project.workflows, selectedDirectory]);
 
+  useEffect(() => {
+    setSpecDocument(null);
+  }, [selectedDirectory]);
+
   const workflow = useMemo(
     () => project.workflows.find((item) => item.directory === selectedDirectory),
     [project.workflows, selectedDirectory],
   );
 
-  async function addIdea(event: React.FormEvent) {
-    event.preventDefault();
-    if (!workflow || !idea.trim()) return;
-    if (await onAddIdea(workflow.directory, idea.trim())) setIdea("");
+  async function addIdea(content: string) {
+    if (!workflow) return false;
+    return onAddIdea(workflow.directory, content);
   }
 
   async function addWorkflow(event: React.FormEvent) {
@@ -65,6 +102,36 @@ export function WorkspaceShell({
       setWorkflowName("");
       setShowWorkflowForm(false);
     }
+  }
+
+  async function openSpec(item: WorkflowItemSummary) {
+    if (!workflow) return;
+    setSpecLoading(true);
+    const document = await onReadSpec(workflow.directory, item.fileName);
+    if (document) setSpecDocument(document);
+    setSpecLoading(false);
+  }
+
+  async function decideSpec(outcome: SpecDecisionOutcome, comment: string) {
+    if (!workflow || !specDocument) return false;
+    const decided = await onDecideSpec(
+      workflow.directory,
+      specDocument.summary.fileName,
+      outcome,
+      comment,
+    );
+    if (decided) {
+      setSpecDocument((current) => current ? {
+        ...current,
+        summary: { ...current.summary, status: outcome },
+      } : current);
+    }
+    return decided;
+  }
+
+  async function openSpecWorkspace(item: WorkflowItemSummary) {
+    setView("specs");
+    await openSpec(item);
   }
 
   const writable = project.compatibility === "current";
@@ -79,11 +146,11 @@ export function WorkspaceShell({
         </button>
 
         <nav className="primary-nav" aria-label="주요 메뉴">
-          <button className="active"><Icon name="spark" />오늘</button>
-          <button><Icon name="inbox" />아이디어</button>
-          <button><Icon name="stamp" />기획서</button>
-          <button><Icon name="board" />개발</button>
-          <button><Icon name="archive" />보관함</button>
+          <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Icon name="spark" />오늘</button>
+          <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
+          <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
+          <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
+          <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />보관함</button>
         </nav>
 
         <div className="workflow-nav">
@@ -116,7 +183,7 @@ export function WorkspaceShell({
       <section className="workspace">
         <header className="workspace-header">
           <div>
-            <div className="breadcrumbs"><span>{project.name}</span><b>/</b><strong>{workflow?.name}</strong></div>
+            <div className="breadcrumbs"><span>{project.name}</span><b>/</b><span>{workflow?.name}</span><b>/</b><strong>{viewLabels[view]}</strong></div>
             <small>{project.rootPath}</small>
           </div>
           <div className="header-actions">
@@ -146,81 +213,155 @@ export function WorkspaceShell({
             </div>
           )}
 
-          <div className="today-heading">
-            <div><p className="eyebrow">TODAY</p><h1>다시 오셨군요.</h1><p>{workflow?.name}에서 다음 결정을 이어가세요.</p></div>
-            <time>{new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "long" }).format(new Date())}</time>
-          </div>
-
-          {project.activeLeases.length > 0 && (
-            <div className="agent-activity">
-              <span className="pulse" />
-              <div><strong>{project.activeLeases[0].agent}가 문서를 작업 중입니다</strong><small>{project.activeLeases[0].taskId ?? "워크플로우 작업"} · 마이그레이션 보호 활성</small></div>
-              <span>{project.activeLeases.length} active</span>
-            </div>
-          )}
-
-          <section className="idea-composer">
-            <div className="composer-icon"><Icon name="idea" /></div>
-            <form onSubmit={addIdea}>
-              <label htmlFor="quick-idea">무엇을 만들어볼까요?</label>
-              <textarea
-                disabled={!writable}
-                id="quick-idea"
-                maxLength={10_000}
-                onChange={(event) => setIdea(event.target.value)}
-                placeholder="떠오른 아이디어를 편하게 적어주세요. 아직 구체적이지 않아도 괜찮습니다."
-                value={idea}
-              />
-              <div className="composer-footer"><span>Markdown으로 안전하게 저장됩니다</span><button className="primary-button" disabled={busy || !idea.trim() || !workflow || !writable} type="submit"><Icon name="plus" />아이디어 추가</button></div>
-            </form>
-          </section>
-
           {error && <div className="error-banner" role="alert">{error}</div>}
 
-          <section className="stage-section">
-            <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><button className="text-button">전체 보드 보기 →</button></div>
-            <div className="stage-grid">
-              {stages.map((stage, index) => (
-                <StageCard index={index} key={stage.key} stage={stage} workflow={workflow} />
-              ))}
-            </div>
-          </section>
+          {view === "today" && (
+            <>
+              <div className="today-heading">
+                <div><p className="eyebrow">TODAY</p><h1>다시 오셨군요.</h1><p>{workflow?.name}에서 다음 결정을 이어가세요.</p></div>
+                <time>{new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "long" }).format(new Date())}</time>
+              </div>
 
-          <div className="lower-grid">
-            <section className="attention-card">
-              <div className="section-heading"><div><p className="eyebrow warm">NEEDS YOU</p><h2>내 선택 대기</h2></div><span className="count-badge">{workflow?.counts.decisions ?? 0}</span></div>
-              {workflow?.counts.decisions ? <p>결정 문서를 확인해 다음 작업을 이어가세요.</p> : <div className="empty-state"><span>✓</span><div><strong>기다리는 선택이 없습니다</strong><small>LLM이 결정을 요청하면 여기에 나타납니다.</small></div></div>}
-            </section>
-            <section className="file-contract-card">
-              <p className="eyebrow">FILE CONTRACT</p>
-              <h2>앱과 LLM은 파일로 협업합니다.</h2>
-              <p>앱은 실행을 통제하지 않고 Markdown의 상태를 읽어 보여줍니다.</p>
-              <code>.workflow/{workflow?.directory}/</code>
-            </section>
-          </div>
+              {project.activeLeases.length > 0 && (
+                <div className="agent-activity">
+                  <span className="pulse" />
+                  <div><strong>{project.activeLeases[0].agent}가 문서를 작업 중입니다</strong><small>{project.activeLeases[0].taskId ?? "워크플로우 작업"} · 마이그레이션 보호 활성</small></div>
+                  <span>{project.activeLeases.length} active</span>
+                </div>
+              )}
+
+              <IdeaComposer busy={busy} compact disabled={!writable || !workflow} onAdd={addIdea} />
+
+              <section className="stage-section">
+                <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><span className="flow-hint">각 단계는 전용 화면에서 관리됩니다</span></div>
+                <div className="stage-grid">
+                  {stages.map((stage, index) => (
+                    <StageCard
+                      index={index}
+                      key={stage.key}
+                      onOpen={() => setView(index === 0 ? "ideas" : index === 1 ? "specs" : index === 2 ? "tasks" : "archive")}
+                      stage={stage}
+                      workflow={workflow}
+                    />
+                  ))}
+                </div>
+              </section>
+
+              <div className="lower-grid">
+                <section className="attention-card">
+                  <div className="section-heading"><div><p className="eyebrow warm">NEEDS YOU</p><h2>내 선택 대기</h2></div><span className="count-badge">{workflow?.counts.decisions ?? 0}</span></div>
+                  {workflow?.counts.decisions ? (
+                    <div className="attention-list">
+                      {workflow.items.specs.filter((item) => item.status === "user_review").map((item) => (
+                        <button key={item.fileName} onClick={() => void openSpecWorkspace(item)}>
+                          <span><strong>{item.title}</strong><small>{item.id} · 기획서 승인 필요</small></span>
+                          <b>검토하기 →</b>
+                        </button>
+                      ))}
+                    </div>
+                  ) : <div className="empty-state"><span>✓</span><div><strong>기다리는 선택이 없습니다</strong><small>LLM이 결정을 요청하면 여기에 나타납니다.</small></div></div>}
+                </section>
+                <section className="file-contract-card">
+                  <p className="eyebrow">FILE CONTRACT</p>
+                  <h2>앱과 LLM은 파일로 협업합니다.</h2>
+                  <p>앱은 실행을 통제하지 않고 Markdown의 상태를 읽어 보여줍니다.</p>
+                  <code>.workflow/{workflow?.directory}/</code>
+                </section>
+              </div>
+            </>
+          )}
+
+          {workflow && view === "ideas" && (
+            <IdeaInbox
+              busy={busy}
+              disabled={!writable}
+              key={workflow.directory}
+              onAdd={addIdea}
+              workflow={workflow}
+            />
+          )}
+
+          {workflow && view === "specs" && (
+            <SpecWorkspace
+              busy={busy}
+              document={specDocument}
+              loading={specLoading}
+              onDecision={decideSpec}
+              onSelect={(item) => void openSpec(item)}
+              workflow={workflow}
+            />
+          )}
+
+          {workflow && view === "tasks" && <DevelopmentBoard workflow={workflow} />}
+
+          {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
+
+          {specLoading && <div className="loading-toast">기획서를 불러오는 중…</div>}
         </div>
       </section>
+
     </main>
   );
 }
 
 function StageCard({
   index,
+  onOpen,
   stage,
   workflow,
 }: {
   index: number;
+  onOpen(): void;
   stage: (typeof stages)[number];
   workflow: WorkflowSummary | undefined;
 }) {
   const value = workflow?.counts[stage.key] ?? 0;
   const subtitles = ["생각을 수집하는 중", "승인 가능한 문서", "실행할 작업", "검증된 결과"];
   return (
-    <article className={`stage-card tone-${index}`}>
+    <button className={`stage-card tone-${index}`} onClick={onOpen}>
       <div className="stage-top"><span><Icon name={stage.icon} /></span><small>0{index + 1}</small></div>
       <strong>{stage.label}</strong>
       <b>{value}</b>
       <p>{subtitles[index]}</p>
-    </article>
+    </button>
+  );
+}
+
+function ArchiveView({
+  onOpenSpec,
+  workflow,
+}: {
+  onOpenSpec(item: WorkflowItemSummary): void;
+  workflow: WorkflowSummary;
+}) {
+  const specs = workflow.items.specs.filter((item) =>
+    ["approved", "rejected"].includes(item.status),
+  );
+  const tasks = workflow.items.tasks.filter((item) => item.status === "completed");
+  return (
+    <section className="archive-view">
+      <p className="eyebrow">ARCHIVE</p>
+      <h1>결정과 완료 기록</h1>
+      <p>승인·폐기된 기획서와 완료된 개발 작업을 모아봅니다.</p>
+      <div className="archive-grid">
+        <section>
+          <div className="section-heading"><h2>결정된 기획서</h2><span>{specs.length}</span></div>
+          {specs.map((item) => (
+            <button key={item.fileName} onClick={() => onOpenSpec(item)}>
+              <span className={`status-pill status-${item.status}`}>{item.status === "approved" ? "승인" : "폐기"}</span>
+              <strong>{item.title}</strong><small>{item.id}</small>
+            </button>
+          ))}
+          {specs.length === 0 && <p className="archive-empty">아직 결정 기록이 없습니다.</p>}
+        </section>
+        <section>
+          <div className="section-heading"><h2>완료된 개발 작업</h2><span>{tasks.length}</span></div>
+          {tasks.map((item) => (
+            <article key={item.fileName}><span className="status-pill status-completed">완료</span><strong>{item.title}</strong><small>{item.id}</small></article>
+          ))}
+          {tasks.length === 0 && <p className="archive-empty">아직 완료 기록이 없습니다.</p>}
+        </section>
+      </div>
+    </section>
   );
 }

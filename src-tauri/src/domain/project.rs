@@ -67,6 +67,7 @@ pub struct WorkflowSummary {
     pub status: WorkflowStatus,
     pub created_at: String,
     pub counts: WorkflowCounts,
+    pub items: WorkflowItems,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -77,6 +78,39 @@ pub struct WorkflowCounts {
     pub decisions: usize,
     pub tasks: usize,
     pub reports: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowItems {
+    pub ideas: Vec<WorkflowItemSummary>,
+    pub specs: Vec<WorkflowItemSummary>,
+    pub tasks: Vec<WorkflowItemSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowItemSummary {
+    pub file_name: String,
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: Option<String>,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecDocument {
+    pub summary: WorkflowItemSummary,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecDecisionOutcome {
+    Approved,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -98,7 +132,7 @@ pub enum SchemaCompatibility {
 }
 
 impl WorkflowEntry {
-    pub fn to_summary(&self, counts: WorkflowCounts) -> WorkflowSummary {
+    pub fn to_summary(&self, counts: WorkflowCounts, items: WorkflowItems) -> WorkflowSummary {
         WorkflowSummary {
             id: self.id.clone(),
             directory: self.directory.clone(),
@@ -106,6 +140,7 @@ impl WorkflowEntry {
             status: self.status.clone(),
             created_at: self.created_at.clone(),
             counts,
+            items,
         }
     }
 }
