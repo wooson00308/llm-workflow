@@ -9,8 +9,10 @@ import type {
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
-import { KanbanBoard } from "./KanbanBoard";
-import { SpecReviewDialog } from "./SpecReviewDialog";
+import { DevelopmentBoard } from "./DevelopmentBoard";
+import { IdeaComposer } from "./IdeaComposer";
+import { IdeaInbox } from "./IdeaInbox";
+import { SpecWorkspace } from "./SpecWorkspace";
 
 interface Props {
   busy: boolean;
@@ -41,6 +43,14 @@ const stages = [
   { key: "reports", label: "완료", icon: "archive" as const },
 ] as const;
 
+const viewLabels = {
+  today: "오늘",
+  ideas: "아이디어",
+  specs: "기획서",
+  tasks: "개발",
+  archive: "보관함",
+} as const;
+
 export function WorkspaceShell({
   busy,
   error,
@@ -57,7 +67,6 @@ export function WorkspaceShell({
   const [selectedDirectory, setSelectedDirectory] = useState(
     project.workflows[0]?.directory ?? "",
   );
-  const [idea, setIdea] = useState("");
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
@@ -81,10 +90,9 @@ export function WorkspaceShell({
     [project.workflows, selectedDirectory],
   );
 
-  async function addIdea(event: React.FormEvent) {
-    event.preventDefault();
-    if (!workflow || !idea.trim()) return;
-    if (await onAddIdea(workflow.directory, idea.trim())) setIdea("");
+  async function addIdea(content: string) {
+    if (!workflow) return false;
+    return onAddIdea(workflow.directory, content);
   }
 
   async function addWorkflow(event: React.FormEvent) {
@@ -106,12 +114,24 @@ export function WorkspaceShell({
 
   async function decideSpec(outcome: SpecDecisionOutcome, comment: string) {
     if (!workflow || !specDocument) return false;
-    return onDecideSpec(
+    const decided = await onDecideSpec(
       workflow.directory,
       specDocument.summary.fileName,
       outcome,
       comment,
     );
+    if (decided) {
+      setSpecDocument((current) => current ? {
+        ...current,
+        summary: { ...current.summary, status: outcome },
+      } : current);
+    }
+    return decided;
+  }
+
+  async function openSpecWorkspace(item: WorkflowItemSummary) {
+    setView("specs");
+    await openSpec(item);
   }
 
   const writable = project.compatibility === "current";
@@ -163,7 +183,7 @@ export function WorkspaceShell({
       <section className="workspace">
         <header className="workspace-header">
           <div>
-            <div className="breadcrumbs"><span>{project.name}</span><b>/</b><strong>{workflow?.name}</strong></div>
+            <div className="breadcrumbs"><span>{project.name}</span><b>/</b><span>{workflow?.name}</span><b>/</b><strong>{viewLabels[view]}</strong></div>
             <small>{project.rootPath}</small>
           </div>
           <div className="header-actions">
@@ -210,24 +230,10 @@ export function WorkspaceShell({
                 </div>
               )}
 
-              <section className="idea-composer">
-                <div className="composer-icon"><Icon name="idea" /></div>
-                <form onSubmit={addIdea}>
-                  <label htmlFor="quick-idea">무엇을 만들어볼까요?</label>
-                  <textarea
-                    disabled={!writable}
-                    id="quick-idea"
-                    maxLength={10_000}
-                    onChange={(event) => setIdea(event.target.value)}
-                    placeholder="떠오른 아이디어를 편하게 적어주세요. 아직 구체적이지 않아도 괜찮습니다."
-                    value={idea}
-                  />
-                  <div className="composer-footer"><span>Markdown으로 안전하게 저장됩니다</span><button className="primary-button" disabled={busy || !idea.trim() || !workflow || !writable} type="submit"><Icon name="plus" />아이디어 추가</button></div>
-                </form>
-              </section>
+              <IdeaComposer busy={busy} compact disabled={!writable || !workflow} onAdd={addIdea} />
 
               <section className="stage-section">
-                <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><button className="text-button" onClick={() => setView("ideas")}>전체 보드 보기 →</button></div>
+                <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><span className="flow-hint">각 단계는 전용 화면에서 관리됩니다</span></div>
                 <div className="stage-grid">
                   {stages.map((stage, index) => (
                     <StageCard
@@ -247,7 +253,7 @@ export function WorkspaceShell({
                   {workflow?.counts.decisions ? (
                     <div className="attention-list">
                       {workflow.items.specs.filter((item) => item.status === "user_review").map((item) => (
-                        <button key={item.fileName} onClick={() => void openSpec(item)}>
+                        <button key={item.fileName} onClick={() => void openSpecWorkspace(item)}>
                           <span><strong>{item.title}</strong><small>{item.id} · 기획서 승인 필요</small></span>
                           <b>검토하기 →</b>
                         </button>
@@ -265,28 +271,35 @@ export function WorkspaceShell({
             </>
           )}
 
-          {workflow && ["ideas", "specs", "tasks"].includes(view) && (
-            <KanbanBoard
-              focus={view as "ideas" | "specs" | "tasks"}
-              onOpenSpec={(item) => void openSpec(item)}
+          {workflow && view === "ideas" && (
+            <IdeaInbox
+              busy={busy}
+              disabled={!writable}
+              key={workflow.directory}
+              onAdd={addIdea}
               workflow={workflow}
             />
           )}
 
-          {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpec(item)} />}
+          {workflow && view === "specs" && (
+            <SpecWorkspace
+              busy={busy}
+              document={specDocument}
+              loading={specLoading}
+              onDecision={decideSpec}
+              onSelect={(item) => void openSpec(item)}
+              workflow={workflow}
+            />
+          )}
+
+          {workflow && view === "tasks" && <DevelopmentBoard workflow={workflow} />}
+
+          {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
           {specLoading && <div className="loading-toast">기획서를 불러오는 중…</div>}
         </div>
       </section>
 
-      {specDocument && (
-        <SpecReviewDialog
-          busy={busy}
-          document={specDocument}
-          onClose={() => setSpecDocument(null)}
-          onDecision={decideSpec}
-        />
-      )}
     </main>
   );
 }

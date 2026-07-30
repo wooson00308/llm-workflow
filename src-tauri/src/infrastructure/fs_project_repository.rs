@@ -13,6 +13,9 @@ use crate::domain::project::{
     SpecDecisionOutcome, SpecDocument, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
     WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
+use crate::infrastructure::project_instructions::{
+    install_project_instructions, validate_project_instructions, ProjectInstructionError,
+};
 
 const CONTROL_DIRECTORY: &str = ".workflow";
 const PROJECT_MANIFEST: &str = "project.yml";
@@ -65,6 +68,8 @@ pub enum ProjectError {
     Yaml(#[from] serde_yaml::Error),
     #[error("프로젝트 메타데이터를 안전하게 저장하지 못했습니다: {0}")]
     Persist(String),
+    #[error(transparent)]
+    ProjectInstructions(#[from] ProjectInstructionError),
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +106,7 @@ impl FileSystemProjectRepository {
         validate_workflow_name(workflow_name)?;
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
+        validate_project_instructions(&root, &control_root)?;
         ensure_managed_control_root(&control_root)?;
 
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -124,6 +130,8 @@ impl FileSystemProjectRepository {
                 workflows: Vec::new(),
             }
         };
+
+        install_project_instructions(&root, &control_root)?;
 
         let id = format!("wf_{}", &compact_uuid()[..8]);
         let directory = format!("{}--{}", slugify(workflow_name), id);
@@ -702,6 +710,7 @@ fn read_markdown_document(
         .to_owned();
     let title = yaml_text(metadata.as_ref(), "title")
         .or_else(|| markdown_title(&body))
+        .or_else(|| markdown_plain_title(&body))
         .unwrap_or_else(|| fallback_id.clone());
     let updated_at = yaml_text(metadata.as_ref(), "updated_at")
         .or_else(|| yaml_text(metadata.as_ref(), "created_at"))
@@ -752,6 +761,18 @@ fn markdown_title(body: &str) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
+}
+
+fn markdown_plain_title(body: &str) -> Option<String> {
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with(['#', '-', '*']))?;
+    let mut title = line.chars().take(60).collect::<String>();
+    if line.chars().count() > 60 {
+        title.push('…');
+    }
+    Some(title)
 }
 
 fn markdown_excerpt(body: &str) -> String {
@@ -933,6 +954,9 @@ mod tests {
             assert!(workflow_root.join(directory).is_dir());
         }
         assert!(workflow_root.join("workflow.yml").is_file());
+        assert!(root.path().join("AGENTS.md").is_file());
+        assert!(root.path().join("CLAUDE.md").is_file());
+        assert!(root.path().join(".workflow/rules/workflow.md").is_file());
         assert_eq!(
             fs::read_to_string(root.path().join(".workflow/.gitignore")).expect("nested gitignore"),
             ".runtime/\n"
@@ -983,6 +1007,10 @@ mod tests {
             .expect("create idea");
 
         assert_eq!(updated.workflows[0].counts.ideas, 1);
+        assert_eq!(
+            updated.workflows[0].items.ideas[0].title,
+            "빠르게 생각을 기록한다."
+        );
         let ideas_root = root
             .path()
             .join(".workflow")
@@ -1182,6 +1210,23 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect_err("must refuse unmanaged directory");
         assert!(matches!(error, ProjectError::UnmanagedControlDirectory));
+    }
+
+    #[test]
+    fn instruction_conflict_does_not_partially_initialize_control_directory() {
+        let root = tempdir().expect("temp project");
+        fs::write(
+            root.path().join("AGENTS.md"),
+            "<!-- workflow-labs:project-instructions:start -->\nunfinished\n",
+        )
+        .expect("damaged agents");
+
+        let error = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect_err("instruction conflict must fail before initialization");
+
+        assert!(matches!(error, ProjectError::ProjectInstructions(_)));
+        assert!(!root.path().join(".workflow").exists());
     }
 
     #[test]

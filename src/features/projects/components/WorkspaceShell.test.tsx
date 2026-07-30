@@ -1,0 +1,62 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import type { ProjectSummary } from "../domain/types";
+import type { AppUpdaterState } from "../../updater/domain/types";
+import { WorkspaceShell } from "./WorkspaceShell";
+
+const project: ProjectSummary = {
+  rootPath: "/projects/workflow-labs",
+  initialized: true,
+  projectId: "prj_1",
+  name: "workflow-labs",
+  compatibility: "current",
+  activeLeases: [],
+  workflows: [{
+    id: "wf_1",
+    directory: "feature--wf_1",
+    name: "Feature",
+    status: "active",
+    createdAt: "2026-07-30T00:00:00Z",
+    counts: { ideas: 0, specs: 0, decisions: 0, tasks: 0, reports: 0 },
+    items: { ideas: [], specs: [], tasks: [] },
+  }],
+};
+
+const updater: AppUpdaterState = {
+  phase: "idle",
+  version: null,
+  progress: null,
+  error: null,
+  check: vi.fn().mockResolvedValue(undefined),
+  install: vi.fn().mockResolvedValue(undefined),
+  restart: vi.fn().mockResolvedValue(undefined),
+};
+
+describe("WorkspaceShell", () => {
+  it("opens a purpose-built screen for each primary menu", () => {
+    render(
+      <WorkspaceShell
+        busy={false}
+        error={null}
+        project={project}
+        updater={updater}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "아이디어" }));
+    expect(screen.getByRole("heading", { name: "아이디어 인박스" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "기획서" }));
+    expect(screen.getByRole("heading", { name: "기획서 검토" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    expect(screen.getByRole("heading", { name: "개발 작업" })).toBeInTheDocument();
+  });
+});

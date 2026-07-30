@@ -5,20 +5,33 @@ Workflow Labs와 외부 LLM은 프로세스나 API가 아니라 프로젝트의 
 ## 디렉터리
 
 ```text
-.workflow/
-├── project.yml
-├── .runtime/                  # Git 제외
-│   ├── leases/
-│   └── migrations/
-└── <slug>--<workflow-id>/
-    ├── workflow.yml
-    ├── ideas/
-    ├── specs/
-    ├── decisions/            # 앱이 기록하는 사용자 결정
-    ├── tasks/
-    ├── reports/
-    └── state/
+.                           # 선택한 프로젝트 루트
+├── AGENTS.md               # Codex 및 공통 에이전트 진입점
+├── CLAUDE.md               # Claude Code가 AGENTS.md를 import
+└── .workflow/
+    ├── project.yml
+    ├── rules/
+    │   └── workflow.md       # 공급자 중립적인 상세 작업 규칙
+    ├── .runtime/             # Git 제외
+    │   ├── leases/
+    │   └── migrations/
+    └── <slug>--<workflow-id>/
+        ├── workflow.yml
+        ├── ideas/
+        ├── specs/
+        ├── decisions/        # 앱이 기록하는 사용자 결정
+        ├── tasks/
+        ├── reports/
+        └── state/
 ```
+
+워크플로우를 처음 생성할 때 앱은 상세 규칙과 두 진입점을 함께 설치한다.
+
+- 기존 `AGENTS.md`와 `CLAUDE.md`는 보존하고 앱 관리 마커 블록만 추가하거나 갱신한다.
+- 기존 `CLAUDE.md`가 이미 `@AGENTS.md`를 import하면 중복 블록을 추가하지 않는다.
+- 관리 마커가 손상됐거나 `.workflow/rules/workflow.md`가 앱 규격 파일이 아니면 덮어쓰지 않고 생성을 중단한다.
+- 상세 규칙은 `schema: workflow-labs/agent-rules@1`로 버전을 식별한다. 향후 규칙·문서 규격 변경은 앱 마이그레이션에서 처리한다.
+- Codex의 `.codex/rules/*.rules`는 명령 승인 정책이므로 워크플로우 행동 규칙 저장소로 사용하지 않는다.
 
 ## 기획서
 
@@ -105,3 +118,5 @@ updated_at: 2026-07-30T10:30:00Z
 - 앱 업데이트와 프로젝트 문서 마이그레이션은 별도 작업이다.
 - 알 수 없는 메타데이터는 보존한다.
 - 사용자 결정과 LLM 원문을 같은 파일에서 동시에 수정하지 않는다.
+- 외부 LLM은 작업 시작 시 `.workflow/rules/workflow.md`를 읽고 만료 시간이 있는 lease를 만든다.
+- 기획서 `user_review`는 사용자 선택 대기 상태이며, 외부 LLM이 승인·폐기를 대신 기록하지 않는다.
