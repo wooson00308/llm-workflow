@@ -201,7 +201,7 @@ impl FileSystemProjectRepository {
             return Err(ProjectError::UnknownWorkflow);
         }
 
-        let idea_id = format!("IDEA-{}", &compact_uuid()[..8].to_uppercase());
+        let idea_id = format!("IDEA-{}", compact_uuid()[..8].to_uppercase());
         let created_at = Utc::now().to_rfc3339();
         let idea = format!(
             "---\nschema: workflow-labs/idea@1\nid: {idea_id}\nstatus: inbox\ncreated_at: {created_at}\n---\n\n{}\n",
@@ -263,7 +263,7 @@ impl FileSystemProjectRepository {
             return Err(ProjectError::SpecNotAwaitingDecision);
         }
 
-        let decision_id = format!("DECISION-{}", &compact_uuid()[..8].to_uppercase());
+        let decision_id = format!("DECISION-{}", compact_uuid()[..8].to_uppercase());
         let created_at = Utc::now().to_rfc3339();
         let outcome_value = match outcome {
             SpecDecisionOutcome::Approved => "approved",
