@@ -107,11 +107,26 @@ pub struct SpecDocument {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDocument {
+    pub summary: WorkflowItemSummary,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecDecisionOutcome {
     Approved,
+    RevisionRequested,
     Rejected,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskQaOutcome {
+    Confirmed,
+    RevisionRequested,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

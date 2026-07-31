@@ -18,12 +18,20 @@ interface Props {
 }
 
 type SpecFilter = "all" | "draft" | "user_review" | "decided";
+type CommentDecision = Exclude<SpecDecisionOutcome, "approved">;
 
 const statusLabels: Record<string, string> = {
   draft: "작성 중",
   user_review: "내 선택 대기",
   approved: "승인됨",
+  revision_requested: "수정 요청됨",
   rejected: "폐기됨",
+};
+
+const decisionLabels: Record<SpecDecisionOutcome, string> = {
+  approved: "승인",
+  revision_requested: "수정 요청",
+  rejected: "폐기",
 };
 
 export function SpecWorkspace({
@@ -35,12 +43,12 @@ export function SpecWorkspace({
   workflow,
 }: Props) {
   const [filter, setFilter] = useState<SpecFilter>("all");
-  const [rejecting, setRejecting] = useState(false);
+  const [commentDecision, setCommentDecision] = useState<CommentDecision | null>(null);
   const [comment, setComment] = useState("");
   const [recorded, setRecorded] = useState<SpecDecisionOutcome | null>(null);
 
   useEffect(() => {
-    setRejecting(false);
+    setCommentDecision(null);
     setComment("");
     setRecorded(null);
   }, [document?.summary.fileName]);
@@ -53,10 +61,10 @@ export function SpecWorkspace({
   const awaitingDecision = activeStatus === "user_review";
 
   async function decide(outcome: SpecDecisionOutcome) {
-    if (outcome === "rejected" && !comment.trim()) return;
+    if (outcome !== "approved" && !comment.trim()) return;
     if (await onDecision(outcome, comment.trim())) {
       setRecorded(outcome);
-      setRejecting(false);
+      setCommentDecision(null);
     }
   }
 
@@ -134,7 +142,7 @@ export function SpecWorkspace({
                 {recorded && (
                   <div className={`decision-stamp ${recorded}`} aria-live="polite">
                     <Icon name="stamp" />
-                    <strong>{recorded === "approved" ? "승인" : "폐기"}</strong>
+                    <strong>{decisionLabels[recorded]}</strong>
                     <small>USER DECISION</small>
                   </div>
                 )}
@@ -146,32 +154,33 @@ export function SpecWorkspace({
         <aside className="decision-panel">
           <p className="eyebrow">USER GATE</p>
           <h2>사용자 결정</h2>
-          {!document && <p className="decision-help">기획서를 선택하면 승인과 폐기 도구가 활성화됩니다.</p>}
-          {document && awaitingDecision && !rejecting && (
+          {!document && <p className="decision-help">기획서를 선택하면 승인·수정 요청·폐기 도구가 활성화됩니다.</p>}
+          {document && awaitingDecision && !commentDecision && (
             <>
               <div className="decision-callout"><Icon name="stamp" /><strong>검토가 필요합니다</strong><p>이 결정은 별도 Markdown 감사 로그로 보존됩니다.</p></div>
               <button className="stamp-button full" disabled={busy} onClick={() => void decide("approved")}><Icon name="stamp" />승인 도장 찍기</button>
-              <button className="secondary-button reject full" disabled={busy} onClick={() => setRejecting(true)}>코멘트와 함께 폐기</button>
+              <button className="secondary-button revision full" disabled={busy} onClick={() => setCommentDecision("revision_requested")}><Icon name="workflow" />수정 요청</button>
+              <button className="secondary-button reject full" disabled={busy} onClick={() => setCommentDecision("rejected")}>기획서 폐기</button>
             </>
           )}
-          {document && awaitingDecision && rejecting && (
+          {document && awaitingDecision && commentDecision && (
             <div className="rejection-form side">
-              <label htmlFor="rejection-comment">폐기 사유</label>
+              <label htmlFor="decision-comment">{commentDecision === "revision_requested" ? "수정 요청 내용" : "폐기 사유"}</label>
               <textarea
                 autoFocus
-                id="rejection-comment"
+                id="decision-comment"
                 maxLength={2_000}
                 onChange={(event) => setComment(event.target.value)}
-                placeholder="다음 기획에서 반영할 수 있도록 구체적으로 적어주세요."
+                placeholder={commentDecision === "revision_requested" ? "다시 검토할 범위와 원하는 방향을 구체적으로 적어주세요." : "폐기 이유를 기록해 주세요."}
                 value={comment}
               />
-              <div><button className="text-button" onClick={() => setRejecting(false)}>취소</button><button className="danger-button" disabled={busy || !comment.trim()} onClick={() => void decide("rejected")}>폐기 기록</button></div>
+              <div><button className="text-button" onClick={() => setCommentDecision(null)}>취소</button><button className={commentDecision === "revision_requested" ? "secondary-button" : "danger-button"} disabled={busy || !comment.trim()} onClick={() => void decide(commentDecision)}>{commentDecision === "revision_requested" ? "수정 요청 기록" : "폐기 기록"}</button></div>
             </div>
           )}
           {document && !awaitingDecision && (
             <div className={`decision-result ${activeStatus}`}>
-              <Icon name={activeStatus === "approved" ? "stamp" : "archive"} />
-              <strong>{activeStatus === "approved" ? "승인된 기획입니다" : activeStatus === "rejected" ? "폐기된 기획입니다" : "아직 작성 중입니다"}</strong>
+              <Icon name={activeStatus === "approved" ? "stamp" : activeStatus === "revision_requested" ? "workflow" : "archive"} />
+              <strong>{activeStatus === "approved" ? "승인된 기획입니다" : activeStatus === "revision_requested" ? "수정을 요청한 기획입니다" : activeStatus === "rejected" ? "폐기된 기획입니다" : "아직 작성 중입니다"}</strong>
               <p>{recorded ? "결정 Markdown을 안전하게 저장했습니다." : activeStatus === "draft" ? "LLM이 status를 user_review로 변경하면 결정을 내릴 수 있습니다." : "결정 기록은 원문과 분리되어 보존됩니다."}</p>
             </div>
           )}
@@ -183,7 +192,7 @@ export function SpecWorkspace({
 
 function matchesFilter(item: WorkflowItemSummary, filter: SpecFilter) {
   if (filter === "all") return true;
-  if (filter === "decided") return item.status === "approved" || item.status === "rejected";
+  if (filter === "decided") return ["approved", "revision_requested", "rejected"].includes(item.status);
   return item.status === filter;
 }
 

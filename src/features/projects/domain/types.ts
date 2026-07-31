@@ -43,7 +43,17 @@ export interface SpecDocument {
   body: string;
 }
 
-export type SpecDecisionOutcome = "approved" | "rejected";
+export interface TaskDocument {
+  summary: WorkflowItemSummary;
+  body: string;
+}
+
+export type SpecDecisionOutcome =
+  | "approved"
+  | "revision_requested"
+  | "rejected";
+
+export type TaskQaOutcome = "confirmed" | "revision_requested";
 
 export interface AgentLeaseSummary {
   leaseId: string;
@@ -82,11 +92,23 @@ export interface ProjectGateway {
     workflowDirectory: string,
     fileName: string,
   ): Promise<SpecDocument>;
+  readTask(
+    path: string,
+    workflowDirectory: string,
+    fileName: string,
+  ): Promise<TaskDocument>;
   decideSpec(
     path: string,
     workflowDirectory: string,
     fileName: string,
     outcome: SpecDecisionOutcome,
+    comment: string,
+  ): Promise<ProjectSummary>;
+  recordTaskQa(
+    path: string,
+    workflowDirectory: string,
+    fileName: string,
+    outcome: TaskQaOutcome,
     comment: string,
   ): Promise<ProjectSummary>;
   migrate(path: string): Promise<ProjectSummary>;

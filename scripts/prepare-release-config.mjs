@@ -6,7 +6,7 @@ const repository = process.env.GITHUB_REPOSITORY;
 const publicKey = process.env.TAURI_UPDATER_PUBLIC_KEY;
 
 if (!repository) {
-  throw new Error("GITHUB_REPOSITORY가 필요합니다. 예: owner/workflow-labs");
+  throw new Error("GITHUB_REPOSITORY가 필요합니다. 예: owner/llm-workflow");
 }
 if (!publicKey) {
   throw new Error("TAURI_UPDATER_PUBLIC_KEY가 필요합니다.");

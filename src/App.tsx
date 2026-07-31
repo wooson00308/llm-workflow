@@ -55,6 +55,8 @@ export default function App() {
       onDecideSpec={workspace.decideSpec}
       onMigrate={workspace.migrate}
       onReadSpec={workspace.readSpec}
+      onReadTask={workspace.readTask}
+      onTaskQa={workspace.recordTaskQa}
       onRefresh={workspace.refresh}
       onSwitchProject={workspace.closeProject}
     />

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use crate::domain::project::{ProjectSummary, SpecDecisionOutcome, SpecDocument};
+use crate::domain::project::{
+    ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
+};
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
 #[derive(Debug, Default)]
@@ -41,6 +43,16 @@ impl ProjectService {
             .read_spec(root, workflow_directory, file_name)
     }
 
+    pub fn read_task(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+    ) -> Result<TaskDocument, ProjectError> {
+        self.repository
+            .read_task(root, workflow_directory, file_name)
+    }
+
     pub fn record_spec_decision(
         &self,
         root: &Path,
@@ -51,6 +63,18 @@ impl ProjectService {
     ) -> Result<ProjectSummary, ProjectError> {
         self.repository
             .record_spec_decision(root, workflow_directory, file_name, outcome, comment)
+    }
+
+    pub fn record_task_qa(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+        outcome: TaskQaOutcome,
+        comment: &str,
+    ) -> Result<ProjectSummary, ProjectError> {
+        self.repository
+            .record_task_qa(root, workflow_directory, file_name, outcome, comment)
     }
 
     pub fn migrate(&self, root: &Path) -> Result<ProjectSummary, ProjectError> {

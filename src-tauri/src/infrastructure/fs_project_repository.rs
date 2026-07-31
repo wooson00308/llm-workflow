@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::domain::project::{
     AgentLease, AgentLeaseSummary, ProjectManifest, ProjectSummary, SchemaCompatibility,
-    SpecDecisionOutcome, SpecDocument, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
-    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome, WorkflowCounts, WorkflowEntry,
+    WorkflowItemSummary, WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 use crate::infrastructure::project_instructions::{
     install_project_instructions, validate_project_instructions, ProjectInstructionError,
@@ -42,12 +42,16 @@ pub enum ProjectError {
     UnsafeDocumentFile(String),
     #[error("기획서 파일을 찾을 수 없습니다: {0}")]
     DocumentNotFound(String),
-    #[error("사용자 선택 대기 상태인 기획서만 승인하거나 폐기할 수 있습니다.")]
+    #[error("사용자 선택 대기 상태인 기획서만 승인·수정 요청·폐기할 수 있습니다.")]
     SpecNotAwaitingDecision,
-    #[error("기획서를 폐기할 때는 코멘트를 입력해 주세요.")]
-    RejectionCommentRequired,
+    #[error("수정 요청이나 폐기에는 코멘트를 입력해 주세요.")]
+    DecisionCommentRequired,
     #[error("결정 코멘트는 2,000자 이하여야 합니다.")]
     DecisionCommentTooLong,
+    #[error("QA 대기 상태인 개발 작업만 확인할 수 있습니다.")]
+    TaskNotAwaitingQa,
+    #[error("개발 수정 요청에는 코멘트를 입력해 주세요.")]
+    QaCommentRequired,
     #[error("프로젝트에 등록되지 않은 워크플로우입니다.")]
     UnknownWorkflow,
     #[error("워크플로우 디렉터리 경로가 안전하지 않습니다: {0}")]
@@ -240,6 +244,22 @@ impl FileSystemProjectRepository {
         Ok(SpecDocument { summary, body })
     }
 
+    pub fn read_task(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+    ) -> Result<TaskDocument, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name)?;
+        let (summary, body) = read_markdown_document(&task_path, "todo")?;
+        Ok(TaskDocument { summary, body })
+    }
+
     pub fn record_spec_decision(
         &self,
         root: &Path,
@@ -254,6 +274,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
+        install_project_instructions(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
         let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
@@ -267,6 +288,7 @@ impl FileSystemProjectRepository {
         let created_at = Utc::now().to_rfc3339();
         let outcome_value = match outcome {
             SpecDecisionOutcome::Approved => "approved",
+            SpecDecisionOutcome::RevisionRequested => "revision_requested",
             SpecDecisionOutcome::Rejected => "rejected",
         };
         let decision = format!(
@@ -280,6 +302,58 @@ impl FileSystemProjectRepository {
                 .join(format!("{decision_id}.md")),
             &decision,
         )?;
+
+        Ok(summary_from_manifest(
+            &root,
+            project,
+            SchemaCompatibility::Current,
+            read_active_leases(&control_root)?,
+        ))
+    }
+
+    pub fn record_task_qa(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+        outcome: TaskQaOutcome,
+        comment: &str,
+    ) -> Result<ProjectSummary, ProjectError> {
+        validate_task_qa(&outcome, comment)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        install_project_instructions(&root, &control_root)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name)?;
+        let (task, _) = read_markdown_document(&task_path, "todo")?;
+        if task.status != "qa_waiting" {
+            return Err(ProjectError::TaskNotAwaitingQa);
+        }
+
+        let decision_id = format!("QA-{}", compact_uuid()[..8].to_uppercase());
+        let created_at = Utc::now().to_rfc3339();
+        let (outcome_value, next_status) = match outcome {
+            TaskQaOutcome::Confirmed => ("confirmed", "completed"),
+            TaskQaOutcome::RevisionRequested => ("revision_requested", "todo"),
+        };
+        let decision = format!(
+            "---\nschema: workflow-labs/qa-decision@1\nid: {decision_id}\ntask_id: {}\noutcome: {outcome_value}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
+            yaml_scalar(&task.id),
+            comment.trim()
+        );
+        write_text_atomically(
+            &workflow_root
+                .join("decisions")
+                .join(format!("{decision_id}.md")),
+            &decision,
+        )?;
+
+        let source = fs::read_to_string(&task_path)?;
+        let updated = update_task_frontmatter(&source, next_status, &created_at)?;
+        write_text_atomically(&task_path, &updated)?;
 
         Ok(summary_from_manifest(
             &root,
@@ -587,13 +661,70 @@ fn validate_idea(content: &str) -> Result<(), ProjectError> {
 
 fn validate_decision(outcome: &SpecDecisionOutcome, comment: &str) -> Result<(), ProjectError> {
     let trimmed = comment.trim();
-    if matches!(outcome, SpecDecisionOutcome::Rejected) && trimmed.is_empty() {
-        return Err(ProjectError::RejectionCommentRequired);
+    if matches!(
+        outcome,
+        SpecDecisionOutcome::RevisionRequested | SpecDecisionOutcome::Rejected
+    ) && trimmed.is_empty()
+    {
+        return Err(ProjectError::DecisionCommentRequired);
     }
     if trimmed.chars().count() > 2_000 {
         return Err(ProjectError::DecisionCommentTooLong);
     }
     Ok(())
+}
+
+fn validate_task_qa(outcome: &TaskQaOutcome, comment: &str) -> Result<(), ProjectError> {
+    let trimmed = comment.trim();
+    if matches!(outcome, TaskQaOutcome::RevisionRequested) && trimmed.is_empty() {
+        return Err(ProjectError::QaCommentRequired);
+    }
+    if trimmed.chars().count() > 2_000 {
+        return Err(ProjectError::DecisionCommentTooLong);
+    }
+    Ok(())
+}
+
+fn update_task_frontmatter(
+    source: &str,
+    next_status: &str,
+    updated_at: &str,
+) -> Result<String, ProjectError> {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let normalized = source.replace("\r\n", "\n");
+    let Some(rest) = normalized.strip_prefix("---\n") else {
+        return Err(ProjectError::TaskNotAwaitingQa);
+    };
+    let Some(frontmatter_end) = rest.find("\n---\n") else {
+        return Err(ProjectError::TaskNotAwaitingQa);
+    };
+    let frontmatter = &rest[..frontmatter_end];
+    let body = &rest[frontmatter_end + "\n---\n".len()..];
+    let mut saw_status = false;
+    let mut saw_updated_at = false;
+    let mut lines = Vec::new();
+    for line in frontmatter.lines() {
+        if line.starts_with("status:") {
+            lines.push(format!("status: {next_status}"));
+            saw_status = true;
+        } else if line.starts_with("updated_at:") {
+            lines.push(format!("updated_at: {updated_at}"));
+            saw_updated_at = true;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if !saw_status {
+        return Err(ProjectError::TaskNotAwaitingQa);
+    }
+    if !saw_updated_at {
+        lines.push(format!("updated_at: {updated_at}"));
+    }
+    Ok(format!("---\n{}\n---\n{body}", lines.join("\n")).replace('\n', newline))
 }
 
 fn require_current_schema(schema_version: u32) -> Result<(), ProjectError> {
@@ -819,7 +950,7 @@ fn latest_spec_decisions(workflow_root: &Path) -> HashMap<String, (String, Strin
         let Some(outcome) = yaml_text(metadata.as_ref(), "outcome") else {
             continue;
         };
-        if outcome != "approved" && outcome != "rejected" {
+        if outcome != "approved" && outcome != "revision_requested" && outcome != "rejected" {
             continue;
         }
         let created_at = yaml_text(metadata.as_ref(), "created_at").unwrap_or_default();
@@ -903,7 +1034,52 @@ fn compact_uuid() -> String {
 
 fn workflow_readme(name: &str, id: &str) -> String {
     format!(
-        "# {name}\n\n워크플로우 ID: `{id}`\n\n## 외부 LLM 작업 규약\n\n1. 쓰기 전에 `../.runtime/migration.lock`이 없는지 확인합니다.\n2. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.\n3. 사용자 결정이 필요한 기획서는 `status: user_review`로 저장합니다.\n4. `decisions/`는 앱이 사용자 선택을 기록하는 감사 로그입니다. 외부 LLM은 이 파일을 만들거나 덮어쓰지 않습니다.\n5. 기획서 승인 여부는 기획서 원문이 아니라 최신 decision 문서로 판단합니다.\n6. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.\n\n## 필수 frontmatter\n\n### 기획서 (`specs/*.md`)\n\n```yaml\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 문서 제목\nstatus: draft # draft | user_review\ncreated_at: RFC3339\nupdated_at: RFC3339\n```\n\n본문에는 `기획 내용`, `요구사항 명세`, `기대효과` 섹션을 권장합니다.\n\n### 개발 작업 (`tasks/*.md`)\n\n```yaml\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 작업 제목\nstatus: todo # todo | in_progress | blocked | qa_waiting | completed\nupdated_at: RFC3339\ndue_at: YYYY-MM-DD # 선택\n```\n\n동시에 수정하면 충돌할 수 있는 작업은 병렬로 진행하지 않습니다.\n"
+        r#"# {name}
+
+워크플로우 ID: `{id}`
+
+## 외부 LLM 작업 규약
+
+1. 공통 규칙 `../rules/workflow.md`와 이 세션에 할당된 `../rules/roles/*.md` 하나를 읽습니다.
+2. 쓰기 전에 `../.runtime/migration.lock`과 겹치는 활성 lease가 없는지 확인합니다.
+3. 한 세션에서는 기획자·프로젝트 아키텍트·개발자 중 한 역할과 한 대상만 처리합니다.
+4. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.
+5. 사용자 결정이 필요한 기획서는 `status: user_review`로 저장합니다.
+6. `decisions/`는 앱이 승인·수정 요청·폐기를 기록하는 감사 로그입니다. 외부 LLM은 이 파일을 만들거나 덮어쓰지 않습니다.
+7. 기획서의 `revision_requested`만 기획자 재작업 대상으로 삼고 `rejected`는 종료 상태로 보존합니다.
+8. `todo`로 돌아온 개발 작업은 최신 `workflow-labs/qa-decision@1`의 테스트 플로우를 읽고 재작업합니다.
+9. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.
+
+## 필수 frontmatter
+
+### 기획서 (`specs/*.md`)
+
+```yaml
+schema: workflow-labs/spec@1
+id: SPEC-001
+title: 문서 제목
+status: draft # draft | user_review
+created_at: RFC3339
+updated_at: RFC3339
+```
+
+본문에는 `기획 내용`, `요구사항 명세`, `기대효과` 섹션을 권장합니다.
+
+### 개발 작업 (`tasks/*.md`)
+
+```yaml
+schema: workflow-labs/task@1
+id: TASK-001
+title: 작업 제목
+status: todo # todo | in_progress | blocked | qa_waiting | completed
+source_spec_id: SPEC-001
+source_decision_id: DECISION-001
+updated_at: RFC3339
+due_at: YYYY-MM-DD # 선택
+```
+
+동시에 수정하면 충돌할 수 있는 작업은 병렬로 진행하지 않습니다.
+"#
     )
 }
 
@@ -915,8 +1091,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
-    use super::{slugify, validate_decision, FileSystemProjectRepository, ProjectError};
-    use crate::domain::project::{SchemaCompatibility, SpecDecisionOutcome};
+    use super::{
+        slugify, validate_decision, validate_task_qa, FileSystemProjectRepository, ProjectError,
+    };
+    use crate::domain::project::{SchemaCompatibility, SpecDecisionOutcome, TaskQaOutcome};
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -1058,6 +1236,108 @@ mod tests {
     }
 
     #[test]
+    fn reads_task_detail_and_records_user_qa_outcomes() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        let tasks = root
+            .path()
+            .join(".workflow")
+            .join(&workflow.directory)
+            .join("tasks");
+        let confirmed_path = tasks.join("TASK-CONFIRMED.md");
+        fs::write(
+            &confirmed_path,
+            "---\nschema: workflow-labs/task@1\nid: TASK-CONFIRMED\ntitle: 사용자 확인\nstatus: qa_waiting\ncustom_field: keep-me\nupdated_at: 2026-07-31T00:00:00Z\n---\n\n# 사용자 확인\n\n## 테스트\n\n실제 동작을 확인한다.\n",
+        )
+        .expect("confirmed task");
+        let revision_path = tasks.join("TASK-REVISION.md");
+        fs::write(
+            &revision_path,
+            "---\nschema: workflow-labs/task@1\nid: TASK-REVISION\ntitle: 재작업 요청\nstatus: qa_waiting\nupdated_at: 2026-07-31T00:00:00Z\n---\n\n# 재작업 요청\n",
+        )
+        .expect("revision task");
+
+        let detail = repository
+            .read_task(root.path(), &workflow.directory, "TASK-CONFIRMED.md")
+            .expect("read task");
+        assert!(detail.body.contains("실제 동작을 확인한다."));
+
+        let confirmed = repository
+            .record_task_qa(
+                root.path(),
+                &workflow.directory,
+                "TASK-CONFIRMED.md",
+                TaskQaOutcome::Confirmed,
+                "앱 실행 → 정상 표시 확인",
+            )
+            .expect("confirm task");
+        assert_eq!(
+            confirmed.workflows[0]
+                .items
+                .tasks
+                .iter()
+                .find(|item| item.id == "TASK-CONFIRMED")
+                .expect("confirmed summary")
+                .status,
+            "completed"
+        );
+        let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
+        assert!(confirmed_source.contains("status: completed"));
+        assert!(confirmed_source.contains("custom_field: keep-me"));
+        assert!(confirmed_source.contains("실제 동작을 확인한다."));
+
+        let revised = repository
+            .record_task_qa(
+                root.path(),
+                &workflow.directory,
+                "TASK-REVISION.md",
+                TaskQaOutcome::RevisionRequested,
+                "빈 상태에서 다시 확인해 주세요.",
+            )
+            .expect("request task revision");
+        assert_eq!(
+            revised.workflows[0]
+                .items
+                .tasks
+                .iter()
+                .find(|item| item.id == "TASK-REVISION")
+                .expect("revision summary")
+                .status,
+            "todo"
+        );
+        let decisions = root
+            .path()
+            .join(".workflow")
+            .join(&workflow.directory)
+            .join("decisions");
+        let qa_decisions = fs::read_dir(decisions)
+            .expect("qa decisions")
+            .filter_map(Result::ok)
+            .map(|entry| fs::read_to_string(entry.path()).expect("qa decision"))
+            .collect::<Vec<_>>();
+        assert!(qa_decisions.iter().any(|decision| {
+            decision.contains("schema: workflow-labs/qa-decision@1")
+                && decision.contains("outcome: confirmed")
+                && decision.contains("앱 실행 → 정상 표시 확인")
+        }));
+        assert!(qa_decisions.iter().any(|decision| {
+            decision.contains("outcome: revision_requested")
+                && decision.contains("빈 상태에서 다시 확인해 주세요.")
+        }));
+    }
+
+    #[test]
+    fn requires_a_comment_for_task_qa_revision() {
+        let error = validate_task_qa(&TaskQaOutcome::RevisionRequested, "   ")
+            .expect_err("empty QA revision must fail");
+        assert!(matches!(error, ProjectError::QaCommentRequired));
+    }
+
+    #[test]
     fn reads_user_review_spec_and_records_approval_without_rewriting_it() {
         let root = tempdir().expect("temp project");
         let repository = FileSystemProjectRepository;
@@ -1116,10 +1396,64 @@ mod tests {
     }
 
     #[test]
-    fn requires_a_comment_when_rejecting_a_spec() {
-        let error = validate_decision(&SpecDecisionOutcome::Rejected, "   ")
-            .expect_err("empty rejection comment must fail");
-        assert!(matches!(error, ProjectError::RejectionCommentRequired));
+    fn requires_a_comment_when_requesting_revision_or_rejecting_a_spec() {
+        for outcome in [
+            SpecDecisionOutcome::RevisionRequested,
+            SpecDecisionOutcome::Rejected,
+        ] {
+            let error =
+                validate_decision(&outcome, "   ").expect_err("empty decision comment must fail");
+            assert!(matches!(error, ProjectError::DecisionCommentRequired));
+        }
+    }
+
+    #[test]
+    fn records_revision_request_as_the_latest_spec_state() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&workflow.directory)
+                .join("specs/SPEC-REVISION.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-REVISION\ntitle: 수정 흐름\nstatus: user_review\ncreated_at: 2026-07-31T00:00:00Z\n---\n\n# 수정 흐름\n",
+        )
+        .expect("write spec");
+
+        let decided = repository
+            .record_spec_decision(
+                root.path(),
+                &workflow.directory,
+                "SPEC-REVISION.md",
+                SpecDecisionOutcome::RevisionRequested,
+                "성공 조건을 수치로 구체화해 주세요.",
+            )
+            .expect("request revision");
+
+        assert_eq!(
+            decided.workflows[0].items.specs[0].status,
+            "revision_requested"
+        );
+        let decisions = root
+            .path()
+            .join(".workflow")
+            .join(&workflow.directory)
+            .join("decisions");
+        let decision = fs::read_to_string(
+            fs::read_dir(decisions)
+                .expect("decisions")
+                .next()
+                .expect("decision entry")
+                .expect("decision file")
+                .path(),
+        )
+        .expect("decision markdown");
+        assert!(decision.contains("outcome: revision_requested"));
+        assert!(decision.contains("성공 조건을 수치로 구체화해 주세요."));
     }
 
     #[test]
