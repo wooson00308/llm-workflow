@@ -55,7 +55,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "Workflow Labs ${{ github.ref_name }}"
+          releaseName: "LLM Workflow ${{ github.ref_name }}"
           releaseBody: "설치 파일과 앱 내부 업데이트 메타데이터입니다."
           releaseDraft: true
           prerelease: false

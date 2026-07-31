@@ -15,7 +15,9 @@ pub fn run() {
             commands::projects::create_workflow,
             commands::projects::create_idea,
             commands::projects::read_spec,
+            commands::projects::read_task,
             commands::projects::record_spec_decision,
+            commands::projects::record_task_qa,
             commands::projects::migrate_project,
         ])
         .run(tauri::generate_context!())

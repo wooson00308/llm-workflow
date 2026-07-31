@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   ProjectSummary,
   SpecDecisionOutcome,
+  TaskQaOutcome,
+  TaskDocument,
   SpecDocument,
   WorkflowItemSummary,
   WorkflowSummary,
@@ -12,6 +14,8 @@ import { Icon } from "../../../shared/ui/Icon";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
+import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
+import { SettingsView } from "./SettingsView";
 import { SpecWorkspace } from "./SpecWorkspace";
 
 interface Props {
@@ -32,7 +36,17 @@ interface Props {
     workflowDirectory: string,
     fileName: string,
   ): Promise<SpecDocument | null>;
-  onRefresh(): void;
+  onReadTask(
+    workflowDirectory: string,
+    fileName: string,
+  ): Promise<TaskDocument | null>;
+  onTaskQa(
+    workflowDirectory: string,
+    fileName: string,
+    outcome: TaskQaOutcome,
+    comment: string,
+  ): Promise<boolean>;
+  onRefresh(): Promise<void> | void;
   onSwitchProject(): void;
 }
 
@@ -49,6 +63,7 @@ const viewLabels = {
   specs: "기획서",
   tasks: "개발",
   archive: "기록",
+  settings: "설정",
 } as const;
 
 export function WorkspaceShell({
@@ -61,6 +76,8 @@ export function WorkspaceShell({
   onDecideSpec,
   onMigrate,
   onReadSpec,
+  onReadTask,
+  onTaskQa,
   onRefresh,
   onSwitchProject,
 }: Props) {
@@ -70,10 +87,12 @@ export function WorkspaceShell({
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
-    "today" | "ideas" | "specs" | "tasks" | "archive"
+    "today" | "ideas" | "specs" | "tasks" | "archive" | "settings"
   >("today");
   const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     if (!project.workflows.some((item) => item.directory === selectedDirectory)) {
@@ -84,6 +103,17 @@ export function WorkspaceShell({
   useEffect(() => {
     setSpecDocument(null);
   }, [selectedDirectory]);
+
+  useEffect(() => {
+    function handleSearchShortcut(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen((current) => !current);
+      }
+    }
+    window.addEventListener("keydown", handleSearchShortcut);
+    return () => window.removeEventListener("keydown", handleSearchShortcut);
+  }, []);
 
   const workflow = useMemo(
     () => project.workflows.find((item) => item.directory === selectedDirectory),
@@ -134,6 +164,42 @@ export function WorkspaceShell({
     await openSpec(item);
   }
 
+  async function refreshProject() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function openSearchResult({
+    item,
+    kind,
+    workflow: resultWorkflow,
+  }: {
+    item: WorkflowItemSummary;
+    kind: SearchItemKind;
+    workflow: WorkflowSummary;
+  }) {
+    setSelectedDirectory(resultWorkflow.directory);
+    if (kind === "ideas") {
+      setView("ideas");
+      return;
+    }
+    if (kind === "tasks") {
+      setView("tasks");
+      return;
+    }
+
+    setView("specs");
+    setSpecLoading(true);
+    const document = await onReadSpec(resultWorkflow.directory, item.fileName);
+    if (document) setSpecDocument(document);
+    setSpecLoading(false);
+  }
+
   const writable = project.compatibility === "current";
 
   return (
@@ -176,7 +242,7 @@ export function WorkspaceShell({
 
         <div className="sidebar-footer">
           <UpdateControl updater={updater} />
-          <button className="settings-link"><Icon name="settings" />설정</button>
+          <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
         </div>
       </aside>
 
@@ -187,8 +253,15 @@ export function WorkspaceShell({
             <small>{project.rootPath}</small>
           </div>
           <div className="header-actions">
-            <button className="icon-button" aria-label="새로 고침" onClick={onRefresh}><Icon name="refresh" /></button>
-            <button className="search-button"><Icon name="search" />프로젝트 검색 <kbd>⌘K</kbd></button>
+            <button
+              aria-busy={refreshing}
+              aria-label={refreshing ? "새로고침 중" : "새로 고침"}
+              className={`icon-button refresh-button ${refreshing ? "refreshing" : ""}`}
+              disabled={refreshing}
+              onClick={() => void refreshProject()}
+              title={refreshing ? "프로젝트를 새로고침하는 중입니다" : "프로젝트 새로고침"}
+            ><Icon name="refresh" /></button>
+            <button className="search-button" onClick={() => setSearchOpen(true)}><Icon name="search" />프로젝트 검색 <kbd>⌘K</kbd></button>
           </div>
         </header>
 
@@ -233,7 +306,7 @@ export function WorkspaceShell({
               <IdeaComposer busy={busy} compact disabled={!writable || !workflow} onAdd={addIdea} />
 
               <section className="stage-section">
-                <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><span className="flow-hint">각 단계는 전용 화면에서 관리됩니다</span></div>
+                <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><span className="flow-hint"><Icon name="workflow" />단계 카드를 선택해 전용 화면으로 이동</span></div>
                 <div className="stage-grid">
                   {stages.map((stage, index) => (
                     <StageCard
@@ -292,13 +365,23 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard workflow={workflow} />}
+          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} workflow={workflow} />}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
+
+          {view === "settings" && <SettingsView project={project} updater={updater} onSwitchProject={onSwitchProject} />}
 
           {specLoading && <div className="loading-toast">기획서를 불러오는 중…</div>}
         </div>
       </section>
+
+      {searchOpen && (
+        <ProjectSearchDialog
+          onClose={() => setSearchOpen(false)}
+          onOpen={(result) => void openSearchResult(result)}
+          project={project}
+        />
+      )}
 
     </main>
   );

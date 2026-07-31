@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 
@@ -25,19 +25,26 @@ function workflowWith(items: WorkflowItemSummary[] = tasks): WorkflowSummary {
   };
 }
 
+function taskReader(item: WorkflowItemSummary = tasks[1]) {
+  return vi.fn().mockResolvedValue({
+    summary: item,
+    body: `# ${item.title}\n\n## 작업 범위\n\n${item.excerpt}`,
+  });
+}
+
 describe("DevelopmentBoard", () => {
   it("groups development tasks by their actual status", () => {
-    render(<DevelopmentBoard workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
 
     expect(screen.getByRole("region", { name: "개발 작업 칸반 보드" })).toBeInTheDocument();
     expect(screen.getByText("파서 구현")).toBeInTheDocument();
-    expect(screen.getByText("사용자 QA")).toBeInTheDocument();
+    expect(screen.getAllByText("사용자 QA").length).toBeGreaterThan(0);
     expect(screen.getAllByText("진행 중").length).toBeGreaterThan(0);
     expect(screen.getAllByText("QA 대기").length).toBeGreaterThan(0);
   });
 
   it("shares search and status filters across view modes", () => {
-    render(<DevelopmentBoard workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
     expect(screen.getByText("파서 구현")).toBeInTheDocument();
@@ -54,7 +61,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("places due tasks on the calendar and preserves unscheduled tasks", () => {
-    render(<DevelopmentBoard workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
     fireEvent.click(screen.getByRole("button", { name: "캘린더" }));
 
     const calendar = screen.getByRole("region", { name: "개발 작업 캘린더" });
@@ -73,11 +80,59 @@ describe("DevelopmentBoard", () => {
       dueAt: null,
       excerpt: "",
     }));
-    render(<DevelopmentBoard workflow={workflowWith(completed)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(completed[0])} onTaskQa={vi.fn()} workflow={workflowWith(completed)} />);
 
     expect(screen.getByText("완료 작업 4")).toBeInTheDocument();
     expect(screen.getByText("완료 작업 3")).toBeInTheDocument();
     expect(screen.getByText("완료 작업 2")).toBeInTheDocument();
     expect(screen.queryByText("완료 작업 1")).not.toBeInTheDocument();
+  });
+
+  it("lets the user confirm a QA waiting task", async () => {
+    const onTaskQa = vi.fn().mockResolvedValue(true);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    fireEvent.change(screen.getByLabelText("테스트 플로우와 확인 메모"), {
+      target: { value: "앱 실행 → 설정 열기 → 정상 표시 확인" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "확인 완료" }));
+
+    await waitFor(() => expect(onTaskQa).toHaveBeenCalledWith("TASK-002.md", "confirmed", "앱 실행 → 설정 열기 → 정상 표시 확인"));
+    expect(screen.getByRole("heading", { name: "개발 작업" })).toBeInTheDocument();
+  });
+
+  it("requires guidance when QA requests development changes", async () => {
+    const onTaskQa = vi.fn().mockResolvedValue(true);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    const submit = screen.getByRole("button", { name: "수정 요청" });
+    expect(submit).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("테스트 플로우와 확인 메모"), {
+      target: { value: "빈 상태에서 다시 확인해 주세요." },
+    });
+    fireEvent.click(submit);
+
+    await waitFor(() =>
+      expect(onTaskQa).toHaveBeenCalledWith(
+        "TASK-002.md",
+        "revision_requested",
+        "빈 상태에서 다시 확인해 주세요.",
+      ),
+    );
+  });
+
+  it("opens a non-QA card as a read-only detail page", async () => {
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(tasks[0])} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+
+    await screen.findByRole("button", { name: "← 개발 작업으로" });
+    expect(screen.getByText("문서 상태를 읽는다.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("테스트 플로우와 확인 메모")).not.toBeInTheDocument();
+    expect(screen.getByText("QA 대기 상태가 되면 확인 도구가 활성화됩니다.")).toBeInTheDocument();
   });
 });

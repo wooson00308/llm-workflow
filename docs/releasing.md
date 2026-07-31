@@ -8,8 +8,8 @@
 4. `main` 병합 후 같은 버전의 태그를 만든다.
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 ## GitHub 설정
@@ -17,7 +17,7 @@ git push origin v0.1.2
 업데이트 서명 키는 로컬에서 생성하고 개인 키를 저장소에 커밋하지 않는다.
 
 ```bash
-npm run tauri signer generate -- -w /안전한/외부/경로/workflow-labs.key
+npm run tauri signer generate -- -w /안전한/외부/경로/llm-workflow.key
 ```
 
 GitHub Actions secret:

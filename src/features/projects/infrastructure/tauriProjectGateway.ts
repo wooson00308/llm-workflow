@@ -4,6 +4,7 @@ import type {
   ProjectGateway,
   ProjectSummary,
   SpecDocument,
+  TaskDocument,
 } from "../domain/types";
 
 export const tauriProjectGateway: ProjectGateway = {
@@ -11,7 +12,7 @@ export const tauriProjectGateway: ProjectGateway = {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Workflow Labs 프로젝트 폴더 선택",
+      title: "LLM Workflow 프로젝트 폴더 선택",
     });
     return typeof selected === "string" ? selected : null;
   },
@@ -40,8 +41,26 @@ export const tauriProjectGateway: ProjectGateway = {
     });
   },
 
+  readTask(path, workflowDirectory, fileName) {
+    return invoke<TaskDocument>("read_task", {
+      path,
+      workflowDirectory,
+      fileName,
+    });
+  },
+
   decideSpec(path, workflowDirectory, fileName, outcome, comment) {
     return invoke<ProjectSummary>("record_spec_decision", {
+      path,
+      workflowDirectory,
+      fileName,
+      outcome,
+      comment,
+    });
+  },
+
+  recordTaskQa(path, workflowDirectory, fileName, outcome, comment) {
+    return invoke<ProjectSummary>("record_task_qa", {
       path,
       workflowDirectory,
       fileName,

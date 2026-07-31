@@ -43,7 +43,9 @@ describe("useProjectWorkspace", () => {
         ],
       }),
       readSpec: vi.fn().mockResolvedValue(null),
+      readTask: vi.fn().mockResolvedValue(null),
       decideSpec: vi.fn().mockResolvedValue(project),
+      recordTaskQa: vi.fn().mockResolvedValue(project),
       migrate: vi.fn().mockResolvedValue(project),
     };
     const recentStore: RecentProjectStore = {

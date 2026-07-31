@@ -1,8 +1,10 @@
-# Workflow Labs
+# LLM Workflow
 
 프로젝트 디렉터리의 Markdown 문서를 아이디어, 기획, 승인, 개발 작업, QA 흐름으로 보여주는 로컬 우선 데스크톱 클라이언트입니다.
 
-Workflow Labs는 LLM을 실행하지 않습니다. 외부 LLM과 앱은 `.workflow/` 아래의 Markdown/YAML 파일 계약으로 협업합니다.
+LLM Workflow는 LLM을 실행하지 않습니다. 외부 LLM과 앱은 `.workflow/` 아래의 Markdown/YAML 파일 계약으로 협업합니다.
+
+사용자는 아이디어를 쌓고 기획서에 승인·수정 요청·폐기 결정을 내린 뒤 개발 결과를 QA합니다. 기획자·프로젝트 아키텍트·개발자 세 역할은 공급자 중립적인 계약으로 분리됩니다.
 
 ## 기술 스택
 

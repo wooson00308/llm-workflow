@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use crate::application::project_service::ProjectService;
-use crate::domain::project::{ProjectSummary, SpecDecisionOutcome, SpecDocument};
+use crate::domain::project::{
+    ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
+};
 
 #[tauri::command]
 pub fn inspect_project(path: String) -> Result<ProjectSummary, String> {
@@ -40,6 +42,17 @@ pub fn read_spec(
 }
 
 #[tauri::command]
+pub fn read_task(
+    path: String,
+    workflow_directory: String,
+    file_name: String,
+) -> Result<TaskDocument, String> {
+    ProjectService::default()
+        .read_task(Path::new(&path), &workflow_directory, &file_name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn record_spec_decision(
     path: String,
     workflow_directory: String,
@@ -49,6 +62,25 @@ pub fn record_spec_decision(
 ) -> Result<ProjectSummary, String> {
     ProjectService::default()
         .record_spec_decision(
+            Path::new(&path),
+            &workflow_directory,
+            &file_name,
+            outcome,
+            &comment,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn record_task_qa(
+    path: String,
+    workflow_directory: String,
+    file_name: String,
+    outcome: TaskQaOutcome,
+    comment: String,
+) -> Result<ProjectSummary, String> {
+    ProjectService::default()
+        .record_task_qa(
             Path::new(&path),
             &workflow_directory,
             &file_name,
