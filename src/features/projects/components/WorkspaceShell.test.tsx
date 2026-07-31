@@ -190,6 +190,32 @@ describe("WorkspaceShell", () => {
     expect(screen.getByRole("heading", { name: "개발 작업" })).toBeInTheDocument();
   });
 
+  it("opens a first-run help guide from the sidebar", () => {
+    render(
+      <WorkspaceShell
+        busy={false}
+        error={null}
+        project={project}
+        updater={updater}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "도움말" }));
+    expect(screen.getByRole("heading", { name: "도움말" })).toBeInTheDocument();
+    expect(screen.getByText(/도장을 찍는다/)).toBeInTheDocument();
+    expect(screen.getByText(/LLM에게 어떻게 시키나요/)).toBeInTheDocument();
+    expect(screen.getByText("아키텍트")).toBeInTheDocument();
+  });
+
   it("opens a working settings view", () => {
     const onSwitchProject = vi.fn();
     render(

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
+import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
 import type {
   SpecDecisionOutcome,
   SpecDocument,
@@ -46,11 +47,13 @@ export function SpecWorkspace({
   const [commentDecision, setCommentDecision] = useState<CommentDecision | null>(null);
   const [comment, setComment] = useState("");
   const [recorded, setRecorded] = useState<SpecDecisionOutcome | null>(null);
+  const approveConfirm = useArmedConfirm();
 
   useEffect(() => {
     setCommentDecision(null);
     setComment("");
     setRecorded(null);
+    approveConfirm.disarm();
   }, [document?.summary.fileName]);
 
   const filtered = useMemo(
@@ -158,9 +161,33 @@ export function SpecWorkspace({
           {document && awaitingDecision && !commentDecision && (
             <>
               <div className="decision-callout"><Icon name="stamp" /><strong>검토가 필요합니다</strong><p>이 결정은 별도 Markdown 감사 로그로 보존됩니다.</p></div>
-              <button className="stamp-button full" disabled={busy} onClick={() => void decide("approved")}><Icon name="stamp" />승인 도장 찍기</button>
-              <button className="secondary-button revision full" disabled={busy} onClick={() => setCommentDecision("revision_requested")}><Icon name="workflow" />수정 요청</button>
-              <button className="secondary-button reject full" disabled={busy} onClick={() => setCommentDecision("rejected")}>기획서 폐기</button>
+              {approveConfirm.armed && (
+                <p className="confirm-warning" role="status">이 기획서를 승인합니다. 승인 기록은 되돌릴 수 없습니다.</p>
+              )}
+              <button
+                className={`stamp-button full ${approveConfirm.armed ? "armed" : ""}`}
+                disabled={busy}
+                onClick={() => approveConfirm.fire(() => void decide("approved"))}
+              >
+                <Icon name="stamp" />{approveConfirm.armed ? "한 번 더 누르면 승인" : "승인 도장 찍기"}
+                {approveConfirm.armed && <i aria-hidden="true" className="confirm-timer" />}
+              </button>
+              <button
+                className="secondary-button revision full"
+                disabled={busy}
+                onClick={() => {
+                  approveConfirm.disarm();
+                  setCommentDecision("revision_requested");
+                }}
+              ><Icon name="workflow" />수정 요청</button>
+              <button
+                className="secondary-button reject full"
+                disabled={busy}
+                onClick={() => {
+                  approveConfirm.disarm();
+                  setCommentDecision("rejected");
+                }}
+              >기획서 폐기</button>
             </>
           )}
           {document && awaitingDecision && commentDecision && (

@@ -5,6 +5,7 @@ export type IconName =
   | "board"
   | "chevron"
   | "folder"
+  | "help"
   | "idea"
   | "inbox"
   | "plus"
@@ -20,6 +21,7 @@ const paths: Record<IconName, React.ReactNode> = {
   board: <path d="M4 5h6v14H4zM14 5h6v8h-6zM14 17h6v2h-6z" />,
   chevron: <path d="m9 18 6-6-6-6" />,
   folder: <path d="M3 6.5h7l2 2h9v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
+  help: <path d="M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18ZM9.4 9.3a2.7 2.7 0 0 1 5.3.6c0 1.8-2.7 2.1-2.7 3.6M12 16.9h.01" />,
   idea: <path d="M9 18h6M10 22h4M8.5 14.5A6 6 0 1 1 15.5 14.5c-1 .7-1.5 1.5-1.5 2.5h-4c0-1-.5-1.8-1.5-2.5Z" />,
   inbox: <path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5" />,
   plus: <path d="M12 5v14M5 12h14" />,

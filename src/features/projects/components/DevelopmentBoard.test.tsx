@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { DevelopmentBoard } from "./DevelopmentBoard";
@@ -7,6 +7,7 @@ const today = new Date();
 const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
 afterEach(cleanup);
+afterEach(() => vi.unstubAllGlobals());
 
 const tasks: WorkflowItemSummary[] = [
   { fileName: "TASK-001.md", id: "TASK-001", title: "파서 구현", status: "in_progress", updatedAt: "2026-07-30T09:00:00Z", dueAt: todayKey, excerpt: "문서 상태를 읽는다." },
@@ -97,10 +98,36 @@ describe("DevelopmentBoard", () => {
     fireEvent.change(screen.getByLabelText("테스트 플로우와 확인 메모"), {
       target: { value: "앱 실행 → 설정 열기 → 정상 표시 확인" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "확인 완료" }));
 
+    fireEvent.click(screen.getByRole("button", { name: "확인 완료" }));
+    expect(onTaskQa).not.toHaveBeenCalled();
+    expect(screen.getByText("이 작업을 완료 처리합니다. 되돌릴 수 없습니다.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 완료" }));
     await waitFor(() => expect(onTaskQa).toHaveBeenCalledWith("TASK-002.md", "confirmed", "앱 실행 → 설정 열기 → 정상 표시 확인"));
     expect(screen.getByRole("heading", { name: "개발 작업" })).toBeInTheDocument();
+  });
+
+  it("returns the confirm button to a safe state when not clicked again in time", async () => {
+    const onTaskQa = vi.fn().mockResolvedValue(true);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "확인 완료" }));
+      expect(screen.getByRole("button", { name: "한 번 더 누르면 완료" })).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(3_600);
+      });
+      expect(screen.getByRole("button", { name: "확인 완료" })).toBeInTheDocument();
+      expect(onTaskQa).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("requires guidance when QA requests development changes", async () => {
@@ -114,8 +141,12 @@ describe("DevelopmentBoard", () => {
     fireEvent.change(screen.getByLabelText("테스트 플로우와 확인 메모"), {
       target: { value: "빈 상태에서 다시 확인해 주세요." },
     });
-    fireEvent.click(submit);
 
+    fireEvent.click(submit);
+    expect(onTaskQa).not.toHaveBeenCalled();
+    expect(screen.getByText("작업을 개발 준비로 되돌리고 수정 요청을 기록합니다.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 수정 요청" }));
     await waitFor(() =>
       expect(onTaskQa).toHaveBeenCalledWith(
         "TASK-002.md",
@@ -123,6 +154,28 @@ describe("DevelopmentBoard", () => {
         "빈 상태에서 다시 확인해 주세요.",
       ),
     );
+  });
+
+  it("resizes the QA side panel and remembers the width", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+    });
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    const handle = await screen.findByRole("separator", { name: "QA 패널 너비 조절" });
+    expect(handle).toHaveAttribute("aria-valuenow", "340");
+
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(handle).toHaveAttribute("aria-valuenow", "364");
+    expect(storage.get("llm-workflow.task-qa-panel-width")).toBe("364");
+
+    fireEvent.doubleClick(handle);
+    expect(handle).toHaveAttribute("aria-valuenow", "340");
   });
 
   it("opens a non-QA card as a read-only detail page", async () => {

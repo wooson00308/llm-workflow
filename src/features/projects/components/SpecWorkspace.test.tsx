@@ -40,7 +40,10 @@ describe("SpecWorkspace", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "승인 도장 찍기" }));
+    expect(onDecision).not.toHaveBeenCalled();
+    expect(screen.getByText("이 기획서를 승인합니다. 승인 기록은 되돌릴 수 없습니다.")).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 승인" }));
     await waitFor(() => expect(onDecision).toHaveBeenCalledWith("approved", ""));
     expect(screen.getByText("USER DECISION")).toBeInTheDocument();
     expect(screen.getByText("결정 Markdown을 안전하게 저장했습니다.")).toBeInTheDocument();
