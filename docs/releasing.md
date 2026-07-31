@@ -8,8 +8,8 @@
 4. `main` 병합 후 같은 버전의 태그를 만든다.
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 ## GitHub 설정

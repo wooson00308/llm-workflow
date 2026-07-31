@@ -48,7 +48,7 @@ const viewLabels = {
   ideas: "아이디어",
   specs: "기획서",
   tasks: "개발",
-  archive: "보관함",
+  archive: "기록",
 } as const;
 
 export function WorkspaceShell({
@@ -150,7 +150,7 @@ export function WorkspaceShell({
           <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
           <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
           <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
-          <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />보관함</button>
+          <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
         </nav>
 
         <div className="workflow-nav">

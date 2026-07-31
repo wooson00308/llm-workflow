@@ -1,6 +1,6 @@
 [package]
 name = "workflow-labs"
-version = "0.1.1"
+version = "0.1.2"
 description = "A local-first workspace for human-approved LLM workflows."
 authors = ["Workflow Labs contributors"]
 edition = "2021"
