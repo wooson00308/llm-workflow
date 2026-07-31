@@ -96,6 +96,7 @@ pub struct WorkflowItemSummary {
     pub title: String,
     pub status: String,
     pub updated_at: Option<String>,
+    pub due_at: Option<String>,
     pub excerpt: String,
 }
 

@@ -96,6 +96,7 @@ id: TASK-001
 title: 기획서 상태 파서 구현
 status: in_progress
 updated_at: 2026-07-30T10:30:00Z
+due_at: 2026-08-07
 ---
 
 작업 범위와 완료 조건을 작성한다.
@@ -108,6 +109,8 @@ updated_at: 2026-07-30T10:30:00Z
 - `blocked`: 진행 불가
 - `qa_waiting`: 작업 완료 후 사용자 QA 대기
 - `completed`: QA까지 완료
+
+`due_at`은 선택 필드이며 `YYYY-MM-DD` 형식의 작업 목표일이다. 캘린더뷰는 이 값을 기준으로 작업을 배치하고, 필드가 없거나 형식이 잘못된 작업은 일정 미지정으로 표시한다.
 
 작업 범위가 겹치면 병렬 작업을 금지한다. 외부 LLM이 작업하는 동안에는 `.workflow/.runtime/leases/*.yml`에 만료 시간이 있는 lease를 두어 앱 마이그레이션을 막는다.
 

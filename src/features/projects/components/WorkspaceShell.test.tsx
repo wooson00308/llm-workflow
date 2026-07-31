@@ -1,8 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectSummary } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { WorkspaceShell } from "./WorkspaceShell";
+
+afterEach(cleanup);
 
 const project: ProjectSummary = {
   rootPath: "/projects/workflow-labs",
@@ -58,5 +60,48 @@ describe("WorkspaceShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "개발" }));
     expect(screen.getByRole("heading", { name: "개발 작업" })).toBeInTheDocument();
+  });
+
+  it("keeps the full completed task history in the archive", () => {
+    const completedTasks = [1, 2, 3, 4].map((day) => ({
+      fileName: `TASK-00${day}.md`,
+      id: `TASK-00${day}`,
+      title: `완료 기록 ${day}`,
+      status: "completed",
+      updatedAt: `2026-07-0${day}T00:00:00Z`,
+      dueAt: null,
+      excerpt: "",
+    }));
+    const completedProject: ProjectSummary = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, tasks: 4 },
+        items: { ...project.workflows[0].items, tasks: completedTasks },
+      }],
+    };
+
+    render(
+      <WorkspaceShell
+        busy={false}
+        error={null}
+        project={completedProject}
+        updater={updater}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    expect(screen.queryByText("완료 기록 1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "기록" }));
+    expect(screen.getByText("완료 기록 1")).toBeInTheDocument();
+    expect(screen.getAllByText(/완료 기록 [1-4]/)).toHaveLength(4);
   });
 });

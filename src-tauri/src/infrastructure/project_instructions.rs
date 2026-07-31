@@ -103,6 +103,7 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 - Keep required frontmatter keys and valid schema identifiers.
 - Preserve unknown frontmatter fields and existing document IDs.
 - Update `updated_at` with an RFC3339 timestamp when changing an agent-owned document.
+- When a task has a target date, store it as optional `due_at: YYYY-MM-DD`.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.

@@ -34,6 +34,7 @@ export interface WorkflowItemSummary {
   title: string;
   status: string;
   updatedAt: string | null;
+  dueAt?: string | null;
   excerpt: string;
 }
 

@@ -720,6 +720,7 @@ fn read_markdown_document(
                 .ok()
                 .map(|value| DateTime::<Utc>::from(value).to_rfc3339())
         });
+    let due_at = yaml_text(metadata.as_ref(), "due_at");
     Ok((
         WorkflowItemSummary {
             file_name,
@@ -728,6 +729,7 @@ fn read_markdown_document(
             status: yaml_text(metadata.as_ref(), "status")
                 .unwrap_or_else(|| default_status.to_owned()),
             updated_at,
+            due_at,
             excerpt: markdown_excerpt(&body),
         },
         body.trim().to_owned(),
@@ -901,7 +903,7 @@ fn compact_uuid() -> String {
 
 fn workflow_readme(name: &str, id: &str) -> String {
     format!(
-        "# {name}\n\n워크플로우 ID: `{id}`\n\n## 외부 LLM 작업 규약\n\n1. 쓰기 전에 `../.runtime/migration.lock`이 없는지 확인합니다.\n2. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.\n3. 사용자 결정이 필요한 기획서는 `status: user_review`로 저장합니다.\n4. `decisions/`는 앱이 사용자 선택을 기록하는 감사 로그입니다. 외부 LLM은 이 파일을 만들거나 덮어쓰지 않습니다.\n5. 기획서 승인 여부는 기획서 원문이 아니라 최신 decision 문서로 판단합니다.\n6. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.\n\n## 필수 frontmatter\n\n### 기획서 (`specs/*.md`)\n\n```yaml\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 문서 제목\nstatus: draft # draft | user_review\ncreated_at: RFC3339\nupdated_at: RFC3339\n```\n\n본문에는 `기획 내용`, `요구사항 명세`, `기대효과` 섹션을 권장합니다.\n\n### 개발 작업 (`tasks/*.md`)\n\n```yaml\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 작업 제목\nstatus: todo # todo | in_progress | blocked | qa_waiting | completed\nupdated_at: RFC3339\n```\n\n동시에 수정하면 충돌할 수 있는 작업은 병렬로 진행하지 않습니다.\n"
+        "# {name}\n\n워크플로우 ID: `{id}`\n\n## 외부 LLM 작업 규약\n\n1. 쓰기 전에 `../.runtime/migration.lock`이 없는지 확인합니다.\n2. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.\n3. 사용자 결정이 필요한 기획서는 `status: user_review`로 저장합니다.\n4. `decisions/`는 앱이 사용자 선택을 기록하는 감사 로그입니다. 외부 LLM은 이 파일을 만들거나 덮어쓰지 않습니다.\n5. 기획서 승인 여부는 기획서 원문이 아니라 최신 decision 문서로 판단합니다.\n6. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.\n\n## 필수 frontmatter\n\n### 기획서 (`specs/*.md`)\n\n```yaml\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 문서 제목\nstatus: draft # draft | user_review\ncreated_at: RFC3339\nupdated_at: RFC3339\n```\n\n본문에는 `기획 내용`, `요구사항 명세`, `기대효과` 섹션을 권장합니다.\n\n### 개발 작업 (`tasks/*.md`)\n\n```yaml\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 작업 제목\nstatus: todo # todo | in_progress | blocked | qa_waiting | completed\nupdated_at: RFC3339\ndue_at: YYYY-MM-DD # 선택\n```\n\n동시에 수정하면 충돌할 수 있는 작업은 병렬로 진행하지 않습니다.\n"
     )
 }
 
@@ -954,6 +956,9 @@ mod tests {
             assert!(workflow_root.join(directory).is_dir());
         }
         assert!(workflow_root.join("workflow.yml").is_file());
+        assert!(fs::read_to_string(workflow_root.join("README.md"))
+            .expect("workflow readme")
+            .contains("due_at: YYYY-MM-DD # 선택"));
         assert!(root.path().join("AGENTS.md").is_file());
         assert!(root.path().join("CLAUDE.md").is_file());
         assert!(root.path().join(".workflow/rules/workflow.md").is_file());
@@ -1025,6 +1030,31 @@ mod tests {
         let contents = fs::read_to_string(idea_path).expect("idea markdown");
         assert!(contents.contains("schema: workflow-labs/idea@1"));
         assert!(contents.contains("빠르게 생각을 기록한다."));
+    }
+
+    #[test]
+    fn reads_optional_task_due_date() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let task_path = root
+            .path()
+            .join(".workflow")
+            .join(&project.workflows[0].directory)
+            .join("tasks/TASK-001.md");
+        fs::write(
+            task_path,
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 일정 작업\nstatus: todo\nupdated_at: 2026-07-30T00:00:00Z\ndue_at: 2026-08-07\n---\n\n목표일이 있는 작업\n",
+        )
+        .expect("write task");
+
+        let inspected = repository.inspect(root.path()).expect("inspect task");
+        assert_eq!(
+            inspected.workflows[0].items.tasks[0].due_at.as_deref(),
+            Some("2026-08-07")
+        );
     }
 
     #[test]
