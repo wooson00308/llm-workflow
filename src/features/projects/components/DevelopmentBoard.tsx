@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
+import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
 import type { TaskDocument, TaskQaOutcome, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { MarkdownBody } from "./MarkdownBody";
 
@@ -145,6 +146,32 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
   );
 }
 
+const QA_PANEL_WIDTH_KEY = "llm-workflow.task-qa-panel-width";
+const QA_PANEL_DEFAULT_WIDTH = 340;
+const QA_PANEL_MIN_WIDTH = 280;
+const QA_PANEL_MAX_WIDTH = 600;
+
+function clampQaPanelWidth(value: number) {
+  return Math.min(QA_PANEL_MAX_WIDTH, Math.max(QA_PANEL_MIN_WIDTH, value));
+}
+
+function loadQaPanelWidth() {
+  try {
+    const stored = Number(localStorage.getItem(QA_PANEL_WIDTH_KEY));
+    return Number.isFinite(stored) && stored > 0 ? clampQaPanelWidth(stored) : QA_PANEL_DEFAULT_WIDTH;
+  } catch {
+    return QA_PANEL_DEFAULT_WIDTH;
+  }
+}
+
+function saveQaPanelWidth(value: number) {
+  try {
+    localStorage.setItem(QA_PANEL_WIDTH_KEY, String(value));
+  } catch {
+    return;
+  }
+}
+
 function TaskDetail({
   busy,
   document,
@@ -157,7 +184,44 @@ function TaskDetail({
   onTaskQa(outcome: TaskQaOutcome, comment: string): Promise<boolean>;
 }) {
   const [comment, setComment] = useState("");
+  const [panelWidth, setPanelWidth] = useState(loadQaPanelWidth);
+  const [resizing, setResizing] = useState(false);
+  const confirmQa = useArmedConfirm();
+  const revisionQa = useArmedConfirm();
   const awaitingQa = document.summary.status === "qa_waiting";
+
+  function applyPanelWidth(value: number) {
+    const next = clampQaPanelWidth(value);
+    setPanelWidth(next);
+    saveQaPanelWidth(next);
+  }
+
+  function startPanelResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = panelWidth;
+    setResizing(true);
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (move: PointerEvent) => {
+      setPanelWidth(clampQaPanelWidth(startWidth + (startX - move.clientX)));
+    };
+    const onUp = (up: PointerEvent) => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      setResizing(false);
+      applyPanelWidth(startWidth + (startX - up.clientX));
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  }
+
+  function resizePanelByKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    const delta = event.key === "ArrowLeft" ? 24 : event.key === "ArrowRight" ? -24 : null;
+    if (delta === null) return;
+    event.preventDefault();
+    applyPanelWidth(panelWidth + delta);
+  }
 
   return (
     <section className="task-detail-view">
@@ -166,22 +230,76 @@ function TaskDetail({
         <div><p className="eyebrow">{document.summary.id}</p><h1>{document.summary.title}</h1><p>개발 작업의 범위와 검증 내용을 확인합니다.</p></div>
         <span className={`status-pill status-${document.summary.status}`}>{statusLabels[document.summary.status] ?? document.summary.status}</span>
       </div>
-      <div className="task-detail-layout">
+      <div
+        className={`task-detail-layout ${resizing ? "resizing" : ""}`}
+        style={{ "--qa-panel-width": `${panelWidth}px` } as React.CSSProperties}
+      >
         <article className="task-detail-document">
           <div className="task-detail-meta"><span>최근 변경 {formatDate(document.summary.updatedAt)}</span><span>{document.summary.dueAt ? `목표 ${formatDueDate(document.summary.dueAt)}` : "일정 없음"}</span></div>
           <div className="spec-paper embedded"><MarkdownBody body={document.body} /></div>
         </article>
         <aside className="task-qa-panel">
+          <div
+            aria-label="QA 패널 너비 조절"
+            aria-orientation="vertical"
+            aria-valuemax={QA_PANEL_MAX_WIDTH}
+            aria-valuemin={QA_PANEL_MIN_WIDTH}
+            aria-valuenow={panelWidth}
+            className="qa-panel-resize"
+            onDoubleClick={() => applyPanelWidth(QA_PANEL_DEFAULT_WIDTH)}
+            onKeyDown={resizePanelByKey}
+            onPointerDown={startPanelResize}
+            role="separator"
+            tabIndex={0}
+            title="드래그로 너비 조절 · 더블클릭으로 초기화"
+          />
           <p className="eyebrow">USER QA</p>
           <h2>{awaitingQa ? "직접 확인해 주세요" : "현재 작업 상태"}</h2>
           {awaitingQa ? (
             <>
               <p>테스트한 순서와 결과를 남기면 완료 기록 또는 개발자 재작업 지시로 전달됩니다.</p>
               <label htmlFor="task-qa-comment">테스트 플로우와 확인 메모</label>
-              <textarea autoFocus id="task-qa-comment" maxLength={2_000} onChange={(event) => setComment(event.target.value)} placeholder={"1. 실행한 동작\n2. 확인한 결과\n3. 기대와 다른 점"} value={comment} />
+              <textarea
+                autoFocus
+                id="task-qa-comment"
+                maxLength={2_000}
+                onChange={(event) => {
+                  confirmQa.disarm();
+                  revisionQa.disarm();
+                  setComment(event.target.value);
+                }}
+                placeholder={"1. 실행한 동작\n2. 확인한 결과\n3. 기대와 다른 점"}
+                value={comment}
+              />
+              {confirmQa.armed && (
+                <p className="confirm-warning" role="status">이 작업을 완료 처리합니다. 되돌릴 수 없습니다.</p>
+              )}
+              {revisionQa.armed && (
+                <p className="confirm-warning" role="status">작업을 개발 준비로 되돌리고 수정 요청을 기록합니다.</p>
+              )}
               <div className="task-qa-actions">
-                <button className="secondary-button" disabled={busy || !comment.trim()} onClick={() => void onTaskQa("revision_requested", comment.trim())}>수정 요청</button>
-                <button className="stamp-button" disabled={busy} onClick={() => void onTaskQa("confirmed", comment.trim())}>확인 완료</button>
+                <button
+                  className={`secondary-button ${revisionQa.armed ? "armed" : ""}`}
+                  disabled={busy || !comment.trim()}
+                  onClick={() => {
+                    confirmQa.disarm();
+                    revisionQa.fire(() => void onTaskQa("revision_requested", comment.trim()));
+                  }}
+                >
+                  {revisionQa.armed ? "한 번 더 누르면 수정 요청" : "수정 요청"}
+                  {revisionQa.armed && <i aria-hidden="true" className="confirm-timer" />}
+                </button>
+                <button
+                  className={`stamp-button ${confirmQa.armed ? "armed" : ""}`}
+                  disabled={busy}
+                  onClick={() => {
+                    revisionQa.disarm();
+                    confirmQa.fire(() => void onTaskQa("confirmed", comment.trim()));
+                  }}
+                >
+                  {confirmQa.armed ? "한 번 더 누르면 완료" : "확인 완료"}
+                  {confirmQa.armed && <i aria-hidden="true" className="confirm-timer" />}
+                </button>
               </div>
             </>
           ) : (

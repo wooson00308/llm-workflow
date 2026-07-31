@@ -12,6 +12,7 @@ import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
 import { DevelopmentBoard } from "./DevelopmentBoard";
+import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
@@ -63,6 +64,7 @@ const viewLabels = {
   specs: "기획서",
   tasks: "개발",
   archive: "기록",
+  help: "도움말",
   settings: "설정",
 } as const;
 
@@ -87,7 +89,7 @@ export function WorkspaceShell({
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
-    "today" | "ideas" | "specs" | "tasks" | "archive" | "settings"
+    "today" | "ideas" | "specs" | "tasks" | "archive" | "help" | "settings"
   >("today");
   const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
@@ -242,6 +244,7 @@ export function WorkspaceShell({
 
         <div className="sidebar-footer">
           <UpdateControl updater={updater} />
+          <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
           <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
         </div>
       </aside>
@@ -368,6 +371,8 @@ export function WorkspaceShell({
           {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} workflow={workflow} />}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
+
+          {view === "help" && <HelpView />}
 
           {view === "settings" && <SettingsView project={project} updater={updater} onSwitchProject={onSwitchProject} />}
 
