@@ -31,4 +31,22 @@ describe("IdeaInbox", () => {
     await waitFor(() => expect(onAdd).toHaveBeenCalledWith("새로운 아이디어"));
     expect(screen.getByLabelText("새로운 생각을 인박스에 담기")).toHaveValue("");
   });
+
+  it("marks ideas already adopted into a specification", () => {
+    const adopted: WorkflowSummary = {
+      ...workflow,
+      items: {
+        ...workflow.items,
+        ideas: [
+          ...workflow.items.ideas,
+          { fileName: "IDEA-002.md", id: "IDEA-002", title: "채택된 생각", status: "adopted", updatedAt: "2026-07-31T00:00:00Z", excerpt: "기획서로 넘어갔다." },
+        ],
+      },
+    };
+    render(<IdeaInbox busy={false} disabled={false} onAdd={vi.fn()} workflow={adopted} />);
+
+    expect(screen.getByText("기획 반영")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /채택된 생각/ }));
+    expect(screen.getByText("기획서 채택")).toBeInTheDocument();
+  });
 });

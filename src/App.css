@@ -244,7 +244,10 @@ svg { width: 20px; height: 20px; }
 .idea-list > button:hover { background: #f4f3ed; }
 .idea-list > button.active { border-color: #ccd8ce; background: #edf2ec; }
 .idea-list-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 9px; color: #9a6b3d; background: #f4e9d9; }
+.idea-list-icon.adopted { color: #2c5c41; background: #e0ece2; }
 .idea-list-icon svg { width: 15px; }
+.idea-list-meta { display: grid; gap: 3px; justify-items: end; }
+.idea-adopted-tag { padding: 2px 6px; border-radius: 99px; color: #286042; background: #dfeee4; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .idea-list button > span:nth-child(2) { min-width: 0; }
 .idea-list button strong, .idea-list button small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .idea-list button strong { font-size: 11px; white-space: nowrap; }
@@ -296,8 +299,22 @@ svg { width: 20px; height: 20px; }
 .markdown-body h2 { margin: 28px 0 10px; padding-bottom: 8px; border-bottom: 1px solid #e7e3d8; color: #33362f; font-size: 17px; }
 .markdown-body h3 { margin: 20px 0 7px; font-size: 14px; }
 .markdown-body p, .markdown-body li { margin: 7px 0; color: #575b52; font-size: 12px; line-height: 1.75; }
-.markdown-body li { margin-left: 20px; }
-.markdown-space { display: block; height: 4px; }
+.markdown-body ul, .markdown-body ol { margin: 7px 0; padding-left: 22px; }
+.markdown-body li { margin: 4px 0; }
+.markdown-body strong { color: #33362f; font-weight: 700; }
+.markdown-body a { color: var(--green); text-decoration: underline; text-underline-offset: 2px; }
+.markdown-body code { padding: 2px 5px; border-radius: 5px; color: #4b4f46; background: #f0efe8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.markdown-body pre { margin: 12px 0; padding: 13px 15px; border: 1px solid #e4e2d9; border-radius: 10px; background: #f6f5ef; overflow-x: auto; }
+.markdown-body pre code { display: block; padding: 0; background: transparent; line-height: 1.7; }
+.markdown-body blockquote { margin: 10px 0; padding: 2px 14px; border-left: 3px solid #d9d8ce; }
+.markdown-body blockquote p { color: #6d7168; }
+.markdown-body table { width: 100%; margin: 12px 0; border-collapse: collapse; font-size: 12px; }
+.markdown-body th, .markdown-body td { padding: 7px 10px; border: 1px solid #e2e0d8; color: #575b52; text-align: left; }
+.markdown-body th { background: #f3f2ec; color: #454941; font-size: 11px; }
+.markdown-body hr { margin: 22px 0; border: 0; border-top: 1px solid #e7e3d8; }
+.markdown-body img { max-width: 100%; border-radius: 8px; }
+.markdown-body .contains-task-list { padding-left: 6px; list-style: none; }
+.markdown-body .task-list-item input { margin-right: 7px; }
 .decision-panel { padding: 19px 16px; background: #f1efe7; }
 .decision-panel h2 { margin: 0; font-size: 17px; }
 .decision-help { margin: 9px 0 0; color: #85887e; font-size: 11px; line-height: 1.55; }

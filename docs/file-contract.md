@@ -50,6 +50,7 @@ schema: workflow-labs/spec@1
 id: SPEC-001
 title: 사용자 선택 대기 허브
 status: user_review
+source_idea_id: IDEA-A1B2C3D4
 created_at: 2026-07-30T10:00:00Z
 updated_at: 2026-07-30T10:10:00Z
 ---
@@ -70,6 +71,8 @@ updated_at: 2026-07-30T10:10:00Z
 ```
 
 기획서 상태는 `draft` 또는 `user_review`를 사용한다. 승인·수정 요청·폐기는 기획서 원문에 쓰지 않는다.
+
+아이디어에서 출발한 기획서는 `source_idea_id`로 출처 아이디어를 참조한다. 앱은 이 참조를 읽어 해당 아이디어를 `기획서 채택` 상태로 표시하며, 어떤 기획서도 참조하지 않는 아이디어만 미처리 아이디어로 본다. 수정 요청 재작업 기획서는 이전 기획서와 결정 ID를 참조한다.
 
 ## 사용자 결정
 
@@ -102,6 +105,7 @@ created_at: 2026-07-30T10:20:00Z
 - 프로젝트 아키텍트는 최신 결정이 `approved`인 기획서 하나를 `todo` 작업으로 분해하고 구현하지 않는다.
 - 개발자는 의존성이 충족된 담당 `todo` 작업 하나를 구현·검증하고 `qa_waiting`에서 멈춘다.
 - 세 역할 모두 한 세션에서 다음 역할로 넘어가지 않으며, 처리 대상이 없으면 파일을 바꾸지 않는다.
+- 세 역할 모두 착수 전에 대상 문서를 먼저 선점한다: 대상 문서 id로 이름 붙인 lease를 배타적으로 생성한 뒤, 기획자는 `status: draft` 스켈레톤을, 개발자는 `status: in_progress`를 즉시 기록하고 나서 실제 작업을 시작한다. 선점에 실패하면 다른 대상을 고르거나 `NO_ELIGIBLE_WORK`를 보고한다.
 
 ## 개발 작업
 
@@ -135,7 +139,7 @@ QA 결정은 `decisions/*.md`에 `schema: workflow-labs/qa-decision@1`, `created
 
 `due_at`은 선택 필드이며 `YYYY-MM-DD` 형식의 작업 목표일이다. 캘린더뷰는 이 값을 기준으로 작업을 배치하고, 필드가 없거나 형식이 잘못된 작업은 일정 미지정으로 표시한다.
 
-작업 범위가 겹치면 병렬 작업을 금지한다. 외부 LLM이 작업하는 동안에는 `.workflow/.runtime/leases/*.yml`에 만료 시간이 있는 lease를 두어 앱 마이그레이션을 막는다.
+작업 범위가 겹치면 병렬 작업을 금지한다. lease 파일은 선점한 문서 id를 파일명으로 사용해 `.workflow/.runtime/leases/<문서-id>.yml`에 배타적 생성으로 만든다. 이미 파일이 있고 만료 전이면 그 대상은 다른 세션이 작업 중인 것이다. lease에는 만료 시간이 있으며 활성 lease는 앱 마이그레이션도 막는다.
 
 ## 안전 규칙
 
@@ -144,5 +148,5 @@ QA 결정은 `decisions/*.md`에 `schema: workflow-labs/qa-decision@1`, `created
 - 앱 업데이트와 프로젝트 문서 마이그레이션은 별도 작업이다.
 - 알 수 없는 메타데이터는 보존한다.
 - 사용자 결정과 LLM 원문을 같은 파일에서 동시에 수정하지 않는다.
-- 외부 LLM은 작업 시작 시 `.workflow/rules/workflow.md`를 읽고 만료 시간이 있는 lease를 만든다.
+- 외부 LLM은 작업 시작 시 `.workflow/rules/workflow.md`를 읽고, 실제 작업 전에 대상 문서를 lease로 선점한 뒤 작업 중 상태(`draft`/`in_progress`)부터 기록한다.
 - 기획서 `user_review`는 사용자 선택 대기 상태이며, 외부 LLM이 승인·수정 요청·폐기를 대신 기록하지 않는다.

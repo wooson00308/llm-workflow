@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -782,11 +782,35 @@ fn workflow_items(workflow_root: &Path) -> WorkflowItems {
             spec.status.clone_from(outcome);
         }
     }
+    let adopted = adopted_idea_ids(&workflow_root.join("specs"));
+    let mut ideas = read_markdown_summaries(&workflow_root.join("ideas"), "inbox");
+    for idea in &mut ideas {
+        if adopted.contains(&idea.id) {
+            idea.status = "adopted".to_owned();
+        }
+    }
     WorkflowItems {
-        ideas: read_markdown_summaries(&workflow_root.join("ideas"), "inbox"),
+        ideas,
         specs,
         tasks: read_markdown_summaries(&workflow_root.join("tasks"), "todo"),
     }
+}
+
+fn adopted_idea_ids(specs_root: &Path) -> HashSet<String> {
+    fs::read_dir(specs_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+                return None;
+            }
+            let contents = fs::read_to_string(&path).ok()?;
+            let (metadata, _) = split_frontmatter(&contents.replace("\r\n", "\n"));
+            yaml_text(metadata.as_ref(), "source_idea_id")
+        })
+        .collect()
 }
 
 fn normalize_spec_status(spec: &mut WorkflowItemSummary) {
@@ -1208,6 +1232,32 @@ mod tests {
         let contents = fs::read_to_string(idea_path).expect("idea markdown");
         assert!(contents.contains("schema: workflow-labs/idea@1"));
         assert!(contents.contains("빠르게 생각을 기록한다."));
+    }
+
+    #[test]
+    fn marks_ideas_referenced_by_specs_as_adopted() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        let updated = repository
+            .create_idea(root.path(), &workflow.directory, "채택될 아이디어")
+            .expect("create idea");
+        let idea_id = updated.workflows[0].items.ideas[0].id.clone();
+
+        let workflow_root = root.path().join(".workflow").join(&workflow.directory);
+        fs::write(
+            workflow_root.join("specs").join("SPEC-001.md"),
+            format!(
+                "---\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 채택 기획\nstatus: draft\nsource_idea_id: {idea_id}\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 채택 기획\n"
+            ),
+        )
+        .expect("write spec");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+        assert_eq!(inspected.workflows[0].items.ideas[0].status, "adopted");
     }
 
     #[test]
