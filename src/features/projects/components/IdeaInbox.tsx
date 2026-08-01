@@ -50,12 +50,17 @@ export function IdeaInbox({ busy, disabled, onAdd, workflow }: Props) {
                 key={item.fileName}
                 onClick={() => setSelectedId(item.id)}
               >
-                <span className="idea-list-icon"><Icon name="idea" /></span>
+                <span className={`idea-list-icon ${item.status === "adopted" ? "adopted" : ""}`}>
+                  <Icon name={item.status === "adopted" ? "stamp" : "idea"} />
+                </span>
                 <span>
                   <strong>{item.title}</strong>
                   <small>{item.excerpt || "내용 미리보기가 없습니다."}</small>
                 </span>
-                <time>{formatDate(item.updatedAt)}</time>
+                <span className="idea-list-meta">
+                  <time>{formatDate(item.updatedAt)}</time>
+                  {item.status === "adopted" && <small className="idea-adopted-tag">기획 반영</small>}
+                </span>
               </button>
             ))}
             {workflow.items.ideas.length === 0 && (
@@ -91,7 +96,9 @@ function IdeaPreview({ item }: { item: WorkflowItemSummary | null }) {
           <p className="eyebrow">IDEA NOTE</p>
           <h2>{item.title}</h2>
         </div>
-        <span className="status-pill">수집됨</span>
+        <span className={`status-pill ${item.status === "adopted" ? "status-approved" : ""}`}>
+          {item.status === "adopted" ? "기획서 채택" : "수집됨"}
+        </span>
       </header>
       <div className="idea-preview-body">
         <p>{item.excerpt || "본문 미리보기가 없습니다."}</p>
