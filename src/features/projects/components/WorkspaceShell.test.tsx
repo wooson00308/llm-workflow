@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProjectSummary } from "../domain/types";
+import type { HeartbeatState, ProjectSummary } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { WorkspaceShell } from "./WorkspaceShell";
 
@@ -34,6 +34,8 @@ const updater: AppUpdaterState = {
   restart: vi.fn().mockResolvedValue(undefined),
 };
 
+const heartbeat: HeartbeatState = { integration: null, error: null, writeError: null };
+
 describe("WorkspaceShell", () => {
   it("opens a purpose-built screen for each primary menu", () => {
     render(
@@ -42,9 +44,11 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
+        heartbeat={heartbeat}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
@@ -89,9 +93,11 @@ describe("WorkspaceShell", () => {
         error={null}
         project={completedProject}
         updater={updater}
+        heartbeat={heartbeat}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
@@ -121,9 +127,11 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
+        heartbeat={heartbeat}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
@@ -167,9 +175,11 @@ describe("WorkspaceShell", () => {
         error={null}
         project={searchableProject}
         updater={updater}
+        heartbeat={heartbeat}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
@@ -197,9 +207,11 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
+        heartbeat={heartbeat}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
@@ -224,9 +236,11 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
+        heartbeat={heartbeat}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}

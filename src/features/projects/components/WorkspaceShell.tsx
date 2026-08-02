@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  HeartbeatState,
   ProjectSummary,
+  RoleJobRequest,
   SpecDecisionOutcome,
   TaskQaOutcome,
   TaskDocument,
@@ -24,6 +26,7 @@ interface Props {
   error: string | null;
   project: ProjectSummary;
   updater: AppUpdaterState;
+  heartbeat: HeartbeatState;
   onAddIdea(workflowDirectory: string, content: string): Promise<boolean>;
   onAddWorkflow(name: string): Promise<boolean>;
   onDecideSpec(
@@ -32,6 +35,7 @@ interface Props {
     outcome: SpecDecisionOutcome,
     comment: string,
   ): Promise<boolean>;
+  onInstallHeartbeatJobs(roles: RoleJobRequest[]): Promise<boolean>;
   onMigrate(): Promise<boolean>;
   onReadSpec(
     workflowDirectory: string,
@@ -73,9 +77,11 @@ export function WorkspaceShell({
   error,
   project,
   updater,
+  heartbeat,
   onAddIdea,
   onAddWorkflow,
   onDecideSpec,
+  onInstallHeartbeatJobs,
   onMigrate,
   onReadSpec,
   onReadTask,
@@ -374,7 +380,7 @@ export function WorkspaceShell({
 
           {view === "help" && <HelpView />}
 
-          {view === "settings" && <SettingsView project={project} updater={updater} onSwitchProject={onSwitchProject} />}
+          {view === "settings" && <SettingsView project={project} updater={updater} heartbeat={heartbeat} onInstallHeartbeatJobs={onInstallHeartbeatJobs} onSwitchProject={onSwitchProject} />}
 
           {specLoading && <div className="loading-toast">기획서를 불러오는 중…</div>}
         </div>

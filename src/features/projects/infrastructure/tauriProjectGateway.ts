@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  HeartbeatIntegration,
   ProjectGateway,
   ProjectSummary,
   SpecDocument,
@@ -71,5 +72,16 @@ export const tauriProjectGateway: ProjectGateway = {
 
   migrate(path) {
     return invoke<ProjectSummary>("migrate_project", { path });
+  },
+
+  inspectHeartbeat(path) {
+    return invoke<HeartbeatIntegration>("inspect_heartbeat", { path });
+  },
+
+  installHeartbeatJobs(path, roles) {
+    return invoke<HeartbeatIntegration>("install_heartbeat_jobs", {
+      path,
+      roles,
+    });
   },
 };

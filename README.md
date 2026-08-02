@@ -55,3 +55,5 @@ src-tauri/src/
 자세한 내용은 [릴리스 가이드](docs/releasing.md)와 [제품·기술 기준](docs/planning/product-concept.md)을 참고하세요.
 
 외부 LLM이 작성해야 하는 frontmatter와 사용자 결정 규칙은 [파일 계약](docs/file-contract.md)에 정의되어 있습니다.
+
+역할 세션을 주기적으로 기동하는 잡 구성 방법은 [하트비트 가이드](docs/heartbeat.md)에 정리되어 있습니다.
