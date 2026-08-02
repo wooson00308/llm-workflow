@@ -22,3 +22,4 @@
 - [x] 되돌릴 수 없는 결정에 2단계 확인 적용 — 공용 훅 `useArmedConfirm`으로 QA 두 버튼과 기획서 승인 보호 ([세션 기록](development-logs/2026-07-31.md))
 - [x] `v0.1.4` 도움말·QA UX 업데이트 공개 배포 — 드래프트 분할 이슈 수습 포함 3개 OS 릴리스와 updater 검증 완료 ([세션 기록](development-logs/2026-07-31.md))
 - [x] `v0.1.5` GFM 뷰어·선점 프로토콜·아이디어 채택 표시 공개 배포 — 단일 드래프트 확인, updater 검증 완료 ([세션 기록](development-logs/2026-08-01.md))
+- [x] `v0.1.6` 선택적 연동(claude-heartbeat 1호) 공개 배포 — CI 핫픽스 3건 수습 포함, updater 검증 완료 ([세션 기록](development-logs/2026-08-02.md))
