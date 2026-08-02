@@ -177,7 +177,9 @@ fn write_text_atomically(path: &Path, value: &str) -> Result<(), ConditionScript
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::path::Path;
+    use std::path::PathBuf;
 
     use tempfile::{tempdir, TempDir};
 
