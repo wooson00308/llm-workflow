@@ -142,12 +142,15 @@ fn enabled_role_jobs(roles: &[RoleJobRequest]) -> Result<Vec<RoleJob>, Heartbeat
 }
 
 /// 하트비트가 조건을 프로젝트 cwd에서 실행하므로 잡에 적히는 값도 이 상대 경로다.
+/// `sh`가 실행할 값이라 OS와 무관하게 항상 `/` 구분자로 만든다.
 fn condition_script_relative_path(project_root: &Path) -> String {
     let path = condition_script_path(&project_root.join(CONTROL_DIRECTORY));
     path.strip_prefix(project_root)
         .unwrap_or(&path)
-        .display()
-        .to_string()
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// 관리 블록 안의 역할 잡만 골라 편집 가능한 설정을 읽는다.
