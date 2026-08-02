@@ -235,7 +235,7 @@ mod tests {
     fn an_empty_home_reports_the_slug_and_the_condition_script_path() {
         let home = tempdir().expect("temporary directory");
 
-        let integration = HeartbeatService::default().inspect(Path::new(PROJECT_ROOT), home.path());
+        let integration = HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path());
 
         assert_eq!(integration.slug, SLUG);
         assert_eq!(
@@ -301,7 +301,7 @@ mod install_tests {
         home: &TempDir,
         roles: &[RoleJobRequest],
     ) -> Result<HeartbeatIntegration, HeartbeatInstallError> {
-        HeartbeatService::default().install(project.path(), home.path(), roles)
+        HeartbeatService.install(project.path(), home.path(), roles)
     }
 
     fn heartbeat_file(home: &TempDir) -> PathBuf {

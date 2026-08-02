@@ -16,7 +16,7 @@ pub fn inspect_heartbeat(
     path: String,
 ) -> Result<HeartbeatIntegration, String> {
     let home = heartbeat_home(&app)?;
-    Ok(HeartbeatService::default().inspect(Path::new(&path), &home))
+    Ok(HeartbeatService.inspect(Path::new(&path), &home))
 }
 
 /// 조건 스크립트와 역할 잡을 설치하고 갱신된 연동 상태를 돌려준다.
@@ -30,7 +30,7 @@ pub fn install_heartbeat_jobs(
     roles: Vec<RoleJobRequest>,
 ) -> Result<HeartbeatIntegration, String> {
     let home = heartbeat_home(&app)?;
-    HeartbeatService::default()
+    HeartbeatService
         .install(Path::new(&path), &home, &roles)
         .map_err(|error| error.to_string())
 }
