@@ -47,6 +47,8 @@ describe("useProjectWorkspace", () => {
       decideSpec: vi.fn().mockResolvedValue(project),
       recordTaskQa: vi.fn().mockResolvedValue(project),
       migrate: vi.fn().mockResolvedValue(project),
+      inspectHeartbeat: vi.fn().mockRejectedValue(new Error("heartbeat")),
+      installHeartbeatJobs: vi.fn().mockRejectedValue(new Error("heartbeat")),
     };
     const recentStore: RecentProjectStore = {
       load: vi.fn().mockReturnValue([]),

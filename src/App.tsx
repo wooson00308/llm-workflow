@@ -50,9 +50,11 @@ export default function App() {
       error={workspace.error}
       project={workspace.project}
       updater={updater}
+      heartbeat={workspace.heartbeat}
       onAddIdea={workspace.createIdea}
       onAddWorkflow={workspace.createWorkflow}
       onDecideSpec={workspace.decideSpec}
+      onInstallHeartbeatJobs={workspace.installHeartbeatJobs}
       onMigrate={workspace.migrate}
       onReadSpec={workspace.readSpec}
       onReadTask={workspace.readTask}

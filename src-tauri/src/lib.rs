@@ -19,6 +19,8 @@ pub fn run() {
             commands::projects::record_spec_decision,
             commands::projects::record_task_qa,
             commands::projects::migrate_project,
+            commands::heartbeat::inspect_heartbeat,
+            commands::heartbeat::install_heartbeat_jobs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  HeartbeatState,
   ProjectGateway,
   ProjectSummary,
   RecentProject,
   RecentProjectStore,
+  RoleJobRequest,
   SpecDecisionOutcome,
   TaskQaOutcome,
 } from "../domain/types";
@@ -24,6 +26,11 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [heartbeat, setHeartbeat] = useState<HeartbeatState>({
+    integration: null,
+    error: null,
+    writeError: null,
+  });
 
   const remember = useCallback(
     (next: ProjectSummary) => {
@@ -224,18 +231,67 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     }
   }, [gateway, project]);
 
+  // 조회 실패를 화면 전체 에러로 올리지 않는다. 2.5초마다 실패가 반복되면 앱을 쓸 수 없다.
+  // 쓰기 실패 문구는 조회가 지우지 않는다. 2.5초 뒤에 사라지면 사용자가 읽을 수 없다.
+  const readHeartbeat = useCallback(
+    async (path: string) => {
+      try {
+        const integration = await gateway.inspectHeartbeat(path);
+        setHeartbeat((previous) => ({ ...previous, integration, error: null }));
+      } catch (reason) {
+        setHeartbeat((previous) => ({
+          ...previous,
+          integration: null,
+          error: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  // 전역 파일 `~/.claude/HEARTBEAT.md`를 쓰는 유일한 경로다. 화면이 확인을 받은 뒤에만 부른다.
+  const installHeartbeatJobs = useCallback(
+    async (roles: RoleJobRequest[]) => {
+      if (!project) return false;
+      setBusy(true);
+      try {
+        const integration = await gateway.installHeartbeatJobs(
+          project.rootPath,
+          roles,
+        );
+        setHeartbeat({ integration, error: null, writeError: null });
+        return true;
+      } catch (reason) {
+        setHeartbeat((previous) => ({
+          ...previous,
+          writeError: messageFrom(reason),
+        }));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
   useEffect(() => {
     if (!project?.initialized) return;
     const path = project.rootPath;
-    const timer = window.setInterval(() => void inspect(path, true), 2_500);
+    void readHeartbeat(path);
+    const timer = window.setInterval(() => {
+      void inspect(path, true);
+      void readHeartbeat(path);
+    }, 2_500);
     return () => window.clearInterval(timer);
-  }, [inspect, project?.initialized, project?.rootPath]);
+  }, [inspect, readHeartbeat, project?.initialized, project?.rootPath]);
 
   return {
     project,
     recentProjects,
     busy,
     error,
+    heartbeat,
+    installHeartbeatJobs,
     openFolder,
     openRecent,
     createWorkflow,
@@ -249,6 +305,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     closeProject: () => {
       setProject(null);
       setError(null);
+      setHeartbeat({ integration: null, error: null, writeError: null });
     },
   };
 }
