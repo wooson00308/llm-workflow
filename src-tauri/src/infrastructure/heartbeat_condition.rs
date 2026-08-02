@@ -114,10 +114,7 @@ pub fn install_condition_script(control_root: &Path) -> Result<(), ConditionScri
     let Some(contents) = plan_condition_script(&path)? else {
         return Ok(());
     };
-    fs::create_dir_all(
-        path.parent()
-            .expect("condition script always has a parent"),
-    )?;
+    fs::create_dir_all(path.parent().expect("condition script always has a parent"))?;
     write_text_atomically(&path, &contents)
 }
 
@@ -246,7 +243,8 @@ mod tests {
         let (_root, control) = project();
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
-        let future = "#!/bin/sh\n# managed_by: workflow-labs\n# condition_script_version: 999\nexit 1\n";
+        let future =
+            "#!/bin/sh\n# managed_by: workflow-labs\n# condition_script_version: 999\nexit 1\n";
         fs::write(&path, future).expect("future script");
 
         let error =
