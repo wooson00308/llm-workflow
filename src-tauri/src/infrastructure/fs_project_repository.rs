@@ -983,7 +983,7 @@ fn read_task_events(metadata: Option<&serde_yaml::Value>) -> Vec<TaskEvent> {
             Some((parsed, TaskEvent { kind, at }))
         })
         .collect::<Vec<_>>();
-    events.sort_by(|(left, _), (right, _)| left.cmp(right));
+    events.sort_by_key(|(left, _)| *left);
     events.into_iter().map(|(_, event)| event).collect()
 }
 
