@@ -883,7 +883,9 @@ mod tests {
         assert_eq!(
             snapshot.dream.skill_path,
             home.path()
-                .join("skills/dream/SKILL.md")
+                .join("skills")
+                .join("dream")
+                .join("SKILL.md")
                 .display()
                 .to_string()
         );
