@@ -16,11 +16,13 @@ pub fn run() {
             commands::projects::create_idea,
             commands::projects::read_spec,
             commands::projects::read_task,
+            commands::projects::read_idea,
             commands::projects::record_spec_decision,
             commands::projects::record_task_qa,
             commands::projects::migrate_project,
-            commands::heartbeat::inspect_heartbeat,
+            commands::heartbeat::inspect_integrations,
             commands::heartbeat::install_heartbeat_jobs,
+            commands::heartbeat::install_dream_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

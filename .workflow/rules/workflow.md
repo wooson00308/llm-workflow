@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 3
+rules_version: 4
 ---
 
 # LLM Workflow agent protocol
@@ -82,12 +82,36 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
+### Record every task transition
+
+A session that changes a task's status appends one entry to the task's `history` field in the same edit. Write entries as single-line flow mappings:
+
+```yaml
+history:
+  - { at: 2026-07-30T09:00:00Z, kind: created }
+  - { at: 2026-07-30T10:30:00Z, kind: in_progress }
+  - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }
+```
+
+- `at` is an RFC3339 timestamp. `kind` is one of six values:
+  - `created`: the task document was created
+  - `in_progress`: implementation started
+  - `blocked`: work became blocked
+  - `qa_waiting`: the task entered user QA
+  - `completed`: user QA confirmed the task
+  - `revision_requested`: user QA returned the task to `todo`
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework.
+- Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
+- Do not use `updated_at` as a transition time. It only tells you when the file last changed.
+- Omit the `history` key entirely while a task has no entries.
+
 ## 6. Preserve the file contract
 
 - Keep required frontmatter keys and valid schema identifiers.
 - Preserve unknown frontmatter fields and existing document IDs.
 - Update `updated_at` with an RFC3339 timestamp when changing an agent-owned document.
 - When a task has a target date, store it as optional `due_at: YYYY-MM-DD`.
+- Task transition facts live in the optional `history` field; leave the key out while there are no entries.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.

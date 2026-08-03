@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::application::project_service::ProjectService;
 use crate::domain::project::{
-    ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
+    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
 };
 
 #[tauri::command]
@@ -49,6 +49,17 @@ pub fn read_task(
 ) -> Result<TaskDocument, String> {
     ProjectService::default()
         .read_task(Path::new(&path), &workflow_directory, &file_name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn read_idea(
+    path: String,
+    workflow_directory: String,
+    file_name: String,
+) -> Result<IdeaDocument, String> {
+    ProjectService::default()
+        .read_idea(Path::new(&path), &workflow_directory, &file_name)
         .map_err(|error| error.to_string())
 }
 

@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 2
+rules_version: 3
 ---
 
 # Developer role
@@ -31,5 +31,6 @@ Implement and verify one eligible development task, then hand it to the user for
 ## Completion
 
 - Claim the task with a lease named after the task id, move it to `in_progress` immediately, and only then implement and run relevant verification.
+- Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
 - Record changes, checks, risks, and handoff notes in `reports/`.
 - Move the task to `qa_waiting`, release the lease, and stop.

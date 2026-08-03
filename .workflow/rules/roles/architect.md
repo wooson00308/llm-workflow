@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 2
+rules_version: 3
 ---
 
 # Project architect role
@@ -35,4 +35,5 @@ Turn one app-approved specification into implementation-ready development tasks.
 
 - Split work into reviewable tasks with dependencies, acceptance criteria, and verification steps.
 - Add `source_spec_id` and `source_decision_id` to every derived task.
+- Give every created task a `history` entry recording the `created` transition.
 - Leave every created task in `status: todo`, release the lease, and stop. Never continue into implementation.

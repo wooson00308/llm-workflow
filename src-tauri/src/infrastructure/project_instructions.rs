@@ -16,6 +16,12 @@ const DEVELOPER_RULES_FILE: &str = "developer.md";
 const MANAGED_START: &str = "<!-- workflow-labs:project-instructions:start -->";
 const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
+const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
+/// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
+const WORKFLOW_RULES_VERSION: u32 = 4;
+/// 역할 계약 세 개의 `rules_version` 중 최댓값. 기획자 계약이 뒤처져 있어도
+/// `plan_rules_file`은 파일 버전이 이 값보다 클 때만 거부하므로 문제가 없다.
+const ROLE_RULES_VERSION: u32 = 3;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 ## LLM Workflow
@@ -39,7 +45,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 3
+rules_version: 4
 ---
 
 # LLM Workflow agent protocol
@@ -120,12 +126,36 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
+### Record every task transition
+
+A session that changes a task's status appends one entry to the task's `history` field in the same edit. Write entries as single-line flow mappings:
+
+```yaml
+history:
+  - { at: 2026-07-30T09:00:00Z, kind: created }
+  - { at: 2026-07-30T10:30:00Z, kind: in_progress }
+  - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }
+```
+
+- `at` is an RFC3339 timestamp. `kind` is one of six values:
+  - `created`: the task document was created
+  - `in_progress`: implementation started
+  - `blocked`: work became blocked
+  - `qa_waiting`: the task entered user QA
+  - `completed`: user QA confirmed the task
+  - `revision_requested`: user QA returned the task to `todo`
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework.
+- Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
+- Do not use `updated_at` as a transition time. It only tells you when the file last changed.
+- Omit the `history` key entirely while a task has no entries.
+
 ## 6. Preserve the file contract
 
 - Keep required frontmatter keys and valid schema identifiers.
 - Preserve unknown frontmatter fields and existing document IDs.
 - Update `updated_at` with an RFC3339 timestamp when changing an agent-owned document.
 - When a task has a target date, store it as optional `due_at: YYYY-MM-DD`.
+- Task transition facts live in the optional `history` field; leave the key out while there are no entries.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.
@@ -178,7 +208,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 2
+rules_version: 3
 ---
 
 # Project architect role
@@ -211,6 +241,7 @@ Turn one app-approved specification into implementation-ready development tasks.
 
 - Split work into reviewable tasks with dependencies, acceptance criteria, and verification steps.
 - Add `source_spec_id` and `source_decision_id` to every derived task.
+- Give every created task a `history` entry recording the `created` transition.
 - Leave every created task in `status: todo`, release the lease, and stop. Never continue into implementation.
 "#;
 
@@ -218,7 +249,7 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 2
+rules_version: 3
 ---
 
 # Developer role
@@ -247,6 +278,7 @@ Implement and verify one eligible development task, then hand it to the user for
 ## Completion
 
 - Claim the task with a lease named after the task id, move it to `in_progress` immediately, and only then implement and run relevant verification.
+- Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
 - Record changes, checks, risks, and handoff notes in `reports/`.
 - Move the task to `qa_waiting`, release the lease, and stop.
 "#;
@@ -276,12 +308,17 @@ pub fn install_project_instructions(
     let agents_path = project_root.join(AGENTS_FILE);
     let claude_path = project_root.join(CLAUDE_FILE);
 
-    let rules_update = plan_rules_file(&rules_path, WORKFLOW_RULES, RULES_SCHEMA, 3)?;
+    let rules_update = plan_rules_file(
+        &rules_path,
+        WORKFLOW_RULES,
+        RULES_SCHEMA,
+        WORKFLOW_RULES_VERSION,
+    )?;
     let role_updates = ROLE_RULES
         .iter()
         .map(|(file_name, contents)| {
             let path = roles_root.join(file_name);
-            plan_rules_file(&path, contents, "schema: workflow-labs/agent-role@1", 2)
+            plan_rules_file(&path, contents, ROLE_RULES_SCHEMA, ROLE_RULES_VERSION)
                 .map(|update| (path, update))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -316,7 +353,12 @@ pub fn validate_project_instructions(
     control_root: &Path,
 ) -> Result<(), ProjectInstructionError> {
     let rules_path = control_root.join(RULES_DIRECTORY).join(WORKFLOW_RULES_FILE);
-    plan_rules_file(&rules_path, WORKFLOW_RULES, RULES_SCHEMA, 3)?;
+    plan_rules_file(
+        &rules_path,
+        WORKFLOW_RULES,
+        RULES_SCHEMA,
+        WORKFLOW_RULES_VERSION,
+    )?;
     for (file_name, contents) in ROLE_RULES {
         plan_rules_file(
             &control_root
@@ -324,8 +366,8 @@ pub fn validate_project_instructions(
                 .join(ROLES_DIRECTORY)
                 .join(file_name),
             contents,
-            "schema: workflow-labs/agent-role@1",
-            2,
+            ROLE_RULES_SCHEMA,
+            ROLE_RULES_VERSION,
         )?;
     }
     plan_managed_file(&project_root.join(AGENTS_FILE), AGENTS_BLOCK, false)?;
@@ -469,7 +511,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{install_project_instructions, ProjectInstructionError, MANAGED_START};
+    use super::{
+        install_project_instructions, validate_project_instructions, ProjectInstructionError,
+        MANAGED_START,
+    };
 
     #[test]
     fn installs_rules_and_both_agent_entrypoints() {
@@ -545,11 +590,90 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 3"));
+        assert!(rules.contains("rules_version: 4"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
         assert!(control.join("rules/roles/developer.md").is_file());
+    }
+
+    #[test]
+    fn records_the_transition_history_obligation_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
+        let architect =
+            fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        assert!(rules.contains("rules_version: 4"));
+        assert!(rules.contains("`history`"));
+        for kind in [
+            "created",
+            "in_progress",
+            "blocked",
+            "qa_waiting",
+            "completed",
+            "revision_requested",
+        ] {
+            assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
+        }
+        assert!(rules.contains("append-only"));
+        assert!(architect.contains("rules_version: 3"));
+        assert!(architect.contains("`history`"));
+        assert!(developer.contains("rules_version: 3"));
+        assert!(developer.contains("`history`"));
+        assert!(planner.contains("rules_version: 2"));
+        assert!(!planner.contains("`history`"));
+    }
+
+    #[test]
+    fn upgrades_rules_installed_before_the_transition_history_contract() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir_all(control.join("rules/roles")).expect("rules root");
+        fs::write(
+            control.join("rules/workflow.md"),
+            "---\nschema: workflow-labs/agent-rules@1\nmanaged_by: workflow-labs\nrules_version: 3\n---\n\n# Rules without history\n",
+        )
+        .expect("old managed rules");
+        for role in ["planner", "architect", "developer"] {
+            fs::write(
+                control.join(format!("rules/roles/{role}.md")),
+                format!("---\nschema: workflow-labs/agent-role@1\nrole: {role}\nmanaged_by: workflow-labs\nrules_version: 2\n---\n\n# Old {role}\n"),
+            )
+            .expect("old role contract");
+        }
+
+        install_project_instructions(root.path(), &control).expect("upgrade instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let architect =
+            fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+        assert!(rules.contains("rules_version: 4"));
+        assert!(rules.contains("`history`"));
+        assert!(architect.contains("rules_version: 3"));
+        assert!(developer.contains("rules_version: 3"));
+    }
+
+    #[test]
+    fn validates_the_instructions_it_just_installed() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        validate_project_instructions(root.path(), &control)
+            .expect("freshly installed instructions must validate");
     }
 
     #[test]

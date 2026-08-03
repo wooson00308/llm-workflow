@@ -1,5 +1,8 @@
 //! 하트비트 설정 파일을 읽고 앱 관리 마커 블록만 안전하게 다루는 모듈.
 //!
+//! 이 모듈은 어떤 연동의 잡인지 모른다. 렌더에 필요한 값이 모두 정해진 `ManagedJob` 목록을 받아
+//! 블록 하나를 소유하는 규칙만 지킨다. 잡을 만드는 일은 연동별 모듈이 한다.
+//!
 //! 공개 함수는 대상 파일 경로를 인자로 받는다. 홈 디렉터리 해석은 커맨드 계층이 한다.
 // 커맨드 계층(TASK-006·TASK-007)이 이 모듈을 호출하기 전까지는 전부 미사용이다. 연결이 끝나면 이 줄을 지운다.
 #![allow(dead_code)]
@@ -14,18 +17,11 @@ use thiserror::Error;
 pub const MANAGED_START: &str = "<!-- workflow-labs:heartbeat-jobs:start -->";
 pub const MANAGED_END: &str = "<!-- workflow-labs:heartbeat-jobs:end -->";
 
-const CONDITION_SCRIPT: &str = ".workflow/rules/wf-eligible.sh";
-const NOTIFY: &str = "all";
-
-const PLANNER_PROMPT: &str = "기획자 역할로 진행해줘. .workflow의 공통 규칙과 planner 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.";
-const ARCHITECT_PROMPT: &str = "프로젝트 아키텍트 역할로 진행해줘. .workflow의 공통 규칙과 architect 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.";
-const DEVELOPER_PROMPT: &str = "개발자 역할로 진행해줘. .workflow의 공통 규칙과 developer 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.";
-
 #[derive(Debug, Error)]
 pub enum HeartbeatJobsError {
     #[error("하트비트 설정 파일을 읽거나 쓰지 못했습니다: {0}")]
     Io(#[from] std::io::Error),
-    #[error("{0} 경로가 일반 파일이 아니어서 역할 잡을 설치할 수 없습니다.")]
+    #[error("{0} 경로가 일반 파일이 아니어서 잡을 설치할 수 없습니다.")]
     NotRegularFile(String),
     #[error("{path}의 앱 관리 블록 마커가 손상되어 파일을 쓰지 않았습니다. 시작 마커 {start}개, 종료 마커 {end}개가 있습니다. 마커를 한 쌍만 남기고 다시 시도하세요.")]
     Markers {
@@ -75,68 +71,20 @@ pub struct HeartbeatDocument {
     pub jobs: Vec<HeartbeatJob>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeartbeatRole {
-    Planner,
-    Architect,
-    Developer,
-}
-
-impl HeartbeatRole {
-    pub const ALL: [HeartbeatRole; 3] = [Self::Planner, Self::Architect, Self::Developer];
-
-    pub fn as_argument(self) -> &'static str {
-        match self {
-            Self::Planner => "planner",
-            Self::Architect => "architect",
-            Self::Developer => "developer",
-        }
-    }
-
-    pub fn prompt(self) -> &'static str {
-        match self {
-            Self::Planner => PLANNER_PROMPT,
-            Self::Architect => ARCHITECT_PROMPT,
-            Self::Developer => DEVELOPER_PROMPT,
-        }
-    }
-
-    pub fn default_settings(self) -> RoleJobSettings {
-        match self {
-            Self::Developer => RoleJobSettings {
-                model: "opus".to_owned(),
-                interval: "20m".to_owned(),
-                max_per: "6/24h".to_owned(),
-            },
-            _ => RoleJobSettings {
-                model: "opus".to_owned(),
-                interval: "30m".to_owned(),
-                max_per: "4/24h".to_owned(),
-            },
-        }
-    }
-
-    /// 앱이 소유하는 값이라 사용자 편집 대상이 아니다.
-    fn timeout(self) -> &'static str {
-        match self {
-            Self::Developer => "30m",
-            _ => "20m",
-        }
-    }
-}
-
-/// 사용자가 편집할 수 있는 역할 잡 설정.
+/// 관리 블록에 그대로 기록될 잡 하나. 필드 순서가 렌더 순서다.
+///
+/// 값은 모두 결정된 상태로 들어온다. 이 모듈은 어떤 연동이 만든 값인지 묻지 않는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoleJobSettings {
+pub struct ManagedJob {
+    pub name: String,
+    pub slug: String,
     pub model: String,
+    pub prompt: String,
     pub interval: String,
+    pub timeout: String,
+    pub condition: String,
+    pub notify: String,
     pub max_per: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoleJob {
-    pub role: HeartbeatRole,
-    pub settings: RoleJobSettings,
 }
 
 /// 하트비트 파서와 같은 규칙으로 읽는다. 값은 원문 문자열 그대로 보존하고 초 단위로 바꾸지 않는다.
@@ -178,21 +126,14 @@ pub fn project_slug(project_root: &Path) -> String {
     }
 }
 
-/// slug가 `-`로 시작하므로 결과는 `wf-planner-Users-...` 형태가 된다.
-pub fn job_name(role: HeartbeatRole, slug: &str) -> String {
-    format!("wf-{}{}", role.as_argument(), slug)
-}
-
-/// 활성 역할 잡을 대상 파일의 관리 블록에 기록한다. `jobs`가 비면 블록 전체를 제거한다.
+/// 활성 잡을 대상 파일의 관리 블록에 기록한다. `jobs`가 비면 블록 전체를 제거한다.
 /// 반환값은 파일을 실제로 썼는지 여부다. 내용이 이미 같으면 쓰지 않는다.
-pub fn install_role_jobs(
-    path: &Path,
-    project_root: &Path,
-    jobs: &[RoleJob],
-) -> Result<bool, HeartbeatJobsError> {
-    validate_role_jobs(jobs)?;
+///
+/// 목록은 블록에 남길 잡 전체다. 이 함수는 기존 블록에 잡을 덧붙이지 않고 블록을 통째로 다시 쓴다.
+pub fn install_managed_jobs(path: &Path, jobs: &[ManagedJob]) -> Result<bool, HeartbeatJobsError> {
+    validate_managed_jobs(jobs)?;
 
-    let block = render_block(jobs, &project_slug(project_root));
+    let block = render_block(jobs);
     let updated = if path.exists() {
         ensure_regular_file(path)?;
         plan_block(path, &fs::read_to_string(path)?, &block)?
@@ -212,12 +153,11 @@ pub fn install_role_jobs(
 }
 
 /// 설치와 같은 검증만 하고 파일은 쓰지 않는다. 다른 파일을 쓰기 전에 입력값을 거를 때 쓴다.
-pub fn validate_role_jobs(jobs: &[RoleJob]) -> Result<(), HeartbeatJobsError> {
-    jobs.iter()
-        .try_for_each(|job| validate_settings(&job.settings))
+pub fn validate_managed_jobs(jobs: &[ManagedJob]) -> Result<(), HeartbeatJobsError> {
+    jobs.iter().try_for_each(validate_job)
 }
 
-fn render_block(jobs: &[RoleJob], slug: &str) -> String {
+fn render_block(jobs: &[ManagedJob]) -> String {
     if jobs.is_empty() {
         return String::new();
     }
@@ -227,18 +167,15 @@ fn render_block(jobs: &[RoleJob], slug: &str) -> String {
         if index > 0 {
             lines.push(String::new());
         }
-        lines.push(format!("## {}", job_name(job.role, slug)));
-        lines.push(format!("- slug: {slug}"));
-        lines.push(format!("- model: {}", job.settings.model));
-        lines.push(format!("- prompt: {}", job.role.prompt()));
-        lines.push(format!("- interval: {}", job.settings.interval));
-        lines.push(format!("- timeout: {}", job.role.timeout()));
-        lines.push(format!(
-            "- condition: sh {CONDITION_SCRIPT} {}",
-            job.role.as_argument()
-        ));
-        lines.push(format!("- notify: {NOTIFY}"));
-        lines.push(format!("- max_per: {}", job.settings.max_per));
+        lines.push(format!("## {}", job.name));
+        lines.push(format!("- slug: {}", job.slug));
+        lines.push(format!("- model: {}", job.model));
+        lines.push(format!("- prompt: {}", job.prompt));
+        lines.push(format!("- interval: {}", job.interval));
+        lines.push(format!("- timeout: {}", job.timeout));
+        lines.push(format!("- condition: {}", job.condition));
+        lines.push(format!("- notify: {}", job.notify));
+        lines.push(format!("- max_per: {}", job.max_per));
     }
     lines.push(MANAGED_END.to_owned());
     lines.join("\n")
@@ -340,25 +277,25 @@ fn remove_block(contents: &str, start: usize, end: usize, newline: &str) -> Stri
     format!("{head}{tail}")
 }
 
-fn validate_settings(settings: &RoleJobSettings) -> Result<(), HeartbeatJobsError> {
-    if !is_duration(&settings.interval) {
+fn validate_job(job: &ManagedJob) -> Result<(), HeartbeatJobsError> {
+    if !is_duration(&job.interval) {
         return Err(HeartbeatJobsError::InvalidValue {
             field: "interval",
-            value: settings.interval.clone(),
+            value: job.interval.clone(),
             expected: "숫자 뒤에 s, m, h, d 중 하나를 붙여 주세요. 예: 30m",
         });
     }
-    if !is_quota(&settings.max_per) {
+    if !is_quota(&job.max_per) {
         return Err(HeartbeatJobsError::InvalidValue {
             field: "max_per",
-            value: settings.max_per.clone(),
+            value: job.max_per.clone(),
             expected: "<횟수>/<기간> 형태로 적어 주세요. 예: 4/24h",
         });
     }
-    if !is_model(&settings.model) {
+    if !is_model(&job.model) {
         return Err(HeartbeatJobsError::InvalidValue {
             field: "model",
-            value: settings.model.clone(),
+            value: job.model.clone(),
             expected: "공백 없는 한 줄 값이어야 합니다. 예: opus",
         });
     }
@@ -420,40 +357,30 @@ fn write_text_atomically(path: &Path, value: &str) -> Result<(), HeartbeatJobsEr
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use tempfile::{tempdir, TempDir};
 
-    use super::{
-        install_role_jobs, job_name, parse_heartbeat, project_slug, HeartbeatJobsError,
-        HeartbeatRole, RoleJob, RoleJobSettings, MANAGED_END, MANAGED_START,
-    };
+    use super::{install_managed_jobs, parse_heartbeat, ManagedJob, MANAGED_END, MANAGED_START};
 
-    const PROJECT_ROOT: &str = "/Users/catze/project/workflow-labs";
+    const SLUG: &str = "-tmp-demo";
 
-    fn default_jobs() -> Vec<RoleJob> {
-        HeartbeatRole::ALL
-            .iter()
-            .map(|role| RoleJob {
-                role: *role,
-                settings: role.default_settings(),
-            })
-            .collect()
+    fn job(name: &str) -> ManagedJob {
+        ManagedJob {
+            name: name.to_owned(),
+            slug: SLUG.to_owned(),
+            model: "opus".to_owned(),
+            prompt: "한 줄 프롬프트".to_owned(),
+            interval: "30m".to_owned(),
+            timeout: "20m".to_owned(),
+            condition: "sh check.sh".to_owned(),
+            notify: "all".to_owned(),
+            max_per: "4/24h".to_owned(),
+        }
     }
 
-    fn jobs_without(excluded: HeartbeatRole) -> Vec<RoleJob> {
-        default_jobs()
-            .into_iter()
-            .filter(|job| job.role != excluded)
-            .collect()
-    }
-
-    fn target(directory: &TempDir) -> PathBuf {
+    fn target(directory: &TempDir) -> std::path::PathBuf {
         directory.path().join("HEARTBEAT.md")
-    }
-
-    fn install(path: &Path, jobs: &[RoleJob]) -> Result<bool, HeartbeatJobsError> {
-        install_role_jobs(path, Path::new(PROJECT_ROOT), jobs)
     }
 
     fn read(path: &Path) -> String {
@@ -461,243 +388,46 @@ mod tests {
     }
 
     #[test]
-    fn creates_file_with_three_role_jobs_at_defaults() {
+    fn renders_jobs_in_the_given_order_with_a_fixed_field_layout() {
         let directory = tempdir().expect("temporary directory");
         let path = target(&directory);
 
-        assert!(install(&path, &default_jobs()).expect("install"));
+        assert!(install_managed_jobs(&path, &[job("first"), job("second")]).expect("install"));
 
-        let contents = read(&path);
-        assert_eq!(contents.matches(MANAGED_START).count(), 1);
-        assert_eq!(contents.matches(MANAGED_END).count(), 1);
+        assert_eq!(
+            read(&path),
+            format!(
+                "{MANAGED_START}\n\
+                 ## first\n\
+                 - slug: -tmp-demo\n\
+                 - model: opus\n\
+                 - prompt: 한 줄 프롬프트\n\
+                 - interval: 30m\n\
+                 - timeout: 20m\n\
+                 - condition: sh check.sh\n\
+                 - notify: all\n\
+                 - max_per: 4/24h\n\
+                 \n\
+                 ## second\n\
+                 - slug: -tmp-demo\n\
+                 - model: opus\n\
+                 - prompt: 한 줄 프롬프트\n\
+                 - interval: 30m\n\
+                 - timeout: 20m\n\
+                 - condition: sh check.sh\n\
+                 - notify: all\n\
+                 - max_per: 4/24h\n\
+                 {MANAGED_END}\n"
+            )
+        );
 
-        let document = parse_heartbeat(&contents);
+        let document = parse_heartbeat(&read(&path));
         let names = document
             .jobs
             .iter()
             .map(|job| job.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "wf-planner-Users-catze-project-workflow-labs",
-                "wf-architect-Users-catze-project-workflow-labs",
-                "wf-developer-Users-catze-project-workflow-labs",
-            ]
-        );
-
-        let developer = document
-            .jobs
-            .iter()
-            .find(|job| job.name.contains("developer"))
-            .expect("developer job");
-        assert_eq!(
-            developer.field("slug"),
-            Some("-Users-catze-project-workflow-labs")
-        );
-        assert_eq!(developer.field("model"), Some("opus"));
-        assert_eq!(developer.field("interval"), Some("20m"));
-        assert_eq!(developer.field("timeout"), Some("30m"));
-        assert_eq!(developer.field("max_per"), Some("6/24h"));
-        assert_eq!(developer.field("notify"), Some("all"));
-        assert_eq!(
-            developer.field("condition"),
-            Some("sh .workflow/rules/wf-eligible.sh developer")
-        );
-        assert_eq!(
-            developer.field("prompt"),
-            Some(HeartbeatRole::Developer.prompt())
-        );
-
-        let planner = &document.jobs[0];
-        assert_eq!(planner.field("interval"), Some("30m"));
-        assert_eq!(planner.field("timeout"), Some("20m"));
-        assert_eq!(planner.field("max_per"), Some("4/24h"));
-    }
-
-    #[test]
-    fn appends_block_after_user_jobs_and_preserves_them() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        let original = "# HEARTBEAT\n- tick: 5m\n\n## my-job\n- slug: -tmp-demo\n- prompt: 안녕\n";
-        fs::write(&path, original).expect("seed file");
-
-        assert!(install(&path, &default_jobs()).expect("install"));
-
-        let contents = read(&path);
-        let start = contents.find(MANAGED_START).expect("start marker");
-        assert_eq!(
-            &contents[..start],
-            "# HEARTBEAT\n- tick: 5m\n\n## my-job\n- slug: -tmp-demo\n- prompt: 안녕\n\n"
-        );
-        assert!(contents.trim_end().ends_with(MANAGED_END));
-
-        let document = parse_heartbeat(&contents);
-        assert_eq!(document.globals, vec![("tick".to_owned(), "5m".to_owned())]);
-        assert_eq!(document.jobs.len(), 4);
-        assert_eq!(document.jobs[0].name, "my-job");
-    }
-
-    #[test]
-    fn second_install_with_same_input_does_not_write() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        fs::write(
-            &path,
-            "- tick: 5m\n\n## my-job\n- slug: -tmp-demo\n- prompt: 안녕\n",
-        )
-        .expect("seed file");
-
-        assert!(install(&path, &default_jobs()).expect("first install"));
-        let first = read(&path);
-        assert!(!install(&path, &default_jobs()).expect("second install"));
-        assert_eq!(read(&path), first);
-    }
-
-    #[test]
-    fn toggling_one_role_off_and_on_restores_the_first_install() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        fs::write(&path, "## my-job\n- slug: -tmp-demo\n- prompt: 안녕\n").expect("seed file");
-
-        assert!(install(&path, &default_jobs()).expect("install"));
-        let first = read(&path);
-
-        assert!(install(&path, &jobs_without(HeartbeatRole::Architect)).expect("disable"));
-        let disabled = read(&path);
-        let slug = project_slug(Path::new(PROJECT_ROOT));
-        assert!(!disabled.contains(&job_name(HeartbeatRole::Architect, &slug)));
-        assert!(disabled.contains(&job_name(HeartbeatRole::Planner, &slug)));
-        assert!(disabled.contains(&job_name(HeartbeatRole::Developer, &slug)));
-        assert!(disabled.contains("## my-job"));
-
-        assert!(install(&path, &default_jobs()).expect("enable"));
-        assert_eq!(read(&path), first);
-    }
-
-    #[test]
-    fn disabling_every_role_removes_the_whole_block() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        let original = "## my-job\n- slug: -tmp-demo\n- prompt: 안녕\n";
-        fs::write(&path, original).expect("seed file");
-
-        assert!(install(&path, &default_jobs()).expect("install"));
-        assert!(install(&path, &[]).expect("disable all"));
-
-        let contents = read(&path);
-        assert!(!contents.contains(MANAGED_START));
-        assert!(!contents.contains(MANAGED_END));
-        assert_eq!(contents, original);
-        assert!(!install(&path, &[]).expect("disable all again"));
-    }
-
-    #[test]
-    fn rejects_a_file_with_only_one_marker() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        let original = format!("## my-job\n- slug: -tmp-demo\n\n{MANAGED_START}\n");
-        fs::write(&path, &original).expect("seed file");
-
-        let error = install(&path, &default_jobs()).expect_err("must fail");
-        assert!(matches!(error, HeartbeatJobsError::Markers { .. }));
-        assert_eq!(read(&path), original);
-    }
-
-    #[test]
-    fn rejects_reversed_markers() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        let original = format!("{MANAGED_END}\n## my-job\n- slug: -tmp-demo\n{MANAGED_START}\n");
-        fs::write(&path, &original).expect("seed file");
-
-        let error = install(&path, &default_jobs()).expect_err("must fail");
-        assert!(matches!(error, HeartbeatJobsError::MarkerOrder(_)));
-        assert_eq!(read(&path), original);
-    }
-
-    #[test]
-    fn rejects_a_field_line_after_the_end_marker() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        fs::write(&path, "## my-job\n- slug: -tmp-demo\n- prompt: 안녕\n").expect("seed file");
-        assert!(install(&path, &default_jobs()).expect("install"));
-
-        let damaged = format!("{}\n- tick: 5m\n", read(&path).trim_end());
-        fs::write(&path, &damaged).expect("damage file");
-
-        let error = install(&path, &default_jobs()).expect_err("must fail");
-        match error {
-            HeartbeatJobsError::AbsorbedLine { line, .. } => assert_eq!(line, "- tick: 5m"),
-            other => panic!("unexpected error: {other}"),
-        }
-        assert_eq!(read(&path), damaged);
-    }
-
-    #[test]
-    fn rejects_invalid_settings_without_touching_the_file() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        let original = "## my-job\n- slug: -tmp-demo\n";
-        fs::write(&path, original).expect("seed file");
-
-        for (field, settings) in [
-            (
-                "interval",
-                RoleJobSettings {
-                    model: "opus".to_owned(),
-                    interval: "30분".to_owned(),
-                    max_per: "4/24h".to_owned(),
-                },
-            ),
-            (
-                "max_per",
-                RoleJobSettings {
-                    model: "opus".to_owned(),
-                    interval: "30m".to_owned(),
-                    max_per: "4번".to_owned(),
-                },
-            ),
-            (
-                "model",
-                RoleJobSettings {
-                    model: "claude opus".to_owned(),
-                    interval: "30m".to_owned(),
-                    max_per: "4/24h".to_owned(),
-                },
-            ),
-        ] {
-            let jobs = vec![RoleJob {
-                role: HeartbeatRole::Planner,
-                settings,
-            }];
-            let error = install(&path, &jobs).expect_err("must fail");
-            match error {
-                HeartbeatJobsError::InvalidValue { field: actual, .. } => {
-                    assert_eq!(actual, field)
-                }
-                other => panic!("unexpected error: {other}"),
-            }
-            assert_eq!(read(&path), original);
-        }
-    }
-
-    #[test]
-    fn keeps_carriage_returns_of_the_original_file() {
-        let directory = tempdir().expect("temporary directory");
-        let path = target(&directory);
-        fs::write(
-            &path,
-            "- tick: 5m\r\n\r\n## my-job\r\n- slug: -tmp-demo\r\n",
-        )
-        .expect("seed file");
-
-        assert!(install(&path, &default_jobs()).expect("install"));
-
-        let contents = read(&path);
-        assert!(contents.contains("\r\n"));
-        assert!(!contents.replace("\r\n", "").contains('\n'));
-        assert!(!install(&path, &default_jobs()).expect("second install"));
+        assert_eq!(names, vec!["first", "second"]);
     }
 
     #[test]

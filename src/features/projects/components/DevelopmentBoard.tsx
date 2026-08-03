@@ -23,7 +23,16 @@ const statusLabels: Record<string, string> = {
 const viewModes = [
   { value: "board", label: "보드" },
   { value: "list", label: "리스트" },
-  { value: "calendar", label: "캘린더" },
+  { value: "calendar", label: "타임라인" },
+] as const;
+
+const eventKinds = [
+  { kind: "created", label: "생성" },
+  { kind: "in_progress", label: "시작" },
+  { kind: "blocked", label: "막힘" },
+  { kind: "qa_waiting", label: "QA 대기" },
+  { kind: "completed", label: "완료" },
+  { kind: "revision_requested", label: "반려" },
 ] as const;
 
 type ViewMode = (typeof viewModes)[number]["value"];
@@ -50,6 +59,10 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
   const filteredTasks = useMemo(
     () => scopedTasks.filter((item) => matchesFilters(item, query, statusFilter)),
     [query, scopedTasks, statusFilter],
+  );
+  const timelineTasks = useMemo(
+    () => workflow.items.tasks.filter((item) => matchesFilters(item, query, statusFilter)),
+    [query, statusFilter, workflow.items.tasks],
   );
   const hasFilters = Boolean(query.trim()) || statusFilter !== "all";
 
@@ -78,7 +91,7 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
   return (
     <section className="development-view">
       <div className="view-heading development-heading">
-        <div><p className="eyebrow">DEVELOPMENT</p><h1>개발 작업</h1><p>작업 흐름을 보드·리스트·일정으로 바꿔 보세요.</p></div>
+        <div><p className="eyebrow">DEVELOPMENT</p><h1>개발 작업</h1><p>작업 흐름을 보드·리스트·타임라인으로 바꿔 보세요.</p></div>
         <span><strong>{count(workflow.items.tasks, "in_progress")}</strong><small>진행 중</small></span>
       </div>
 
@@ -125,7 +138,11 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
         <span><i className="summary-dot active" />진행 중 {count(workflow.items.tasks, "in_progress")}</span>
         <span><i className="summary-dot danger" />막힘 {count(workflow.items.tasks, "blocked")}</span>
         <span><i className="summary-dot review" />QA 대기 {count(workflow.items.tasks, "qa_waiting")}</span>
-        <span className="result-count">{filteredTasks.length}개 표시 · 완료는 최근 3개만 표시</span>
+        <span className="result-count">
+          {viewMode === "calendar"
+            ? `${timelineTasks.length}개 표시 · 완료 작업까지 전부 표시`
+            : `${filteredTasks.length}개 표시 · 완료는 최근 3개만 표시`}
+        </span>
       </div>
 
       {taskLoading && <div className="loading-toast">개발 작업을 불러오는 중…</div>}
@@ -137,7 +154,8 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
       {viewMode === "calendar" && (
         <CalendarView
           cursor={calendarCursor}
-          items={filteredTasks}
+          hasFilters={hasFilters}
+          items={timelineTasks}
           onCursorChange={setCalendarCursor}
           onOpen={(item) => void openTask(item)}
         />
@@ -372,31 +390,38 @@ function ListView({ items, onOpen }: { items: WorkflowItemSummary[]; onOpen(item
 
 function CalendarView({
   cursor,
+  hasFilters,
   items,
   onCursorChange,
   onOpen,
 }: {
   cursor: Date;
+  hasFilters: boolean;
   items: WorkflowItemSummary[];
   onCursorChange(value: Date): void;
   onOpen(item: WorkflowItemSummary): void;
 }) {
-  const days = calendarDays(cursor);
-  const today = localDateKey(new Date());
-  const scheduled = new Map<string, WorkflowItemSummary[]>();
-  const unscheduled: WorkflowItemSummary[] = [];
-
-  for (const item of items) {
-    const key = calendarDateKey(item.dueAt);
-    if (!key) {
-      unscheduled.push(item);
-      continue;
-    }
-    scheduled.set(key, [...(scheduled.get(key) ?? []), item]);
+  const monthKey = `${cursor.getFullYear()}-${cursor.getMonth()}`;
+  const [selectedMonth, setSelectedMonth] = useState(monthKey);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  if (selectedMonth !== monthKey) {
+    setSelectedMonth(monthKey);
+    setSelectedDate(null);
   }
 
+  const days = calendarDays(cursor);
+  const today = localDateKey(new Date());
+  const eventsByDate = groupEventsByDate(items);
+  const monthEventCount = days
+    .filter((day) => day.getMonth() === cursor.getMonth())
+    .reduce((total, day) => total + (eventsByDate.get(localDateKey(day))?.length ?? 0), 0);
+  const unrecorded = items.filter((item) => timelineEvents(item).length === 0).length;
+  const selectedEvents = selectedDate
+    ? [...(eventsByDate.get(selectedDate) ?? [])].sort((left, right) => timestamp(left.at) - timestamp(right.at))
+    : [];
+
   return (
-    <section className="task-calendar" aria-label="개발 작업 캘린더">
+    <section className="task-calendar" aria-label="개발 작업 타임라인">
       <header>
         <div>
           <button aria-label="이전 달" onClick={() => onCursorChange(addMonths(cursor, -1))}>‹</button>
@@ -404,7 +429,7 @@ function CalendarView({
           <button aria-label="다음 달" onClick={() => onCursorChange(addMonths(cursor, 1))}>›</button>
         </div>
         <h2>{new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(cursor)}</h2>
-        <small><code>due_at</code> 기준</small>
+        <small>상태 전이 기록 기준</small>
       </header>
       <div className="calendar-weekdays" aria-hidden="true">
         {["일", "월", "화", "수", "목", "금", "토"].map((day) => <span key={day}>{day}</span>)}
@@ -412,29 +437,67 @@ function CalendarView({
       <div className="calendar-grid">
         {days.map((day) => {
           const key = localDateKey(day);
-          return (
-            <div
-              className={`${day.getMonth() === cursor.getMonth() ? "" : "outside"} ${key === today ? "today" : ""}`.trim()}
-              key={key}
-            >
+          const events = eventsByDate.get(key) ?? [];
+          const className = `${day.getMonth() === cursor.getMonth() ? "" : "outside"} ${key === today ? "today" : ""}`.trim();
+          const content = (
+            <>
               <time dateTime={key}>{day.getDate()}</time>
               <div>
-                {(scheduled.get(key) ?? []).map((item) => (
-                  <button className={`calendar-task status-border-${item.status}`} key={item.fileName} onClick={() => onOpen(item)} title={`${item.title} 상세 보기`}>
-                    <span>{item.title}</span><small>{item.id}</small>
-                  </button>
+                {countEventKinds(events).map((entry) => (
+                  <span className={`calendar-count event-${entry.kind}`} key={entry.kind}>
+                    <span>{entry.label}</span><b>{entry.count}</b>
+                  </span>
                 ))}
               </div>
-            </div>
+            </>
+          );
+          if (events.length === 0) return <div className={className} key={key}>{content}</div>;
+          return (
+            <button
+              aria-label={`${formatDayLabel(day)}, 이벤트 ${events.length}건`}
+              aria-pressed={selectedDate === key}
+              className={className}
+              key={key}
+              onClick={() => setSelectedDate(selectedDate === key ? null : key)}
+            >
+              {content}
+            </button>
           );
         })}
       </div>
-      <section className="unscheduled-tasks">
-        <div><strong>일정 미지정</strong><span>{unscheduled.length}</span><small><code>due_at</code>을 추가하면 캘린더에 배치됩니다.</small></div>
-        {unscheduled.length > 0 ? (
-          <div>{unscheduled.map((item) => <button key={item.fileName} onClick={() => onOpen(item)}><b>{item.title}</b><small>{item.id}</small></button>)}</div>
-        ) : <p>모든 작업에 목표일이 있습니다.</p>}
-      </section>
+      {monthEventCount === 0 && (
+        <p className="calendar-notice">
+          {hasFilters ? "필터 조건에 맞는 기록이 이 달에 없습니다." : "이 달에 기록된 전이가 없습니다."}
+        </p>
+      )}
+      {selectedDate && (
+        <div className="calendar-day-panel">
+          <header>
+            <strong>{formatDayLabel(dateFromKey(selectedDate))}</strong>
+            <span>이벤트 {selectedEvents.length}건</span>
+            <button className="text-button" onClick={() => setSelectedDate(null)}>닫기</button>
+          </header>
+          {selectedEvents.length === 0 ? (
+            <p className="calendar-notice">이 날짜에 표시할 이벤트가 없습니다.</p>
+          ) : (
+            <ul>
+              {selectedEvents.map((event, index) => (
+                <li key={`${event.item.fileName}:${event.kind}:${event.at}:${index}`}>
+                  <button onClick={() => onOpen(event.item)}>
+                    <time dateTime={event.at}>{formatEventTime(event.at)}</time>
+                    <span className={`calendar-count event-${event.kind}`}><span>{eventKindLabels.get(event.kind)}</span></span>
+                    <small>{event.item.id}</small>
+                    <strong>{event.item.title}</strong>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {unrecorded > 0 && (
+        <p className="calendar-notice">기록이 없어 타임라인에 표시되지 않는 작업 {unrecorded}건</p>
+      )}
     </section>
   );
 }
@@ -543,6 +606,61 @@ function calendarDays(cursor: Date) {
   return Array.from({ length: 42 }, (_, index) => (
     new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index)
   ));
+}
+
+interface TimelineEvent {
+  at: string;
+  dateKey: string;
+  kind: string;
+  item: WorkflowItemSummary;
+}
+
+const eventKindLabels = new Map<string, string>(eventKinds.map((entry) => [entry.kind, entry.label]));
+
+/** 타임라인이 사실로 다루는 이벤트만 남긴다. 시각을 읽을 수 없거나 모르는 종류는 집계·건수·상세에서 모두 빠진다. */
+function timelineEvents(item: WorkflowItemSummary): TimelineEvent[] {
+  const events: TimelineEvent[] = [];
+  for (const event of item.events ?? []) {
+    if (!eventKindLabels.has(event.kind)) continue;
+    const dateKey = eventDateKey(event.at);
+    if (!dateKey) continue;
+    events.push({ at: event.at, dateKey, kind: event.kind, item });
+  }
+  return events;
+}
+
+function groupEventsByDate(items: WorkflowItemSummary[]) {
+  const grouped = new Map<string, TimelineEvent[]>();
+  for (const item of items) {
+    for (const event of timelineEvents(item)) {
+      grouped.set(event.dateKey, [...(grouped.get(event.dateKey) ?? []), event]);
+    }
+  }
+  return grouped;
+}
+
+function countEventKinds(events: TimelineEvent[]) {
+  return eventKinds
+    .map((entry) => ({ ...entry, count: events.filter((event) => event.kind === entry.kind).length }))
+    .filter((entry) => entry.count > 0);
+}
+
+function formatDayLabel(value: Date) {
+  return new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(value);
+}
+
+function formatEventTime(value: string) {
+  return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function dateFromKey(key: string) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function eventDateKey(value: string) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : localDateKey(parsed);
 }
 
 function localDateKey(value: Date) {

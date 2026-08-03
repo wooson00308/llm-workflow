@@ -9,9 +9,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::project::{
-    AgentLease, AgentLeaseSummary, ProjectManifest, ProjectSummary, SchemaCompatibility,
-    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome, WorkflowCounts, WorkflowEntry,
-    WorkflowItemSummary, WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    AgentLease, AgentLeaseSummary, IdeaDocument, ProjectManifest, ProjectSummary,
+    SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskEvent, TaskQaOutcome,
+    WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
+    WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 use crate::infrastructure::project_instructions::{
     install_project_instructions, validate_project_instructions, ProjectInstructionError,
@@ -23,6 +24,15 @@ const WORKFLOW_MANIFEST: &str = "workflow.yml";
 const RUNTIME_DIRECTORY: &str = ".runtime";
 const WORKFLOW_DIRECTORIES: [&str; 6] =
     ["ideas", "specs", "decisions", "tasks", "reports", "state"];
+/// 개발 작업 `history` 항목의 `kind`로 인정하는 값. 이 밖의 값은 항목째 버린다.
+const TASK_EVENT_KINDS: [&str; 6] = [
+    "created",
+    "in_progress",
+    "blocked",
+    "qa_waiting",
+    "completed",
+    "revision_requested",
+];
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -260,6 +270,26 @@ impl FileSystemProjectRepository {
         Ok(TaskDocument { summary, body })
     }
 
+    pub fn read_idea(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+    ) -> Result<IdeaDocument, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        let idea_path = safe_markdown_file(&workflow_root.join("ideas"), file_name)?;
+        let (mut summary, body) = read_markdown_document(&idea_path, "inbox")?;
+        // 목록(`workflow_items`)이 하는 채택 판정과 같아야 화면의 상태 표시가 갈리지 않는다.
+        if adopted_idea_ids(&workflow_root.join("specs")).contains(&summary.id) {
+            summary.status = "adopted".to_owned();
+        }
+        Ok(IdeaDocument { summary, body })
+    }
+
     pub fn record_spec_decision(
         &self,
         root: &Path,
@@ -335,9 +365,11 @@ impl FileSystemProjectRepository {
 
         let decision_id = format!("QA-{}", compact_uuid()[..8].to_uppercase());
         let created_at = Utc::now().to_rfc3339();
-        let (outcome_value, next_status) = match outcome {
-            TaskQaOutcome::Confirmed => ("confirmed", "completed"),
-            TaskQaOutcome::RevisionRequested => ("revision_requested", "todo"),
+        let (outcome_value, next_status, event_kind) = match outcome {
+            TaskQaOutcome::Confirmed => ("confirmed", "completed", "completed"),
+            TaskQaOutcome::RevisionRequested => {
+                ("revision_requested", "todo", "revision_requested")
+            }
         };
         let decision = format!(
             "---\nschema: workflow-labs/qa-decision@1\nid: {decision_id}\ntask_id: {}\noutcome: {outcome_value}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
@@ -352,7 +384,7 @@ impl FileSystemProjectRepository {
         )?;
 
         let source = fs::read_to_string(&task_path)?;
-        let updated = update_task_frontmatter(&source, next_status, &created_at)?;
+        let updated = update_task_frontmatter(&source, next_status, &created_at, event_kind)?;
         write_text_atomically(&task_path, &updated)?;
 
         Ok(summary_from_manifest(
@@ -689,6 +721,7 @@ fn update_task_frontmatter(
     source: &str,
     next_status: &str,
     updated_at: &str,
+    event_kind: &str,
 ) -> Result<String, ProjectError> {
     let newline = if source.contains("\r\n") {
         "\r\n"
@@ -724,7 +757,40 @@ fn update_task_frontmatter(
     if !saw_updated_at {
         lines.push(format!("updated_at: {updated_at}"));
     }
+    append_task_history(&mut lines, updated_at, event_kind);
     Ok(format!("---\n{}\n---\n{body}", lines.join("\n")).replace('\n', newline))
+}
+
+/// 프론트매터 줄 목록 끝에 전이 항목 한 줄을 덧붙인다. 기록은 추가 전용이라 기존 항목은 한 줄도
+/// 고치지 않는다. 이력을 남기지 못해도 완료·반려 사실은 QA 결정 문서에 남으므로 이 함수는
+/// 실패하지 않고, QA 기록 자체를 막지도 않는다.
+fn append_task_history(lines: &mut Vec<String>, at: &str, kind: &str) {
+    let entry = |indent: &str| format!("{indent}- {{ at: {at}, kind: {kind} }}");
+    let Some(header) = lines.iter().position(|line| line.starts_with("history:")) else {
+        lines.push("history:".to_owned());
+        lines.push(entry("  "));
+        return;
+    };
+    // `history: []` 같은 인라인 표기는 계약이 금지한 형태다. 줄을 이어 붙이면 문서가 깨지므로
+    // 이력만 건너뛴다.
+    if !lines[header]["history:".len()..].trim().is_empty() {
+        return;
+    }
+    let mut end = header + 1;
+    let mut indent = None;
+    while end < lines.len() && lines[end].starts_with([' ', '\t']) {
+        if indent.is_none() {
+            indent = Some(leading_whitespace(&lines[end]));
+        }
+        end += 1;
+    }
+    lines.insert(end, entry(&indent.unwrap_or_else(|| "  ".to_owned())));
+}
+
+fn leading_whitespace(line: &str) -> String {
+    line.chars()
+        .take_while(|value| *value == ' ' || *value == '\t')
+        .collect()
 }
 
 fn require_current_schema(schema_version: u32) -> Result<(), ProjectError> {
@@ -789,10 +855,12 @@ fn workflow_items(workflow_root: &Path) -> WorkflowItems {
             idea.status = "adopted".to_owned();
         }
     }
+    let mut tasks = read_markdown_summaries(&workflow_root.join("tasks"), "todo");
+    merge_qa_decision_events(workflow_root, &mut tasks);
     WorkflowItems {
         ideas,
         specs,
-        tasks: read_markdown_summaries(&workflow_root.join("tasks"), "todo"),
+        tasks,
     }
 }
 
@@ -876,6 +944,7 @@ fn read_markdown_document(
                 .map(|value| DateTime::<Utc>::from(value).to_rfc3339())
         });
     let due_at = yaml_text(metadata.as_ref(), "due_at");
+    let events = read_task_events(metadata.as_ref());
     Ok((
         WorkflowItemSummary {
             file_name,
@@ -885,10 +954,37 @@ fn read_markdown_document(
                 .unwrap_or_else(|| default_status.to_owned()),
             updated_at,
             due_at,
+            events,
             excerpt: markdown_excerpt(&body),
         },
         body.trim().to_owned(),
     ))
+}
+
+/// 상태 전이 이력을 관대하게 읽는다. 이력이 없거나 항목이 깨진 것은 오류가 아니다.
+/// 읽기가 `Err`가 되면 `read_markdown_summaries`가 그 문서를 통째로 건너뛰기 때문이다.
+fn read_task_events(metadata: Option<&serde_yaml::Value>) -> Vec<TaskEvent> {
+    let Some(entries) = metadata
+        .and_then(|value| value.get("history"))
+        .and_then(serde_yaml::Value::as_sequence)
+    else {
+        return Vec::new();
+    };
+    let mut events = entries
+        .iter()
+        .filter_map(|entry| {
+            if !entry.is_mapping() {
+                return None;
+            }
+            let kind = yaml_text(Some(entry), "kind")
+                .filter(|value| TASK_EVENT_KINDS.contains(&value.as_str()))?;
+            let at = yaml_text(Some(entry), "at")?;
+            let parsed = DateTime::parse_from_rfc3339(&at).ok()?;
+            Some((parsed, TaskEvent { kind, at }))
+        })
+        .collect::<Vec<_>>();
+    events.sort_by(|(left, _), (right, _)| left.cmp(right));
+    events.into_iter().map(|(_, event)| event).collect()
 }
 
 fn split_frontmatter(contents: &str) -> (Option<serde_yaml::Value>, String) {
@@ -946,6 +1042,86 @@ fn markdown_excerpt(body: &str) -> String {
         excerpt.push('…');
     }
     excerpt
+}
+
+/// QA 결정 문서를 전이 이벤트의 두 번째 원천으로 읽는다. 결정 문서는 앱 소유라 여기서는 읽기만
+/// 한다. 형식이 어긋난 문서는 그 파일만 건너뛰고 조회 전체를 실패시키지 않는다.
+fn qa_decision_events(workflow_root: &Path) -> HashMap<String, Vec<TaskEvent>> {
+    let mut events: HashMap<String, Vec<TaskEvent>> = HashMap::new();
+    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
+        return events;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let normalized = contents.replace("\r\n", "\n");
+        let (metadata, _) = split_frontmatter(&normalized);
+        if yaml_text(metadata.as_ref(), "schema").as_deref() != Some("workflow-labs/qa-decision@1")
+            || yaml_text(metadata.as_ref(), "created_by").as_deref() != Some("user")
+        {
+            continue;
+        }
+        let Some(task_id) = yaml_text(metadata.as_ref(), "task_id") else {
+            continue;
+        };
+        let Some(at) = yaml_text(metadata.as_ref(), "created_at") else {
+            continue;
+        };
+        if DateTime::parse_from_rfc3339(&at).is_err() {
+            continue;
+        }
+        let kind = match yaml_text(metadata.as_ref(), "outcome").as_deref() {
+            Some("confirmed") => "completed",
+            Some("revision_requested") => "revision_requested",
+            _ => continue,
+        };
+        events.entry(task_id).or_default().push(TaskEvent {
+            kind: kind.to_owned(),
+            at,
+        });
+    }
+    events
+}
+
+/// 작업 문서의 이력과 QA 결정 문서를 한 타임라인으로 합친다. 같은 사실이 두 원천에 있으면 작업
+/// 문서의 항목을 남긴다(원문 보존). 가리키는 작업이 목록에 없는 결정 기록은 화면에 도달하지 않는다.
+fn merge_qa_decision_events(workflow_root: &Path, tasks: &mut [WorkflowItemSummary]) {
+    let decisions = qa_decision_events(workflow_root);
+    if decisions.is_empty() {
+        return;
+    }
+    for task in tasks.iter_mut() {
+        let Some(candidates) = decisions.get(&task.id) else {
+            continue;
+        };
+        // 같은 순간을 `Z`와 `+00:00`으로 달리 적을 수 있으므로 문자열이 아니라 파싱한 순간으로 비교한다.
+        let mut seen = task
+            .events
+            .iter()
+            .filter_map(|event| Some((event.kind.clone(), parse_event_instant(&event.at)?)))
+            .collect::<HashSet<_>>();
+        for event in candidates {
+            let Some(instant) = parse_event_instant(&event.at) else {
+                continue;
+            };
+            if seen.insert((event.kind.clone(), instant)) {
+                task.events.push(event.clone());
+            }
+        }
+        task.events
+            .sort_by_key(|event| parse_event_instant(&event.at));
+    }
+}
+
+fn parse_event_instant(at: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn latest_spec_decisions(workflow_root: &Path) -> HashMap<String, (String, String)> {
@@ -1110,13 +1286,15 @@ due_at: YYYY-MM-DD # 선택
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     use chrono::{Duration, Utc};
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
     use super::{
-        slugify, validate_decision, validate_task_qa, FileSystemProjectRepository, ProjectError,
+        slugify, update_task_frontmatter, validate_decision, validate_task_qa,
+        FileSystemProjectRepository, ProjectError, ProjectSummary,
     };
     use crate::domain::project::{SchemaCompatibility, SpecDecisionOutcome, TaskQaOutcome};
 
@@ -1285,6 +1463,159 @@ mod tests {
         );
     }
 
+    fn write_task_with_frontmatter(root: &Path, directory: &str, extra: &str) -> ProjectSummary {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("tasks/TASK-001.md"),
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 이력 작업\nstatus: qa_waiting\nupdated_at: 2026-07-30T00:00:00Z\n{extra}---\n\n전이 이력이 있는 작업\n"
+            ),
+        )
+        .expect("write task");
+        FileSystemProjectRepository
+            .inspect(root)
+            .expect("inspect task")
+    }
+
+    #[test]
+    fn reads_task_history_in_chronological_order() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "history:\n  - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }\n  - { at: 2026-07-30T09:00:00Z, kind: created }\n  - { at: 2026-07-30T10:30:00Z, kind: in_progress }\n",
+        );
+
+        let events = &inspected.workflows[0].items.tasks[0].events;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.kind.as_str(), event.at.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created", "2026-07-30T09:00:00Z"),
+                ("in_progress", "2026-07-30T10:30:00Z"),
+                ("qa_waiting", "2026-07-30T14:00:00Z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_block_style_history_and_keeps_the_recorded_offset() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "history:\n  - at: 2026-07-30T09:00:00+00:00\n    kind: created\n",
+        );
+
+        let events = &inspected.workflows[0].items.tasks[0].events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "created");
+        assert_eq!(events[0].at, "2026-07-30T09:00:00+00:00");
+    }
+
+    #[test]
+    fn treats_a_task_without_history_as_having_no_events() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "owner: 나\n",
+        );
+
+        let task = &inspected.workflows[0].items.tasks[0];
+        assert!(task.events.is_empty());
+        assert_eq!(task.id, "TASK-001");
+        assert_eq!(task.title, "이력 작업");
+        assert_eq!(task.status, "qa_waiting");
+        assert_eq!(task.updated_at.as_deref(), Some("2026-07-30T00:00:00Z"));
+    }
+
+    #[test]
+    fn drops_only_the_damaged_history_entries() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "history:\n  - { at: 2026-07-30T09:00:00Z, kind: created }\n  - { kind: in_progress }\n  - { at: 어제, kind: blocked }\n  - { at: 2026-07-30T11:00:00Z, kind: 시작 }\n  - 문자열 항목\n  - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }\n",
+        );
+
+        let events = &inspected.workflows[0].items.tasks[0].events;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["created", "qa_waiting"]
+        );
+    }
+
+    #[test]
+    fn treats_a_non_sequence_history_as_empty_without_failing_the_read() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "history: 아직 없음\n",
+        );
+        assert!(inspected.workflows[0].items.tasks[0].events.is_empty());
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "history:\n  created: 2026-07-30T09:00:00Z\n",
+        );
+        let task = &inspected.workflows[0].items.tasks[0];
+        assert!(task.events.is_empty());
+        assert_eq!(task.id, "TASK-001");
+    }
+
+    #[test]
+    fn keeps_repeated_transitions_after_qa_rework() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &project.workflows[0].directory,
+            "history:\n  - { at: 2026-07-30T10:00:00Z, kind: in_progress }\n  - { at: 2026-07-30T12:00:00Z, kind: qa_waiting }\n  - { at: 2026-07-30T15:00:00Z, kind: revision_requested }\n  - { at: 2026-07-31T09:00:00Z, kind: in_progress }\n  - { at: 2026-07-31T11:00:00Z, kind: qa_waiting }\n",
+        );
+
+        let events = &inspected.workflows[0].items.tasks[0].events;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "qa_waiting")
+                .map(|event| event.at.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-07-30T12:00:00Z", "2026-07-31T11:00:00Z"]
+        );
+    }
+
     #[test]
     fn reads_task_detail_and_records_user_qa_outcomes() {
         let root = tempdir().expect("temp project");
@@ -1378,6 +1709,433 @@ mod tests {
             decision.contains("outcome: revision_requested")
                 && decision.contains("빈 상태에서 다시 확인해 주세요.")
         }));
+    }
+
+    fn qa_waiting_task(
+        root: &Path,
+        directory: &str,
+        file_name: &str,
+        frontmatter: &str,
+    ) -> PathBuf {
+        let path = root
+            .join(".workflow")
+            .join(directory)
+            .join("tasks")
+            .join(file_name);
+        fs::write(&path, format!("---\n{frontmatter}---\n\n# QA 대상 작업\n"))
+            .expect("write qa task");
+        path
+    }
+
+    fn back_to_qa_waiting(path: &Path) {
+        let source = fs::read_to_string(path).expect("task source");
+        fs::write(
+            path,
+            source
+                .replace("status: completed", "status: qa_waiting")
+                .replace("status: todo", "status: qa_waiting"),
+        )
+        .expect("rewind task status");
+    }
+
+    fn qa_decision_created_at(root: &Path, directory: &str, outcome: &str) -> String {
+        fs::read_dir(root.join(".workflow").join(directory).join("decisions"))
+            .expect("decisions")
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .filter(|text| text.contains("schema: workflow-labs/qa-decision@1"))
+            .filter(|text| text.contains(&format!("outcome: {outcome}")))
+            .find_map(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("created_at: "))
+                    .map(str::to_owned)
+            })
+            .expect("qa decision created_at")
+    }
+
+    fn write_decision(root: &Path, directory: &str, file_name: &str, contents: &str) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("decisions")
+                .join(file_name),
+            contents,
+        )
+        .expect("write decision");
+    }
+
+    fn task_events(project: &ProjectSummary, id: &str) -> Vec<(String, String)> {
+        project.workflows[0]
+            .items
+            .tasks
+            .iter()
+            .find(|item| item.id == id)
+            .expect("task summary")
+            .events
+            .iter()
+            .map(|event| (event.kind.clone(), event.at.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn records_a_confirmed_transition_with_the_qa_decision_time() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        let path = qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 확인 대상\nstatus: qa_waiting\nupdated_at: 2026-07-31T00:00:00Z\nhistory:\n  - { at: 2026-07-31T00:00:00Z, kind: qa_waiting }\n",
+        );
+
+        let confirmed = repository
+            .record_task_qa(
+                root.path(),
+                directory,
+                "TASK-001.md",
+                TaskQaOutcome::Confirmed,
+                "앱에서 확인함",
+            )
+            .expect("confirm task");
+
+        let created_at = qa_decision_created_at(root.path(), directory, "confirmed");
+        let source = fs::read_to_string(&path).expect("task source");
+        assert!(source.contains(&format!("  - {{ at: {created_at}, kind: completed }}")));
+        assert!(source.contains("  - { at: 2026-07-31T00:00:00Z, kind: qa_waiting }"));
+        assert_eq!(
+            task_events(&confirmed, "TASK-001"),
+            vec![
+                ("qa_waiting".to_owned(), "2026-07-31T00:00:00Z".to_owned()),
+                ("completed".to_owned(), created_at),
+            ]
+        );
+    }
+
+    #[test]
+    fn records_a_revision_transition_and_returns_the_task_to_todo() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        let path = qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 반려 대상\nstatus: qa_waiting\nupdated_at: 2026-07-31T00:00:00Z\nhistory:\n  - { at: 2026-07-31T00:00:00Z, kind: qa_waiting }\n",
+        );
+
+        let revised = repository
+            .record_task_qa(
+                root.path(),
+                directory,
+                "TASK-001.md",
+                TaskQaOutcome::RevisionRequested,
+                "빈 상태에서 다시 확인해 주세요.",
+            )
+            .expect("request revision");
+
+        let created_at = qa_decision_created_at(root.path(), directory, "revision_requested");
+        let source = fs::read_to_string(&path).expect("task source");
+        assert!(source.contains("status: todo"));
+        assert!(source.contains(&format!(
+            "  - {{ at: {created_at}, kind: revision_requested }}"
+        )));
+        assert_eq!(
+            task_events(&revised, "TASK-001")
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>(),
+            vec!["qa_waiting", "revision_requested"]
+        );
+    }
+
+    #[test]
+    fn keeps_every_transition_when_qa_repeats() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        let seeded = "  - { at: 2026-07-31T00:00:00Z, kind: qa_waiting }";
+        let path = qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 반복 QA\nstatus: qa_waiting\nupdated_at: 2026-07-31T00:00:00Z\nhistory:\n  - { at: 2026-07-31T00:00:00Z, kind: qa_waiting }\n",
+        );
+
+        for _ in 0..2 {
+            repository
+                .record_task_qa(
+                    root.path(),
+                    directory,
+                    "TASK-001.md",
+                    TaskQaOutcome::RevisionRequested,
+                    "다시 확인해 주세요.",
+                )
+                .expect("request revision");
+            back_to_qa_waiting(&path);
+        }
+        let inspected = repository
+            .record_task_qa(
+                root.path(),
+                directory,
+                "TASK-001.md",
+                TaskQaOutcome::Confirmed,
+                "확인 완료",
+            )
+            .expect("confirm task");
+
+        let source = fs::read_to_string(&path).expect("task source");
+        assert!(source.contains(seeded));
+        assert_eq!(
+            task_events(&inspected, "TASK-001")
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>(),
+            vec![
+                "qa_waiting",
+                "revision_requested",
+                "revision_requested",
+                "completed"
+            ]
+        );
+    }
+
+    #[test]
+    fn adds_a_history_block_while_preserving_custom_fields() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        let path = qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 이력 없음\nstatus: qa_waiting\ncustom_field: keep-me\nupdated_at: 2026-07-31T00:00:00Z\n",
+        );
+
+        let confirmed = repository
+            .record_task_qa(
+                root.path(),
+                directory,
+                "TASK-001.md",
+                TaskQaOutcome::Confirmed,
+                "확인 완료",
+            )
+            .expect("confirm task");
+
+        let created_at = qa_decision_created_at(root.path(), directory, "confirmed");
+        let source = fs::read_to_string(&path).expect("task source");
+        assert!(source.contains("custom_field: keep-me"));
+        assert!(source.contains("history:\n"));
+        assert!(source.contains(&format!("  - {{ at: {created_at}, kind: completed }}")));
+        assert_eq!(
+            task_events(&confirmed, "TASK-001"),
+            vec![("completed".to_owned(), created_at)]
+        );
+    }
+
+    #[test]
+    fn keeps_history_entries_out_of_the_status_and_updated_at_substitution() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        let path = qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 중간 이력\nstatus: qa_waiting\nhistory:\n  - { at: 2026-07-30T09:00:00Z, kind: created }\n  - { at: 2026-07-30T10:00:00Z, kind: qa_waiting }\nupdated_at: 2026-07-31T00:00:00Z\ncustom_field: keep-me\n",
+        );
+
+        repository
+            .record_task_qa(
+                root.path(),
+                directory,
+                "TASK-001.md",
+                TaskQaOutcome::Confirmed,
+                "확인 완료",
+            )
+            .expect("confirm task");
+
+        let created_at = qa_decision_created_at(root.path(), directory, "confirmed");
+        let source = fs::read_to_string(&path).expect("task source");
+        assert!(source.contains("  - { at: 2026-07-30T09:00:00Z, kind: created }"));
+        assert!(source.contains("  - { at: 2026-07-30T10:00:00Z, kind: qa_waiting }"));
+        assert!(source.contains(&format!("  - {{ at: {created_at}, kind: completed }}")));
+        assert!(source.contains("custom_field: keep-me"));
+        assert!(!source.contains("updated_at: 2026-07-31T00:00:00Z"));
+        assert_eq!(source.matches("\nstatus:").count(), 1);
+        assert!(source.contains("\nstatus: completed\n"));
+        assert_eq!(source.matches("\nupdated_at:").count(), 1);
+    }
+
+    #[test]
+    fn skips_history_when_the_field_uses_an_inline_form() {
+        let source = "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: qa_waiting\nhistory: []\nupdated_at: 2026-07-31T00:00:00Z\n---\n\n본문\n";
+        let updated =
+            update_task_frontmatter(source, "completed", "2026-08-01T00:00:00Z", "completed")
+                .expect("update frontmatter");
+        assert!(updated.contains("history: []"));
+        assert!(updated.contains("status: completed"));
+        assert!(!updated.contains("kind: completed"));
+    }
+
+    #[test]
+    fn reads_qa_decisions_as_events_for_tasks_without_history() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 이력 없음\nstatus: completed\nupdated_at: 2026-07-31T00:00:00Z\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-1.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-1\ntask_id: TASK-001\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-07-31T04:37:59.588232+00:00\n---\n\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-2.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-2\ntask_id: TASK-001\noutcome: revision_requested\ncreated_by: user\ncreated_at: 2026-07-30T01:00:00Z\n---\n\n다시 확인해 주세요.\n",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+        assert_eq!(
+            task_events(&inspected, "TASK-001"),
+            vec![
+                (
+                    "revision_requested".to_owned(),
+                    "2026-07-30T01:00:00Z".to_owned()
+                ),
+                (
+                    "completed".to_owned(),
+                    "2026-07-31T04:37:59.588232+00:00".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_qa_decisions_that_are_damaged_or_point_nowhere() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 정상 작업\nstatus: completed\nupdated_at: 2026-07-31T00:00:00Z\n",
+        );
+        write_decision(root.path(), directory, "QA-BROKEN.md", "프론트매터 없음\n");
+        write_decision(
+            root.path(),
+            directory,
+            "QA-OTHER-SCHEMA.md",
+            "---\nschema: workflow-labs/decision@1\nid: QA-OTHER-SCHEMA\ntask_id: TASK-001\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-07-31T02:00:00Z\n---\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-AGENT.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-AGENT\ntask_id: TASK-001\noutcome: confirmed\ncreated_by: agent\ncreated_at: 2026-07-31T03:00:00Z\n---\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-MISSING-FIELDS.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-MISSING-FIELDS\ntask_id: TASK-001\ncreated_by: user\n---\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-UNKNOWN-TASK.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-UNKNOWN-TASK\ntask_id: TASK-404\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-07-31T05:00:00Z\n---\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-GOOD.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-GOOD\ntask_id: TASK-001\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-07-31T06:00:00Z\n---\n",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+        assert_eq!(
+            task_events(&inspected, "TASK-001"),
+            vec![("completed".to_owned(), "2026-07-31T06:00:00Z".to_owned())]
+        );
+    }
+
+    #[test]
+    fn merges_the_same_fact_from_both_sources_only_once() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        qa_waiting_task(
+            root.path(),
+            directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 두 원천\nstatus: completed\nupdated_at: 2026-07-31T00:00:00Z\nhistory:\n  - { at: 2026-07-30T12:00:00Z, kind: qa_waiting }\n  - { at: 2026-07-31T09:00:00Z, kind: completed }\n",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "QA-SAME.md",
+            "---\nschema: workflow-labs/qa-decision@1\nid: QA-SAME\ntask_id: TASK-001\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-07-31T09:00:00+00:00\n---\n",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+        assert_eq!(
+            task_events(&inspected, "TASK-001"),
+            vec![
+                ("qa_waiting".to_owned(), "2026-07-30T12:00:00Z".to_owned()),
+                ("completed".to_owned(), "2026-07-31T09:00:00Z".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_events_empty_when_only_updated_at_is_recorded() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        qa_waiting_task(
+            root.path(),
+            &project.workflows[0].directory,
+            "TASK-001.md",
+            "schema: workflow-labs/task@1\nid: TASK-001\ntitle: 이력 없는 완료\nstatus: completed\nupdated_at: 2026-07-31T00:00:00Z\n",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+        assert!(task_events(&inspected, "TASK-001").is_empty());
     }
 
     #[test]
@@ -1544,6 +2302,80 @@ mod tests {
             .read_spec(root.path(), &project.workflows[0].directory, "../README.md")
             .expect_err("document traversal must fail");
         assert!(matches!(error, ProjectError::UnsafeDocumentFile(_)));
+        let idea_error = repository
+            .read_idea(root.path(), &project.workflows[0].directory, "../README.md")
+            .expect_err("idea traversal must fail");
+        assert!(matches!(idea_error, ProjectError::UnsafeDocumentFile(_)));
+    }
+
+    // 목록의 `excerpt`는 앞 세 줄에서 끊긴다. 전문 읽기는 그 뒤까지 돌려줘야 의미가 있다.
+    #[test]
+    fn reads_full_idea_body_without_touching_the_file() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        let workflow_root = root.path().join(".workflow").join(&workflow.directory);
+        let idea_path = workflow_root.join("ideas/IDEA-001.md");
+        let source = "---\nschema: workflow-labs/idea@1\nid: IDEA-001\ntitle: 아이디어 전문 읽기\nstatus: inbox\ncreated_at: 2026-08-02T00:00:00Z\n---\n\n# 아이디어 전문 읽기\n\n첫째 줄 배경이다.\n둘째 줄 문제다.\n셋째 줄 제안이다.\n넷째 줄은 요약에서 잘린다.\n";
+        fs::write(&idea_path, source).expect("write idea");
+        let modified_before = fs::metadata(&idea_path)
+            .and_then(|value| value.modified())
+            .expect("idea mtime");
+
+        let document = repository
+            .read_idea(root.path(), &workflow.directory, "IDEA-001.md")
+            .expect("read idea");
+
+        assert!(document.body.contains("넷째 줄은 요약에서 잘린다."));
+        assert!(!document
+            .summary
+            .excerpt
+            .contains("넷째 줄은 요약에서 잘린다."));
+        assert!(!document.body.contains("schema:"));
+        assert!(!document.body.contains("id: IDEA-001"));
+        assert_eq!(document.summary.id, "IDEA-001");
+        assert_eq!(document.summary.status, "inbox");
+        assert_eq!(
+            fs::read_to_string(&idea_path).expect("idea after read"),
+            source
+        );
+        assert_eq!(
+            fs::metadata(&idea_path)
+                .and_then(|value| value.modified())
+                .expect("idea mtime after read"),
+            modified_before
+        );
+    }
+
+    // 전문 읽기의 상태가 목록과 갈리면 같은 아이디어가 화면 두 곳에서 다르게 보인다.
+    #[test]
+    fn reports_adopted_status_for_an_idea_referenced_by_a_spec() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        let workflow_root = root.path().join(".workflow").join(&workflow.directory);
+        fs::write(
+            workflow_root.join("ideas/IDEA-001.md"),
+            "---\nschema: workflow-labs/idea@1\nid: IDEA-001\ntitle: 채택된 아이디어\nstatus: inbox\n---\n\n본문이다.\n",
+        )
+        .expect("write idea");
+        fs::write(
+            workflow_root.join("specs/SPEC-001.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 기획서\nstatus: draft\nsource_idea_id: IDEA-001\n---\n\n기획 내용이다.\n",
+        )
+        .expect("write spec");
+
+        let document = repository
+            .read_idea(root.path(), &workflow.directory, "IDEA-001.md")
+            .expect("read idea");
+
+        assert_eq!(document.summary.status, "adopted");
     }
 
     #[test]
