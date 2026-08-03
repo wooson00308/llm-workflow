@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
-  HeartbeatState,
+  DreamJobRequest,
+  IntegrationActions,
+  IntegrationsSnapshot,
+  IntegrationsState,
+  ManagedDreamJob,
+  ManagedRoleJob,
   ProjectGateway,
   ProjectSummary,
   RecentProject,
@@ -26,8 +31,8 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [heartbeat, setHeartbeat] = useState<HeartbeatState>({
-    integration: null,
+  const [integrations, setIntegrations] = useState<IntegrationsState>({
+    snapshot: null,
     error: null,
     writeError: null,
   });
@@ -155,6 +160,24 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, project],
   );
 
+  const readIdea = useCallback(
+    async (workflowDirectory: string, fileName: string) => {
+      if (!project) return null;
+      setError(null);
+      try {
+        return await gateway.readIdea(
+          project.rootPath,
+          workflowDirectory,
+          fileName,
+        );
+      } catch (reason) {
+        setError(messageFrom(reason));
+        return null;
+      }
+    },
+    [gateway, project],
+  );
+
   const decideSpec = useCallback(
     async (
       workflowDirectory: string,
@@ -233,15 +256,15 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
 
   // 조회 실패를 화면 전체 에러로 올리지 않는다. 2.5초마다 실패가 반복되면 앱을 쓸 수 없다.
   // 쓰기 실패 문구는 조회가 지우지 않는다. 2.5초 뒤에 사라지면 사용자가 읽을 수 없다.
-  const readHeartbeat = useCallback(
+  const readIntegrations = useCallback(
     async (path: string) => {
       try {
-        const integration = await gateway.inspectHeartbeat(path);
-        setHeartbeat((previous) => ({ ...previous, integration, error: null }));
+        const snapshot = await gateway.inspectIntegrations(path);
+        setIntegrations((previous) => ({ ...previous, snapshot, error: null }));
       } catch (reason) {
-        setHeartbeat((previous) => ({
+        setIntegrations((previous) => ({
           ...previous,
-          integration: null,
+          snapshot: null,
           error: messageFrom(reason),
         }));
       }
@@ -250,54 +273,80 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   // 전역 파일 `~/.claude/HEARTBEAT.md`를 쓰는 유일한 경로다. 화면이 확인을 받은 뒤에만 부른다.
-  const installHeartbeatJobs = useCallback(
-    async (roles: RoleJobRequest[]) => {
+  // 실패 사유는 요청한 연동 id와 함께 담는다. 그래야 그 연동 카드에서만 문구가 보인다.
+  const writeIntegration = useCallback(
+    async (
+      integration: string,
+      write: (path: string) => Promise<IntegrationsSnapshot>,
+    ) => {
       if (!project) return false;
       setBusy(true);
       try {
-        const integration = await gateway.installHeartbeatJobs(
-          project.rootPath,
-          roles,
-        );
-        setHeartbeat({ integration, error: null, writeError: null });
+        const snapshot = await write(project.rootPath);
+        setIntegrations({ snapshot, error: null, writeError: null });
         return true;
       } catch (reason) {
-        setHeartbeat((previous) => ({
+        setIntegrations((previous) => ({
           ...previous,
-          writeError: messageFrom(reason),
+          writeError: { integration, message: messageFrom(reason) },
         }));
         return false;
       } finally {
         setBusy(false);
       }
     },
-    [gateway, project],
+    [project],
+  );
+
+  // 기준값은 화면이 폼을 시딩할 때 읽은 관리 블록의 값이다. 훅은 내용을 들여다보지 않고 그대로
+  // 넘긴다. 대조는 쓰기 직전의 파일을 아는 백엔드가 한다.
+  const installHeartbeatJobs = useCallback(
+    (roles: RoleJobRequest[], baseline: ManagedRoleJob[]) =>
+      writeIntegration("heartbeat", (path) =>
+        gateway.installHeartbeatJobs(path, roles, baseline),
+      ),
+    [gateway, writeIntegration],
+  );
+
+  const installDreamJob = useCallback(
+    (dream: DreamJobRequest, baseline: ManagedDreamJob | null) =>
+      writeIntegration("dream", (path) =>
+        gateway.installDreamJob(path, dream, baseline),
+      ),
+    [gateway, writeIntegration],
+  );
+
+  // 연동 카드가 받는 쓰기 액션 묶음. 연동이 늘면 여기에 항목이 하나 더 붙는다.
+  const integrationActions = useMemo<IntegrationActions>(
+    () => ({ installHeartbeatJobs, installDreamJob }),
+    [installDreamJob, installHeartbeatJobs],
   );
 
   useEffect(() => {
     if (!project?.initialized) return;
     const path = project.rootPath;
-    void readHeartbeat(path);
+    void readIntegrations(path);
     const timer = window.setInterval(() => {
       void inspect(path, true);
-      void readHeartbeat(path);
+      void readIntegrations(path);
     }, 2_500);
     return () => window.clearInterval(timer);
-  }, [inspect, readHeartbeat, project?.initialized, project?.rootPath]);
+  }, [inspect, readIntegrations, project?.initialized, project?.rootPath]);
 
   return {
     project,
     recentProjects,
     busy,
     error,
-    heartbeat,
-    installHeartbeatJobs,
+    integrations,
+    integrationActions,
     openFolder,
     openRecent,
     createWorkflow,
     createIdea,
     readSpec,
     readTask,
+    readIdea,
     recordTaskQa,
     decideSpec,
     refresh,
@@ -305,7 +354,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     closeProject: () => {
       setProject(null);
       setError(null);
-      setHeartbeat({ integration: null, error: null, writeError: null });
+      setIntegrations({ snapshot: null, error: null, writeError: null });
     },
   };
 }

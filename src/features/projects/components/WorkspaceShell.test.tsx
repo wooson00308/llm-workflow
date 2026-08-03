@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HeartbeatState, ProjectSummary } from "../domain/types";
+import type { IntegrationsState, ProjectSummary } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { WorkspaceShell } from "./WorkspaceShell";
 
@@ -34,7 +34,11 @@ const updater: AppUpdaterState = {
   restart: vi.fn().mockResolvedValue(undefined),
 };
 
-const heartbeat: HeartbeatState = { integration: null, error: null, writeError: null };
+const integrations: IntegrationsState = { snapshot: null, error: null, writeError: null };
+const integrationActions = {
+  installHeartbeatJobs: vi.fn().mockResolvedValue(true),
+  installDreamJob: vi.fn().mockResolvedValue(true),
+};
 
 describe("WorkspaceShell", () => {
   it("opens a purpose-built screen for each primary menu", () => {
@@ -44,12 +48,13 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
-        heartbeat={heartbeat}
+        integrations={integrations}
+        integrationActions={integrationActions}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
-        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
@@ -93,12 +98,13 @@ describe("WorkspaceShell", () => {
         error={null}
         project={completedProject}
         updater={updater}
-        heartbeat={heartbeat}
+        integrations={integrations}
+        integrationActions={integrationActions}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
-        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
@@ -127,12 +133,13 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
-        heartbeat={heartbeat}
+        integrations={integrations}
+        integrationActions={integrationActions}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
-        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
@@ -175,12 +182,13 @@ describe("WorkspaceShell", () => {
         error={null}
         project={searchableProject}
         updater={updater}
-        heartbeat={heartbeat}
+        integrations={integrations}
+        integrationActions={integrationActions}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
-        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
@@ -207,12 +215,13 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
-        heartbeat={heartbeat}
+        integrations={integrations}
+        integrationActions={integrationActions}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
-        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
@@ -228,6 +237,75 @@ describe("WorkspaceShell", () => {
     expect(screen.getByText("아키텍트")).toBeInTheDocument();
   });
 
+  it("opens the integrations view from its own sidebar menu", () => {
+    const { container } = render(
+      <WorkspaceShell
+        busy={false}
+        error={null}
+        project={project}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "연동" }));
+
+    expect(screen.getByRole("region", { name: "연동" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "연동" })).toHaveClass("active");
+    expect(container.querySelector(".breadcrumbs")).toHaveTextContent("연동");
+  });
+
+  // R1. 연동은 워크플로우가 아니라 사용자 환경을 다루는 화면이다. 워크플로우를 바꿔도 내용이
+  // 달라지면 사용자가 잘못된 소속으로 읽는다.
+  it("keeps the integrations view unchanged across workflow switches", () => {
+    const twoWorkflows: ProjectSummary = {
+      ...project,
+      workflows: [
+        project.workflows[0],
+        { ...project.workflows[0], id: "wf_2", directory: "second--wf_2", name: "Second" },
+      ],
+    };
+
+    render(
+      <WorkspaceShell
+        busy={false}
+        error={null}
+        project={twoWorkflows}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "연동" }));
+    const before = screen.getByRole("region", { name: "연동" }).textContent;
+
+    fireEvent.click(screen.getByRole("button", { name: /Second/ }));
+
+    expect(screen.getByRole("region", { name: "연동" }).textContent).toBe(before);
+  });
+
   it("opens a working settings view", () => {
     const onSwitchProject = vi.fn();
     render(
@@ -236,12 +314,13 @@ describe("WorkspaceShell", () => {
         error={null}
         project={project}
         updater={updater}
-        heartbeat={heartbeat}
+        integrations={integrations}
+        integrationActions={integrationActions}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
-        onInstallHeartbeatJobs={vi.fn().mockResolvedValue(true)}
         onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}

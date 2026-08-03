@@ -4,7 +4,28 @@ import type { WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 
 const today = new Date();
-const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+function localDateKey(value: Date) {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+const todayKey = localDateKey(today);
+const otherDayKey = localDateKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() === 1 ? 2 : 1));
+
+function localDateKeyOf(at: string) {
+  return localDateKey(new Date(at));
+}
+
+function dayLabel(key: string) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(new Date(year, month - 1, day));
+}
+
+function dayCell(container: HTMLElement, key: string) {
+  const cell = container.querySelector(`time[datetime="${key}"]`)?.parentElement;
+  if (!cell) throw new Error(`${key} 칸을 찾지 못했습니다.`);
+  return cell;
+}
 
 afterEach(cleanup);
 afterEach(() => vi.unstubAllGlobals());
@@ -61,14 +82,273 @@ describe("DevelopmentBoard", () => {
     expect(within(list).queryByText("파서 구현")).not.toBeInTheDocument();
   });
 
-  it("places due tasks on the calendar and preserves unscheduled tasks", () => {
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
-    fireEvent.click(screen.getByRole("button", { name: "캘린더" }));
+  it("places tasks on the timeline by transition time instead of due_at", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T04:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
-    const calendar = screen.getByRole("region", { name: "개발 작업 캘린더" });
-    expect(within(calendar).getByText("파서 구현")).toBeInTheDocument();
-    expect(within(calendar).getByText("일정 미지정")).toBeInTheDocument();
-    expect(within(calendar).getByText("사용자 QA")).toBeInTheDocument();
+    const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
+    expect(within(dayCell(timeline, todayKey)).getByText("시작")).toBeInTheDocument();
+  });
+
+  it("drops the due_at placement wording from the timeline header", () => {
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    expect(screen.getByText("상태 전이 기록 기준")).toBeInTheDocument();
+    expect(screen.queryByText("일정 미지정")).not.toBeInTheDocument();
+    expect(screen.queryByText(/due_at을 추가하면/)).not.toBeInTheDocument();
+  });
+
+  it("folds a day into one chip per event kind", () => {
+    const items: WorkflowItemSummary[] = [1, 2, 3].map((index) => ({
+      fileName: `TASK-10${index}.md`,
+      id: `TASK-10${index}`,
+      title: `작업 ${index}`,
+      status: "qa_waiting",
+      updatedAt: `${todayKey}T00:00:00Z`,
+      dueAt: null,
+      excerpt: "",
+      events: [
+        { kind: "in_progress", at: `${todayKey}T01:00:00Z` },
+        { kind: "qa_waiting", at: `${todayKey}T02:00:00Z` },
+      ],
+    }));
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
+    expect(cell.querySelectorAll(".calendar-count")).toHaveLength(2);
+    expect(within(cell).getByText("시작").parentElement).toHaveTextContent("시작3");
+    expect(within(cell).getByText("QA 대기").parentElement).toHaveTextContent("QA 대기3");
+  });
+
+  it("keeps every completed task on the timeline while the board still truncates", () => {
+    const completed = [1, 2, 3, 4].map((day) => ({
+      fileName: `TASK-00${day}.md`,
+      id: `TASK-00${day}`,
+      title: `완료 작업 ${day}`,
+      status: "completed",
+      updatedAt: `2026-07-0${day}T00:00:00Z`,
+      dueAt: null,
+      excerpt: "",
+      events: [{ kind: "completed", at: `${todayKey}T05:00:00Z` }],
+    }));
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(completed[0])} onTaskQa={vi.fn()} workflow={workflowWith(completed)} />);
+
+    expect(screen.getByText("3개 표시 · 완료는 최근 3개만 표시")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
+    expect(within(cell).getByText("완료").parentElement).toHaveTextContent("완료4");
+    expect(screen.getByText("4개 표시 · 완료 작업까지 전부 표시")).toBeInTheDocument();
+    expect(screen.queryByText(/완료는 최근 3개만 표시/)).not.toBeInTheDocument();
+  });
+
+  it("narrows timeline events with the shared search and status filters", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T01:00:00Z` }] },
+      { ...tasks[1], dueAt: null, events: [{ kind: "qa_waiting", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    const cell = () => dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
+    expect(cell().querySelectorAll(".calendar-count")).toHaveLength(2);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "qa_waiting" } });
+    expect(within(cell()).getByText("QA 대기")).toBeInTheDocument();
+    expect(within(cell()).queryByText("시작")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "all" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
+    expect(within(cell()).getByText("시작")).toBeInTheDocument();
+    expect(within(cell()).queryByText("QA 대기")).not.toBeInTheDocument();
+  });
+
+  it("skips unreadable event times and unknown kinds without breaking the grid", () => {
+    const items: WorkflowItemSummary[] = [
+      {
+        ...tasks[0],
+        dueAt: null,
+        events: [
+          { kind: "created", at: "어제" },
+          { kind: "탈락", at: `${todayKey}T03:00:00Z` },
+          { kind: "blocked", at: `${todayKey}T03:00:00Z` },
+        ],
+      },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
+    expect(cell.querySelectorAll(".calendar-count")).toHaveLength(1);
+    expect(within(cell).getByText("막힘")).toBeInTheDocument();
+  });
+
+  it("groups events by the local date of the transition instant", () => {
+    const at = `${todayKey}T23:00:00Z`;
+    const localKey = localDateKeyOf(at);
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "completed", at }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
+    expect(within(dayCell(timeline, localKey)).getByText("완료")).toBeInTheDocument();
+    if (localKey !== todayKey) {
+      expect(within(dayCell(timeline, todayKey)).queryByText("완료")).not.toBeInTheDocument();
+    }
+  });
+
+  it("opens a day's events in time order with the task id, title and kind", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "qa_waiting", at: `${todayKey}T08:00:00Z` }] },
+      { ...tasks[1], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 2건` }));
+
+    const entries = screen.getAllByRole("listitem");
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toHaveTextContent("시작");
+    expect(entries[0]).toHaveTextContent("TASK-002");
+    expect(entries[0]).toHaveTextContent("사용자 QA");
+    expect(entries[1]).toHaveTextContent("QA 대기");
+    expect(entries[1]).toHaveTextContent("TASK-001");
+    expect(entries[1]).toHaveTextContent("파서 구현");
+  });
+
+  it("opens the task detail from a timeline event entry", async () => {
+    const onReadTask = taskReader(tasks[0]);
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "blocked", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
+    fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
+
+    await waitFor(() => expect(onReadTask).toHaveBeenCalledWith("TASK-001.md"));
+    expect(await screen.findByRole("button", { name: "← 개발 작업으로" })).toBeInTheDocument();
+  });
+
+  it("leaves days without events out of the keyboard order", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
+    expect(dayCell(timeline, todayKey).tagName).toBe("BUTTON");
+    expect(timeline.querySelectorAll(".calendar-grid > button")).toHaveLength(1);
+  });
+
+  it("selects a day with the keyboard and exposes the selection", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
+      { ...tasks[1], dueAt: null, events: [{ kind: "qa_waiting", at: `${otherDayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+
+    const target = screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` });
+    const other = screen.getByRole("button", { name: `${dayLabel(otherDayKey)}, 이벤트 1건` });
+    expect(target).toHaveAttribute("aria-pressed", "false");
+
+    // 기본 키보드 조작을 그대로 쓰므로, 날짜 칸이 초점을 받는 진짜 button인지까지 확인한다.
+    target.focus();
+    expect(document.activeElement).toBe(target);
+    expect(target.tagName).toBe("BUTTON");
+
+    fireEvent.click(target);
+    expect(target).toHaveAttribute("aria-pressed", "true");
+    expect(other).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("keeps the month and filters untouched while opening and closing a day", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
+
+    const monthTitle = screen.getByRole("heading", { level: 2 }).textContent;
+    fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
+    expect(screen.getByRole("button", { name: "닫기" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "닫기" }));
+    expect(screen.queryByRole("button", { name: "닫기" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(monthTitle ?? "");
+    expect(screen.getByRole("textbox", { name: "작업 검색" })).toHaveValue("파서");
+  });
+
+  it("lists both entries when one task transitions twice on the same day", () => {
+    const items: WorkflowItemSummary[] = [
+      {
+        ...tasks[0],
+        dueAt: null,
+        events: [
+          { kind: "in_progress", at: `${todayKey}T02:00:00Z` },
+          { kind: "qa_waiting", at: `${todayKey}T06:00:00Z` },
+        ],
+      },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 2건` }));
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("clears the day selection when the month changes", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
+    expect(screen.getByRole("button", { name: "닫기" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "이전 달" }));
+    expect(screen.queryByRole("button", { name: "닫기" })).not.toBeInTheDocument();
+  });
+
+  it("reports tasks that never reach the timeline and drops the notice once they do", () => {
+    const withEvents: WorkflowItemSummary = { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] };
+    const view = render(
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith([withEvents, { ...tasks[1], dueAt: null }])} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    expect(screen.getByText("기록이 없어 타임라인에 표시되지 않는 작업 1건")).toBeInTheDocument();
+
+    view.rerender(
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith([withEvents])} />,
+    );
+    expect(screen.queryByText(/기록이 없어 타임라인에 표시되지 않는 작업/)).not.toBeInTheDocument();
+  });
+
+  it("tells an empty month apart from a month emptied by filters", () => {
+    const items: WorkflowItemSummary[] = [
+      { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
+    ];
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    expect(screen.queryByText("이 달에 기록된 전이가 없습니다.")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "이전 달" }));
+    expect(screen.getByText("이 달에 기록된 전이가 없습니다.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "오늘" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "없는작업" } });
+    expect(screen.getByText("필터 조건에 맞는 기록이 이 달에 없습니다.")).toBeInTheDocument();
+    expect(screen.queryByText("이 달에 기록된 전이가 없습니다.")).not.toBeInTheDocument();
   });
 
   it("keeps only the three most recently completed tasks in development", () => {

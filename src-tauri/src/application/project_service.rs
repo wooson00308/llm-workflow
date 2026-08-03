@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::domain::project::{
-    ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
+    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
 };
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
@@ -51,6 +51,16 @@ impl ProjectService {
     ) -> Result<TaskDocument, ProjectError> {
         self.repository
             .read_task(root, workflow_directory, file_name)
+    }
+
+    pub fn read_idea(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+    ) -> Result<IdeaDocument, ProjectError> {
+        self.repository
+            .read_idea(root, workflow_directory, file_name)
     }
 
     pub fn record_spec_decision(

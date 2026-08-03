@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
-  HeartbeatState,
+  IdeaDocument,
+  IntegrationActions,
+  IntegrationsState,
   ProjectSummary,
-  RoleJobRequest,
   SpecDecisionOutcome,
   TaskQaOutcome,
   TaskDocument,
@@ -17,6 +18,7 @@ import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
+import { IntegrationsView } from "./integrations/IntegrationsView";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
 import { SettingsView } from "./SettingsView";
 import { SpecWorkspace } from "./SpecWorkspace";
@@ -26,7 +28,8 @@ interface Props {
   error: string | null;
   project: ProjectSummary;
   updater: AppUpdaterState;
-  heartbeat: HeartbeatState;
+  integrations: IntegrationsState;
+  integrationActions: IntegrationActions;
   onAddIdea(workflowDirectory: string, content: string): Promise<boolean>;
   onAddWorkflow(name: string): Promise<boolean>;
   onDecideSpec(
@@ -35,8 +38,11 @@ interface Props {
     outcome: SpecDecisionOutcome,
     comment: string,
   ): Promise<boolean>;
-  onInstallHeartbeatJobs(roles: RoleJobRequest[]): Promise<boolean>;
   onMigrate(): Promise<boolean>;
+  onReadIdea(
+    workflowDirectory: string,
+    fileName: string,
+  ): Promise<IdeaDocument | null>;
   onReadSpec(
     workflowDirectory: string,
     fileName: string,
@@ -68,6 +74,7 @@ const viewLabels = {
   specs: "기획서",
   tasks: "개발",
   archive: "기록",
+  integrations: "연동",
   help: "도움말",
   settings: "설정",
 } as const;
@@ -77,12 +84,13 @@ export function WorkspaceShell({
   error,
   project,
   updater,
-  heartbeat,
+  integrations,
+  integrationActions,
   onAddIdea,
   onAddWorkflow,
   onDecideSpec,
-  onInstallHeartbeatJobs,
   onMigrate,
+  onReadIdea,
   onReadSpec,
   onReadTask,
   onTaskQa,
@@ -95,7 +103,7 @@ export function WorkspaceShell({
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
-    "today" | "ideas" | "specs" | "tasks" | "archive" | "help" | "settings"
+    "today" | "ideas" | "specs" | "tasks" | "archive" | "integrations" | "help" | "settings"
   >("today");
   const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
@@ -250,6 +258,7 @@ export function WorkspaceShell({
 
         <div className="sidebar-footer">
           <UpdateControl updater={updater} />
+          <button className={`settings-link ${view === "integrations" ? "active" : ""}`} onClick={() => setView("integrations")}><Icon name="spark" />연동</button>
           <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
           <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
         </div>
@@ -359,6 +368,7 @@ export function WorkspaceShell({
               disabled={!writable}
               key={workflow.directory}
               onAdd={addIdea}
+              onReadIdea={(fileName) => onReadIdea(workflow.directory, fileName)}
               workflow={workflow}
             />
           )}
@@ -378,9 +388,19 @@ export function WorkspaceShell({
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
+          {/* 워크플로우와 무관한 화면이라 workflow 조건을 걸지 않는다. */}
+          {view === "integrations" && (
+            <IntegrationsView
+              actions={integrationActions}
+              error={integrations.error}
+              snapshot={integrations.snapshot}
+              writeError={integrations.writeError}
+            />
+          )}
+
           {view === "help" && <HelpView />}
 
-          {view === "settings" && <SettingsView project={project} updater={updater} heartbeat={heartbeat} onInstallHeartbeatJobs={onInstallHeartbeatJobs} onSwitchProject={onSwitchProject} />}
+          {view === "settings" && <SettingsView project={project} updater={updater} onSwitchProject={onSwitchProject} />}
 
           {specLoading && <div className="loading-toast">기획서를 불러오는 중…</div>}
         </div>

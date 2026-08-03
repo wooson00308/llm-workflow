@@ -1,16 +1,27 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
-import type { WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import type {
+  IdeaDocument,
+  WorkflowItemSummary,
+  WorkflowSummary,
+} from "../domain/types";
 import { IdeaComposer } from "./IdeaComposer";
+import { MarkdownBody } from "./MarkdownBody";
+
+type IdeaBodyState =
+  | { kind: "loading" }
+  | { kind: "loaded"; body: string }
+  | { kind: "failed" };
 
 interface Props {
   busy: boolean;
   disabled: boolean;
   onAdd(content: string): Promise<boolean>;
+  onReadIdea(fileName: string): Promise<IdeaDocument | null>;
   workflow: WorkflowSummary;
 }
 
-export function IdeaInbox({ busy, disabled, onAdd, workflow }: Props) {
+export function IdeaInbox({ busy, disabled, onAdd, onReadIdea, workflow }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(
     workflow.items.ideas[0]?.id ?? null,
   );
@@ -25,6 +36,38 @@ export function IdeaInbox({ busy, disabled, onAdd, workflow }: Props) {
     () => workflow.items.ideas.find((item) => item.id === selectedId) ?? null,
     [selectedId, workflow.items.ideas],
   );
+
+  const [body, setBody] = useState<IdeaBodyState | null>(null);
+
+  // 폴링이 2.5초마다 조회 함수의 정체성을 바꾸므로 효과 의존성에 넣지 않는다.
+  const readIdea = useRef(onReadIdea);
+  useEffect(() => {
+    readIdea.current = onReadIdea;
+  }, [onReadIdea]);
+
+  const selectedFileName = selected?.fileName ?? null;
+  useEffect(() => {
+    if (!selectedFileName) {
+      setBody(null);
+      return;
+    }
+    let cancelled = false;
+    setBody({ kind: "loading" });
+    void readIdea.current(selectedFileName).then(
+      (document) => {
+        if (cancelled) return;
+        setBody(
+          document ? { kind: "loaded", body: document.body } : { kind: "failed" },
+        );
+      },
+      () => {
+        if (!cancelled) setBody({ kind: "failed" });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFileName]);
 
   return (
     <section className="idea-inbox-view">
@@ -72,13 +115,19 @@ export function IdeaInbox({ busy, disabled, onAdd, workflow }: Props) {
           </div>
         </section>
 
-        <IdeaPreview item={selected} />
+        <IdeaPreview body={body} item={selected} />
       </div>
     </section>
   );
 }
 
-function IdeaPreview({ item }: { item: WorkflowItemSummary | null }) {
+function IdeaPreview({
+  body,
+  item,
+}: {
+  body: IdeaBodyState | null;
+  item: WorkflowItemSummary | null;
+}) {
   if (!item) {
     return (
       <section className="idea-preview empty">
@@ -100,8 +149,16 @@ function IdeaPreview({ item }: { item: WorkflowItemSummary | null }) {
           {item.status === "adopted" ? "기획서 채택" : "수집됨"}
         </span>
       </header>
-      <div className="idea-preview-body">
-        <p>{item.excerpt || "본문 미리보기가 없습니다."}</p>
+      <div className="idea-preview-body" key={item.fileName}>
+        {body?.kind === "loaded" ? (
+          <MarkdownBody body={body.body} />
+        ) : (
+          <p className="idea-preview-note">
+            {body?.kind === "failed"
+              ? "아이디어 전문을 불러오지 못했습니다."
+              : "아이디어를 불러오는 중…"}
+          </p>
+        )}
       </div>
       <footer>
         <div><span>문서 ID</span><strong>{item.id}</strong></div>

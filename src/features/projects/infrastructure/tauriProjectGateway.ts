@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  HeartbeatIntegration,
+  IdeaDocument,
+  IntegrationsSnapshot,
   ProjectGateway,
   ProjectSummary,
   SpecDocument,
@@ -50,6 +51,14 @@ export const tauriProjectGateway: ProjectGateway = {
     });
   },
 
+  readIdea(path, workflowDirectory, fileName) {
+    return invoke<IdeaDocument>("read_idea", {
+      path,
+      workflowDirectory,
+      fileName,
+    });
+  },
+
   decideSpec(path, workflowDirectory, fileName, outcome, comment) {
     return invoke<ProjectSummary>("record_spec_decision", {
       path,
@@ -74,14 +83,23 @@ export const tauriProjectGateway: ProjectGateway = {
     return invoke<ProjectSummary>("migrate_project", { path });
   },
 
-  inspectHeartbeat(path) {
-    return invoke<HeartbeatIntegration>("inspect_heartbeat", { path });
+  inspectIntegrations(path) {
+    return invoke<IntegrationsSnapshot>("inspect_integrations", { path });
   },
 
-  installHeartbeatJobs(path, roles) {
-    return invoke<HeartbeatIntegration>("install_heartbeat_jobs", {
+  installHeartbeatJobs(path, roles, baseline) {
+    return invoke<IntegrationsSnapshot>("install_heartbeat_jobs", {
       path,
       roles,
+      baseline,
+    });
+  },
+
+  installDreamJob(path, dream, baseline) {
+    return invoke<IntegrationsSnapshot>("install_dream_job", {
+      path,
+      dream,
+      baseline,
     });
   },
 };
