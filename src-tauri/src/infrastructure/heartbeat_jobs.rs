@@ -124,9 +124,14 @@ pub fn parse_heartbeat(contents: &str) -> HeartbeatDocument {
     document
 }
 
-/// 프로젝트 루트 절대 경로의 `/`를 `-`로 바꾸고, 앞이 `-`가 아니면 `-`를 붙인다.
+/// 프로젝트 루트 절대 경로의 경로 구분자(`/`·`\`)와 드라이브 콜론(`:`)을 `-`로 바꾸고,
+/// 앞이 `-`가 아니면 `-`를 붙인다. 슬러그는 jobs.d 파일명이 되므로 파일명에 못 쓰는
+/// 문자가 남으면 Windows에서 쓰기가 `InvalidFilename`으로 실패한다. macOS·Linux 절대
+/// 경로에는 `\`·`:`가 나타나지 않아 기존 슬러그는 이 치환으로 달라지지 않는다.
 pub fn project_slug(project_root: &Path) -> String {
-    let slug = project_root.to_string_lossy().replace('/', "-");
+    let slug = project_root
+        .to_string_lossy()
+        .replace(['/', '\\', ':'], "-");
     if slug.starts_with('-') {
         slug
     } else {
@@ -567,11 +572,25 @@ mod tests {
 
     use super::{
         check_quota, install_managed_jobs, parse_duration, parse_heartbeat, parse_quota,
-        project_jobs_path, write_project_jobs, HeartbeatJobsError, ManagedJob, MaxPer, Quota,
-        QuotaRejection, MANAGED_END, MANAGED_START,
+        project_jobs_path, project_slug, write_project_jobs, HeartbeatJobsError, ManagedJob,
+        MaxPer, Quota, QuotaRejection, MANAGED_END, MANAGED_START,
     };
 
     const SLUG: &str = "-tmp-demo";
+
+    #[test]
+    fn a_windows_style_path_makes_a_filename_safe_slug() {
+        // 슬러그는 jobs.d 파일명이 된다. 드라이브 콜론·역슬래시가 남으면 Windows 쓰기가
+        // InvalidFilename으로 실패한다(v0.1.8 CI에서 실측). 문자열 치환이라 어느 OS에서든 돈다.
+        assert_eq!(
+            project_slug(Path::new("C:\\Users\\tester\\project")),
+            "-C--Users-tester-project"
+        );
+        assert_eq!(
+            project_slug(Path::new("/Users/tester/project")),
+            "-Users-tester-project"
+        );
+    }
 
     fn job(name: &str) -> ManagedJob {
         ManagedJob {
