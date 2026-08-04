@@ -79,6 +79,17 @@ export interface TaskDependency {
   state: TaskDependencyState;
 }
 
+/**
+ * 이 작업의 착수를 막고 있는 활성 lease 하나와 그 근거. lease가 풀리면 사라지는 일시적인 사실이라
+ * `missing`·`cyclic`처럼 사람이 선언을 고쳐야 하는 상태와 다르다.
+ */
+export interface TaskOverlapBlock {
+  /** lease가 잡은 문서 id. */
+  leaseTargetId: string;
+  /** 두 선언이 함께 가리킨 경로. 선언 부재나 형식 오류로 막힌 경우 비어 있다. */
+  sharedFiles: string[];
+}
+
 export interface TaskDocument {
   summary: WorkflowItemSummary;
   body: string;
@@ -86,6 +97,8 @@ export interface TaskDocument {
   dependencies?: TaskDependency[];
   /** 선언 줄이 계약 형식이 아니어서 목록으로 읽지 못했는가. 참이면 이 작업은 미충족이다. */
   dependencyFormatError?: boolean;
+  /** 착수를 막고 있는 활성 lease와 그 근거. 비어 있으면 막히지 않은 것이다. */
+  overlapBlocks?: TaskOverlapBlock[];
 }
 
 export interface IdeaDocument {
@@ -99,6 +112,21 @@ export type SpecDecisionOutcome =
   | "rejected";
 
 export type TaskQaOutcome = "confirmed" | "revision_requested";
+
+export interface TaskQaBatchEntry {
+  fileName: string;
+  /** 문서를 읽지 못하면 null. 추정으로 채우지 않는다. */
+  taskId: string | null;
+  recorded: boolean;
+  /** 실패 사유. 성공이면 null. */
+  message: string | null;
+}
+
+export interface TaskQaBatchResult {
+  summary: ProjectSummary;
+  /** 요청 순서 그대로. 화면이 목록과 나란히 읽는다. */
+  results: TaskQaBatchEntry[];
+}
 
 export interface AgentLeaseSummary {
   leaseId: string;
@@ -316,6 +344,29 @@ export interface DreamIntegration {
 }
 
 /**
+ * 하트비트를 갱신하는 명령 원문(SPEC-034 R3). 백엔드가 완성한 문자열이고 화면은 그리기만 한다 —
+ * 설치 마법사의 `command`와 같은 규칙이다.
+ *
+ * 갈래가 둘인 이유는 앱이 이 기기의 설치 방법을 알지 못하기 때문이다. 사용자가 `identifyCommand`로
+ * 자기 갈래를 확인하고 그중 하나를 고른다.
+ */
+export interface HeartbeatUpdateGuide {
+  /** 설치 갈래를 판별하는 명령. 결과에 편집 가능 설치 표시가 있으면 소스 체크아웃이다. */
+  identifyCommand: string;
+  /** pip으로 설치한 경우의 갱신 명령. */
+  packageCommand: string;
+  /** 소스 체크아웃으로 설치한 경우의 갱신 명령. 체크아웃 경로는 앱이 알지 못해 붙지 않는다. */
+  sourceCommand: string;
+  /**
+   * 사용자가 자기 서비스 등록물의 라벨을 확인하는 명령. null은 "앱이 이 플랫폼의 재시작 방법을
+   * 알지 못한다"는 뜻이며 `serviceRestartCommand`와 함께 움직인다.
+   */
+  serviceLookupCommand: string | null;
+  /** 재시작 명령. 라벨 자리는 사용자가 채운다 — 앱이 지어낸 값을 넣지 않는다. */
+  serviceRestartCommand: string | null;
+}
+
+/**
  * 연동 섹션이 한 번에 읽는 값. 섹션 공통 값과 연동별 payload를 나눠 담는다.
  *
  * 연동이 늘어나도 게이트웨이 메서드·훅 상태·조회 주기는 그대로다. 새 연동은 payload 필드 하나를
@@ -341,6 +392,14 @@ export interface IntegrationsSnapshot {
    * 갈라질 자리가 생긴다. `conditionScriptPath`·`conditionCommand`가 payload에 있는 것과 같은 규칙이다.
    */
   jobsFilePath: string;
+  /**
+   * 하트비트 갱신 절차의 명령 원문. 두 카드가 같은 값을 같은 문구로 보여야 하므로(R7) 연동별
+   * payload가 아니라 섹션 공통 값이다. `managedBlockFailure`·`jobsFilePath`와 같은 이유다.
+   *
+   * 표시 조건은 여기 없다. 084 경고가 뜨는 조건은 화면이 이미 갖고 있고, 같은 결론을 내는 자리를
+   * 둘로 만들지 않는다.
+   */
+  updateGuide: HeartbeatUpdateGuide;
   heartbeat: HeartbeatIntegration;
   dream: DreamIntegration;
 }
@@ -484,6 +543,13 @@ export interface ProjectGateway {
     outcome: TaskQaOutcome,
     comment: string,
   ): Promise<ProjectSummary>;
+  /** 확인 전용이라 outcome 자리가 없다. 일괄 반려는 이 길로 열지 않는다. */
+  confirmTaskQaBatch(
+    path: string,
+    workflowDirectory: string,
+    fileNames: string[],
+    comment: string,
+  ): Promise<TaskQaBatchResult>;
   migrate(path: string): Promise<ProjectSummary>;
   /** 연동 조회는 이 메서드 하나다. 연동이 늘어나도 메서드를 늘리지 않는다. */
   inspectIntegrations(path: string): Promise<IntegrationsSnapshot>;

@@ -11,6 +11,7 @@ import type {
   HeartbeatSetupStage,
   HeartbeatSetupState,
   HeartbeatSetupStep,
+  HeartbeatUpdateGuide,
   IntegrationsSnapshot,
   IntegrationsState,
   JobDefaults,
@@ -169,12 +170,25 @@ function dream(overrides: Partial<DreamIntegration> = {}): DreamIntegration {
 /** 백엔드가 계산해 내려보내는 잡 파일 경로. 화면은 이 값을 그리기만 한다. */
 const jobsFilePath = "/home/tester/.claude/heartbeat/jobs.d/-projects-workflow-labs.md";
 
+/**
+ * 갱신 안내의 명령 원문. 다섯 값을 실제 상수와 알아볼 수 있게 다르게 둔다 — 화면이 조각을
+ * 조립하면 이 값이 그대로 나올 수 없으므로 그 사실이 검사가 된다(SPEC-034 R3).
+ */
+const updateGuide: HeartbeatUpdateGuide = {
+  identifyCommand: "fixture-identify claude-heartbeat",
+  packageCommand: "fixture-package -U claude-heartbeat",
+  sourceCommand: "fixture-source pull",
+  serviceLookupCommand: "fixture-lookup | grep heartbeat",
+  serviceRestartCommand: "fixture-restart gui/$(id -u)/<라벨>",
+};
+
 function snapshot(overrides: Partial<IntegrationsSnapshot> = {}): IntegrationsSnapshot {
   return {
     supported: true,
     slug: "-projects-workflow-labs",
     managedBlockFailure: null,
     jobsFilePath,
+    updateGuide,
     heartbeat: heartbeat(),
     dream: dream(),
     ...overrides,
@@ -1355,6 +1369,209 @@ describe("IntegrationsView 잡 파일에만 있는 잡", () => {
     expect(
       screen.getAllByText(/잡 파일에는 이 잡의 정의가 있는데 하트비트가 실행한 기록이 없습니다/),
     ).toHaveLength(2);
+  });
+});
+
+/**
+ * SPEC-034. 084 경고가 "하트비트를 갱신하세요"로 끝나던 자리에서 그 갱신 방법까지 읽는다.
+ *
+ * 안내가 뜨는 조건은 084 경고의 조건 그대로다. 표시 조건을 새로 만들지 않는 것이 승인된 확인 필요
+ * 4번이고, 그래서 이 시나리오들은 084 시나리오와 같은 픽스처 위에 선다.
+ */
+describe("IntegrationsView 갱신 안내", () => {
+  const guideTitle = "하트비트를 갱신하는 방법";
+  const principle = "설치한 방법 그대로 갱신합니다";
+  /** 084 경고의 제목. 안내가 그 경고 안에 있다는 것을 이 제목으로 확인한다. */
+  const warningTitle = "하트비트가 이 잡을 실행한 기록이 없습니다";
+
+  /** 갱신 안내의 명령 원문 다섯. 화면이 조립하면 이 값이 그대로 나올 수 없다. */
+  const commands = [
+    updateGuide.identifyCommand,
+    updateGuide.packageCommand,
+    updateGuide.sourceCommand,
+    updateGuide.serviceLookupCommand,
+    updateGuide.serviceRestartCommand,
+  ];
+
+  const plannerJob: ManagedRoleJob = {
+    role: "planner",
+    interval: "30m",
+    maxPer: "4/24h",
+    model: "opus",
+    timeout: "20m",
+    appOwnedDrift: [],
+  };
+
+  /** 084 경고가 뜬 상태. 개발자 잡만 파일에 있고 실행 기록이 없다. */
+  function warned(
+    overrides: Partial<HeartbeatIntegration> = {},
+    snapshotOverrides: Partial<IntegrationsSnapshot> = {},
+  ): IntegrationsState {
+    return {
+      snapshot: snapshot({
+        heartbeat: heartbeat({ managedJobs: [developerJob], roles: roleStatuses(), ...overrides }),
+        ...snapshotOverrides,
+      }),
+      error: null,
+      writeError: null,
+    };
+  }
+
+  /** 안내 하나의 DOM. 역할 잡 행 안에서 고르므로 다른 역할의 안내와 섞이지 않는다. */
+  function guideIn(label: string) {
+    return within(jobRow(label)).getByText(guideTitle).closest(".heartbeat-update-guide") as HTMLElement;
+  }
+
+  beforeEach(() => {
+    clipboard.copy.mockReset();
+    clipboard.copy.mockResolvedValue(true);
+  });
+
+  // 완료 조건 1. 다른 탭이나 외부 문서로 보내지 않는다.
+  it("puts the update steps inside the very warning that asks for the update", () => {
+    renderIntegrations(warned());
+
+    const warning = within(jobRow("개발자")).getByText(warningTitle).closest(
+      ".integration-warning",
+    ) as HTMLElement;
+    expect(within(warning).getByText(guideTitle)).toBeVisible();
+    expect(warning).toHaveTextContent(principle);
+    // 084 문구가 그대로 남고 안내가 그 뒤에 온다. 원인을 단정하는 문장이 새로 생기지 않는다.
+    expect(warning).toHaveTextContent("앱은 하트비트 버전을 판정하지 않으므로");
+    expect(warning).not.toHaveTextContent("업데이트가 필요합니다");
+  });
+
+  // 완료 조건 9·승인된 확인 필요 4번. 상시 표시가 아니다.
+  it("stays out of sight wherever the warning itself is out of sight", () => {
+    const quiet: [string, IntegrationsState][] = [
+      [
+        "실행 기록이 있는 잡",
+        warned({ roles: roleStatuses({ developer: ranOnce }) }),
+      ],
+      ["잡이 꺼진 역할", warned({ managedJobs: [] })],
+      ["미설치", warned({ installation: "not_installed" })],
+      [
+        "잡 파일 읽기 실패",
+        warned({}, { managedBlockFailure: { path: jobsFilePath, message: "Permission denied" } }),
+      ],
+    ];
+
+    for (const [name, state] of quiet) {
+      renderIntegrations(state);
+      expect(screen.queryByText(guideTitle), name).toBeNull();
+      expect(screen.queryByText(updateGuide.packageCommand), name).toBeNull();
+      cleanup();
+    }
+  });
+
+  // 완료 조건 5·6. 갈래 판별·pip·소스·재시작 넷이 모두 있고, 원문은 payload 값 그대로다.
+  it("shows every command the payload carries and assembles none of them", () => {
+    renderIntegrations(warned());
+
+    const guide = guideIn("개발자");
+    for (const command of commands) {
+      expect(within(guide).getByText(command as string)).toBeVisible();
+    }
+    // 명령 하나로 단정하지 않는다. 갈래를 고르는 방법이 그 앞에 온다.
+    expect(guide).toHaveTextContent("Editable project location 줄이 있으면 소스 체크아웃");
+    expect(guide).toHaveTextContent("pip으로 설치했다면");
+    expect(guide).toHaveTextContent("소스 체크아웃으로 설치했다면");
+    // R4. 재시작이 필요한 이유가 함께 있다.
+    expect(guide).toHaveTextContent("이미 돌고 있는 프로세스는 갱신 전 코드를 그대로 들고 있어서");
+  });
+
+  // 완료 조건 2. 걸음마다 복사 수단이 있고 원문 그대로 넘어간다.
+  it("copies each command exactly as it arrived", async () => {
+    renderIntegrations(warned());
+
+    const guide = guideIn("개발자");
+    const buttons = within(guide).getAllByRole("button", { name: /명령 복사$/ });
+    expect(buttons).toHaveLength(commands.length);
+
+    for (const [index, button] of buttons.entries()) {
+      await userEvent.click(button);
+      expect(clipboard.copy).toHaveBeenNthCalledWith(index + 1, commands[index]);
+    }
+    // 마지막으로 복사한 명령 하나만 표시한다. 마법사와 같은 어법이다.
+    expect(within(guide).getAllByText("복사됨")).toHaveLength(1);
+  });
+
+  // 완료 조건 2. 복사에 실패해도 원문은 화면에 남는다.
+  it("keeps the command on screen when the copy fails", async () => {
+    clipboard.copy.mockResolvedValue(false);
+    renderIntegrations(warned());
+
+    const guide = guideIn("개발자");
+    await userEvent.click(
+      within(guide).getByRole("button", { name: "pip 설치 갱신 명령 복사" }),
+    );
+
+    expect(
+      within(guide).getByText("복사하지 못했습니다 — 위 명령을 직접 선택해 복사하세요."),
+    ).toBeVisible();
+    expect(within(guide).getByText(updateGuide.packageCommand)).toBeVisible();
+  });
+
+  // 완료 조건 4·7. 앱이 모르는 것을 지어내지 않는다.
+  it("says it does not know how to restart instead of inventing a command", () => {
+    renderIntegrations(
+      warned({}, {
+        updateGuide: { ...updateGuide, serviceLookupCommand: null, serviceRestartCommand: null },
+      }),
+    );
+
+    const guide = guideIn("개발자");
+    expect(guide).toHaveTextContent("이 플랫폼에서 하트비트를 재시작하는 방법을 알지 못합니다");
+    // 재시작 명령 자리에 지어낸 값이 오지 않는다. 라벨도 launchctl도 화면에 없다.
+    expect(within(guide).queryByText(updateGuide.serviceLookupCommand as string)).toBeNull();
+    expect(within(guide).queryByText(updateGuide.serviceRestartCommand as string)).toBeNull();
+    expect(guide.textContent).not.toContain("<라벨>");
+    expect(guide.textContent).not.toContain("launchctl");
+    // 재시작이 필요하다는 사실 자체는 플랫폼과 무관하게 남는다.
+    expect(guide).toHaveTextContent("갱신한 뒤에는 하트비트를 재시작합니다");
+  });
+
+  /**
+   * 경고가 역할별이라 한 화면에 안내가 여럿 뜬다. 복사 결과를 카드가 들면 한 번의 복사가 모든
+   * 자리에 "복사됨"을 띄운다. 인스턴스가 각자 들면 그 분리가 구조로 보장된다.
+   */
+  it("keeps one guide's copy result out of the other's", async () => {
+    renderIntegrations(warned({ managedJobs: [developerJob, plannerJob] }));
+
+    await userEvent.click(
+      within(guideIn("개발자")).getByRole("button", { name: "pip 설치 갱신 명령 복사" }),
+    );
+
+    expect(within(guideIn("개발자")).getByText("복사됨")).toBeVisible();
+    expect(within(guideIn("기획자")).queryByText("복사됨")).toBeNull();
+  });
+
+  // 완료 조건 8. 갱신을 실행하는 버튼이 없다.
+  it("adds copy buttons and nothing else", () => {
+    renderIntegrations(warned());
+
+    const guide = guideIn("개발자");
+    const buttons = within(guide).getAllByRole("button");
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "설치 갈래 확인 명령 복사",
+      "pip 설치 갱신 명령 복사",
+      "소스 체크아웃 갱신 명령 복사",
+      "서비스 라벨 확인 명령 복사",
+      "하트비트 재시작 명령 복사",
+    ]);
+    for (const button of buttons) {
+      expect(button.textContent).toBe("명령 복사");
+      expect(button.getAttribute("aria-label")).not.toContain("실행");
+    }
+  });
+
+  // 완료 조건 12. 안내가 어떤 버튼도 비활성화하지 않는다(R8).
+  it("disables no button that the warning left enabled", () => {
+    renderIntegrations(warned());
+
+    expect(screen.getByRole("button", { name: "역할 잡 변경 사항 저장" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "개발자 기본값으로 재설정" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "개발자 잡 지금 실행" })).toBeEnabled();
   });
 });
 
@@ -3491,7 +3708,7 @@ describe("IntegrationsView 하트비트 잡 지금 실행", () => {
       renderRuns(state(), runControls({ failure: runFailure() }));
 
       const row = jobRow("개발자");
-      expect(row.querySelector("pre code")?.textContent).toBe(
+      expect(row.querySelector(".heartbeat-run-failure-command code")?.textContent).toBe(
         `heartbeat once -j ${developerJobName}`,
       );
 
@@ -3515,7 +3732,7 @@ describe("IntegrationsView 하트비트 잡 지금 실행", () => {
       const row = jobRow("개발자");
       expect(await within(row).findByText(/복사하지 못했습니다/)).toBeVisible();
       expect(within(row).getByText(/직접 선택해 복사하세요/)).toBeVisible();
-      expect(row.querySelector("pre code")?.textContent).toBe(
+      expect(row.querySelector(".heartbeat-run-failure-command code")?.textContent).toBe(
         `heartbeat once -j ${developerJobName}`,
       );
       expect(within(row).queryByText("복사됨")).toBeNull();

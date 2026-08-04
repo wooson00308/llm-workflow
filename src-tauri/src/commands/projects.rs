@@ -2,7 +2,8 @@ use std::path::Path;
 
 use crate::application::project_service::ProjectService;
 use crate::domain::project::{
-    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
+    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument,
+    TaskQaBatchResult, TaskQaOutcome,
 };
 
 #[tauri::command]
@@ -98,6 +99,18 @@ pub fn record_task_qa(
             outcome,
             &comment,
         )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn confirm_task_qa_batch(
+    path: String,
+    workflow_directory: String,
+    file_names: Vec<String>,
+    comment: String,
+) -> Result<TaskQaBatchResult, String> {
+    ProjectService::default()
+        .confirm_task_qa_batch(Path::new(&path), &workflow_directory, &file_names, &comment)
         .map_err(|error| error.to_string())
 }
 

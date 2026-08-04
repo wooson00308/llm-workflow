@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use crate::domain::project::{
-    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaOutcome,
+    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument,
+    TaskQaBatchResult, TaskQaOutcome,
 };
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
@@ -85,6 +86,17 @@ impl ProjectService {
     ) -> Result<ProjectSummary, ProjectError> {
         self.repository
             .record_task_qa(root, workflow_directory, file_name, outcome, comment)
+    }
+
+    pub fn confirm_task_qa_batch(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_names: &[String],
+        comment: &str,
+    ) -> Result<TaskQaBatchResult, ProjectError> {
+        self.repository
+            .confirm_task_qa_batch(root, workflow_directory, file_names, comment)
     }
 
     pub fn migrate(&self, root: &Path) -> Result<ProjectSummary, ProjectError> {

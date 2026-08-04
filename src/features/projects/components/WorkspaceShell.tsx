@@ -5,6 +5,7 @@ import type {
   IntegrationsState,
   ProjectSummary,
   SpecDecisionOutcome,
+  TaskQaBatchEntry,
   TaskQaOutcome,
   TaskDocument,
   SpecDocument,
@@ -58,6 +59,11 @@ interface Props {
     outcome: TaskQaOutcome,
     comment: string,
   ): Promise<boolean>;
+  onTaskQaBatch(
+    workflowDirectory: string,
+    fileNames: string[],
+    comment: string,
+  ): Promise<TaskQaBatchEntry[] | null>;
   onRefresh(): Promise<void> | void;
   onSwitchProject(): void;
 }
@@ -96,6 +102,7 @@ export function WorkspaceShell({
   onReadSpec,
   onReadTask,
   onTaskQa,
+  onTaskQaBatch,
   onRefresh,
   onSwitchProject,
 }: Props) {
@@ -389,7 +396,7 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} workflow={workflow} />}
+          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 

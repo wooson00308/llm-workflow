@@ -2,14 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-094
 title: 레인 접힘 상태를 담는 브라우저 저장소를 만든다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-029
 source_decision_id: DECISION-DD348ED0
-updated_at: 2026-08-04T11:55:30Z
+updated_at: 2026-08-04T15:29:37.591413+00:00
 history:
   - { at: 2026-08-04T11:30:00Z, kind: created }
   - { at: 2026-08-04T11:53:00Z, kind: in_progress }
   - { at: 2026-08-04T11:55:30Z, kind: qa_waiting }
+  - { at: 2026-08-04T15:29:37.591413+00:00, kind: completed }
 ---
 
 # 레인 접힘 상태를 담는 브라우저 저장소를 만든다

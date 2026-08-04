@@ -19,6 +19,7 @@ import {
   type IntegrationCardProps,
 } from "./IntegrationCard";
 import { JobChanges, type RemovedJob, type WrittenJob } from "./JobChanges";
+import { HeartbeatUpdateGuide } from "./HeartbeatUpdateGuide";
 import { browserJobValueMemoryStore } from "../../infrastructure/jobValueMemoryStore";
 
 const name = "dream";
@@ -807,6 +808,11 @@ function DreamJob({
           {missingRunEvidence(installed, dream.lastRun) && (
             <IntegrationWarning title={noRunEvidenceTitle}>
               <p>{noRunEvidenceNote}</p>
+              {/* 위 문장이 "갱신하세요"로 끝나므로 그 방법이 같은 자리에 온다(SPEC-034 R7). 역할 잡
+                  카드(`HeartbeatCard.tsx`)의 같은 경고 안, 같은 순서다. 문구를 이 카드가 다시 쓰지
+                  않는다 — 컴포넌트가 문구를 들고 있어 두 카드가 글자까지 같은 말을 한다. 표시 조건도
+                  새로 만들지 않는다. 이 경고가 뜨는 조건이 곧 안내가 뜨는 조건이다. */}
+              <HeartbeatUpdateGuide guide={snapshot.updateGuide} />
             </IntegrationWarning>
           )}
 

@@ -20,6 +20,7 @@ pub fn run() {
             commands::projects::read_idea,
             commands::projects::record_spec_decision,
             commands::projects::record_task_qa,
+            commands::projects::confirm_task_qa_batch,
             commands::projects::migrate_project,
             commands::heartbeat::inspect_integrations,
             commands::heartbeat::install_heartbeat_jobs,

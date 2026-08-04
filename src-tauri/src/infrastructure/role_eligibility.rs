@@ -15,10 +15,10 @@
 //!    보고 스크립트는 만료로 본다. 표기 기준을 계약에 올리기 전까지 남는 차이이고, 선점 헬퍼가
 //!    쓰는 lease는 이미 canonical이라 헬퍼 이전에 손으로 만들어진 파일에만 해당한다.
 //! 5. 기획서 결정을 앱은 `created_by: user`와 세 `outcome` 값으로 한 번 더 거른다. 스크립트의
-//!    `architect)` 분기는 `created_by`를 같은 값으로 거르지만(SPEC-028 R5) `planner)` 분기는
-//!    스키마 줄과 `spec_id` 유무만 본다. 그래서 남는 차이는 기획자 분기의 `created_by`와 두 분기가
-//!    보지 않는 `outcome` 값 목록이다. 앱이 쓰는 결정 문서는 전부 그 조건을 만족하므로, 손으로
-//!    만든 결정 문서에만 해당한다.
+//!    `planner)`·`architect)` 두 분기도 `created_by`를 같은 값으로 거르지만(SPEC-028 R5,
+//!    SPEC-030 R1) `outcome` 값 목록은 보지 않는다. 그래서 남는 차이는 두 분기가 보지 않는
+//!    `outcome` 값 목록 하나다. 앱이 쓰는 결정 문서는 전부 그 조건을 만족하므로, 손으로 만든
+//!    결정 문서에만 해당한다.
 //!
 //! 이 대조는 세 플랫폼 러너에서 모두 돈다. 한 플랫폼에서만 도는 상태로 되돌리지 않는다.
 
@@ -41,6 +41,9 @@ pub struct WorkflowInput<'a> {
     /// 규칙이 한 벌이어야 하기 때문이다 — 판정은 `fs_project_repository`가 하고 이 모듈은 결과만
     /// 받는다. 목록 payload(`WorkflowItemSummary`)는 선언을 싣지 않으므로 별도 값으로 온다.
     pub unsatisfied_dependencies: &'a HashSet<String>,
+    /// 겹침 선언이 활성 lease와 충돌해 착수가 막힌 작업의 id(SPEC-032 R2). 선행 선언과 같은
+    /// 이유로 여기서 다시 판정하지 않는다 — lease 파일도 작업 문서도 이 모듈은 읽지 않는다.
+    pub overlap_blocked: &'a HashSet<String>,
 }
 
 /// `lease_ids`는 만료 전인 lease 파일 이름 집합이다. 스크립트도 만료된 lease를 선점으로 세지
@@ -121,15 +124,20 @@ fn has_architect_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>)
         })
 }
 
-/// 스크립트 `developer)` 절: `todo` 작업 중 그 id로 lease가 없고 선행 선언이 충족된 것.
+/// 스크립트 `developer)` 절: `todo` 작업 중 그 id로 lease가 없고, 선행 선언이 충족됐고, 다른
+/// 문서를 잡은 활성 lease와 겹치지 않는 것.
 ///
-/// 세 조건은 개발자 계약의 자격 조건 그대로다. 선언을 보지 않던 동안에는 의존 미충족 `todo`만 남은
+/// 네 조건은 개발자 계약의 자격 조건 그대로다. 선언을 보지 않던 동안에는 의존 미충족 `todo`만 남은
 /// 저장소에서 스크립트가 1을, 이 모듈이 `true`를 냈다(SPEC-013 완료 조건 8).
+///
+/// 마지막 조건은 잡힌 lease가 있을 때만 개입한다. 활성 lease가 하나도 없으면 `overlap_blocked`가
+/// 비어 있어 판정이 이 조건이 없던 때와 같다(SPEC-032 R9).
 fn has_developer_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> bool {
     workflow.items.tasks.iter().any(|task| {
         task.status == "todo"
             && !lease_ids.contains(&task.id)
             && !workflow.unsatisfied_dependencies.contains(&task.id)
+            && !workflow.overlap_blocked.contains(&task.id)
     })
 }
 
@@ -275,6 +283,16 @@ mod tests {
         .expect("write task with declaration");
     }
 
+    /// 겹침 선언을 가진 작업. `scope`는 `scope_files:` 뒤에 그대로 놓이는 원문이라 형식 오류
+    /// 시나리오도 같은 헬퍼가 쓴다. 계약대로 키는 열 0에서 시작한다(SPEC-032 R1).
+    fn write_task_with_scope(workflow_root: &Path, id: &str, status: &str, scope: &str) {
+        fs::write(
+            workflow_root.join(format!("tasks/{id}.md")),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nscope_files: {scope}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+        )
+        .expect("write task with scope");
+    }
+
     /// lease 파일 하나를 그대로 쓴다. 만료 시각이 아니라 파일 내용 자체를 바꾸는 시나리오가 쓴다.
     fn write_lease_body(project_root: &Path, target_id: &str, body: &str) {
         let leases = project_root.join(".workflow/.runtime/leases");
@@ -319,6 +337,24 @@ mod tests {
         write_spec(&workflow_root, "SPEC-001", "IDEA-001");
 
         assert!(!assert_matches_condition_script(root.path()).planner);
+    }
+
+    /// 참조 판정은 앵커 없는 부분 일치다. `IDEA-1`을 참조한 기획서는 `IDEA-12`를 닫지 못하므로
+    /// `IDEA-12`가 기획자 대기 물량으로 남는다. 스크립트가 한 번의 훑기로 모은 줄에 부분 문자열
+    /// 검사를 걸어도 이 방향의 답이 그대로인지를 본다(TASK-104).
+    ///
+    /// 반대 방향(`IDEA-12`만 참조한 기획서가 `IDEA-1`까지 닫는 쪽)은 두 판정이 갈라지는 자리라
+    /// 여기서 세우지 않는다. 스크립트만 `IDEA-1`을 닫고 앱은 `source_idea_id`를 아이디어 id와 값
+    /// 전체로 비교한다. 착수 시점부터 있던 차이이고 TASK-104가 만든 것이 아니다 — 조건 스크립트의
+    /// 시나리오 표가 그 상황의 현재 답을 따로 고정한다.
+    #[test]
+    fn a_spec_naming_a_shorter_idea_id_does_not_close_the_longer_one() {
+        let (root, workflow_root) = project();
+        write_idea(&workflow_root, "IDEA-1");
+        write_idea(&workflow_root, "IDEA-12");
+        write_spec(&workflow_root, "SPEC-001", "IDEA-1");
+
+        assert!(assert_matches_condition_script(root.path()).planner);
     }
 
     #[test]
@@ -554,6 +590,58 @@ mod tests {
         assert!(!assert_matches_condition_script(root.path()).architect);
     }
 
+    /// 위임 대리 결정은 최신 자리도 차지하지 못한다. 앞의 시나리오가 후보 선택을 보고 이쪽이 최신
+    /// 검사를 본다. 스크립트는 최신 검사를 `spec_id`별 `created_at` 최댓값 표로 하는데, 그 표에
+    /// 드는 것은 `created_by`가 정확히 `user`인 결정뿐이다(TASK-104). 앱은 `read_spec_decisions`가
+    /// 같은 값으로 거른 뒤 `latest_approvals`가 최신을 고른다.
+    #[test]
+    fn a_delegate_approval_does_not_supersede_an_approval() {
+        let (root, workflow_root) = project();
+        write_spec(&workflow_root, "SPEC-001", "IDEA-001");
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_decision_created_by(
+            &workflow_root,
+            "DECISION-002",
+            "SPEC-001",
+            "approved",
+            "user-delegate",
+            "2026-08-02T00:00:00Z",
+        );
+
+        assert!(assert_matches_condition_script(root.path()).architect);
+    }
+
+    /// 최신 검사는 같은 기획서 안에서만 한다. 스크립트의 최댓값 표가 `spec_id`로 갈리는 것과 앱의
+    /// `latest_approvals`가 `other.spec_id == record.spec_id`를 보는 것이 같은 규칙이다. 표를 하나로
+    /// 두면 다른 기획서의 더 늦은 결정이 이 승인을 밀어내 두 판정이 갈라진다.
+    #[test]
+    fn a_later_decision_on_another_spec_does_not_supersede_an_approval() {
+        let (root, workflow_root) = project();
+        write_spec(&workflow_root, "SPEC-001", "IDEA-001");
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-002",
+            "SPEC-002",
+            "revision_requested",
+            "2026-08-02T00:00:00Z",
+        );
+
+        assert!(assert_matches_condition_script(root.path()).architect);
+    }
+
     #[test]
     fn a_todo_task_is_developer_work() {
         let (root, workflow_root) = project();
@@ -713,6 +801,88 @@ mod tests {
         write_lease(root.path(), "TASK-002", &future());
 
         assert!(!assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// SPEC-032 완료 조건 2·5. 선행 관계가 없는 두 작업 — 어느 쪽도 상대를 `depends_on`에 적지
+    /// 않았다 — 이 같은 파일을 선언하면, 한쪽이 잡힌 동안 다른 쪽은 착수 대상이 아니다. 두 판정이
+    /// 같은 답을 낸다.
+    #[test]
+    fn a_shared_scope_is_not_developer_work_while_the_other_task_is_leased() {
+        let (root, workflow_root) = project();
+        write_task_with_scope(&workflow_root, "TASK-001", "todo", "[src/shared.rs]");
+        write_task_with_scope(&workflow_root, "TASK-002", "in_progress", "[src/shared.rs]");
+        write_lease(root.path(), "TASK-002", &future());
+
+        assert!(!assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// SPEC-032 완료 조건 3·5. 겹치지 않는 선언은 잡힌 lease가 있어도 열린다. 위 시나리오와 다른
+    /// 것은 선언 한 줄뿐이다.
+    #[test]
+    fn a_disjoint_scope_is_developer_work_while_another_task_is_leased() {
+        let (root, workflow_root) = project();
+        write_task_with_scope(&workflow_root, "TASK-001", "todo", "[src/one.rs]");
+        write_task_with_scope(&workflow_root, "TASK-002", "in_progress", "[src/two.rs]");
+        write_lease(root.path(), "TASK-002", &future());
+
+        assert!(assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// SPEC-032 완료 조건 6·5. 선언이 없는 작업은 무엇과 겹치는지 알 수 없으므로 잡힌 lease가
+    /// 하나라도 있으면 자격에서 빠지고, 없으면 열린다. 두 판정이 같은 답을 낸다.
+    #[test]
+    fn a_task_without_a_scope_is_developer_work_only_while_nothing_is_leased() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "todo", None);
+        write_task_with_scope(&workflow_root, "TASK-002", "in_progress", "[src/two.rs]");
+        assert!(assert_matches_condition_script(root.path()).developer);
+
+        write_lease(root.path(), "TASK-002", &future());
+        assert!(!assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// SPEC-032 완료 조건 7·5. 만료된 lease는 겹치는 작업을 막지 않는다. 만료가 유일한 해제
+    /// 조건이라는 것이 R8이고, 그것이 없으면 죽은 세션 하나가 겹치는 작업을 영원히 닫는다.
+    #[test]
+    fn an_expired_lease_does_not_block_an_overlapping_task() {
+        let (root, workflow_root) = project();
+        write_task_with_scope(&workflow_root, "TASK-001", "todo", "[src/shared.rs]");
+        write_task_with_scope(&workflow_root, "TASK-002", "in_progress", "[src/shared.rs]");
+        write_lease(root.path(), "TASK-002", &past());
+
+        assert!(assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// 형식 오류 선언은 부재와 같은 답을 낸다. 겹침이 대칭 관계이므로 어느 쪽이 잘못 썼든 결과가
+    /// 같고, 두 판정도 갈라지지 않는다.
+    #[test]
+    fn a_malformed_scope_is_not_developer_work_on_either_side() {
+        for (mine, theirs) in [
+            ("[\"src/one.rs\"]", "[src/two.rs]"),
+            ("[src/one.rs]", "[\"src/two.rs\"]"),
+        ] {
+            let (root, workflow_root) = project();
+            write_task_with_scope(&workflow_root, "TASK-001", "todo", mine);
+            write_task_with_scope(&workflow_root, "TASK-002", "in_progress", theirs);
+            write_lease(root.path(), "TASK-002", &future());
+
+            assert!(
+                !assert_matches_condition_script(root.path()).developer,
+                "`scope_files: {mine}`와 `{theirs}`의 조합이 자격으로 읽혔다"
+            );
+        }
+    }
+
+    /// 빈 목록은 "만지는 파일이 없다"이고 아무와도 겹치지 않는다. 부재와 다르다 — 부재였다면 잡힌
+    /// lease 하나로 막혔을 자리다.
+    #[test]
+    fn an_empty_scope_overlaps_with_nothing() {
+        let (root, workflow_root) = project();
+        write_task_with_scope(&workflow_root, "TASK-001", "todo", "[]");
+        write_task_with_scope(&workflow_root, "TASK-002", "in_progress", "[src/two.rs]");
+        write_lease(root.path(), "TASK-002", &future());
+
+        assert!(assert_matches_condition_script(root.path()).developer);
     }
 
     /// 세 역할이 보는 대상 각각에 만료된 lease가 있는 픽스처. 죽은 세션이 남긴 lease가 자격을
@@ -898,6 +1068,50 @@ mod tests {
         assert!(assert_matches_condition_script(root.path()).architect);
     }
 
+    /// 같은 짝의 최신 검사 방향. 다른 워크플로우의 더 늦은 결정은 이쪽 승인을 밀어내지 못한다.
+    /// 스크립트는 최댓값 표를 워크플로우 하나 안에서 만들고(TASK-104), 앱은 워크플로우별로 읽은
+    /// 결정 목록에 `latest_approvals`를 건다. 표를 전역으로 만들면 여기서 갈라진다.
+    #[test]
+    fn a_later_decision_in_another_workflow_does_not_supersede_an_approval() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let first = repository
+            .create_workflow(root.path(), "First")
+            .expect("create workflow");
+        let summary = repository
+            .create_workflow(root.path(), "Second")
+            .expect("create workflow");
+        let control_root = root.path().join(".workflow");
+        install_condition_script(&control_root).expect("install condition script");
+        let first_root = control_root.join(&first.workflows[0].directory);
+        let second_root = control_root.join(
+            &summary
+                .workflows
+                .iter()
+                .find(|workflow| workflow.name == "Second")
+                .expect("second workflow")
+                .directory,
+        );
+        write_decision(
+            &first_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_decision(
+            &second_root,
+            "DECISION-002",
+            "SPEC-001",
+            "revision_requested",
+            "2026-08-02T00:00:00Z",
+        );
+
+        // 두 번째 워크플로우의 결정이 `SPEC-001`을 같은 이름으로 쓰지만 첫 워크플로우의 승인을
+        // 밀어내지 못한다. 표가 전역이면 이 값이 뒤집힌다.
+        assert!(assert_matches_condition_script(root.path()).architect);
+    }
+
     /// SPEC-018 R1 (나). 후속 기획서가 없는 수정 요청이 기획자 대기 물량이다.
     #[test]
     fn a_revision_request_without_a_follow_up_spec_is_planner_work() {
@@ -981,6 +1195,48 @@ mod tests {
         );
 
         assert!(assert_matches_condition_script(root.path()).planner);
+    }
+
+    /// 위임 대리 결정은 사용자의 수정 요청을 최신 자리에서 밀어내지 못한다. 앱의 읽기 경로가
+    /// `created_by`를 `user`로 거른 목록 안에서만 `created_at`을 비교하므로, 스크립트의 기획자
+    /// 분기도 비교 대상을 같은 값으로 걸러야 두 판정이 같은 답을 낸다(SPEC-030 R1·R3).
+    #[test]
+    fn a_delegate_approval_does_not_supersede_a_users_revision_request() {
+        let (root, workflow_root) = project();
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "revision_requested",
+            "2026-08-01T00:00:00Z",
+        );
+        write_decision_created_by(
+            &workflow_root,
+            "DECISION-002",
+            "SPEC-001",
+            "approved",
+            "user-delegate",
+            "2026-08-02T00:00:00Z",
+        );
+
+        assert!(assert_matches_condition_script(root.path()).planner);
+    }
+
+    /// 반대 방향. 대리 수정 요청은 앱이 아예 읽지 않으므로 기획자 일감이 아니다. 스크립트가 후보를
+    /// 고를 때 `created_by`를 값 전체로 비교하지 않으면 여기서 갈린다(SPEC-030 R1·R3).
+    #[test]
+    fn a_revision_request_created_by_a_delegate_is_not_planner_work() {
+        let (root, workflow_root) = project();
+        write_decision_created_by(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "revision_requested",
+            "user-delegate",
+            "2026-08-01T00:00:00Z",
+        );
+
+        assert!(!assert_matches_condition_script(root.path()).planner);
     }
 
     /// 후속 판정 키는 결정 id다. 그 결정을 참조하는 것이 개발 작업뿐이면 대기가 유지된다.
@@ -1090,11 +1346,13 @@ mod tests {
         let items = crate::domain::project::WorkflowItems::default();
         let approved = [("DECISION-001".to_owned(), "SPEC-001".to_owned())];
         let unsatisfied = HashSet::new();
+        let overlapped = HashSet::new();
         let workflows = [super::WorkflowInput {
             items: &items,
             approved_decisions: &approved,
             revision_requested_decisions: &[],
             unsatisfied_dependencies: &unsatisfied,
+            overlap_blocked: &overlapped,
         }];
         let mut leases = HashSet::new();
         leases.insert("SPEC-001".to_owned());

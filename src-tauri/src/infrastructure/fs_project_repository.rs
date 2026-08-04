@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::domain::project::{
     AgentLease, AgentLeaseSummary, IdeaDocument, PendingRoleWork, ProjectManifest, ProjectSummary,
     SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
-    TaskDocument, TaskEvent, TaskQaOutcome, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
-    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    TaskDocument, TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
+    WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
+    WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 use crate::infrastructure::claim_helper::{
     install_claim_helper, validate_claim_helper, ClaimHelperError,
@@ -286,11 +287,14 @@ impl FileSystemProjectRepository {
         // `inspect`의 2.5초 주기와 다르고, 목록 payload는 이 값을 싣지 않는다(SPEC-013 R5).
         let graph = task_dependency_graph(&tasks_root);
         let (dependencies, dependency_format_error) = task_dependencies(&summary.id, &graph);
+        // 겹침 근거는 미만료 lease를 읽어야 나온다. 자격 판정이 쓰는 읽기 그대로다.
+        let overlap_blocks = task_overlap_blocks(&summary.id, &graph, &lease_ids(&control_root));
         Ok(TaskDocument {
             summary,
             body,
             dependencies,
             dependency_format_error,
+            overlap_blocks,
         })
     }
 
@@ -388,35 +392,7 @@ impl FileSystemProjectRepository {
         install_project_instructions(&root, &control_root)?;
         install_claim_helper(&control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
-        let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name)?;
-        let (task, _) = read_markdown_document(&task_path, "todo")?;
-        if task.status != "qa_waiting" {
-            return Err(ProjectError::TaskNotAwaitingQa);
-        }
-
-        let decision_id = format!("QA-{}", compact_uuid()[..8].to_uppercase());
-        let created_at = Utc::now().to_rfc3339();
-        let (outcome_value, next_status, event_kind) = match outcome {
-            TaskQaOutcome::Confirmed => ("confirmed", "completed", "completed"),
-            TaskQaOutcome::RevisionRequested => {
-                ("revision_requested", "todo", "revision_requested")
-            }
-        };
-        let decision = format!(
-            "---\nschema: workflow-labs/qa-decision@1\nid: {decision_id}\ntask_id: {}\noutcome: {outcome_value}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
-            yaml_scalar(&task.id),
-            comment.trim()
-        );
-        write_text_atomically(
-            &workflow_root
-                .join("decisions")
-                .join(format!("{decision_id}.md")),
-            &decision,
-        )?;
-
-        let source = fs::read_to_string(&task_path)?;
-        let updated = update_task_frontmatter(&source, next_status, &created_at, event_kind)?;
-        write_text_atomically(&task_path, &updated)?;
+        record_one_task_qa(&workflow_root, file_name, &outcome, comment)?;
 
         Ok(summary_from_manifest(
             &root,
@@ -424,6 +400,62 @@ impl FileSystemProjectRepository {
             SchemaCompatibility::Current,
             read_active_leases(&control_root)?,
         ))
+    }
+
+    /// 목록을 통째로 받아 건별로 QA 확인을 기록한다. 확인 전용이라 `outcome` 자리가 없다.
+    /// 한 건이 실패해도 멈추지 않고, `Err`로 끝나는 것은 프로젝트 전체를 읽지 못하는 경우뿐이다.
+    /// 리스는 보지 않는다 — 일괄이 단건보다 엄격해지면 같은 작업이 자리에 따라 다르게 찍힌다.
+    pub fn confirm_task_qa_batch(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_names: &[String],
+        comment: &str,
+    ) -> Result<TaskQaBatchResult, ProjectError> {
+        validate_task_qa(&TaskQaOutcome::Confirmed, comment)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        install_project_instructions(&root, &control_root)?;
+        install_claim_helper(&control_root)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+
+        let results = file_names
+            .iter()
+            .map(|file_name| {
+                match record_one_task_qa(
+                    &workflow_root,
+                    file_name,
+                    &TaskQaOutcome::Confirmed,
+                    comment,
+                ) {
+                    Ok(task_id) => TaskQaBatchEntry {
+                        file_name: file_name.clone(),
+                        task_id: Some(task_id),
+                        recorded: true,
+                        message: None,
+                    },
+                    Err(error) => TaskQaBatchEntry {
+                        file_name: file_name.clone(),
+                        task_id: task_id_of(&workflow_root, file_name),
+                        recorded: false,
+                        message: Some(error.to_string()),
+                    },
+                }
+            })
+            .collect();
+
+        Ok(TaskQaBatchResult {
+            summary: summary_from_manifest(
+                &root,
+                project,
+                SchemaCompatibility::Current,
+                read_active_leases(&control_root)?,
+            ),
+            results,
+        })
     }
 
     pub fn migrate(&self, root: &Path) -> Result<ProjectSummary, ProjectError> {
@@ -701,11 +733,17 @@ fn summary_from_manifest(
     active_leases: Vec<AgentLeaseSummary>,
 ) -> ProjectSummary {
     let control_root = root.join(CONTROL_DIRECTORY);
+    // 미만료 lease의 대상 id. 겹침 판정과 선점 판정이 같은 집합을 본다.
+    let lease_target_ids = lease_ids(&control_root);
     let prepared: Vec<PreparedWorkflow> = manifest
         .workflows
         .iter()
         .map(|workflow| {
-            PreparedWorkflow::read(control_root.join(&workflow.directory), &active_leases)
+            PreparedWorkflow::read(
+                control_root.join(&workflow.directory),
+                &active_leases,
+                &lease_target_ids,
+            )
         })
         .collect();
     let pending_work = {
@@ -716,13 +754,14 @@ fn summary_from_manifest(
                 approved_decisions: &workflow.approved_decisions,
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
+                overlap_blocked: &workflow.overlap_blocked,
             })
             .collect();
         let migration_locked = control_root
             .join(RUNTIME_DIRECTORY)
             .join(MIGRATION_LOCK_FILE)
             .exists();
-        pending_role_work(migration_locked, &lease_ids(&control_root), &inputs)
+        pending_role_work(migration_locked, &lease_target_ids, &inputs)
     };
 
     ProjectSummary {
@@ -758,24 +797,33 @@ struct PreparedWorkflow {
     revision_requested_decisions: Vec<String>,
     /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2).
     unsatisfied_dependencies: HashSet<String>,
+    /// 겹침 선언이 활성 lease와 충돌해 착수가 막힌 작업의 id(SPEC-032 R2).
+    overlap_blocked: HashSet<String>,
 }
 
 impl PreparedWorkflow {
-    fn read(root: PathBuf, leases: &[AgentLeaseSummary]) -> Self {
-        let decisions = read_spec_decisions(&root);
-        let items = workflow_items(&root, &decisions, leases);
+    fn read(
+        root: PathBuf,
+        leases: &[AgentLeaseSummary],
+        lease_target_ids: &HashSet<String>,
+    ) -> Self {
+        // 디렉터리마다 한 번씩만 훑는다(SPEC-033 R7). 결정 훑기가 기획서 결정 목록과 QA 이벤트를,
+        // 작업 훑기가 목록 요약과 판정 노드를 함께 낸다. 선행·겹침 판정은 목록에 실리지 않는 값을
+        // 쓰지만(`WorkflowItemSummary`에 필드를 더하지 않는다 — TASK-037) 같은 읽기에서 나온다.
+        let (decisions, qa_events) = read_decision_documents(&root);
+        let (tasks, graph) = read_task_documents(&root.join("tasks"));
+        let items = workflow_items(&root, &decisions, &qa_events, tasks, leases);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
-        // 선행 판정에는 워크플로우의 모든 작업 문서가 필요하다. 목록 읽기는 선언을 담지 않으므로
-        // (`WorkflowItemSummary`에 필드를 더하지 않는다 — TASK-037) `tasks/`를 한 번 더 훑는다.
-        let unsatisfied_dependencies =
-            unsatisfied_dependency_task_ids(&task_dependency_graph(&root.join("tasks")));
+        let unsatisfied_dependencies = unsatisfied_dependency_task_ids(&graph);
+        let overlap_blocked = overlap_blocked_task_ids(&graph, lease_target_ids);
         Self {
             root,
             items,
             approved_decisions,
             revision_requested_decisions,
             unsatisfied_dependencies,
+            overlap_blocked,
         }
     }
 }
@@ -850,6 +898,54 @@ fn validate_task_qa(outcome: &TaskQaOutcome, comment: &str) -> Result<(), Projec
         return Err(ProjectError::DecisionCommentTooLong);
     }
     Ok(())
+}
+
+/// QA 한 건을 기록한다. 결정 문서를 쓰고 작업 문서의 상태와 `history`를 갱신한 뒤 작업 id를 준다.
+/// 단건 경로와 일괄 경로가 이 함수 하나를 함께 쓴다 — QA 기록 규칙이 지켜지는 자리를 둘로 늘리지
+/// 않는 것이 뽑은 이유다. 판정 순서와 에러 종류는 뽑기 전과 같다.
+fn record_one_task_qa(
+    workflow_root: &Path,
+    file_name: &str,
+    outcome: &TaskQaOutcome,
+    comment: &str,
+) -> Result<String, ProjectError> {
+    let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name)?;
+    let (task, _) = read_markdown_document(&task_path, "todo")?;
+    if task.status != "qa_waiting" {
+        return Err(ProjectError::TaskNotAwaitingQa);
+    }
+
+    let decision_id = format!("QA-{}", compact_uuid()[..8].to_uppercase());
+    let created_at = Utc::now().to_rfc3339();
+    let (outcome_value, next_status, event_kind) = match outcome {
+        TaskQaOutcome::Confirmed => ("confirmed", "completed", "completed"),
+        TaskQaOutcome::RevisionRequested => ("revision_requested", "todo", "revision_requested"),
+    };
+    let decision = format!(
+        "---\nschema: workflow-labs/qa-decision@1\nid: {decision_id}\ntask_id: {}\noutcome: {outcome_value}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
+        yaml_scalar(&task.id),
+        comment.trim()
+    );
+    write_text_atomically(
+        &workflow_root
+            .join("decisions")
+            .join(format!("{decision_id}.md")),
+        &decision,
+    )?;
+
+    let source = fs::read_to_string(&task_path)?;
+    let updated = update_task_frontmatter(&source, next_status, &created_at, event_kind)?;
+    write_text_atomically(&task_path, &updated)?;
+
+    Ok(task.id)
+}
+
+/// 실패한 건의 작업 id. 문서를 읽지 못하면 `None`이고, 파일 이름에서 추정하지 않는다.
+fn task_id_of(workflow_root: &Path, file_name: &str) -> Option<String> {
+    let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name).ok()?;
+    read_markdown_document(&task_path, "todo")
+        .ok()
+        .map(|(task, _)| task.id)
 }
 
 fn update_task_frontmatter(
@@ -974,13 +1070,17 @@ fn safe_markdown_file(directory: &Path, file_name: &str) -> Result<PathBuf, Proj
     Ok(path)
 }
 
+/// 이미 읽어 둔 결정과 작업을 받는다. 이 함수가 여는 디렉터리는 `specs/`와 `ideas/` 둘뿐이고
+/// 각각 한 번이다(SPEC-033 R7).
 fn workflow_items(
     workflow_root: &Path,
     decisions: &[SpecDecisionRecord],
+    qa_events: &HashMap<String, Vec<TaskEvent>>,
+    mut tasks: Vec<WorkflowItemSummary>,
     leases: &[AgentLeaseSummary],
 ) -> WorkflowItems {
-    let mut specs = read_markdown_summaries(&workflow_root.join("specs"), "draft");
     let latest = latest_spec_decisions(decisions);
+    let (mut specs, references) = read_spec_documents(&workflow_root.join("specs"), &latest);
     let mut decision_events = spec_decision_events(decisions);
     for spec in &mut specs {
         normalize_spec_status(spec);
@@ -994,13 +1094,8 @@ fn workflow_items(
         }
     }
     let mut ideas = read_markdown_summaries(&workflow_root.join("ideas"), "inbox");
-    derive_idea_states(
-        &mut ideas,
-        &spec_references(workflow_root, decisions),
-        leases,
-    );
-    let mut tasks = read_markdown_summaries(&workflow_root.join("tasks"), "todo");
-    merge_qa_decision_events(workflow_root, &mut tasks);
+    derive_idea_states(&mut ideas, &references, leases);
+    merge_qa_decision_events(qa_events, &mut tasks);
     WorkflowItems {
         ideas,
         specs,
@@ -1020,46 +1115,79 @@ struct SpecReference {
 }
 
 /// `source_idea_id`를 가진 기획서만 모은다. 없는 문서는 아이디어에서 출발하지 않은 기획서이므로
-/// 판정 대상이 아니다. 결정 목록은 이미 읽어 둔 것을 받는다 — 결정 판정 규칙을 새로 쓰지 않는다.
-fn spec_references(workflow_root: &Path, decisions: &[SpecDecisionRecord]) -> Vec<SpecReference> {
-    let decided = latest_spec_decisions(decisions);
-    fs::read_dir(workflow_root.join("specs"))
+/// 판정 대상이 아니다. 결정 판정은 이미 읽어 둔 최신 결정 표를 받는다 — 규칙을 새로 쓰지 않는다.
+fn spec_reference(
+    path: &Path,
+    metadata: Option<&serde_yaml::Value>,
+    decided: &HashMap<String, (String, String)>,
+) -> Option<SpecReference> {
+    let idea_id = yaml_text(metadata, "source_idea_id")?;
+    // `read_markdown_document`의 fallback과 같은 규칙이어야 화면이 짚어 주는 id와
+    // 목록의 기획서 id가 어긋나지 않는다.
+    let spec_id = yaml_text(metadata, "id").unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("DOCUMENT")
+            .to_owned()
+    });
+    // 화면 기준 상태가 `draft`인가를 본다. 파일에 적힌 글자가 아니다. 결정이 있으면 그
+    // 결정이 상태를 덮어쓰고, 정규화가 알 수 없는 값을 `draft`로 떨어뜨리므로 `draft`가
+    // 아니라고 말하려면 `user_review`가 명시돼 있어야 한다.
+    let latest_outcome = decided.get(&spec_id).map(|(_, outcome)| outcome.as_str());
+    let is_draft =
+        latest_outcome.is_none() && yaml_text(metadata, "status").as_deref() != Some("user_review");
+    // 최신 결정 하나만 본다. `rejected` 뒤에 다른 결정이 붙으면 그 기획서는 반려로 끝난
+    // 것이 아니고, `latest_spec_decisions`가 이미 그 규칙을 판정해 둔다.
+    let is_rejected = latest_outcome == Some("rejected");
+    Some(SpecReference {
+        idea_id,
+        spec_id,
+        is_draft,
+        is_rejected,
+    })
+}
+
+/// `specs/`를 한 번 훑어 목록 요약과 아이디어 판정용 참조를 함께 낸다(SPEC-033 R7).
+///
+/// 두 값이 세는 문서가 서로 다르다. 요약은 일반 파일만 담고(`read_markdown_summaries`의 규칙),
+/// 참조는 읽히는 `.md`를 전부 담는다 — 심링크로 걸린 기획서가 목록에는 없어도 아이디어 판정에는
+/// 든다. 그 차이가 판정을 갈라 온 자리이므로 합치면서도 각자의 규칙을 그대로 지킨다.
+/// 참조 순서는 디렉터리 순회 순서 그대로이고, 요약만 목록 정렬을 거친다.
+fn read_spec_documents(
+    specs_root: &Path,
+    decided: &HashMap<String, (String, String)>,
+) -> (Vec<WorkflowItemSummary>, Vec<SpecReference>) {
+    let mut summaries = Vec::new();
+    let mut references = Vec::new();
+    for entry in fs::read_dir(specs_root)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("md") {
-                return None;
-            }
-            let contents = fs::read_to_string(&path).ok()?;
-            let (metadata, _) = split_frontmatter(&contents.replace("\r\n", "\n"));
-            let idea_id = yaml_text(metadata.as_ref(), "source_idea_id")?;
-            // `read_markdown_document`의 fallback과 같은 규칙이어야 화면이 짚어 주는 id와
-            // 목록의 기획서 id가 어긋나지 않는다.
-            let spec_id = yaml_text(metadata.as_ref(), "id").unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("DOCUMENT")
-                    .to_owned()
-            });
-            // 화면 기준 상태가 `draft`인가를 본다. 파일에 적힌 글자가 아니다. 결정이 있으면 그
-            // 결정이 상태를 덮어쓰고, 정규화가 알 수 없는 값을 `draft`로 떨어뜨리므로 `draft`가
-            // 아니라고 말하려면 `user_review`가 명시돼 있어야 한다.
-            let latest_outcome = decided.get(&spec_id).map(|(_, outcome)| outcome.as_str());
-            let is_draft = latest_outcome.is_none()
-                && yaml_text(metadata.as_ref(), "status").as_deref() != Some("user_review");
-            // 최신 결정 하나만 본다. `rejected` 뒤에 다른 결정이 붙으면 그 기획서는 반려로 끝난
-            // 것이 아니고, `latest_spec_decisions`가 이미 그 규칙을 판정해 둔다.
-            let is_rejected = latest_outcome == Some("rejected");
-            Some(SpecReference {
-                idea_id,
-                spec_id,
-                is_draft,
-                is_rejected,
-            })
-        })
-        .collect()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let normalized = contents.replace("\r\n", "\n");
+        let (metadata, body) = split_frontmatter(&normalized);
+        if matches!(fs::symlink_metadata(&path), Ok(value) if value.file_type().is_file()) {
+            summaries.push(markdown_summary(&path, metadata.as_ref(), &body, "draft"));
+        }
+        references.extend(spec_reference(&path, metadata.as_ref(), decided));
+    }
+    sort_markdown_summaries(&mut summaries);
+    (summaries, references)
+}
+
+fn spec_references(workflow_root: &Path, decisions: &[SpecDecisionRecord]) -> Vec<SpecReference> {
+    read_spec_documents(
+        &workflow_root.join("specs"),
+        &latest_spec_decisions(decisions),
+    )
+    .1
 }
 
 /// 아이디어 항목의 `status`와 `stalled_spec_ids`를 파생값으로 채운다.
@@ -1138,13 +1266,19 @@ fn read_markdown_summaries(directory: &Path, default_status: &str) -> Vec<Workfl
                 .map(|(summary, _)| summary)
         })
         .collect();
+    sort_markdown_summaries(&mut items);
+    items
+}
+
+/// 목록 화면이 쓰는 정렬. 한 번 훑기로 요약을 만드는 자리들이 같은 순서를 내도록 규칙을 한 벌만 둔다.
+/// 같은 디렉터리에 파일 이름이 겹칠 수 없으므로 이 비교는 전순서이고, 입력 순서가 결과를 바꾸지 않는다.
+fn sort_markdown_summaries(items: &mut [WorkflowItemSummary]) {
     items.sort_by(|left, right| {
         right
             .updated_at
             .cmp(&left.updated_at)
             .then_with(|| left.file_name.cmp(&right.file_name))
     });
-    items
 }
 
 fn read_markdown_document(
@@ -1154,6 +1288,20 @@ fn read_markdown_document(
     let contents = fs::read_to_string(path)?;
     let normalized = contents.replace("\r\n", "\n");
     let (metadata, body) = split_frontmatter(&normalized);
+    Ok((
+        markdown_summary(path, metadata.as_ref(), &body, default_status),
+        body.trim().to_owned(),
+    ))
+}
+
+/// 이미 읽어 둔 프론트매터와 본문에서 목록 항목 하나를 만든다. 파일을 다시 읽지 않는 자리가
+/// 이 함수를 부르고, 같은 문서에서 다른 값을 함께 만드는 훑기가 그 자리다(SPEC-033 R7).
+fn markdown_summary(
+    path: &Path,
+    metadata: Option<&serde_yaml::Value>,
+    body: &str,
+    default_status: &str,
+) -> WorkflowItemSummary {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -1164,40 +1312,36 @@ fn read_markdown_document(
         .and_then(|value| value.to_str())
         .unwrap_or("DOCUMENT")
         .to_owned();
-    let title = yaml_text(metadata.as_ref(), "title")
-        .or_else(|| markdown_title(&body))
-        .or_else(|| markdown_plain_title(&body))
+    let title = yaml_text(metadata, "title")
+        .or_else(|| markdown_title(body))
+        .or_else(|| markdown_plain_title(body))
         .unwrap_or_else(|| fallback_id.clone());
-    let updated_at = yaml_text(metadata.as_ref(), "updated_at")
-        .or_else(|| yaml_text(metadata.as_ref(), "created_at"))
+    let updated_at = yaml_text(metadata, "updated_at")
+        .or_else(|| yaml_text(metadata, "created_at"))
         .or_else(|| {
             fs::metadata(path)
                 .and_then(|value| value.modified())
                 .ok()
                 .map(|value| DateTime::<Utc>::from(value).to_rfc3339())
         });
-    let due_at = yaml_text(metadata.as_ref(), "due_at");
-    let source_spec_id = yaml_text(metadata.as_ref(), "source_spec_id");
-    let source_decision_id = yaml_text(metadata.as_ref(), "source_decision_id");
-    let events = read_task_events(metadata.as_ref());
-    Ok((
-        WorkflowItemSummary {
-            file_name,
-            id: yaml_text(metadata.as_ref(), "id").unwrap_or(fallback_id),
-            title,
-            status: yaml_text(metadata.as_ref(), "status")
-                .unwrap_or_else(|| default_status.to_owned()),
-            updated_at,
-            due_at,
-            source_spec_id,
-            source_decision_id,
-            // 아이디어 판정(`derive_idea_states`)만 이 값을 채운다.
-            stalled_spec_ids: Vec::new(),
-            events,
-            excerpt: markdown_excerpt(&body),
-        },
-        body.trim().to_owned(),
-    ))
+    let due_at = yaml_text(metadata, "due_at");
+    let source_spec_id = yaml_text(metadata, "source_spec_id");
+    let source_decision_id = yaml_text(metadata, "source_decision_id");
+    let events = read_task_events(metadata);
+    WorkflowItemSummary {
+        file_name,
+        id: yaml_text(metadata, "id").unwrap_or(fallback_id),
+        title,
+        status: yaml_text(metadata, "status").unwrap_or_else(|| default_status.to_owned()),
+        updated_at,
+        due_at,
+        source_spec_id,
+        source_decision_id,
+        // 아이디어 판정(`derive_idea_states`)만 이 값을 채운다.
+        stalled_spec_ids: Vec::new(),
+        events,
+        excerpt: markdown_excerpt(body),
+    }
 }
 
 /// 상태 전이 이력을 관대하게 읽는다. 이력이 없거나 항목이 깨진 것은 오류가 아니다.
@@ -1297,11 +1441,83 @@ fn parse_dependency_declaration(frontmatter: &str) -> DependencyDeclaration {
     DependencyDeclaration::Declared(tokens.into_iter().map(str::to_owned).collect())
 }
 
-/// 판정에 필요한 값만 담은 워크플로우의 작업 목록. 문서 id로 찾고 값은 상태와 선언이다.
+/// 프론트매터의 겹침 선언 한 줄을 읽은 결과(SPEC-032 R1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopeDeclaration {
+    /// 키가 없다. 이 작업이 무엇을 만지는지 알 수 없다.
+    Absent,
+    /// 계약 형식의 목록을 읽었다. 빈 목록은 "만지는 파일이 없다"이고 아무와도 겹치지 않는다.
+    Declared(Vec<String>),
+    /// 키는 있는데 계약 형식이 아니다.
+    Malformed,
+}
+
+/// `depends_on`과 같은 어법으로 `scope_files` 한 줄을 읽는다. 두 필드를 한 함수로 합치지 않는 것은
+/// 허용 문자 집합이 다르기 때문이다 — 경로에는 `.`과 `/`가 들어간다.
+///
+/// 판정 순서는 [`parse_dependency_declaration`]과 같고, 조건 스크립트 두 본문이 같은 결론을 낸다.
+/// 부재와 형식 오류는 자격 판정에서 같은 답을 내지만 화면이 둘을 다르게 말할 수 있도록 구분한다.
+fn parse_scope_declaration(frontmatter: &str) -> ScopeDeclaration {
+    let mut declarations = frontmatter
+        .lines()
+        .filter_map(|line| line.strip_prefix("scope_files:"));
+    let Some(value) = declarations.next() else {
+        return ScopeDeclaration::Absent;
+    };
+    // 같은 키가 두 줄이면 YAML 중복 키이기도 하다.
+    if declarations.next().is_some() {
+        return ScopeDeclaration::Malformed;
+    }
+    let value = value.trim();
+    // 값이 비어 있는 것은 블록 표기이거나 값 없는 키다.
+    if !value.starts_with('[') || !value.ends_with(']') || value.len() < 2 {
+        return ScopeDeclaration::Malformed;
+    }
+    let tokens: Vec<&str> = value[1..value.len() - 1]
+        .split(',')
+        .map(str::trim)
+        .collect();
+    if tokens.iter().all(|token| token.is_empty()) {
+        return ScopeDeclaration::Declared(Vec::new());
+    }
+    // 따옴표로 감싼 표기와 공백이 든 경로가 여기서 걸린다. 경로는 프로젝트 루트 기준 상대 경로를
+    // 적힌 그대로 쓴다 — 정규화도 글롭도 하지 않는다.
+    if tokens.iter().any(|token| {
+        token.is_empty()
+            || !token.chars().all(|value| {
+                value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/')
+            })
+    }) {
+        return ScopeDeclaration::Malformed;
+    }
+    ScopeDeclaration::Declared(tokens.into_iter().map(str::to_owned).collect())
+}
+
+/// 판정에 필요한 값만 담은 작업 문서 하나. 한 번의 읽기에서 셋이 함께 나온다.
+struct TaskNode {
+    status: String,
+    dependencies: DependencyDeclaration,
+    scope: ScopeDeclaration,
+}
+
+/// 판정에 필요한 값만 담은 워크플로우의 작업 목록. 문서 id로 찾고 값은 상태와 두 선언이다.
 ///
 /// id와 상태는 목록 화면이 쓰는 규칙 그대로 읽고 선언만 줄 단위로 읽는다. 같은 id를 가진 문서가
 /// 둘 이상이면 파일 이름이 앞서는 쪽을 남긴다 — 중복 id는 계약 위반이라 여기서 다루지 않는다.
-fn task_dependency_graph(tasks_root: &Path) -> HashMap<String, (String, DependencyDeclaration)> {
+fn task_dependency_graph(tasks_root: &Path) -> HashMap<String, TaskNode> {
+    read_task_documents(tasks_root).1
+}
+
+/// `tasks/`를 한 번 훑어 목록 요약과 판정 노드를 함께 낸다(SPEC-033 R7).
+///
+/// 두 값이 세는 문서와 읽는 규칙이 같다. id와 상태는 목록 요약이 만든 값을 그대로 쓰고 — 두 자리가
+/// 같은 규칙이라고 적어 온 것이 이 함수에서 한 벌이 된다 — 선언만 프론트매터 원문에서 줄 단위로
+/// 읽는다. 선언은 목록 payload에 실리지 않는다(`WorkflowItemSummary`에 필드를 더하지 않는다 —
+/// TASK-037).
+///
+/// 노드 표는 파일 이름 순서로 채운다. 같은 id를 가진 문서가 둘 이상이면 파일 이름이 앞서는 쪽을
+/// 남기는 규칙이 그 순서에 기댄다. 요약은 뒤에서 다시 정렬하므로 이 순서에 기대지 않는다.
+fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<String, TaskNode>) {
     let mut paths: Vec<PathBuf> = fs::read_dir(tasks_root)
         .into_iter()
         .flatten()
@@ -1314,35 +1530,35 @@ fn task_dependency_graph(tasks_root: &Path) -> HashMap<String, (String, Dependen
         .collect();
     paths.sort();
 
+    let mut summaries = Vec::new();
     let mut graph = HashMap::new();
     for path in paths {
         let Ok(contents) = fs::read_to_string(&path) else {
             continue;
         };
         let normalized = contents.replace("\r\n", "\n");
-        let (metadata, _) = split_frontmatter(&normalized);
-        let fallback_id = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("DOCUMENT")
-            .to_owned();
-        let id = yaml_text(metadata.as_ref(), "id").unwrap_or(fallback_id);
-        let status = yaml_text(metadata.as_ref(), "status").unwrap_or_else(|| "todo".to_owned());
-        let declaration =
-            parse_dependency_declaration(frontmatter_source(&normalized).unwrap_or_default());
-        graph.entry(id).or_insert((status, declaration));
+        let (metadata, body) = split_frontmatter(&normalized);
+        let summary = markdown_summary(&path, metadata.as_ref(), &body, "todo");
+        let frontmatter = frontmatter_source(&normalized).unwrap_or_default();
+        graph.entry(summary.id.clone()).or_insert(TaskNode {
+            status: summary.status.clone(),
+            dependencies: parse_dependency_declaration(frontmatter),
+            scope: parse_scope_declaration(frontmatter),
+        });
+        summaries.push(summary);
     }
-    graph
+    sort_markdown_summaries(&mut summaries);
+    (summaries, graph)
 }
 
 /// 작업 하나의 선언을 판정해 상세 payload에 실을 값으로 만든다. 순서는 선언에 적힌 그대로다 —
 /// 아키텍트가 쓴 순서에 뜻이 있을 수 있다.
 fn task_dependencies(
     task_id: &str,
-    graph: &HashMap<String, (String, DependencyDeclaration)>,
+    graph: &HashMap<String, TaskNode>,
 ) -> (Vec<TaskDependency>, bool) {
-    match graph.get(task_id) {
-        Some((_, DependencyDeclaration::Declared(ids))) => (
+    match graph.get(task_id).map(|node| &node.dependencies) {
+        Some(DependencyDeclaration::Declared(ids)) => (
             ids.iter()
                 .map(|id| TaskDependency {
                     id: id.clone(),
@@ -1351,8 +1567,8 @@ fn task_dependencies(
                 .collect(),
             false,
         ),
-        Some((_, DependencyDeclaration::Malformed)) => (Vec::new(), true),
-        Some((_, DependencyDeclaration::Absent)) | None => (Vec::new(), false),
+        Some(DependencyDeclaration::Malformed) => (Vec::new(), true),
+        Some(DependencyDeclaration::Absent) | None => (Vec::new(), false),
     }
 }
 
@@ -1361,9 +1577,7 @@ fn task_dependencies(
 ///
 /// 선언이 없는 작업은 이 집합에 들어가지 않는다. 그래서 여기 없는 id는 제약이 없는 것이고, 그래프에
 /// 잡히지 않은 작업도 조건 스크립트와 같이 충족으로 떨어진다.
-fn unsatisfied_dependency_task_ids(
-    graph: &HashMap<String, (String, DependencyDeclaration)>,
-) -> HashSet<String> {
+fn unsatisfied_dependency_task_ids(graph: &HashMap<String, TaskNode>) -> HashSet<String> {
     graph
         .keys()
         .filter(|task_id| {
@@ -1384,9 +1598,9 @@ fn unsatisfied_dependency_task_ids(
 fn dependency_state(
     task_id: &str,
     dependency_id: &str,
-    graph: &HashMap<String, (String, DependencyDeclaration)>,
+    graph: &HashMap<String, TaskNode>,
 ) -> TaskDependencyState {
-    let Some((status, _)) = graph.get(dependency_id) else {
+    let Some(TaskNode { status, .. }) = graph.get(dependency_id) else {
         return TaskDependencyState::Missing;
     };
     // 순환은 상태 판정보다 앞선다. 뒤에 두면 `completed`인 선행이 고리를 이룰 때 결론이 갈린다.
@@ -1406,7 +1620,7 @@ fn dependency_state(
 fn declaration_reaches<'a>(
     from: &'a str,
     target: &str,
-    graph: &'a HashMap<String, (String, DependencyDeclaration)>,
+    graph: &'a HashMap<String, TaskNode>,
 ) -> bool {
     let mut visited: HashSet<&str> = HashSet::new();
     let mut pending = vec![from];
@@ -1418,11 +1632,99 @@ fn declaration_reaches<'a>(
             continue;
         }
         // `Absent`·`Malformed`인 작업에는 나가는 간선이 없다.
-        if let Some((_, DependencyDeclaration::Declared(ids))) = graph.get(current) {
+        if let Some(TaskNode {
+            dependencies: DependencyDeclaration::Declared(ids),
+            ..
+        }) = graph.get(current)
+        {
             pending.extend(ids.iter().map(String::as_str));
         }
     }
     false
+}
+
+/// 미만료 lease 대상 `target` 하나가 작업 `task_id`의 착수를 막는지, 막는다면 두 선언이 함께 가리킨
+/// 경로가 무엇인지(SPEC-032 R2). `None`이 막지 않는다는 뜻이다.
+///
+/// 자기 자신을 잡은 lease는 이 규칙이 다루지 않는다. 그것은 겹침이 아니라 자기 선점이고, 자격
+/// 판정의 기존 조건이 이미 뺀다.
+///
+/// 선언이 없거나 형식 오류인 작업은 "모든 미완료 작업과 겹친다"로 본다(SPEC-032 승인된 확인 필요
+/// 2번). 겹침은 대칭 관계이므로 lease가 잡은 작업 쪽의 선언이 그럴 때도 같은 답을 낸다. 반대로
+/// lease가 잡은 것이 작업 문서가 아니면 비교할 상대가 없으므로 막지 않는다.
+fn overlap_block(
+    task_id: &str,
+    target: &str,
+    graph: &HashMap<String, TaskNode>,
+) -> Option<Vec<String>> {
+    if target == task_id {
+        return None;
+    }
+    let Some(TaskNode {
+        scope: ScopeDeclaration::Declared(mine),
+        ..
+    }) = graph.get(task_id)
+    else {
+        return Some(Vec::new());
+    };
+    let other = graph.get(target)?;
+    let ScopeDeclaration::Declared(theirs) = &other.scope else {
+        return Some(Vec::new());
+    };
+    // 문자열 완전 일치 교집합이다. 정규화·글롭·디렉터리 접두 일치·대소문자 접기를 하지 않는다 —
+    // 세 구현이 같은 결론을 내야 하고 경로 정규화는 플랫폼마다 다르다.
+    let theirs: HashSet<&str> = theirs.iter().map(String::as_str).collect();
+    let mut shared: Vec<String> = mine
+        .iter()
+        .filter(|path| theirs.contains(path.as_str()))
+        .cloned()
+        .collect();
+    shared.sort();
+    shared.dedup();
+    if shared.is_empty() {
+        None
+    } else {
+        Some(shared)
+    }
+}
+
+/// 겹침으로 착수가 막힌 작업의 id(SPEC-032 R2). 자격 판정이 쓰는 모양으로 접은 것이고, 판정 자체는
+/// 상세 화면과 같은 [`overlap_block`]이 한다 — 같은 규칙의 구현을 두 벌 만들지 않는다.
+///
+/// `lease_target_ids`는 미만료 lease의 대상 id 집합이다. 비어 있으면 아무것도 막히지 않으므로
+/// 판정은 이 필드가 없던 때와 같다.
+fn overlap_blocked_task_ids(
+    graph: &HashMap<String, TaskNode>,
+    lease_target_ids: &HashSet<String>,
+) -> HashSet<String> {
+    graph
+        .keys()
+        .filter(|task_id| {
+            lease_target_ids
+                .iter()
+                .any(|target| overlap_block(task_id, target, graph).is_some())
+        })
+        .cloned()
+        .collect()
+}
+
+/// 작업 하나의 착수를 막고 있는 lease와 그 근거. lease 대상 id 오름차순이다(SPEC-032 R7).
+fn task_overlap_blocks(
+    task_id: &str,
+    graph: &HashMap<String, TaskNode>,
+    lease_target_ids: &HashSet<String>,
+) -> Vec<TaskOverlapBlock> {
+    let mut blocks: Vec<TaskOverlapBlock> = lease_target_ids
+        .iter()
+        .filter_map(|target| {
+            overlap_block(task_id, target, graph).map(|shared_files| TaskOverlapBlock {
+                lease_target_id: target.clone(),
+                shared_files,
+            })
+        })
+        .collect();
+    blocks.sort_by(|left, right| left.lease_target_id.cmp(&right.lease_target_id));
+    blocks
 }
 
 fn yaml_text(metadata: Option<&serde_yaml::Value>, key: &str) -> Option<String> {
@@ -1470,54 +1772,34 @@ fn markdown_excerpt(body: &str) -> String {
     excerpt
 }
 
-/// QA 결정 문서를 전이 이벤트의 두 번째 원천으로 읽는다. 결정 문서는 앱 소유라 여기서는 읽기만
-/// 한다. 형식이 어긋난 문서는 그 파일만 건너뛰고 조회 전체를 실패시키지 않는다.
-fn qa_decision_events(workflow_root: &Path) -> HashMap<String, Vec<TaskEvent>> {
-    let mut events: HashMap<String, Vec<TaskEvent>> = HashMap::new();
-    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
-        return events;
+/// QA 결정 문서 하나를 전이 이벤트로 읽는다. 결정 문서는 앱 소유라 여기서는 읽기만 한다.
+/// 형식이 어긋난 문서는 그 파일만 건너뛰고 조회 전체를 실패시키지 않는다.
+fn qa_decision_event(metadata: Option<&serde_yaml::Value>) -> Option<(String, TaskEvent)> {
+    let task_id = yaml_text(metadata, "task_id")?;
+    let at = yaml_text(metadata, "created_at")?;
+    DateTime::parse_from_rfc3339(&at).ok()?;
+    let kind = match yaml_text(metadata, "outcome").as_deref() {
+        Some("confirmed") => "completed",
+        Some("revision_requested") => "revision_requested",
+        _ => return None,
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
-            continue;
-        }
-        let Ok(contents) = fs::read_to_string(path) else {
-            continue;
-        };
-        let normalized = contents.replace("\r\n", "\n");
-        let (metadata, _) = split_frontmatter(&normalized);
-        if yaml_text(metadata.as_ref(), "schema").as_deref() != Some("workflow-labs/qa-decision@1")
-            || yaml_text(metadata.as_ref(), "created_by").as_deref() != Some("user")
-        {
-            continue;
-        }
-        let Some(task_id) = yaml_text(metadata.as_ref(), "task_id") else {
-            continue;
-        };
-        let Some(at) = yaml_text(metadata.as_ref(), "created_at") else {
-            continue;
-        };
-        if DateTime::parse_from_rfc3339(&at).is_err() {
-            continue;
-        }
-        let kind = match yaml_text(metadata.as_ref(), "outcome").as_deref() {
-            Some("confirmed") => "completed",
-            Some("revision_requested") => "revision_requested",
-            _ => continue,
-        };
-        events.entry(task_id).or_default().push(TaskEvent {
+    Some((
+        task_id,
+        TaskEvent {
             kind: kind.to_owned(),
             at,
-        });
-    }
-    events
+        },
+    ))
 }
 
 /// 작업 문서의 이력과 QA 결정 문서를 한 타임라인으로 합친다. 같은 사실이 두 원천에 있으면 작업
 /// 문서의 항목을 남긴다(원문 보존). 가리키는 작업이 목록에 없는 결정 기록은 화면에 도달하지 않는다.
-fn merge_qa_decision_events(workflow_root: &Path, tasks: &mut [WorkflowItemSummary]) {
-    let decisions = qa_decision_events(workflow_root);
+///
+/// 결정은 이미 읽어 둔 것을 받는다. `decisions/`를 여는 자리는 `read_decision_documents` 하나다.
+fn merge_qa_decision_events(
+    decisions: &HashMap<String, Vec<TaskEvent>>,
+    tasks: &mut [WorkflowItemSummary],
+) {
     if decisions.is_empty() {
         return;
     }
@@ -1559,10 +1841,35 @@ struct SpecDecisionRecord {
     created_at: String,
 }
 
-fn read_spec_decisions(workflow_root: &Path) -> Vec<SpecDecisionRecord> {
+/// 기획서 결정 문서 하나를 읽는다. 앞의 세 값이 없으면 판정에 쓸 수 없는 문서다.
+fn spec_decision_record(metadata: Option<&serde_yaml::Value>) -> Option<SpecDecisionRecord> {
+    // 조건 스크립트도 `[ -n "$did" ]`로 id 없는 결정을 건너뛴다.
+    let id = yaml_text(metadata, "id")?;
+    let spec_id = yaml_text(metadata, "spec_id")?;
+    let outcome = yaml_text(metadata, "outcome")?;
+    if outcome != "approved" && outcome != "revision_requested" && outcome != "rejected" {
+        return None;
+    }
+    Some(SpecDecisionRecord {
+        id,
+        spec_id,
+        outcome,
+        created_at: yaml_text(metadata, "created_at").unwrap_or_default(),
+    })
+}
+
+/// `decisions/`를 한 번 훑어 기획서 결정 목록과 QA 이벤트를 함께 낸다(SPEC-033 R7).
+///
+/// 두 값이 세는 문서는 스키마로 갈리므로 한 문서가 양쪽에 들지 않고, 두 벌로 훑던 때와 같은
+/// 부분집합이 나온다. 목록 순서는 디렉터리 순회 순서 그대로다 — `latest_spec_decisions`의 동률
+/// 처리가 그 순서를 보므로 여기서 정렬하거나 순서를 바꾸지 않는다.
+fn read_decision_documents(
+    workflow_root: &Path,
+) -> (Vec<SpecDecisionRecord>, HashMap<String, Vec<TaskEvent>>) {
     let mut records = Vec::new();
+    let mut events: HashMap<String, Vec<TaskEvent>> = HashMap::new();
     let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
-        return records;
+        return (records, events);
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1574,32 +1881,26 @@ fn read_spec_decisions(workflow_root: &Path) -> Vec<SpecDecisionRecord> {
         };
         let normalized = contents.replace("\r\n", "\n");
         let (metadata, _) = split_frontmatter(&normalized);
-        if yaml_text(metadata.as_ref(), "schema").as_deref() != Some("workflow-labs/decision@1")
-            || yaml_text(metadata.as_ref(), "created_by").as_deref() != Some("user")
-        {
+        if yaml_text(metadata.as_ref(), "created_by").as_deref() != Some("user") {
             continue;
         }
-        // 조건 스크립트도 `[ -n "$did" ]`로 id 없는 결정을 건너뛴다.
-        let Some(id) = yaml_text(metadata.as_ref(), "id") else {
-            continue;
-        };
-        let Some(spec_id) = yaml_text(metadata.as_ref(), "spec_id") else {
-            continue;
-        };
-        let Some(outcome) = yaml_text(metadata.as_ref(), "outcome") else {
-            continue;
-        };
-        if outcome != "approved" && outcome != "revision_requested" && outcome != "rejected" {
-            continue;
+        match yaml_text(metadata.as_ref(), "schema").as_deref() {
+            Some("workflow-labs/decision@1") => {
+                records.extend(spec_decision_record(metadata.as_ref()));
+            }
+            Some("workflow-labs/qa-decision@1") => {
+                if let Some((task_id, event)) = qa_decision_event(metadata.as_ref()) {
+                    events.entry(task_id).or_default().push(event);
+                }
+            }
+            _ => {}
         }
-        records.push(SpecDecisionRecord {
-            id,
-            spec_id,
-            outcome,
-            created_at: yaml_text(metadata.as_ref(), "created_at").unwrap_or_default(),
-        });
     }
-    records
+    (records, events)
+}
+
+fn read_spec_decisions(workflow_root: &Path) -> Vec<SpecDecisionRecord> {
+    read_decision_documents(workflow_root).0
 }
 
 /// 기획서 결정을 기획서 항목의 이벤트로 바꾼다. 원천이 결정 문서 하나뿐이고 앱이 결정 하나당
@@ -1820,10 +2121,11 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        apply_latest_decision, latest_spec_decisions, normalize_spec_status,
-        read_markdown_document, read_spec_decisions, slugify, update_task_frontmatter,
+        apply_latest_decision, latest_spec_decisions, lease_ids, normalize_spec_status,
+        overlap_blocked_task_ids, parse_scope_declaration, read_markdown_document,
+        read_spec_decisions, slugify, task_dependency_graph, update_task_frontmatter,
         validate_decision, validate_task_qa, FileSystemProjectRepository, ProjectError,
-        ProjectSummary,
+        ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
         SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
@@ -3552,6 +3854,271 @@ mod tests {
         );
     }
 
+    fn batch_qa_task(root: &Path, directory: &str, id: &str, status: &str) -> PathBuf {
+        qa_waiting_task(
+            root,
+            directory,
+            &format!("{id}.md"),
+            &format!(
+                "schema: workflow-labs/task@1\nid: {id}\ntitle: 일괄 확인 대상\nstatus: {status}\nupdated_at: 2026-07-31T00:00:00Z\nhistory:\n  - {{ at: 2026-07-31T00:00:00Z, kind: qa_waiting }}\n"
+            ),
+        )
+    }
+
+    fn qa_decision_texts(root: &Path, directory: &str) -> Vec<String> {
+        fs::read_dir(root.join(".workflow").join(directory).join("decisions"))
+            .expect("decisions")
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .filter(|text| text.contains("schema: workflow-labs/qa-decision@1"))
+            .collect()
+    }
+
+    #[test]
+    fn a_batch_confirms_every_task_it_was_given() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let paths: Vec<PathBuf> = ["TASK-001", "TASK-002", "TASK-003"]
+            .iter()
+            .map(|id| batch_qa_task(root.path(), &directory, id, "qa_waiting"))
+            .collect();
+
+        let result = repository
+            .confirm_task_qa_batch(
+                root.path(),
+                &directory,
+                &[
+                    "TASK-001.md".to_owned(),
+                    "TASK-002.md".to_owned(),
+                    "TASK-003.md".to_owned(),
+                ],
+                "레인에서 한 번에 확인함",
+            )
+            .expect("confirm batch");
+
+        assert!(result.results.iter().all(|entry| entry.recorded));
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|entry| entry.task_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("TASK-001".to_owned()),
+                Some("TASK-002".to_owned()),
+                Some("TASK-003".to_owned()),
+            ]
+        );
+
+        let decisions = qa_decision_texts(root.path(), &directory);
+        assert_eq!(decisions.len(), 3);
+        for id in ["TASK-001", "TASK-002", "TASK-003"] {
+            assert!(decisions.iter().any(|text| {
+                text.contains(&format!("task_id: {id}"))
+                    && text.contains("outcome: confirmed")
+                    && text.contains("created_by: user")
+                    && text.contains("레인에서 한 번에 확인함")
+            }));
+        }
+        for path in &paths {
+            let source = fs::read_to_string(path).expect("task source");
+            assert!(source.contains("status: completed"));
+            assert_eq!(source.matches("kind: completed").count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_batch_leaves_tasks_outside_the_list_untouched() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        let untouched = batch_qa_task(root.path(), &directory, "TASK-002", "qa_waiting");
+        let before = fs::read_to_string(&untouched).expect("untouched source");
+
+        repository
+            .confirm_task_qa_batch(
+                root.path(),
+                &directory,
+                &["TASK-001.md".to_owned()],
+                "하나만 고름",
+            )
+            .expect("confirm batch");
+
+        assert_eq!(
+            fs::read_to_string(&untouched).expect("untouched source"),
+            before
+        );
+        let decisions = qa_decision_texts(root.path(), &directory);
+        assert_eq!(decisions.len(), 1);
+        assert!(decisions[0].contains("task_id: TASK-001"));
+    }
+
+    #[test]
+    fn a_batch_records_the_rest_when_one_task_is_not_awaiting_qa() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        let in_progress = batch_qa_task(root.path(), &directory, "TASK-002", "in_progress");
+        batch_qa_task(root.path(), &directory, "TASK-003", "qa_waiting");
+
+        let result = repository
+            .confirm_task_qa_batch(
+                root.path(),
+                &directory,
+                &[
+                    "TASK-001.md".to_owned(),
+                    "TASK-002.md".to_owned(),
+                    "TASK-003.md".to_owned(),
+                ],
+                "확인함",
+            )
+            .expect("confirm batch");
+
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|entry| (entry.file_name.as_str(), entry.recorded))
+                .collect::<Vec<_>>(),
+            vec![
+                ("TASK-001.md", true),
+                ("TASK-002.md", false),
+                ("TASK-003.md", true),
+            ]
+        );
+        assert_eq!(result.results[1].task_id, Some("TASK-002".to_owned()));
+        assert_eq!(
+            result.results[1].message.as_deref(),
+            Some(ProjectError::TaskNotAwaitingQa.to_string().as_str())
+        );
+        assert!(result.results[0].message.is_none());
+        assert!(fs::read_to_string(&in_progress)
+            .expect("task source")
+            .contains("status: in_progress"));
+        assert_eq!(qa_decision_texts(root.path(), &directory).len(), 2);
+    }
+
+    #[test]
+    fn a_batch_writes_nothing_when_the_comment_is_too_long() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let path = batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        let before = fs::read_to_string(&path).expect("task source");
+
+        let error = repository
+            .confirm_task_qa_batch(
+                root.path(),
+                &directory,
+                &["TASK-001.md".to_owned()],
+                &"가".repeat(2_001),
+            )
+            .expect_err("comment too long");
+
+        assert!(matches!(error, ProjectError::DecisionCommentTooLong));
+        assert_eq!(fs::read_to_string(&path).expect("task source"), before);
+        assert!(qa_decision_texts(root.path(), &directory).is_empty());
+
+        let confirmed = repository
+            .confirm_task_qa_batch(root.path(), &directory, &["TASK-001.md".to_owned()], "")
+            .expect("empty comment is allowed");
+        assert!(confirmed.results[0].recorded);
+    }
+
+    #[test]
+    fn a_batch_confirms_a_task_covered_by_an_unexpired_lease() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let path = batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        let expires_at = (Utc::now() + Duration::minutes(30)).to_rfc3339();
+        write_lease(
+            root.path(),
+            "TASK-001.yml",
+            &format!(
+                "schema_version: 1\nlease_id: live\nagent: codex\ntask_id: TASK-001\nheartbeat_at: {expires_at}\nexpires_at: {expires_at}\n"
+            ),
+        );
+
+        let result = repository
+            .confirm_task_qa_batch(
+                root.path(),
+                &directory,
+                &["TASK-001.md".to_owned()],
+                "리스가 있어도 확인함",
+            )
+            .expect("confirm batch");
+
+        assert!(result.results[0].recorded);
+        assert!(fs::read_to_string(&path)
+            .expect("task source")
+            .contains("status: completed"));
+    }
+
+    #[test]
+    fn a_repeated_file_name_fails_only_the_second_time() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+
+        let result = repository
+            .confirm_task_qa_batch(
+                root.path(),
+                &directory,
+                &["TASK-001.md".to_owned(), "TASK-001.md".to_owned()],
+                "두 번 들어옴",
+            )
+            .expect("confirm batch");
+
+        assert!(result.results[0].recorded);
+        assert!(!result.results[1].recorded);
+        assert_eq!(
+            result.results[1].message.as_deref(),
+            Some(ProjectError::TaskNotAwaitingQa.to_string().as_str())
+        );
+        assert_eq!(qa_decision_texts(root.path(), &directory).len(), 1);
+    }
+
+    #[test]
+    fn an_empty_batch_returns_the_summary_with_no_results() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+
+        let result = repository
+            .confirm_task_qa_batch(root.path(), &directory, &[], "")
+            .expect("empty batch");
+
+        assert!(result.results.is_empty());
+        assert_eq!(result.summary.workflows.len(), 1);
+        assert!(qa_decision_texts(root.path(), &directory).is_empty());
+    }
+
     #[test]
     fn adds_a_history_block_while_preserving_custom_fields() {
         let root = tempdir().expect("temp project");
@@ -4796,6 +5363,311 @@ mod tests {
         assert_eq!(declared, plain);
     }
 
+    // ---- 겹침 선언(SPEC-032) ----
+
+    /// 겹침 판정 픽스처의 결과. 워크플로우의 작업 문서와 미만료 lease를 읽어 막힌 id 집합을 만든다.
+    fn overlap_blocked(root: &Path, directory: &str) -> Vec<String> {
+        let control_root = root.join(".workflow");
+        let graph = task_dependency_graph(&control_root.join(directory).join("tasks"));
+        let mut blocked: Vec<String> = overlap_blocked_task_ids(&graph, &lease_ids(&control_root))
+            .into_iter()
+            .collect();
+        blocked.sort();
+        blocked
+    }
+
+    /// 대상 문서를 잡은 lease 하나. 시각은 조건 스크립트가 읽는 고정 자리수 UTC 표기여야 한다 —
+    /// `to_rfc3339()`가 내는 `+00:00`은 두 판정의 대조를 표기 차이만으로 무너뜨린다.
+    fn write_target_lease(root: &Path, target_id: &str, expires_at: chrono::DateTime<Utc>) {
+        let stamp = expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        write_lease(
+            root,
+            &format!("{target_id}.yml"),
+            &format!("schema_version: 1\nlease_id: lease-{target_id}\nagent: agent\ntask_id: {target_id}\nheartbeat_at: {stamp}\nexpires_at: {stamp}\n"),
+        );
+    }
+
+    fn future() -> chrono::DateTime<Utc> {
+        Utc::now() + Duration::minutes(30)
+    }
+
+    fn past() -> chrono::DateTime<Utc> {
+        Utc::now() - Duration::minutes(30)
+    }
+
+    /// SPEC-032 완료 조건 1. 부재와 형식 오류는 자격 판정에서 같은 답을 내지만 파서는 둘을 구분한다.
+    #[test]
+    fn reads_the_scope_declaration_by_the_contract_form() {
+        let cases = [
+            (
+                "scope_files: [src/a.rs, src/b.rs]",
+                ScopeDeclaration::Declared(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]),
+            ),
+            ("title: 선언 없음", ScopeDeclaration::Absent),
+            ("scope_files: []", ScopeDeclaration::Declared(Vec::new())),
+            ("scope_files: [ ]", ScopeDeclaration::Declared(Vec::new())),
+            (
+                "scope_files: [src/a.rs]\nscope_files: [src/b.rs]",
+                ScopeDeclaration::Malformed,
+            ),
+            ("scope_files:\n  - src/a.rs", ScopeDeclaration::Malformed),
+            ("scope_files:", ScopeDeclaration::Malformed),
+            ("scope_files: [\"src/a.rs\"]", ScopeDeclaration::Malformed),
+            ("scope_files: [src/a b.rs]", ScopeDeclaration::Malformed),
+            ("scope_files: [src/a.rs, ]", ScopeDeclaration::Malformed),
+            ("scope_files: [src/a.rs", ScopeDeclaration::Malformed),
+            ("scope_files: [src/앱.rs]", ScopeDeclaration::Malformed),
+        ];
+
+        for (frontmatter, expected) in cases {
+            assert_eq!(
+                parse_scope_declaration(frontmatter),
+                expected,
+                "{frontmatter:?}의 판정이 다르다"
+            );
+        }
+    }
+
+    /// SPEC-032 완료 조건 2. 선행 관계가 없는 두 작업이라도 같은 파일을 선언하면 하나가 잡힌 동안
+    /// 다른 하나는 착수 대상이 아니다.
+    #[test]
+    fn a_shared_path_blocks_the_task_while_the_other_is_leased() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: [src/shared.rs, src/one.rs]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [src/shared.rs]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", future());
+
+        assert_eq!(overlap_blocked(root.path(), &directory), vec!["TASK-001"]);
+    }
+
+    /// SPEC-032 완료 조건 3. 겹치지 않으면 잡힌 lease가 있어도 열린다.
+    #[test]
+    fn a_disjoint_declaration_stays_open_while_another_task_is_leased() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: [src/one.rs]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [src/two.rs]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", future());
+
+        assert!(overlap_blocked(root.path(), &directory).is_empty());
+    }
+
+    /// SPEC-032 완료 조건 6과 승인된 확인 필요 2번. 선언이 없는 작업은 무엇과 겹치는지 알 수 없으므로
+    /// 잡힌 lease가 하나라도 있으면 막힌다. 잡힌 것이 없으면 열린다.
+    #[test]
+    fn a_task_without_a_declaration_is_blocked_by_any_active_lease() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-001", "todo", "");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [src/two.rs]\n",
+        );
+        assert!(overlap_blocked(root.path(), &directory).is_empty());
+
+        write_target_lease(root.path(), "TASK-002", future());
+        assert_eq!(overlap_blocked(root.path(), &directory), vec!["TASK-001"]);
+    }
+
+    /// SPEC-032 완료 조건 7. 만료가 유일한 해제 조건이고(R8), 만료된 lease는 아무것도 막지 않는다.
+    #[test]
+    fn an_expired_lease_blocks_nothing() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-001", "todo", "");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "todo",
+            "scope_files: [src/two.rs]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", past());
+
+        assert!(overlap_blocked(root.path(), &directory).is_empty());
+    }
+
+    /// 형식 오류 선언은 부재와 같은 답을 낸다. 겹침은 대칭 관계이므로 그 작업을 잡은 lease는
+    /// 선언이 멀쩡한 다른 작업까지 막는다(판정 규칙 2번).
+    #[test]
+    fn a_malformed_declaration_blocks_both_directions() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: [\"src/one.rs\"]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [src/two.rs]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", future());
+        assert_eq!(overlap_blocked(root.path(), &directory), vec!["TASK-001"]);
+
+        // 반대편. 형식 오류를 가진 작업을 잡으면 겹치지 않는 선언도 비교할 상대를 잃는다.
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: [src/one.rs]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [\"src/two.rs\"]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", future());
+        assert_eq!(overlap_blocked(root.path(), &directory), vec!["TASK-001"]);
+    }
+
+    /// lease가 잡은 것이 작업 문서가 아니면 비교할 상대가 없다. 선언을 가진 작업은 그때 막히지 않는다.
+    #[test]
+    fn a_lease_on_a_document_that_is_not_a_task_blocks_a_declared_task_never() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: [src/one.rs]\n",
+        );
+        write_target_lease(root.path(), "SPEC-001", future());
+
+        assert!(overlap_blocked(root.path(), &directory).is_empty());
+    }
+
+    /// SPEC-032 완료 조건 8. 판정은 lease 파일을 읽기만 한다.
+    #[test]
+    fn judging_overlap_leaves_every_lease_file_untouched() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-001", "todo", "");
+        write_target_lease(root.path(), "TASK-002", future());
+        write_target_lease(root.path(), "TASK-003", past());
+        let leases = root.path().join(".workflow/.runtime/leases");
+        let before = lease_directory(&leases);
+
+        assert_eq!(overlap_blocked(root.path(), &directory), vec!["TASK-001"]);
+
+        assert_eq!(before, lease_directory(&leases));
+        assert_eq!(before.len(), 2);
+    }
+
+    /// lease 디렉터리의 `(파일 이름, 내용)` 목록. 개수와 내용을 함께 고정한다.
+    fn lease_directory(leases: &Path) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = fs::read_dir(leases)
+            .expect("leases root")
+            .map(|entry| {
+                let path = entry.expect("lease entry").path();
+                (
+                    path.file_name()
+                        .expect("lease file name")
+                        .to_string_lossy()
+                        .into_owned(),
+                    fs::read_to_string(&path).expect("lease body"),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// SPEC-032 R7. 상세 payload가 막은 lease와 함께 가리킨 경로를 싣는다. 막히지 않았으면 비어 있다.
+    #[test]
+    fn carries_the_overlap_evidence_in_the_task_payload() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: [src/b.rs, src/a.rs, src/one.rs]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [src/a.rs, src/b.rs]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-003",
+            "in_progress",
+            "scope_files: [src/three.rs]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", future());
+        write_target_lease(root.path(), "TASK-003", future());
+
+        let blocked = read_task_document(root.path(), &directory, "TASK-001.md");
+        assert_eq!(blocked.overlap_blocks.len(), 1);
+        assert_eq!(blocked.overlap_blocks[0].lease_target_id, "TASK-002");
+        // 선언에 적힌 문자열 그대로이고 오름차순·중복 없음이다.
+        assert_eq!(
+            blocked.overlap_blocks[0].shared_files,
+            vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]
+        );
+
+        // 자기 자신을 잡은 lease는 겹침 근거가 아니다.
+        assert!(read_task_document(root.path(), &directory, "TASK-003.md")
+            .overlap_blocks
+            .is_empty());
+    }
+
+    /// 선언이 없어 막힌 작업의 근거에는 함께 가리킨 경로가 없다. 화면이 "겹쳤다"와 "알 수 없다"를
+    /// 그 값으로 구분한다.
+    #[test]
+    fn leaves_the_shared_files_empty_when_the_declaration_is_missing() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-001", "todo", "");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "in_progress",
+            "scope_files: [src/two.rs]\n",
+        );
+        write_target_lease(root.path(), "TASK-002", future());
+
+        let blocked = read_task_document(root.path(), &directory, "TASK-001.md");
+        assert_eq!(blocked.overlap_blocks.len(), 1);
+        assert_eq!(blocked.overlap_blocks[0].lease_target_id, "TASK-002");
+        assert!(blocked.overlap_blocks[0].shared_files.is_empty());
+    }
+
     /// 선언 줄이 `history:` 앞에 있는 픽스처. 앱이 QA 전이를 기록해도 원문 그대로여야 한다.
     const DECLARATION_BEFORE_HISTORY: &str = "schema: workflow-labs/task@1\nid: TASK-BEFORE\ntitle: 선언이 앞\nstatus: qa_waiting\ndepends_on: [TASK-A, TASK-B]\nhistory:\n  - { at: 2026-08-01T00:00:00Z, kind: qa_waiting }\nupdated_at: 2026-08-02T00:00:00Z\n";
     /// 선언 줄이 `history:` 뒤에 있는 픽스처. `append_task_history`의 스캔이 열 0에서 멈추는지를
@@ -4908,6 +5780,311 @@ mod tests {
                 dependency("TASK-002", TaskDependencyState::Cyclic),
                 dependency("TASK-404", TaskDependencyState::Missing),
             ]
+        );
+    }
+
+    /// 목록 항목의 `(id, status)`. 합친 훑기가 목록 쪽에 내는 값을 짚을 때 쓴다.
+    fn item_states(items: &[WorkflowItemSummary]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|item| (item.id.clone(), item.status.clone()))
+            .collect()
+    }
+
+    /// 문서 id 오름차순으로 세운 [`item_states`]. 목록 순서가 아니라 문서 집합을 보는 자리가 쓴다.
+    fn sorted_item_states(items: &[WorkflowItemSummary]) -> Vec<(String, String)> {
+        let mut states = item_states(items);
+        states.sort();
+        states
+    }
+
+    fn qa_decision(
+        id: &str,
+        task_id: &str,
+        outcome: &str,
+        created_at: &str,
+        extra: &str,
+    ) -> String {
+        format!(
+            "---\nschema: workflow-labs/qa-decision@1\nid: {id}\ntask_id: {task_id}\noutcome: {outcome}\ncreated_by: user\ncreated_at: {created_at}\n{extra}---\n\nQA 코멘트\n"
+        )
+    }
+
+    // SPEC-033 R7. 결정·기획서·작업 세 디렉터리를 각각 한 번만 훑도록 합친 뒤에도, 두 번 훑어
+    // 만들던 값이 그대로 나온다. 쌍마다 그 쌍만이 만드는 값을 짚는다.
+    #[test]
+    fn one_scan_per_directory_keeps_the_values_two_scans_made() {
+        let (root, directory) = dependency_workflow();
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-1.md",
+            &spec_decision("DECISION-1", "SPEC-001", "approved", "2026-08-01T00:00:00Z"),
+        );
+        write_decision(
+            root.path(),
+            &directory,
+            "QA-1.md",
+            &qa_decision("QA-1", "TASK-001", "confirmed", "2026-08-02T00:00:00Z", ""),
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "qa_waiting",
+            "history:\n  - { at: 2026-08-01T09:00:00Z, kind: created }\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "todo",
+            "depends_on: [TASK-001]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-003",
+            "todo",
+            "depends_on: [TASK-404]\n",
+        );
+
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project");
+
+        // 결정 쌍. 기획서 상태와 결정 피드는 앞 훑기가, 작업 타임라인의 QA 이벤트는 뒤 훑기가
+        // 만들던 값이다.
+        assert_eq!(
+            item_states(&project.workflows[0].items.specs),
+            vec![("SPEC-001".to_owned(), "approved".to_owned())]
+        );
+        assert_eq!(
+            spec_events(&project, 0, "SPEC-001"),
+            vec![("approved".to_owned(), "2026-08-01T00:00:00Z".to_owned())]
+        );
+        assert_eq!(
+            task_events(&project, "TASK-001"),
+            vec![
+                ("created".to_owned(), "2026-08-01T09:00:00Z".to_owned()),
+                ("completed".to_owned(), "2026-08-02T00:00:00Z".to_owned()),
+            ]
+        );
+        // 기획서 쌍. 목록 요약과 아이디어 파생 상태가 같은 훑기에서 나온다.
+        assert_eq!(
+            idea_state(&project, 0, "IDEA-001"),
+            ("adopted".to_owned(), Vec::new())
+        );
+        // 작업 쌍. 목록 요약과 선행 판정이 같은 훑기에서 나온다.
+        assert_eq!(
+            item_states(&project.workflows[0].items.tasks),
+            vec![
+                ("TASK-001".to_owned(), "qa_waiting".to_owned()),
+                ("TASK-002".to_owned(), "todo".to_owned()),
+                ("TASK-003".to_owned(), "todo".to_owned()),
+            ]
+        );
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-002.md"),
+            vec![dependency("TASK-001", TaskDependencyState::Satisfied)]
+        );
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-003.md"),
+            vec![dependency("TASK-404", TaskDependencyState::Missing)]
+        );
+        assert_eq!(
+            (
+                project.pending_work.planner,
+                project.pending_work.architect,
+                project.pending_work.developer
+            ),
+            (false, true, true)
+        );
+    }
+
+    // 결정 쌍을 합칠 때 가장 틀리기 쉬운 자리다. 두 종류가 한 디렉터리에 섞여 있고 서로의 키까지
+    // 들고 있어도, 스키마가 가르는 부분집합이 두 벌로 훑던 때와 같아야 한다.
+    #[test]
+    fn one_decision_scan_keeps_the_two_schemas_apart() {
+        let (root, directory) = dependency_workflow();
+        write_spec(root.path(), &directory, "SPEC-001");
+        write_spec(root.path(), &directory, "SPEC-002");
+        write_spec(root.path(), &directory, "SPEC-003");
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-1.md",
+            &spec_decision("DECISION-1", "SPEC-001", "approved", "2026-08-01T00:00:00Z"),
+        );
+        // 기획서 결정이 `task_id`를 들고 있어도 작업 타임라인에 닿지 않는다.
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-2.md",
+            &spec_decision("DECISION-2", "SPEC-003", "approved", "2026-08-01T01:00:00Z")
+                .replace("---\n\n결정 사유", "task_id: TASK-001\n---\n\n결정 사유"),
+        );
+        // QA 결정이 `spec_id`와 승인 어법의 `outcome`을 들고 있어도 기획서 상태를 덮지 않는다.
+        write_decision(
+            root.path(),
+            &directory,
+            "QA-1.md",
+            &qa_decision(
+                "QA-1",
+                "TASK-001",
+                "confirmed",
+                "2026-08-02T00:00:00Z",
+                "spec_id: SPEC-002\n",
+            ),
+        );
+        write_task_document(root.path(), &directory, "TASK-001", "qa_waiting", "");
+
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project");
+
+        assert_eq!(
+            item_states(&project.workflows[0].items.specs),
+            vec![
+                ("SPEC-001".to_owned(), "approved".to_owned()),
+                ("SPEC-002".to_owned(), "user_review".to_owned()),
+                ("SPEC-003".to_owned(), "approved".to_owned()),
+            ]
+        );
+        assert_eq!(
+            task_events(&project, "TASK-001"),
+            vec![("completed".to_owned(), "2026-08-02T00:00:00Z".to_owned())]
+        );
+    }
+
+    // 두 훑기가 각자 조용히 건너뛰던 문서를 한 훑기가 다르게 다루지 않는다. 건너뛰는 문서와 세는
+    // 문서가 그대로여야 한다.
+    #[test]
+    fn one_scan_skips_the_documents_two_scans_skipped() {
+        let (root, directory) = dependency_workflow();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        write_spec_for_idea(root.path(), &directory, "SPEC-001", "IDEA-001", "draft");
+        write_decision(
+            root.path(),
+            &directory,
+            "QA-1.md",
+            &qa_decision("QA-1", "TASK-001", "confirmed", "2026-08-02T00:00:00Z", ""),
+        );
+        write_task_document(root.path(), &directory, "TASK-001", "qa_waiting", "");
+        for folder in ["decisions", "specs", "tasks"] {
+            let directory_path = workflow_root.join(folder);
+            fs::write(
+                directory_path.join("no-frontmatter.md"),
+                "프론트매터가 없다\n",
+            )
+            .expect("write plain markdown");
+            fs::write(
+                directory_path.join("other-schema.md"),
+                "---\nschema: workflow-labs/other@1\nid: OTHER\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-03T00:00:00Z\n---\n\n본문\n",
+            )
+            .expect("write foreign schema");
+            fs::write(directory_path.join("unreadable.md"), [0xff, 0xfe, 0x00])
+                .expect("write invalid utf-8");
+        }
+
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project");
+
+        // 결정 디렉터리의 셋 중 무엇도 기획서 결정도 QA 이벤트도 되지 않는다. 기획서는 파일에
+        // 적힌 상태로 남고 작업 이력은 QA 결정 하나뿐이다.
+        //
+        // 목록 순서는 여기서 보지 않는다. 프론트매터가 없는 문서는 `updated_at`이 파일 수정
+        // 시각이라 실행 시각에 따라 자리가 달라진다. 순서는 시각이 고정된 픽스처가 본다.
+        assert_eq!(
+            sorted_item_states(&project.workflows[0].items.specs),
+            vec![
+                ("OTHER".to_owned(), "draft".to_owned()),
+                ("SPEC-001".to_owned(), "draft".to_owned()),
+                ("no-frontmatter".to_owned(), "draft".to_owned()),
+            ]
+        );
+        assert_eq!(
+            task_events(&project, "TASK-001"),
+            vec![("completed".to_owned(), "2026-08-02T00:00:00Z".to_owned())]
+        );
+        // 기획서 쌍. 읽히지 않는 문서는 목록에도 참조에도 없고, `source_idea_id`가 없는 문서는
+        // 목록에만 있고 아이디어 판정을 흔들지 않는다.
+        assert_eq!(
+            idea_state(&project, 0, "IDEA-001"),
+            ("drafting".to_owned(), vec!["SPEC-001".to_owned()])
+        );
+        // 작업 쌍. 목록과 선행 판정이 같은 문서 집합을 본다.
+        assert_eq!(
+            sorted_item_states(&project.workflows[0].items.tasks),
+            vec![
+                ("OTHER".to_owned(), "todo".to_owned()),
+                ("TASK-001".to_owned(), "qa_waiting".to_owned()),
+                ("no-frontmatter".to_owned(), "todo".to_owned()),
+            ]
+        );
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            Vec::new()
+        );
+    }
+
+    // `id`가 없는 문서의 fallback은 파일 stem이다. 기획서 참조와 작업 노드가 각자 갖고 있던 규칙이
+    // 합친 훑기에서도 같은 값을 낸다.
+    #[test]
+    fn one_scan_falls_back_to_the_file_stem_for_a_document_without_an_id() {
+        let (root, directory) = dependency_workflow();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        fs::write(
+            workflow_root.join("specs").join("no-id-spec.md"),
+            "---\nschema: workflow-labs/spec@1\ntitle: id 없는 기획서\nstatus: draft\nsource_idea_id: IDEA-001\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n기획 내용이다.\n",
+        )
+        .expect("write spec without id");
+        fs::write(
+            workflow_root.join("tasks").join("no-id-task.md"),
+            "---\nschema: workflow-labs/task@1\ntitle: id 없는 작업\nstatus: qa_waiting\nupdated_at: 2026-08-03T00:00:00Z\n---\n\n본문이다.\n",
+        )
+        .expect("write task without id");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [no-id-task]\n",
+        );
+
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project");
+
+        assert_eq!(
+            item_states(&project.workflows[0].items.specs),
+            vec![("no-id-spec".to_owned(), "draft".to_owned())]
+        );
+        assert_eq!(
+            idea_state(&project, 0, "IDEA-001"),
+            ("drafting".to_owned(), vec!["no-id-spec".to_owned()])
+        );
+        assert_eq!(
+            item_states(&project.workflows[0].items.tasks),
+            vec![
+                ("TASK-001".to_owned(), "todo".to_owned()),
+                ("no-id-task".to_owned(), "qa_waiting".to_owned()),
+            ]
+        );
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("no-id-task", TaskDependencyState::Satisfied)]
         );
     }
 }

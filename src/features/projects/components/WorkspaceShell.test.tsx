@@ -59,6 +59,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -109,6 +110,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -144,6 +146,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={onRefresh}
         onSwitchProject={vi.fn()}
       />,
@@ -193,6 +196,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -226,6 +230,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -255,6 +260,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -294,6 +300,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -324,6 +331,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -353,6 +361,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -402,6 +411,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -434,6 +444,7 @@ describe("WorkspaceShell", () => {
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
         onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={onSwitchProject}
       />,
@@ -493,6 +504,7 @@ function shell(overrides: Partial<ComponentProps<typeof WorkspaceShell>> = {}) {
       onReadSpec={vi.fn().mockResolvedValue(null)}
       onReadTask={vi.fn().mockResolvedValue(null)}
       onTaskQa={vi.fn().mockResolvedValue(true)}
+      onTaskQaBatch={vi.fn().mockResolvedValue([])}
       onRefresh={vi.fn()}
       onSwitchProject={vi.fn()}
       {...overrides}

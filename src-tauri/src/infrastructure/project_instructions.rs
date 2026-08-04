@@ -18,7 +18,7 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-const WORKFLOW_RULES_VERSION: u32 = 8;
+const WORKFLOW_RULES_VERSION: u32 = 10;
 /// 역할 계약 세 개의 `rules_version` 중 최댓값. `plan_rules_file`은 파일 버전이
 /// 이 값보다 클 때만 거부하므로 계약별 값이 서로 달라도 문제가 없다.
 const ROLE_RULES_VERSION: u32 = 5;
@@ -45,7 +45,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 8
+rules_version: 10
 ---
 
 # LLM Workflow agent protocol
@@ -93,11 +93,10 @@ Ratification is the user's action alone. An agent never ratifies, and never driv
 
 The delegated decision file stays where it is. Several decisions on one specification is the design here — "when was this approved, and when was it sent back" is what the audit log answers — and the app has no path that edits or deletes a decision document, so removing one would mean a human editing app-owned state, which is what these rules exist to prevent.
 
-That leaves a document sitting in `decisions/` that the app does not see. Two judgements ignore it and one does not:
+That leaves a document sitting in `decisions/` that the app does not see. Every judgement ignores it:
 
 - The app ignores it wherever it reads specification decisions. It never sets a specification's status and never reaches the decision feed.
 - The architect eligibility judgement ignores it. It is not architect work, and it cannot displace another decision from being the latest one.
-- The condition script's planner branch does not read `created_by`. It compares `created_at` across every decision document of the specification, so a delegated decision later than a pending `revision_requested` hides that revision request from the heartbeat while the app still counts it. Until that branch reads `created_by` too, the app and the heartbeat disagree about such a specification.
 
 Decisions written before this rule carry `created_by: user` even where an agent wrote them. They are not valid delegated decisions, but the app cannot tell them from its own stamps and still reads them as user decisions, which also means the ratification above does not reach them. Do not rewrite them: `created_by` is the app's field. Report the gap instead.
 
@@ -219,6 +218,8 @@ history:
 - Update `updated_at` with an RFC3339 timestamp when changing an agent-owned document.
 - When a task has a target date, store it as optional `due_at: YYYY-MM-DD`.
 - Task transition facts live in the optional `history` field; leave the key out while there are no entries.
+- The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
+- An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.
@@ -286,7 +287,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 4
+rules_version: 5
 ---
 
 # Project architect role
@@ -307,7 +308,10 @@ Turn one app-approved specification into implementation-ready development tasks.
 
 - Decide whether the tasks derived from one approval are safe to run at the same time. Tasks whose code scope overlaps are not.
 - Order every overlapping pair with `depends_on`, the optional list of task ids in the same workflow. Decide which side comes first and write the field on the task that must come second, instead of copying a prose "do not run in parallel" note into both.
-- Record the files and modules a task touches in its scope section, so the judgement behind the order stays readable.
+- Write `scope_files` on every task you create. `.workflow/rules/workflow.md` §6 defines the notation. The ordering above only reaches the tasks of one approval, because a session decomposing a later approval cannot name tasks that do not exist yet; the declaration is what lets two such sets be compared at all.
+- The two devices do not replace each other. You still decide the order with `depends_on`, and the declaration is the net for when that judgement turns out to be incomplete.
+- Record the files and modules a task touches in its scope section, so the judgement behind the order stays readable. That section stays a rationale for a reader; where it and `scope_files` disagree, the judgement follows `scope_files`.
+- Declare a scope as wide as the work really is and no wider. Declared too narrowly, an overlap goes unseen; declared too broadly, parallel room disappears for no reason.
 - Never declare a cycle and never reference a task id that does not exist. Both are dependencies that can never be satisfied.
 - Do not serialize tasks that do not overlap. Ordering without a reason removes parallel room and gains nothing.
 
@@ -335,7 +339,7 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 4
+rules_version: 5
 ---
 
 # Developer role
@@ -345,7 +349,7 @@ Implement and verify one eligible development task, then hand it to the user for
 ## Eligibility
 
 - The task must be `todo`, its dependencies must be satisfied, and its source decision must remain approved.
-- No unexpired lease may cover overlapping work.
+- No unexpired lease may cover work that overlaps the task's `scope_files`. "Overlapping work" below is that judgement.
 - If the task returned from user QA, read the latest `workflow-labs/qa-decision@1` comment and follow its test flow.
 
 ## Satisfied dependencies
@@ -362,6 +366,22 @@ Dependencies are satisfied only when every declared id names a task document who
 The judgement is derived when read and stored nowhere, so a dependency returning to `todo` after a QA revision request makes the waiting task unsatisfied again.
 
 Never select a task whose dependencies are unsatisfied. If only such tasks remain, change no files and report `NO_ELIGIBLE_WORK`. Do not move them to `blocked` either: `blocked` is the state of a task that was started and then hit a real impediment, not of a task whose turn has not come.
+
+## Overlapping work
+
+A task declares the files it touches in the optional `scope_files` frontmatter field, and `.workflow/rules/workflow.md` §6 defines that notation. `depends_on` orders tasks that one architect session saw together; this declaration is what catches an overlap between tasks that were decomposed from different approvals and never named each other.
+
+A task is blocked by overlap while an unexpired lease exists whose target is some other document and any of the following holds:
+
+- the task's own declaration is missing or malformed, whatever that lease holds
+- the lease's target is a task document whose declaration is missing or malformed
+- the lease's target is a task document, and the two declarations name at least one identical path
+
+Nothing else blocks. When the lease holds something that is not a task document and this task's declaration is readable, there is no declaration to compare against and the task stays open. Only unexpired leases count, judged for expiry exactly as `.workflow/rules/workflow.md` §4 describes, and the status of the task the lease holds does not matter — expiry is the only thing that releases it. A lease on the task itself is not overlap; the eligibility rule above already excludes that task.
+
+The judgement only reads lease files. Never create, edit, or delete one to change its outcome.
+
+If only tasks blocked by overlap remain, change no files and report `NO_ELIGIBLE_WORK`. Do not move them to `blocked` either, for the same reason as an unsatisfied dependency: another session's lease is not this task's impediment, and it goes away on its own.
 
 ## Allowed
 
@@ -614,7 +634,7 @@ mod tests {
 
     use super::{
         install_project_instructions, validate_project_instructions, ProjectInstructionError,
-        MANAGED_START,
+        MANAGED_START, ROLE_RULES_VERSION, WORKFLOW_RULES_VERSION,
     };
 
     #[test]
@@ -691,7 +711,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -713,7 +733,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -726,9 +746,9 @@ mod tests {
             assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
         }
         assert!(rules.contains("append-only"));
-        assert!(architect.contains("rules_version: 4"));
+        assert!(architect.contains("rules_version: 5"));
         assert!(architect.contains("`history`"));
-        assert!(developer.contains("rules_version: 4"));
+        assert!(developer.contains("rules_version: 5"));
         assert!(developer.contains("`history`"));
         assert!(planner.contains("rules_version: 5"));
         assert!(!planner.contains("`history`"));
@@ -749,12 +769,12 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 4"));
-        assert!(developer.contains("rules_version: 4"));
+        assert!(architect.contains("rules_version: 5"));
+        assert!(developer.contains("rules_version: 5"));
         assert!(planner.contains("rules_version: 5"));
     }
 
@@ -773,7 +793,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -795,10 +815,10 @@ mod tests {
             assert!(contract.contains("`.workflow/rules/workflow.md` §4"));
             assert!(!contract.contains("wf-claim.sh"));
         }
-        assert!(developer.contains("rules_version: 4"));
+        assert!(developer.contains("rules_version: 5"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("`qa_waiting` or `completed`"));
-        assert!(architect.contains("rules_version: 4"));
+        assert!(architect.contains("rules_version: 5"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
         assert!(planner.contains("rules_version: 5"));
@@ -815,7 +835,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -830,6 +850,57 @@ mod tests {
         assert!(planner.contains("`NO_ELIGIBLE_WORK`"));
         // 우선순위는 계약에만 있다. 두 판정은 있다/없다만 답한다.
         assert!(planner.contains("never which work comes first"));
+    }
+
+    #[test]
+    fn records_the_scope_files_declaration_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
+        let architect =
+            fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
+        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
+        assert!(rules.contains("one flow sequence on a single line starting at column 0"));
+        assert!(rules.contains("compared exactly as written"));
+        assert!(rules.contains("cannot be judged"));
+
+        // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
+        assert!(architect.contains("rules_version: 5"));
+        assert!(architect.contains("Write `scope_files` on every task you create"));
+        assert!(architect.contains("Order every overlapping pair with `depends_on`"));
+        assert!(architect.contains("The two devices do not replace each other"));
+        assert!(architect.contains("the judgement follows `scope_files`"));
+
+        // 개발자 계약의 겹침 조항이 선언을 근거로 지목한다.
+        assert!(developer.contains("rules_version: 5"));
+        assert!(developer
+            .contains("No unexpired lease may cover work that overlaps the task's `scope_files`"));
+        assert!(developer.contains("## Overlapping work"));
+        assert!(developer.contains("the task's own declaration is missing or malformed"));
+        assert!(developer.contains("name at least one identical path"));
+        assert!(developer.contains("Only unexpired leases count"));
+        assert!(developer.contains("The judgement only reads lease files"));
+        assert!(developer
+            .contains("If only tasks blocked by overlap remain, change no files and report `NO_ELIGIBLE_WORK`"));
+        assert!(developer.contains("Do not move them to `blocked` either"));
+
+        // 이 기획서에 기획자 계약의 변경분이 없다.
+        assert!(planner.contains("rules_version: 5"));
+        assert!(!planner.contains("scope_files"));
+
+        // `ROLE_RULES_VERSION`은 세 계약 `rules_version`의 최댓값이다.
+        assert_eq!(WORKFLOW_RULES_VERSION, 10);
+        assert_eq!(ROLE_RULES_VERSION, 5);
     }
 
     #[test]
@@ -853,7 +924,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -884,10 +955,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 8"));
+        assert!(rules.contains("rules_version: 10"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 4"));
-        assert!(developer.contains("rules_version: 4"));
+        assert!(architect.contains("rules_version: 5"));
+        assert!(developer.contains("rules_version: 5"));
     }
 
     #[test]

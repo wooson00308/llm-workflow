@@ -1,6 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { TaskDependency, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import type {
+  TaskDependency,
+  TaskOverlapBlock,
+  TaskQaBatchEntry,
+  WorkflowItemSummary,
+  WorkflowSummary,
+} from "../domain/types";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 
 const today = new Date();
@@ -28,6 +34,8 @@ function dayCell(container: HTMLElement, key: string) {
 }
 
 afterEach(cleanup);
+// 접힘 검사가 저장소에 쓰지만 따로 비울 것이 없다. 이 환경의 전역 `localStorage`는 메서드가 없는 빈
+// 객체이고 값은 `stubStorage()`가 검사마다 새로 만드는 `Map`에만 쌓이므로, 이 한 줄이 곧 정리다.
 afterEach(() => vi.unstubAllGlobals());
 
 const tasks: WorkflowItemSummary[] = [
@@ -59,13 +67,18 @@ function taskReader(item: WorkflowItemSummary = tasks[1]) {
   });
 }
 
-function dependencyReader(dependencies: TaskDependency[], dependencyFormatError = false) {
+function dependencyReader(
+  dependencies: TaskDependency[],
+  dependencyFormatError = false,
+  overlapBlocks: TaskOverlapBlock[] = [],
+) {
   const item = tasks[0];
   return vi.fn().mockResolvedValue({
     summary: item,
     body: `# ${item.title}`,
     dependencies,
     dependencyFormatError,
+    overlapBlocks,
   });
 }
 
@@ -91,10 +104,45 @@ function laneTask(
 /** 묶기를 켠 보드를 그린다. 레인 검사가 전부 이 상태에서 시작한다. */
 function renderLanes(workflow: WorkflowSummary) {
   const view = render(
-    <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflow} />,
+    <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflow} />,
   );
   fireEvent.click(screen.getByRole("button", { name: "기획서별 묶기" }));
   return view;
+}
+
+/** 일괄 확인 콜백을 갈아 끼운 채 묶기를 켠 보드를 그린다. 일괄 검사가 전부 이 상태에서 시작한다. */
+function renderBatchLanes(
+  workflow: WorkflowSummary,
+  onTaskQaBatch: (fileNames: string[], comment: string) => Promise<TaskQaBatchEntry[] | null>,
+) {
+  const view = render(
+    <DevelopmentBoard
+      busy={false}
+      onReadTask={taskReader()}
+      onTaskQa={vi.fn()}
+      onTaskQaBatch={onTaskQaBatch}
+      workflow={workflow}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "기획서별 묶기" }));
+  return view;
+}
+
+/** 일괄 확인 화면을 연다. 레인 헤더의 액션 하나가 유일한 입구다. */
+function openBatchDialog(count: number) {
+  fireEvent.click(screen.getByRole("button", { name: `이 그룹 ${count}건 QA 확인` }));
+  return screen.getByRole("dialog");
+}
+
+/** 성공으로 기록된 건별 결과. 앱이 요청 순서 그대로 돌려주는 모양이다. */
+function recordedEntry(id: string): TaskQaBatchEntry {
+  return { fileName: `${id}.md`, taskId: id, recorded: true, message: null };
+}
+
+/** 무장하고 한 번 더 눌러 실제로 실행한다. 확인 사실 10의 2단계 무장 확인이다. */
+function fireBatch(dialog: HTMLElement, count: number) {
+  fireEvent.click(within(dialog).getByRole("button", { name: `선택한 ${count}건 확인 완료` }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "한 번 더 누르면 완료" }));
 }
 
 /** 레인 하나를 그 안 보드의 region 이름으로 집는다. */
@@ -108,12 +156,48 @@ function laneCountsOf(container: HTMLElement, label: string) {
   return laneOf(container, label).querySelector(".task-lane-counts");
 }
 
-async function openDependencyDetail(dependencies: TaskDependency[], dependencyFormatError = false) {
+const LANE_COLLAPSE_KEY = "workflow-labs.spec-lane-collapse.v1";
+
+/** `browserSpecLaneCollapseStore.test.ts`와 같은 대체 저장소. 화면이 쓴 값을 그대로 읽어 볼 수 있다. */
+function stubStorage() {
+  const stored = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      stored.set(key, value);
+    },
+  });
+  return stored;
+}
+
+/**
+ * 레인 하나를 접기 버튼으로 집는다. 접힌 레인에는 보드 region이 없어 `laneOf`가 닿지 않는다.
+ *
+ * `key`는 레인 키다 — 기획서 id이거나 미분류 레인의 `미분류`. 버튼 이름이 제목이 아니라 이 키로
+ * 지어지므로 제목이 겹치는 레인이 있어도 하나만 집힌다.
+ */
+function laneByToggle(key: string) {
+  const toggle = screen.getByRole("button", { name: new RegExp(`^${key} 레인 `) });
+  const lane = toggle.closest(".task-lane");
+  if (!lane) throw new Error(`${key} 레인을 찾지 못했습니다.`);
+  return { lane: lane as HTMLElement, toggle };
+}
+
+/** 저장소에 쌓인 이 화면의 접힘 맵. 화면이 실제로 쓴 값을 그대로 읽는다. */
+function storedCollapse(stored: Map<string, string>, directory = "feature--wf_1") {
+  return JSON.parse(stored.get(LANE_COLLAPSE_KEY) ?? "{}")[directory];
+}
+
+async function openDependencyDetail(
+  dependencies: TaskDependency[],
+  dependencyFormatError = false,
+  overlapBlocks: TaskOverlapBlock[] = [],
+) {
   render(
     <DevelopmentBoard
       busy={false}
-      onReadTask={dependencyReader(dependencies, dependencyFormatError)}
-      onTaskQa={vi.fn()}
+      onReadTask={dependencyReader(dependencies, dependencyFormatError, overlapBlocks)}
+      onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()}
       workflow={workflowWith()}
     />,
   );
@@ -123,7 +207,7 @@ async function openDependencyDetail(dependencies: TaskDependency[], dependencyFo
 
 describe("DevelopmentBoard", () => {
   it("groups development tasks by their actual status", () => {
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     expect(screen.getByRole("region", { name: "개발 작업 칸반 보드" })).toBeInTheDocument();
     expect(screen.getByText("파서 구현")).toBeInTheDocument();
@@ -136,14 +220,14 @@ describe("DevelopmentBoard", () => {
     // jsdom은 레이아웃을 계산하지 않으므로 이 시나리오가 보장하는 것은 "이 데이터가 카드에 실린다"까지다.
     // 상자 크기를 묻지 않는다 — 물으면 전부 0이 돌아와 통과하는 것처럼 보이는 거짓 검사가 된다.
     const items: WorkflowItemSummary[] = [{ ...tasks[1], excerpt: overflowExcerpt }];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
 
     const card = screen.getByRole("button", { name: /사용자 QA/ });
     expect(card.querySelector("p")).toHaveTextContent(overflowRun);
   });
 
   it("shares search and status filters across view modes", () => {
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
     expect(screen.getByText("파서 구현")).toBeInTheDocument();
@@ -163,7 +247,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T04:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
@@ -171,7 +255,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("drops the due_at placement wording from the timeline header", () => {
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     expect(screen.getByText("상태 전이 기록 기준")).toBeInTheDocument();
@@ -193,7 +277,7 @@ describe("DevelopmentBoard", () => {
         { kind: "qa_waiting", at: `${todayKey}T02:00:00Z` },
       ],
     }));
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
@@ -213,7 +297,7 @@ describe("DevelopmentBoard", () => {
       excerpt: "",
       events: [{ kind: "completed", at: `${todayKey}T05:00:00Z` }],
     }));
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader(completed[0])} onTaskQa={vi.fn()} workflow={workflowWith(completed)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(completed[0])} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(completed)} />);
 
     expect(screen.getByText("3개 표시 · 완료는 최근 3개만 표시")).toBeInTheDocument();
 
@@ -229,7 +313,7 @@ describe("DevelopmentBoard", () => {
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T01:00:00Z` }] },
       { ...tasks[1], dueAt: null, events: [{ kind: "qa_waiting", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const cell = () => dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
@@ -257,7 +341,7 @@ describe("DevelopmentBoard", () => {
         ],
       },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
@@ -271,7 +355,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "completed", at }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
@@ -286,7 +370,7 @@ describe("DevelopmentBoard", () => {
       { ...tasks[0], dueAt: null, events: [{ kind: "qa_waiting", at: `${todayKey}T08:00:00Z` }] },
       { ...tasks[1], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 2건` }));
 
@@ -305,7 +389,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "blocked", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
     fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
@@ -318,7 +402,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
@@ -331,7 +415,7 @@ describe("DevelopmentBoard", () => {
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
       { ...tasks[1], dueAt: null, events: [{ kind: "qa_waiting", at: `${otherDayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const target = screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` });
@@ -352,7 +436,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
 
@@ -377,7 +461,7 @@ describe("DevelopmentBoard", () => {
         ],
       },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 2건` }));
 
@@ -388,7 +472,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
     expect(screen.getByRole("button", { name: "닫기" })).toBeInTheDocument();
@@ -400,13 +484,13 @@ describe("DevelopmentBoard", () => {
   it("reports tasks that never reach the timeline and drops the notice once they do", () => {
     const withEvents: WorkflowItemSummary = { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] };
     const view = render(
-      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith([withEvents, { ...tasks[1], dueAt: null }])} />,
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith([withEvents, { ...tasks[1], dueAt: null }])} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     expect(screen.getByText("기록이 없어 타임라인에 표시되지 않는 작업 1건")).toBeInTheDocument();
 
     view.rerender(
-      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith([withEvents])} />,
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith([withEvents])} />,
     );
     expect(screen.queryByText(/기록이 없어 타임라인에 표시되지 않는 작업/)).not.toBeInTheDocument();
   });
@@ -415,7 +499,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     expect(screen.queryByText("이 달에 기록된 전이가 없습니다.")).not.toBeInTheDocument();
 
@@ -438,7 +522,7 @@ describe("DevelopmentBoard", () => {
       dueAt: null,
       excerpt: "",
     }));
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader(completed[0])} onTaskQa={vi.fn()} workflow={workflowWith(completed)} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(completed[0])} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(completed)} />);
 
     expect(screen.getByText("완료 작업 4")).toBeInTheDocument();
     expect(screen.getByText("완료 작업 3")).toBeInTheDocument();
@@ -448,7 +532,7 @@ describe("DevelopmentBoard", () => {
 
   it("lets the user confirm a QA waiting task", async () => {
     const onTaskQa = vi.fn().mockResolvedValue(true);
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
     await screen.findByLabelText("테스트 플로우와 확인 메모");
@@ -467,7 +551,7 @@ describe("DevelopmentBoard", () => {
 
   it("returns the confirm button to a safe state when not clicked again in time", async () => {
     const onTaskQa = vi.fn().mockResolvedValue(true);
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
     await screen.findByLabelText("테스트 플로우와 확인 메모");
@@ -489,7 +573,7 @@ describe("DevelopmentBoard", () => {
 
   it("requires guidance when QA requests development changes", async () => {
     const onTaskQa = vi.fn().mockResolvedValue(true);
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={onTaskQa} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
     await screen.findByLabelText("테스트 플로우와 확인 메모");
@@ -521,7 +605,7 @@ describe("DevelopmentBoard", () => {
         storage.set(key, value);
       },
     });
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
     const handle = await screen.findByRole("separator", { name: "QA 패널 너비 조절" });
@@ -536,7 +620,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("opens a non-QA card as a read-only detail page", async () => {
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader(tasks[0])} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(tasks[0])} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
 
@@ -552,7 +636,7 @@ describe("DevelopmentBoard", () => {
     const body = ["첫 줄은 배경이다.", "둘째 줄은 원인이다."].join("\n");
     const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[0], body });
     const { container } = render(
-      <DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} workflow={workflowWith()} />,
+      <DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
@@ -566,7 +650,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("leaves the detail untouched when a task declares no dependency", async () => {
-    render(<DevelopmentBoard busy={false} onReadTask={taskReader(tasks[0])} onTaskQa={vi.fn()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(tasks[0])} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
 
@@ -641,6 +725,78 @@ describe("DevelopmentBoard", () => {
     expect(ids).toEqual(["TASK-900", "TASK-100", "TASK-500"]);
   });
 
+  it("stops calling a task startable while an active lease overlaps it", async () => {
+    const block = await openDependencyDetail(
+      [{ id: "TASK-100", state: "satisfied" }],
+      false,
+      [{ leaseTargetId: "TASK-101", sharedFiles: ["src/App.css", "src/features/projects/domain/types.ts"] }],
+    );
+
+    expect(within(block).getByText("준비됨")).toBeInTheDocument();
+    expect(within(block).queryByText("시작 가능")).not.toBeInTheDocument();
+    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
+    expect(within(block).getByText("TASK-101")).toBeInTheDocument();
+    expect(within(block).getByText(/src\/App\.css/)).toHaveTextContent(
+      "겹친 경로 src/App.css, src/features/projects/domain/types.ts",
+    );
+  });
+
+  it("draws the overlap of a task that declares no dependency at all", async () => {
+    const block = await openDependencyDetail([], false, [
+      { leaseTargetId: "TASK-104", sharedFiles: ["src-tauri/src/infrastructure/heartbeat_condition.rs"] },
+    ]);
+
+    expect(block.querySelectorAll(".task-dependency")).toHaveLength(0);
+    expect(within(block).getByText("TASK-104")).toBeInTheDocument();
+    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
+  });
+
+  it("tells an undeclared scope apart from a shared path when it reports an overlap", async () => {
+    const block = await openDependencyDetail([], false, [{ leaseTargetId: "TASK-104", sharedFiles: [] }]);
+
+    expect(
+      within(block).getByText("두 작업 중 한쪽에 범위 선언이 없거나 형식이 잘못되어 겹친 것으로 봅니다."),
+    ).toBeInTheDocument();
+    expect(within(block).queryByText(/겹친 경로/)).not.toBeInTheDocument();
+  });
+
+  it("keeps an overlap out of the tone reserved for declarations that never open", async () => {
+    const block = await openDependencyDetail([], false, [
+      { leaseTargetId: "TASK-104", sharedFiles: ["src/App.css"] },
+    ]);
+
+    expect(within(block).queryByText(/시간이 지나도 풀리지 않습니다/)).not.toBeInTheDocument();
+    expect(block.querySelector(".task-dependency-note")).toBeNull();
+    expect(
+      within(block).getByText("다른 세션이 잡은 작업과 범위가 겹칩니다. 그 lease가 풀리면 착수할 수 있습니다."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows an unsatisfied dependency and an overlap side by side", async () => {
+    const block = await openDependencyDetail(
+      [{ id: "TASK-100", state: "missing" }],
+      false,
+      [{ leaseTargetId: "TASK-104", sharedFiles: ["src/App.css"] }],
+    );
+
+    expect(within(block).getByText("TASK-100").parentElement).toHaveTextContent("없는 작업");
+    expect(within(block).getByText("TASK-104")).toBeInTheDocument();
+    expect(
+      within(block).getByText("이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다."),
+    ).toBeInTheDocument();
+    expect(
+      within(block).getByText("다른 세션이 잡은 작업과 범위가 겹칩니다. 그 lease가 풀리면 착수할 수 있습니다."),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the startable reading alone when nothing overlaps the task", async () => {
+    const block = await openDependencyDetail([{ id: "TASK-100", state: "satisfied" }], false, []);
+
+    expect(within(block).getByText("시작 가능")).toBeInTheDocument();
+    expect(block.querySelectorAll(".task-overlap")).toHaveLength(0);
+    expect(within(block).queryByText(/lease가 풀리면/)).not.toBeInTheDocument();
+  });
+
   it("splits the board into lanes by the source spec of each task", () => {
     const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-002")];
     const { container } = renderLanes(workflowWith(items));
@@ -654,7 +810,7 @@ describe("DevelopmentBoard", () => {
 
   it("starts with grouping off and returns the plain board when it is turned off again", () => {
     const { container } = render(
-      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} workflow={workflowWith()} />,
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />,
     );
 
     const toggle = screen.getByRole("button", { name: "기획서별 묶기" });
@@ -809,5 +965,349 @@ describe("DevelopmentBoard", () => {
     expect(within(lane).getByText("확인 필요")).toBeInTheDocument();
     expect(within(lane).getByText("TASK-201 작업")).toBeInTheDocument();
     expect(within(lane).queryByText("QA 대기만 남음 · 통째로 QA 가능")).not.toBeInTheDocument();
+  });
+
+  it("collapses a lane to its header while the counts and the signal stay in view", () => {
+    stubStorage();
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-002")];
+    const base = workflowWith(items);
+    const workflow: WorkflowSummary = {
+      ...base,
+      items: {
+        ...base.items,
+        specs: [
+          {
+            fileName: "SPEC-001.md",
+            id: "SPEC-001",
+            title: "레인 기획",
+            status: "user_review",
+            updatedAt: "2026-08-01T00:00:00Z",
+            excerpt: "",
+          },
+        ],
+      },
+    };
+    const { container } = renderLanes(workflow);
+
+    // 제목이 있어도 버튼 이름은 레인 키로 지어진다. 제목이 겹치는 레인이 있어도 하나만 집힌다.
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+
+    const { lane, toggle } = laneByToggle("SPEC-001");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(lane).toHaveClass("collapsed");
+    expect(screen.queryByRole("region", { name: "SPEC-001 칸반 보드" })).not.toBeInTheDocument();
+    expect(within(lane).queryByText("TASK-201 작업")).not.toBeInTheDocument();
+
+    // 접기는 카드를 줄이는 것이지 사실을 감추는 것이 아니다. 헤더는 통째로 남는다.
+    expect(within(lane).getByText("레인 기획")).toBeInTheDocument();
+    expect(lane.querySelector(".task-lane-counts")).toHaveTextContent("QA 대기 1");
+    expect(within(lane).getByText("QA 대기만 남음 · 통째로 QA 가능")).toBeInTheDocument();
+
+    expect(within(laneOf(container, "SPEC-002 칸반 보드")).getByText("TASK-202 작업")).toBeInTheDocument();
+  });
+
+  it("brings the cards back when a collapsed lane is expanded again", () => {
+    stubStorage();
+    const { container } = renderLanes(workflowWith([laneTask("TASK-201", "qa_waiting", "SPEC-001")]));
+
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+    expect(screen.queryByRole("region", { name: "SPEC-001 칸반 보드" })).not.toBeInTheDocument();
+
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+
+    expect(laneByToggle("SPEC-001").toggle).toHaveAttribute("aria-expanded", "true");
+    expect(laneByToggle("SPEC-001").lane).not.toHaveClass("collapsed");
+    expect(within(laneOf(container, "SPEC-001 칸반 보드")).getByText("TASK-201 작업")).toBeInTheDocument();
+  });
+
+  it("keeps a lane collapsed after the board is mounted again", () => {
+    const stored = stubStorage();
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-002")];
+    renderLanes(workflowWith(items));
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+    expect(storedCollapse(stored)).toEqual({ "SPEC-001": true });
+
+    cleanup();
+    renderLanes(workflowWith(items));
+
+    expect(laneByToggle("SPEC-001").toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "SPEC-001 칸반 보드" })).not.toBeInTheDocument();
+    // 접은 적 없는 레인은 펼침으로 돌아온다.
+    expect(laneByToggle("SPEC-002").toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("region", { name: "SPEC-002 칸반 보드" })).toBeInTheDocument();
+  });
+
+  it("stores the collapse under the versioned key and splits it by workflow directory", () => {
+    const stored = stubStorage();
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001")];
+    const { rerender } = renderLanes(workflowWith(items));
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+
+    expect([...stored.keys()]).toEqual(["workflow-labs.spec-lane-collapse.v1"]);
+    expect(JSON.parse(stored.get(LANE_COLLAPSE_KEY)!)).toEqual({ "feature--wf_1": { "SPEC-001": true } });
+
+    // 디렉터리가 다른 워크플로에는 접힘이 따라오지 않는다. `WorkspaceShell`이 이 컴포넌트에 `key`를
+    // 주지 않아 워크플로를 바꿔도 마운트가 유지되므로, 다시 그리는 것이 아니라 프롭을 갈아 끼워 본다.
+    rerender(
+      <DevelopmentBoard
+        busy={false}
+        onReadTask={taskReader()}
+        onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()}
+        workflow={{ ...workflowWith(items), directory: "other--wf_2" }}
+      />,
+    );
+    expect(laneByToggle("SPEC-001").toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("region", { name: "SPEC-001 칸반 보드" })).toBeInTheDocument();
+
+    // 돌아오면 그 워크플로의 접힘도 돌아온다.
+    rerender(
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />,
+    );
+    expect(laneByToggle("SPEC-001").toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "SPEC-001 칸반 보드" })).not.toBeInTheDocument();
+  });
+
+  it("draws every lane when the stored collapse points at a spec that is gone", () => {
+    const stored = stubStorage();
+    stored.set(LANE_COLLAPSE_KEY, JSON.stringify({ "feature--wf_1": { "SPEC-404": true, "SPEC-001": true } }));
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-002")];
+    const { container } = renderLanes(workflowWith(items));
+
+    expect(container.querySelectorAll(".task-lane")).toHaveLength(2);
+    expect(laneByToggle("SPEC-001").toggle).toHaveAttribute("aria-expanded", "false");
+    expect(within(laneOf(container, "SPEC-002 칸반 보드")).getByText("TASK-202 작업")).toBeInTheDocument();
+
+    // 지금 없는 기획서의 값을 정리하지 않는다. 그 레인이 돌아왔을 때 접힘이 남아 있어야 한다.
+    fireEvent.click(laneByToggle("SPEC-002").toggle);
+    expect(storedCollapse(stored)).toEqual({ "SPEC-404": true, "SPEC-001": true, "SPEC-002": true });
+  });
+
+  it("keeps the board and the collapse working when localStorage throws", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("접근이 거부되었습니다.");
+      },
+      setItem: () => {
+        throw new Error("한도를 넘었습니다.");
+      },
+    });
+    const { container } = renderLanes(workflowWith([laneTask("TASK-201", "qa_waiting", "SPEC-001")]));
+
+    expect(within(laneOf(container, "SPEC-001 칸반 보드")).getByText("TASK-201 작업")).toBeInTheDocument();
+
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+    expect(laneByToggle("SPEC-001").toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "SPEC-001 칸반 보드" })).not.toBeInTheDocument();
+
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+    expect(screen.getByRole("region", { name: "SPEC-001 칸반 보드" })).toBeInTheDocument();
+
+    // 표시 상태의 저장 실패를 사용자에게 알리지 않는다.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/실패|오류/);
+  });
+
+  it("wraps only the lane board in a scroll box and leaves the header outside it", () => {
+    stubStorage();
+    renderLanes(workflowWith([laneTask("TASK-201", "qa_waiting", "SPEC-001")]));
+
+    // 좁은 창에서 950px 보드가 레인 테두리 밖으로 빠져나가지 않게 하는 상자다(QA-F25FD89E).
+    // 선언 자체는 `specLaneOverflow.test.ts`가 지키고, 여기서는 상자가 실제로 보드를 감싸는지 본다.
+    const scroll = screen.getByRole("region", { name: "SPEC-001 칸반 보드" }).parentElement;
+    expect(scroll).toHaveClass("task-lane-scroll");
+    expect(scroll?.parentElement).toHaveClass("task-lane");
+    // 헤더가 상자 밖이라 보드를 옆으로 밀어도 집계와 신호가 남는다.
+    expect(scroll?.querySelector(".task-lane-header")).toBeNull();
+
+    // 묶기를 끈 보드에는 이 상자가 생기지 않는다.
+    cleanup();
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
+    expect(screen.getByRole("region", { name: "개발 작업 칸반 보드" }).parentElement).not.toHaveClass("task-lane-scroll");
+  });
+
+  it("collapses the unassigned lane under its own key instead of a spec id", () => {
+    const stored = stubStorage();
+    const items = [laneTask("TASK-201", "qa_waiting", null), laneTask("TASK-202", "qa_waiting", "SPEC-001")];
+    renderLanes(workflowWith(items));
+
+    fireEvent.click(laneByToggle("미분류").toggle);
+
+    expect(laneByToggle("미분류").lane).toHaveClass("collapsed");
+    expect(screen.queryByRole("region", { name: "미분류 칸반 보드" })).not.toBeInTheDocument();
+    // 저장 키가 기획서 id와 섞이지 않는다. `browserSpecLaneCollapseStore`의 `UNASSIGNED_LANE_KEY`다.
+    expect(storedCollapse(stored)).toEqual({ "#unassigned": true });
+    expect(screen.getByRole("region", { name: "SPEC-001 칸반 보드" })).toBeInTheDocument();
+  });
+
+  it("puts the batch QA action only on a lane whose signal is lit", () => {
+    const items = [
+      laneTask("TASK-201", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-202", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-203", "qa_waiting", "SPEC-002"),
+      laneTask("TASK-204", "todo", "SPEC-002"),
+      laneTask("TASK-205", "qa_waiting", null),
+    ];
+    const { container } = renderBatchLanes(workflowWith(items), vi.fn());
+
+    // 문구의 건수가 그 레인의 `qa_waiting` 수와 같다.
+    const signalled = laneOf(container, "SPEC-001 칸반 보드");
+    expect(within(signalled).getByRole("button", { name: "이 그룹 2건 QA 확인" })).toBeInTheDocument();
+
+    // 신호가 꺼진 레인과 미분류 레인에는 액션 자체가 없다. `lane.signal` 하나로 갈린다.
+    expect(within(laneOf(container, "SPEC-002 칸반 보드")).queryByRole("button", { name: /QA 확인$/ })).not.toBeInTheDocument();
+    expect(within(laneOf(container, "미분류 칸반 보드")).queryByRole("button", { name: /QA 확인$/ })).not.toBeInTheDocument();
+  });
+
+  it("lists every target with its id and title and lets each one be dropped", () => {
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-001")];
+    renderBatchLanes(workflowWith(items), vi.fn());
+    const dialog = openBatchDialog(2);
+
+    expect(within(dialog).getByText("TASK-201")).toBeInTheDocument();
+    expect(within(dialog).getByText("TASK-201 작업")).toBeInTheDocument();
+    // 처음에는 전부 선택이다.
+    expect(within(dialog).getAllByRole("checkbox").every((box) => (box as HTMLInputElement).checked)).toBe(true);
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /TASK-201/ }));
+    expect(within(dialog).getByRole("button", { name: "선택한 1건 확인 완료" })).toBeEnabled();
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /TASK-202/ }));
+    expect(within(dialog).getByRole("button", { name: "선택한 0건 확인 완료" })).toBeDisabled();
+  });
+
+  it("counts the whole lane even when the status filter hides some of its cards", () => {
+    const items = [
+      laneTask("TASK-201", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-202", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-203", "completed", "SPEC-001"),
+    ];
+    const { container } = renderBatchLanes(workflowWith(items), vi.fn());
+    fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "completed" } });
+
+    // 카드는 완료 1장만 남았는데 액션은 여전히 2건을 말한다. 승인된 확인 필요 3번이 정한 어긋남이다.
+    const lane = laneOf(container, "SPEC-001 칸반 보드");
+    expect(within(lane).queryByText("TASK-201 작업")).not.toBeInTheDocument();
+
+    const dialog = openBatchDialog(2);
+    expect(within(dialog).getAllByRole("checkbox")).toHaveLength(2);
+    expect(within(dialog).getByText("TASK-201 작업")).toBeInTheDocument();
+    expect(within(dialog).getByText("필터와 무관하게 이 레인의 QA 대기 전체를 셉니다")).toBeInTheDocument();
+  });
+
+  it("calls the app once with every selected file name and the shared comment", async () => {
+    const onTaskQaBatch = vi.fn().mockResolvedValue([recordedEntry("TASK-201"), recordedEntry("TASK-203")]);
+    const items = [
+      laneTask("TASK-201", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-202", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-203", "qa_waiting", "SPEC-001"),
+    ];
+    renderBatchLanes(workflowWith(items), onTaskQaBatch);
+    const dialog = openBatchDialog(3);
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /TASK-202/ }));
+    fireEvent.change(within(dialog).getByLabelText("전 건에 함께 남길 확인 메모"), {
+      target: { value: "레인 유저 플로우를 한 번 타 봤습니다." },
+    });
+    fireBatch(dialog, 2);
+
+    // 일괄 한 번이 앱 호출 한 번이다. 선택된 건수만큼 반복해 부르지 않는다.
+    await waitFor(() => expect(onTaskQaBatch).toHaveBeenCalledTimes(1));
+    expect(onTaskQaBatch).toHaveBeenCalledWith(
+      ["TASK-201.md", "TASK-203.md"],
+      "레인 유저 플로우를 한 번 타 봤습니다.",
+    );
+  });
+
+  it("reads out the recorded count and every failure with its task id and reason", async () => {
+    const onTaskQaBatch = vi.fn().mockResolvedValue([
+      recordedEntry("TASK-201"),
+      { fileName: "TASK-202.md", taskId: "TASK-202", recorded: false, message: "QA 대기 상태가 아닙니다." },
+      recordedEntry("TASK-203"),
+    ]);
+    const items = [
+      laneTask("TASK-201", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-202", "qa_waiting", "SPEC-001"),
+      laneTask("TASK-203", "qa_waiting", "SPEC-001"),
+    ];
+    renderBatchLanes(workflowWith(items), onTaskQaBatch);
+    const dialog = openBatchDialog(3);
+    fireBatch(dialog, 3);
+
+    await waitFor(() => expect(within(dialog).getByText("2건을 기록했습니다.")).toBeInTheDocument());
+    // 작업 id가 목록에도 있으므로 실패 목록 안에서만 읽는다.
+    const failures = dialog.querySelector(".lane-qa-failures");
+    expect(failures?.querySelectorAll("li")).toHaveLength(1);
+    expect(failures).toHaveTextContent("TASK-202");
+    expect(failures).toHaveTextContent("QA 대기 상태가 아닙니다.");
+  });
+
+  it("still says how many were recorded when nothing failed", async () => {
+    const onTaskQaBatch = vi.fn().mockResolvedValue([recordedEntry("TASK-201"), recordedEntry("TASK-202")]);
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-001")];
+    renderBatchLanes(workflowWith(items), onTaskQaBatch);
+    const dialog = openBatchDialog(2);
+    fireBatch(dialog, 2);
+
+    await waitFor(() => expect(within(dialog).getByText("2건을 기록했습니다.")).toBeInTheDocument());
+    expect(dialog.querySelector(".lane-qa-failures")).toBeNull();
+  });
+
+  it("says the call itself failed inside the dialog instead of leaving it to a global message", async () => {
+    const onTaskQaBatch = vi.fn().mockResolvedValue(null);
+    renderBatchLanes(workflowWith([laneTask("TASK-201", "qa_waiting", "SPEC-001")]), onTaskQaBatch);
+    const dialog = openBatchDialog(1);
+    fireBatch(dialog, 1);
+
+    await waitFor(() =>
+      expect(within(dialog).getByText("일괄 확인 호출이 실패해 건별 결과를 받지 못했습니다.")).toBeInTheDocument(),
+    );
+  });
+
+  it("runs with an empty comment and caps the shared one at two thousand characters", async () => {
+    const onTaskQaBatch = vi.fn().mockResolvedValue([recordedEntry("TASK-201")]);
+    renderBatchLanes(workflowWith([laneTask("TASK-201", "qa_waiting", "SPEC-001")]), onTaskQaBatch);
+    const dialog = openBatchDialog(1);
+
+    expect(within(dialog).getByLabelText("전 건에 함께 남길 확인 메모")).toHaveAttribute("maxlength", "2000");
+    fireBatch(dialog, 1);
+
+    await waitFor(() => expect(onTaskQaBatch).toHaveBeenCalledWith(["TASK-201.md"], ""));
+  });
+
+  it("arms before it runs, names the count in the warning, and locks the dialog while running", async () => {
+    let finish!: (value: TaskQaBatchEntry[] | null) => void;
+    const onTaskQaBatch = vi.fn(
+      () => new Promise<TaskQaBatchEntry[] | null>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-001")];
+    renderBatchLanes(workflowWith(items), onTaskQaBatch);
+    const dialog = openBatchDialog(2);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "선택한 2건 확인 완료" }));
+    expect(onTaskQaBatch).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("선택한 2건을 완료 처리합니다. 되돌릴 수 없습니다.")).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "한 번 더 누르면 완료" }));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "선택한 2건 확인 완료" })).toBeDisabled());
+    expect(within(dialog).getAllByRole("checkbox")[0]).toBeDisabled();
+
+    await act(async () => {
+      finish([recordedEntry("TASK-201"), recordedEntry("TASK-202")]);
+    });
+    expect(within(dialog).getByText("2건을 기록했습니다.")).toBeInTheDocument();
+  });
+
+  it("keeps the batch action on a collapsed lane", () => {
+    stubStorage();
+    renderBatchLanes(workflowWith([laneTask("TASK-201", "qa_waiting", "SPEC-001")]), vi.fn());
+
+    fireEvent.click(laneByToggle("SPEC-001").toggle);
+
+    // 접기는 카드를 줄이는 것이지 사실을 감추는 것이 아니다. 헤더가 남으므로 액션도 남는다.
+    const { lane } = laneByToggle("SPEC-001");
+    expect(lane).toHaveClass("collapsed");
+    expect(within(lane).getByRole("button", { name: "이 그룹 1건 QA 확인" })).toBeInTheDocument();
   });
 });

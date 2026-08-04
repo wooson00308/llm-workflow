@@ -8,6 +8,7 @@ import type {
   ProjectGateway,
   ProjectSummary,
   RecentProjectStore,
+  TaskQaBatchEntry,
 } from "../domain/types";
 
 const project: ProjectSummary = {
@@ -35,6 +36,13 @@ const snapshot: IntegrationsSnapshot = {
   slug: "-projects-workflow-labs",
   managedBlockFailure: null,
   jobsFilePath: "/home/tester/.claude/heartbeat/jobs.d/-projects-workflow-labs.md",
+  updateGuide: {
+    identifyCommand: "pip show claude-heartbeat",
+    packageCommand: "pip install -U claude-heartbeat",
+    sourceCommand: "git pull",
+    serviceLookupCommand: "launchctl list | grep heartbeat",
+    serviceRestartCommand: "launchctl kickstart -k gui/$(id -u)/<라벨>",
+  },
   heartbeat: {
     installation: "installed",
     daemonRunning: true,
@@ -85,6 +93,9 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     readIdea: vi.fn().mockResolvedValue(null),
     decideSpec: vi.fn().mockResolvedValue(project),
     recordTaskQa: vi.fn().mockResolvedValue(project),
+    confirmTaskQaBatch: vi
+      .fn()
+      .mockResolvedValue({ summary: project, results: [] }),
     migrate: vi.fn().mockResolvedValue(project),
     inspectIntegrations: vi.fn().mockResolvedValue(snapshot),
     installHeartbeatJobs: vi.fn().mockResolvedValue(snapshot),
@@ -342,6 +353,93 @@ describe("useProjectWorkspace", () => {
     expect(read).toBeNull();
     await waitFor(() =>
       expect(result.current.error).toBe("아이디어 문서를 찾을 수 없습니다"),
+    );
+    unmount();
+  });
+
+  // 일괄 확인은 앱 호출 한 번이다. 건별 결과가 그대로 화면으로 가고, 요약은 응답의 것으로 바뀐다.
+  it("일괄 확인을 게이트웨이 한 번으로 부르고 건별 결과를 그대로 돌려준다", async () => {
+    const results: TaskQaBatchEntry[] = [
+      { fileName: "TASK-001.md", taskId: "TASK-001", recorded: true, message: null },
+      {
+        fileName: "TASK-002.md",
+        taskId: "TASK-002",
+        recorded: false,
+        message: "QA 대기 상태인 개발 작업만 확인할 수 있습니다.",
+      },
+    ];
+    const batched: ProjectSummary = {
+      ...project,
+      workflows: [
+        {
+          ...project.workflows[0],
+          counts: { ...project.workflows[0].counts, decisions: 1 },
+        },
+      ],
+    };
+    const gateway = gatewayFor({
+      confirmTaskQaBatch: vi
+        .fn()
+        .mockResolvedValue({ summary: batched, results }),
+    });
+    const recentStore: RecentProjectStore = {
+      load: vi.fn().mockReturnValue([]),
+      remember: vi.fn().mockReturnValue([]),
+    };
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    let confirmed: TaskQaBatchEntry[] | null = null;
+    await act(async () => {
+      confirmed = await result.current.confirmTaskQaBatch(
+        "feature--wf_1",
+        ["TASK-001.md", "TASK-002.md"],
+        "한 번에 확인함",
+      );
+    });
+
+    expect(gateway.confirmTaskQaBatch).toHaveBeenCalledTimes(1);
+    expect(gateway.confirmTaskQaBatch).toHaveBeenCalledWith(
+      project.rootPath,
+      "feature--wf_1",
+      ["TASK-001.md", "TASK-002.md"],
+      "한 번에 확인함",
+    );
+    expect(confirmed).toEqual(results);
+    await waitFor(() => expect(result.current.project).toEqual(batched));
+    expect(result.current.error).toBeNull();
+    unmount();
+  });
+
+  it("일괄 확인 호출이 실패하면 null과 전역 사유가 남는다", async () => {
+    const gateway = gatewayFor({
+      confirmTaskQaBatch: vi
+        .fn()
+        .mockRejectedValue(new Error("결정 코멘트는 2,000자 이하여야 합니다.")),
+    });
+    const recentStore: RecentProjectStore = {
+      load: vi.fn().mockReturnValue([]),
+      remember: vi.fn().mockReturnValue([]),
+    };
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    let confirmed: TaskQaBatchEntry[] | null = [];
+    await act(async () => {
+      confirmed = await result.current.confirmTaskQaBatch(
+        "feature--wf_1",
+        ["TASK-001.md"],
+        "너무 긴 코멘트",
+      );
+    });
+
+    expect(confirmed).toBeNull();
+    await waitFor(() =>
+      expect(result.current.error).toBe("결정 코멘트는 2,000자 이하여야 합니다."),
     );
     unmount();
   });

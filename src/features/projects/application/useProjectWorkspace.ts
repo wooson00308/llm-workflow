@@ -13,6 +13,7 @@ import type {
   RecentProjectStore,
   RoleJobRequest,
   SpecDecisionOutcome,
+  TaskQaBatchEntry,
   TaskQaOutcome,
 } from "../domain/types";
 
@@ -289,6 +290,38 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, project],
   );
 
+  /**
+   * 일괄 확인은 앱 호출 한 번이다. 건별 실패는 돌려주는 배열에 담기고 전역 에러로 올라가지 않는다 —
+   * 전역 문구는 다음 호출이 덮는 자리라 건별 보고를 담지 못한다. `null`은 호출 자체가 실패한 것이다.
+   */
+  const confirmTaskQaBatch = useCallback(
+    async (
+      workflowDirectory: string,
+      fileNames: string[],
+      comment: string,
+    ): Promise<TaskQaBatchEntry[] | null> => {
+      if (!project) return null;
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await gateway.confirmTaskQaBatch(
+          project.rootPath,
+          workflowDirectory,
+          fileNames,
+          comment,
+        );
+        setProject(result.summary);
+        return result.results;
+      } catch (reason) {
+        setError(messageFrom(reason));
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
   const migrate = useCallback(async () => {
     if (!project) return false;
     setBusy(true);
@@ -438,6 +471,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     readTask,
     readIdea,
     recordTaskQa,
+    confirmTaskQaBatch,
     decideSpec,
     refresh,
     migrate,

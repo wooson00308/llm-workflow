@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::domain::project::{
     DreamRefinement, DuplicateHeartbeatJob, HeartbeatInstallation, HeartbeatJobRun,
     HeartbeatReadFailure, HeartbeatRoleStatus, HeartbeatSetupStage, HeartbeatStatus,
-    IntegrationInstallation, JobDefaults, JobQuota,
+    HeartbeatUpdateGuide, IntegrationInstallation, JobDefaults, JobQuota,
 };
 use crate::infrastructure::heartbeat_condition::{
     install_condition_script, ConditionScriptError, CONDITION_SCRIPT,
@@ -27,6 +27,7 @@ use crate::infrastructure::heartbeat_setup::setup_stages;
 use crate::infrastructure::heartbeat_status::{
     self, read_heartbeat_status, read_job_runs, read_text, JobRuns,
 };
+use crate::infrastructure::heartbeat_update::update_guide;
 
 const CONTROL_DIRECTORY: &str = ".workflow";
 /// 전환 전에 앱이 잡을 쓰던 전역 파일. 이제 앱은 이 파일에서 자기 잡을 빼는 정리만 한다(R3).
@@ -61,6 +62,15 @@ pub struct IntegrationsSnapshot {
     ///
     /// 두 연동이 같은 파일을 쓰므로 연동별 payload가 아니라 섹션 공통 값이다.
     pub jobs_file_path: String,
+    /// 084 경고가 "갱신하세요"로 끝나는 자리에서 화면이 보여줄 갱신 절차의 명령 원문(SPEC-034 R3).
+    ///
+    /// 두 카드가 같은 값을 같은 문구로 보여야 하므로(R7) 연동별 payload가 아니라 섹션 공통 값이다.
+    /// `managed_block_failure`·`jobs_file_path`가 같은 이유로 여기 있는 것과 같은 규칙이다.
+    /// `heartbeat.setup_stages`에 얹지 않는다 — 그 목록은 설치 마법사의 것이고 dream 카드는 그 값을
+    /// 읽지 않는다.
+    ///
+    /// 표시 조건은 화면의 일이라 이 값은 조회 상태와 무관하게 언제나 실린다.
+    pub update_guide: HeartbeatUpdateGuide,
     pub heartbeat: HeartbeatIntegration,
     pub dream: DreamIntegration,
 }
@@ -355,6 +365,9 @@ impl HeartbeatService {
             managed_block_failure,
             // 읽기가 연 그 경로다. 화면이 보여주는 파일과 앱이 실제로 여는 파일이 갈라질 수 없다.
             jobs_file_path: jobs_path.display().to_string(),
+            // 입력이 없다. 이 조립은 파일도 읽지 않고 명령도 부르지 않으므로 조회 비용을 늘리지
+            // 않고, 값이 조회 상태에 따라 갈라지지도 않는다(SPEC-034 R2).
+            update_guide: update_guide(),
             dream,
             heartbeat: heartbeat_integration(
                 status,
@@ -934,7 +947,7 @@ mod tests {
 
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{heartbeat_dream, job_quota, managed_role_jobs, HeartbeatService};
+    use super::{heartbeat_dream, job_quota, managed_role_jobs, update_guide, HeartbeatService};
     use crate::domain::project::{
         HeartbeatSetupStage, HeartbeatSetupState, HeartbeatSetupStep, IntegrationInstallation,
         JobQuota,
@@ -1300,6 +1313,81 @@ mod tests {
         HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), user_home.path());
 
         assert_eq!((tree(home.path()), tree(user_home.path())), before);
+    }
+
+    /// SPEC-034 R3·완료 조건 1. 갱신 안내가 섹션 공통 영역에 실리고, 다섯 값이 백엔드 상수 그대로다.
+    /// 화면이 조각을 붙일 자리가 없다.
+    #[test]
+    fn the_snapshot_carries_the_update_guide_in_the_shared_area() {
+        let home = tempdir().expect("temporary directory");
+
+        let snapshot = HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), home.path());
+
+        assert_eq!(snapshot.update_guide, update_guide());
+        assert_eq!(
+            snapshot.update_guide.identify_command,
+            "pip show claude-heartbeat"
+        );
+        assert_eq!(
+            snapshot.update_guide.package_command,
+            "pip install -U claude-heartbeat"
+        );
+        assert_eq!(snapshot.update_guide.source_command, "git pull");
+    }
+
+    /// SPEC-034 R2·완료 조건 4. 안내는 판정이 아니다. 미설치 홈, 잡이 설치된 홈, 데몬 pid 파일이
+    /// 있는 홈에서 값이 모두 같다 — 표시 조건은 화면의 일이라 payload가 상태를 보지 않는다.
+    #[test]
+    fn the_update_guide_does_not_change_with_the_install_or_daemon_state() {
+        let empty = tempdir().expect("temporary directory");
+
+        let installed = tempdir().expect("temporary directory");
+        fs::write(installed.path().join("HEARTBEAT.md"), "- tick: 5m\n").expect("seed document");
+        write_jobs_file(installed.path(), &developer_job(DEVELOPER_JOB));
+
+        let running = tempdir().expect("temporary directory");
+        fs::write(running.path().join("HEARTBEAT.md"), "- tick: 5m\n").expect("seed document");
+        fs::create_dir(running.path().join("heartbeat")).expect("daemon directory");
+        fs::write(running.path().join("heartbeat/heartbeat.pid"), "1234\n").expect("seed pid");
+
+        let reported = [&empty, &installed, &running].map(|home| {
+            HeartbeatService
+                .inspect(Path::new(PROJECT_ROOT), home.path(), home.path())
+                .update_guide
+        });
+
+        assert_eq!(reported[0], reported[1]);
+        assert_eq!(reported[1], reported[2]);
+    }
+
+    /// SPEC-034 R6·완료 조건 6. 설치 마법사는 그대로다. 네 단계의 명령 원문이 착수 시점과 같고,
+    /// 1단계와 갱신 안내의 pip 명령이 같은 설치 모델을 말한다.
+    #[test]
+    fn the_setup_wizard_commands_are_unchanged_and_agree_with_the_update_guide() {
+        let home = tempdir().expect("temporary directory");
+
+        let snapshot = HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), home.path());
+
+        assert_eq!(
+            snapshot
+                .heartbeat
+                .setup_stages
+                .iter()
+                .map(|stage| stage.command.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "pip install claude-heartbeat",
+                "heartbeat init",
+                "heartbeat install-service",
+                "heartbeat install dream",
+            ]
+        );
+        // 두 문구가 같은 설치 모델(pip)을 말한다. 갱신 명령은 그 위의 `-U`만 다르다.
+        let package = setup_stage(&snapshot, HeartbeatSetupStep::Package).command;
+        assert_eq!(
+            snapshot.update_guide.package_command,
+            package.replacen("pip install", "pip install -U", 1)
+        );
     }
 
     /// 중복 잡은 연동별로 나뉜다. 하트비트 카드에 dream 중복이 섞이면 안 된다.

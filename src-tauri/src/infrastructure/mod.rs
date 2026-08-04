@@ -7,6 +7,7 @@ pub mod heartbeat_process;
 pub mod heartbeat_roles;
 pub mod heartbeat_setup;
 pub mod heartbeat_status;
+pub mod heartbeat_update;
 pub mod managed_script;
 pub mod project_instructions;
 pub mod role_eligibility;

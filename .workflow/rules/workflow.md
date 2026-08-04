@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 8
+rules_version: 10
 ---
 
 # LLM Workflow agent protocol
@@ -49,11 +49,10 @@ Ratification is the user's action alone. An agent never ratifies, and never driv
 
 The delegated decision file stays where it is. Several decisions on one specification is the design here — "when was this approved, and when was it sent back" is what the audit log answers — and the app has no path that edits or deletes a decision document, so removing one would mean a human editing app-owned state, which is what these rules exist to prevent.
 
-That leaves a document sitting in `decisions/` that the app does not see. Two judgements ignore it and one does not:
+That leaves a document sitting in `decisions/` that the app does not see. Every judgement ignores it:
 
 - The app ignores it wherever it reads specification decisions. It never sets a specification's status and never reaches the decision feed.
 - The architect eligibility judgement ignores it. It is not architect work, and it cannot displace another decision from being the latest one.
-- The condition script's planner branch does not read `created_by`. It compares `created_at` across every decision document of the specification, so a delegated decision later than a pending `revision_requested` hides that revision request from the heartbeat while the app still counts it. Until that branch reads `created_by` too, the app and the heartbeat disagree about such a specification.
 
 Decisions written before this rule carry `created_by: user` even where an agent wrote them. They are not valid delegated decisions, but the app cannot tell them from its own stamps and still reads them as user decisions, which also means the ratification above does not reach them. Do not rewrite them: `created_by` is the app's field. Report the gap instead.
 
@@ -175,6 +174,8 @@ history:
 - Update `updated_at` with an RFC3339 timestamp when changing an agent-owned document.
 - When a task has a target date, store it as optional `due_at: YYYY-MM-DD`.
 - Task transition facts live in the optional `history` field; leave the key out while there are no entries.
+- The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
+- An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.

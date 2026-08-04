@@ -443,6 +443,33 @@ svg { width: 20px; height: 20px; }
 .task-lane-counts em { color: #a0a39a; font-style: normal; }
 .task-lane-signal { padding: 4px 9px; border-radius: 999px; color: #3f5145; background: rgba(77,120,93,.14); font-size: 11px; font-weight: 700; }
 .task-lane-hidden { margin: 0; color: #a0a39a; font-size: 11px; }
+.task-lane-toggle { padding: 4px 9px; border: 1px solid #dbdad1; border-radius: 999px; color: #888b83; background: var(--paper); font-size: 11px; font-weight: 700; cursor: pointer; }
+/* `.task-board`의 min-width가 950px이라 좁은 창에서 레인 테두리 밖으로 열이 빠져나간다. 레인 안에서
+   가로로 스크롤시켜 가둔다. 헤더는 이 상자 밖이라 스크롤해도 남는다. */
+.task-lane-scroll { min-width: 0; overflow-x: auto; }
+/* 접힌 레인은 보드가 없어 헤더만 남는다. 펼침 때 보드를 받치던 여백을 그만큼 줄인다. */
+.task-lane.collapsed { padding-bottom: 4px; }
+.task-lane.collapsed .task-lane-header { padding-bottom: 2px; }
+
+/* Lane batch QA */
+/* 신호와 같은 초록 계열로 두어 "이 레인이 통째로 QA 가능하다"는 사실과 그 액션이 한 덩어리로 읽힌다. */
+.task-lane-batch { padding: 4px 9px; border: 1px solid #b9cdbf; border-radius: 999px; color: #315b44; background: rgba(77,120,93,.14); font-size: 11px; font-weight: 700; cursor: pointer; }
+.lane-qa-overlay { position: fixed; z-index: 100; inset: 0; display: grid; place-items: start center; padding: min(12vh, 100px) 22px 40px; background: rgba(31, 34, 29, .28); backdrop-filter: blur(5px); }
+.lane-qa-dialog { width: min(560px, 100%); max-height: min(76vh, 640px); padding: 18px 19px 16px; overflow: auto; border: 1px solid rgba(201, 202, 192, .9); border-radius: 18px; background: #fbfaf6; box-shadow: 0 30px 90px rgba(33, 36, 31, .2); }
+.lane-qa-dialog h2 { margin: 0; font-size: 13px; }
+.lane-qa-dialog label[for] { display: block; margin-top: 13px; color: #858980; font-size: 11px; }
+.lane-qa-dialog textarea { width: 100%; min-height: 78px; margin-top: 6px; padding: 10px 11px; border: 1px solid #dcdbd2; border-radius: 11px; color: #30352e; background: #fff; font-family: inherit; font-size: 11px; line-height: 1.6; resize: vertical; }
+.lane-qa-note { margin: 7px 0 0; color: #a0a39a; font-size: 11px; }
+.lane-qa-targets { margin: 12px 0 0; padding: 7px 0; max-height: 232px; overflow: auto; border: 1px solid #dcdbd2; border-radius: 11px; background: #fff; list-style: none; }
+.lane-qa-targets label { display: flex; align-items: center; gap: 9px; padding: 6px 12px; cursor: pointer; }
+.lane-qa-targets strong { flex: 0 0 auto; color: #858980; font-size: 11px; }
+.lane-qa-targets span { min-width: 0; overflow: hidden; color: #4b504a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.lane-qa-result { margin-top: 11px; padding: 10px 12px; border: 1px solid #d5ddd5; border-radius: 9px; background: #edf2ec; font-size: 11px; line-height: 1.5; }
+.lane-qa-result strong { color: #315b44; font-size: 11px; }
+.lane-qa-failures { margin: 8px 0 0; padding: 0; list-style: none; }
+.lane-qa-failures li { display: flex; gap: 8px; padding: 4px 0; border-top: 1px solid #dbe3da; }
+.lane-qa-failures strong { flex: 0 0 auto; color: #8d4b3c; }
+.lane-qa-failures span { min-width: 0; color: #754a30; }
 
 /* Development list */
 .task-list { overflow-x: auto; border: 1px solid #dcdbd2; border-radius: 14px; background: var(--paper); }
@@ -735,6 +762,19 @@ svg { width: 20px; height: 20px; }
    자리이고, 복사는 실패해도 위의 명령 원문을 직접 선택하면 되는 편의다. */
 .heartbeat-setup-copied.copy-failed { color: #87512f; }
 .heartbeat-setup-copied.copy-failed::before { content: "! "; }
+/* 084 경고 안의 갱신 안내. 경고 색 위에 얹히므로 걸음 상자는 마법사와 같은 흰 배경을 쓴다. */
+.heartbeat-update-guide { margin-top: 11px; }
+.heartbeat-update-guide > strong { display: block; }
+.heartbeat-update-steps { display: grid; gap: 9px; margin: 7px 0 0; padding: 0; list-style: none; }
+.heartbeat-update-step { padding: 9px 11px; border: 1px solid rgba(255,255,255,.7); border-radius: 10px; background: rgba(255,255,255,.6); }
+.heartbeat-update-step p { margin: 0; }
+.heartbeat-update-command { margin: 7px 0 0; padding: 9px 11px; overflow-x: auto; border-radius: 9px; background: rgba(255,255,255,.7); }
+.heartbeat-update-command code { color: #7a4629; font-size: 11px; }
+.heartbeat-update-copy { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 7px; }
+.heartbeat-update-copy-button { padding: 4px 9px; border-radius: 8px; font-size: 11px; }
+.heartbeat-update-copied { font-size: 11px; }
+.heartbeat-update-copied::before { content: "✓ "; }
+.heartbeat-update-copied.copy-failed::before { content: "! "; }
 .integration-warning { margin-top: 11px; padding: 11px; border-radius: 11px; color: #87512f; background: #f8e9da; font-size: 11px; line-height: 1.5; }
 .integration-warning strong { display: block; font-size: 11px; }
 .integration-warning p { margin: 5px 0 0; }
@@ -780,3 +820,8 @@ svg { width: 20px; height: 20px; }
 .task-dependency.state-pending { color: #805415; background: #f5e7c9; }
 .task-dependency.state-missing, .task-dependency.state-cyclic { color: #8a3f38; background: #f3dfdc; }
 .task-dependency-error, .task-dependency-note { margin: 10px 0 0; color: #8a3f38; font-size: 11px; line-height: 1.5; }
+/* 겹침은 기다리면 풀리는 상태다. 영구 실패의 붉은 톤이 아니라 대기 톤을 쓴다. */
+.task-overlaps { margin: 10px 0 0; }
+.task-overlap-note { margin: 0; color: #805415; font-size: 11px; line-height: 1.5; }
+.task-overlap { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; border-radius: 8px; color: #805415; background: #f5e7c9; font-size: 11px; }
+.task-overlap > strong { font-weight: 700; }

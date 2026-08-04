@@ -169,6 +169,17 @@ pub struct TaskDependency {
     pub state: TaskDependencyState,
 }
 
+/// 활성 lease 하나가 이 작업의 착수를 막는 근거(SPEC-032 R7).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOverlapBlock {
+    /// lease가 잡은 문서 id. 활동 뷰의 카드가 쓰는 값과 같다.
+    pub lease_target_id: String,
+    /// 두 선언이 함께 가리킨 경로. 선언에 적힌 문자열 그대로이고 오름차순·중복 없음이다.
+    /// 선언 부재나 형식 오류로 막힌 경우 비어 있다.
+    pub shared_files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDocument {
@@ -179,6 +190,9 @@ pub struct TaskDocument {
     /// 선언 줄이 계약 형식이 아니어서 목록으로 읽지 못했는가(SPEC-013 R3). 참이면 `dependencies`는
     /// 비어 있고 이 작업은 미충족이다.
     pub dependency_format_error: bool,
+    /// 이 작업의 착수를 막고 있는 활성 lease와 그 근거(SPEC-032 R7). 비어 있으면 막히지 않은
+    /// 것이다. 자기 자신을 잡은 lease는 담지 않는다 — 그것은 겹침이 아니라 자기 선점이다.
+    pub overlap_blocks: Vec<TaskOverlapBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -201,6 +215,25 @@ pub enum SpecDecisionOutcome {
 pub enum TaskQaOutcome {
     Confirmed,
     RevisionRequested,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaBatchResult {
+    pub summary: ProjectSummary,
+    /// 요청 순서 그대로. 화면이 목록과 나란히 읽는다.
+    pub results: Vec<TaskQaBatchEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaBatchEntry {
+    pub file_name: String,
+    /// 문서를 읽지 못하면 `None`. 추정으로 채우지 않는다.
+    pub task_id: Option<String>,
+    pub recorded: bool,
+    /// 실패 사유. 성공이면 `None`.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -317,6 +350,27 @@ pub enum HeartbeatSetupState {
     Done,
     NotDone,
     Unknown,
+}
+
+/// 084 경고 자리에서 보여줄 하트비트 갱신 절차의 명령 원문(SPEC-034 R3·R4). 설치 마법사의
+/// `command`와 같은 규칙이다 — 화면이 조각을 조립하지 않게 완성된 문자열이 도착한다.
+///
+/// 설치 방법을 하나로 단정하지 않으므로 갱신 명령이 둘이다(R3). `identify_command`가 사용자에게
+/// 자기 갈래를 알려 주고, `package_command`와 `source_command`가 그 두 갈래다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatUpdateGuide {
+    /// 어느 갈래인지 확인하는 명령. 출력의 `Editable project location` 유무가 갈래를 가른다.
+    pub identify_command: String,
+    /// pip 배포본으로 설치한 경우의 갱신 명령.
+    pub package_command: String,
+    /// 소스 체크아웃으로 설치한 경우의 갱신 명령. 체크아웃 경로는 앱이 알지 못하므로 붙이지 않는다.
+    pub source_command: String,
+    /// 재시작에 앞서 사용자가 자기 서비스 라벨을 확인하는 명령(R4). 확인할 방법이 없는 플랫폼에서는
+    /// `None`이다 — 설치 3단계의 `evidence`가 같은 이유로 `None`이 되는 것과 같은 어법이다.
+    pub service_lookup_command: Option<String>,
+    /// 데몬 재시작 명령(R4). 라벨 자리는 사용자가 바꿔 넣는 빈자리이고 앱이 지어낸 값이 아니다.
+    pub service_restart_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

@@ -25,6 +25,7 @@ import {
   type IntegrationCardProps,
 } from "./IntegrationCard";
 import { JobChanges, type RemovedJob, type WrittenJob } from "./JobChanges";
+import { HeartbeatUpdateGuide } from "./HeartbeatUpdateGuide";
 import { browserJobValueMemoryStore } from "../../infrastructure/jobValueMemoryStore";
 import { browserSetupGuideCollapseStore } from "../../infrastructure/browserSetupGuideCollapseStore";
 import { copy } from "../../infrastructure/clipboard";
@@ -1176,6 +1177,10 @@ function HeartbeatRoleJobs({
               {missingRunEvidence(Boolean(job), run) && (
                 <IntegrationWarning title={noRunEvidenceTitle}>
                   <p>{noRunEvidenceNote}</p>
+                  {/* 위 문장이 "갱신하세요"로 끝나므로 그 방법이 같은 자리에 온다(SPEC-034 R1).
+                      표시 조건을 새로 만들지 않는다 — 이 경고가 뜨는 조건이 곧 안내가 뜨는 조건이고,
+                      그래서 상시 표시가 되지 않는다. */}
+                  <HeartbeatUpdateGuide guide={snapshot.updateGuide} />
                 </IntegrationWarning>
               )}
 

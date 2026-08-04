@@ -1,7 +1,16 @@
 import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
 import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
-import type { TaskDependency, TaskDocument, TaskQaOutcome, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import type {
+  TaskDependency,
+  TaskDocument,
+  TaskOverlapBlock,
+  TaskQaBatchEntry,
+  TaskQaOutcome,
+  WorkflowItemSummary,
+  WorkflowSummary,
+} from "../domain/types";
+import { UNASSIGNED_LANE_KEY, browserSpecLaneCollapseStore } from "../infrastructure/browserSpecLaneCollapseStore";
 import { MarkdownBody } from "./MarkdownBody";
 
 const taskColumns = [
@@ -33,8 +42,11 @@ const permanentDependencyStates = new Set(["missing", "cyclic"]);
 const PERMANENT_DEPENDENCY_NOTE =
   "이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다.";
 
-/** 미분류 레인의 키. 기획서 문서 id에 `#`이 들어가는 경로가 없어 실제 id와 충돌하지 않는다. */
-const UNASSIGNED_LANE_KEY = "#unassigned";
+/** 겹침은 lease가 만료되거나 풀리면 열린다. 영구 실패와 섞이지 않게 문구도 따로 둔다. */
+const OVERLAP_NOTE = "다른 세션이 잡은 작업과 범위가 겹칩니다. 그 lease가 풀리면 착수할 수 있습니다.";
+
+/** 공유 경로가 비어 있는 겹침의 뜻. 무엇을 고쳐야 열리는지가 공유 경로로 막힌 경우와 다르다. */
+const OVERLAP_UNDECLARED_NOTE = "두 작업 중 한쪽에 범위 선언이 없거나 형식이 잘못되어 겹친 것으로 봅니다.";
 
 const UNASSIGNED_LANE_TITLE = "미분류";
 
@@ -43,6 +55,14 @@ const LANE_BASIS_NOTE = "레인의 수치와 QA 신호는 필터·완료 절단 
 
 /** 앞부분이 집계 사실이고 뒷부분이 그 사실의 뜻이다. 판정이 아니라 집계라는 것을 문구가 말한다. */
 const LANE_SIGNAL_LABEL = "QA 대기만 남음 · 통째로 QA 가능";
+
+/**
+ * 액션 문구의 건수가 왜 눈앞의 카드 수와 다른지 밝히는 문장. 필터가 걸렸을 때만 붙인다.
+ *
+ * SPEC-031 확인 필요 3번이 승인한 비용이다. 대상은 필터·완료 절단 이전의 레인 전체 `qa_waiting`이라
+ * 카드 3장만 보이던 레인에서 9건이 목록에 뜰 수 있다. 어긋남이 없는 자리에는 이 문장을 늘리지 않는다.
+ */
+const LANE_QA_BASIS_NOTE = "필터와 무관하게 이 레인의 QA 대기 전체를 셉니다";
 
 const viewModes = [
   { value: "board", label: "보드" },
@@ -65,10 +85,12 @@ interface Props {
   busy: boolean;
   onReadTask(fileName: string): Promise<TaskDocument | null>;
   onTaskQa(fileName: string, outcome: TaskQaOutcome, comment: string): Promise<boolean>;
+  /** 일괄은 입구를 하나 더하는 것이지 `onTaskQa`를 대체하지 않는다(SPEC-031 R7). */
+  onTaskQaBatch(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
   workflow: WorkflowSummary;
 }
 
-export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props) {
+export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [laneGrouping, setLaneGrouping] = useState(false);
   const [query, setQuery] = useState("");
@@ -76,6 +98,17 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
   const [calendarCursor, setCalendarCursor] = useState(() => startOfMonth(new Date()));
   const [taskDocument, setTaskDocument] = useState<TaskDocument | null>(null);
   const [taskLoading, setTaskLoading] = useState(false);
+  // 게으른 초기화라 렌더마다 저장소를 읽지 않는다.
+  const [laneCollapsed, setLaneCollapsed] = useState(() => browserSpecLaneCollapseStore.load(workflow.directory));
+  const [collapseDirectory, setCollapseDirectory] = useState(workflow.directory);
+
+  // `WorkspaceShell`이 이 컴포넌트에는 `key`를 주지 않아(`IdeaInbox`와 다르다) 워크플로가 바뀌어도
+  // 마운트가 유지된다. 그래서 디렉터리가 바뀌면 그 워크플로의 접힘을 여기서 다시 읽는다.
+  // `CalendarView`의 `selectedMonth` 비교와 같은 어법이다.
+  if (collapseDirectory !== workflow.directory) {
+    setCollapseDirectory(workflow.directory);
+    setLaneCollapsed(browserSpecLaneCollapseStore.load(workflow.directory));
+  }
 
   const scopedTasks = useMemo(
     () => tasksForDevelopment(workflow.items.tasks),
@@ -90,6 +123,18 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
     [query, statusFilter, workflow.items.tasks],
   );
   const hasFilters = Boolean(query.trim()) || statusFilter !== "all";
+
+  /**
+   * 레인 하나의 접힘을 뒤집고 같은 자리에서 저장한다(`applyPanelWidth`와 같은 어법).
+   *
+   * 지금 목록에 없는 레인의 저장값은 그대로 둔다. 카드가 없어 빠졌던 레인이 돌아왔을 때 접힘이
+   * 남아 있어야 한다(SPEC-029 확인 필요 3번의 비용 항목).
+   */
+  function toggleLaneCollapsed(key: string) {
+    const next = { ...laneCollapsed, [key]: !laneCollapsed[key] };
+    setLaneCollapsed(next);
+    browserSpecLaneCollapseStore.save(workflow.directory, next);
+  }
 
   async function openTask(item: WorkflowItemSummary) {
     setTaskLoading(true);
@@ -182,8 +227,12 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
           {laneGrouping ? (
             <SpecLaneBoard
               allTasks={workflow.items.tasks}
+              busy={busy}
+              collapsed={laneCollapsed}
               hasFilters={hasFilters}
               onOpen={(item) => void openTask(item)}
+              onToggleCollapsed={toggleLaneCollapsed}
+              onTaskQaBatch={onTaskQaBatch}
               specs={workflow.items.specs}
               statusFilter={statusFilter}
               visibleTasks={filteredTasks}
@@ -300,6 +349,7 @@ function TaskDetail({
           <TaskDependencies
             dependencies={document.dependencies ?? []}
             formatError={document.dependencyFormatError ?? false}
+            overlaps={document.overlapBlocks ?? []}
           />
           <div className="spec-paper embedded"><MarkdownBody body={document.body} /></div>
         </article>
@@ -381,14 +431,27 @@ function TaskDetail({
 }
 
 /**
- * 선언된 선행 작업과 각각의 판정을 그린다. 선언이 없고 형식 오류도 아니면 아무것도 그리지 않는다.
+ * 선언된 선행 작업과 각각의 판정, 그리고 겹침으로 막힌 사실을 그린다. 선언이 없고 형식 오류도 겹침도
+ * 없으면 아무것도 그리지 않는다.
  *
  * `missing`·`cyclic`·형식 오류는 기다려서 풀리는 `pending`과 구분해 경고 톤과 안내 문구를 준다.
- * 이 구분이 없으면 사용자가 영원히 열리지 않는 작업을 "기다리면 되는 작업"으로 읽는다.
+ * 이 구분이 없으면 사용자가 영원히 열리지 않는 작업을 "기다리면 되는 작업"으로 읽는다. 겹침은 lease가
+ * 풀리면 열리므로 그 경고 톤에 넣지 않는다(SPEC-032 R7).
+ *
+ * 선행 미충족과 겹침은 동시에 성립할 수 있고, 그때 둘 다 보인다. 한쪽이 다른 쪽을 가리지 않는다.
  */
-function TaskDependencies({ dependencies, formatError }: { dependencies: TaskDependency[]; formatError: boolean }) {
-  if (!formatError && dependencies.length === 0) return null;
-  const startable = !formatError && dependencies.every((entry) => entry.state === "satisfied");
+function TaskDependencies({
+  dependencies,
+  formatError,
+  overlaps,
+}: {
+  dependencies: TaskDependency[];
+  formatError: boolean;
+  overlaps: TaskOverlapBlock[];
+}) {
+  if (!formatError && dependencies.length === 0 && overlaps.length === 0) return null;
+  const startable =
+    !formatError && overlaps.length === 0 && dependencies.every((entry) => entry.state === "satisfied");
   const permanent = formatError || dependencies.some((entry) => permanentDependencyStates.has(entry.state));
 
   return (
@@ -400,16 +463,35 @@ function TaskDependencies({ dependencies, formatError }: { dependencies: TaskDep
       {formatError ? (
         <p className="task-dependency-error">선행 선언의 형식이 잘못되어 목록으로 읽지 못했습니다.</p>
       ) : (
-        <ul>
-          {dependencies.map((entry, index) => (
-            <li className={`task-dependency state-${entry.state}`} key={`${entry.id}:${index}`}>
-              <strong>{entry.id}</strong>
-              <span>{dependencyLabels[entry.state] ?? entry.state}</span>
-            </li>
-          ))}
-        </ul>
+        dependencies.length > 0 && (
+          <ul>
+            {dependencies.map((entry, index) => (
+              <li className={`task-dependency state-${entry.state}`} key={`${entry.id}:${index}`}>
+                <strong>{entry.id}</strong>
+                <span>{dependencyLabels[entry.state] ?? entry.state}</span>
+              </li>
+            ))}
+          </ul>
+        )
       )}
       {permanent && <p className="task-dependency-note">{PERMANENT_DEPENDENCY_NOTE}</p>}
+      {overlaps.length > 0 && (
+        <div className="task-overlaps">
+          <p className="task-overlap-note">{OVERLAP_NOTE}</p>
+          <ul>
+            {overlaps.map((block, index) => (
+              <li className="task-overlap" key={`${block.leaseTargetId}:${index}`}>
+                <strong>{block.leaseTargetId}</strong>
+                {block.sharedFiles.length > 0 ? (
+                  <span>겹친 경로 {block.sharedFiles.join(", ")}</span>
+                ) : (
+                  <span className="task-overlap-undeclared">{OVERLAP_UNDECLARED_NOTE}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   );
 }
@@ -458,16 +540,25 @@ function BoardView({
  */
 function SpecLaneBoard({
   allTasks,
+  busy,
+  collapsed,
   hasFilters,
   onOpen,
+  onToggleCollapsed,
+  onTaskQaBatch,
   specs,
   statusFilter,
   visibleTasks,
 }: {
   /** 수치와 신호의 계산 집합. 필터와 완료 절단 이전의 워크플로 작업 전체다. */
   allTasks: WorkflowItemSummary[];
+  busy: boolean;
+  /** 레인 키 → 접혔는지. 값이 없는 레인은 펼침이다. */
+  collapsed: Record<string, boolean>;
   hasFilters: boolean;
   onOpen(item: WorkflowItemSummary): void;
+  onToggleCollapsed(key: string): void;
+  onTaskQaBatch(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
   specs: WorkflowItemSummary[];
   statusFilter: string;
   /** 카드로 그릴 집합. 완료 절단과 검색·상태 필터를 이미 거쳤다. */
@@ -478,35 +569,73 @@ function SpecLaneBoard({
     () => buildSpecLanes(allTasks, visibleTasks, specs),
     [allTasks, specs, visibleTasks],
   );
+  // 확인 화면은 한 번에 하나만 열린다. 키가 아니라 연 시점의 레인을 그대로 드는 이유는 실행 결과다 —
+  // 상태 필터가 걸린 채 전 건이 `completed`가 되면 그 레인은 카드가 0장이 되어 목록에서 빠지는데,
+  // 키로 다시 찾는 구조였다면 건별 결과를 읽기 전에 화면이 사라진다(R4).
+  const [openLane, setOpenLane] = useState<SpecLane | null>(null);
 
   return (
     <>
       <p className="task-lane-note">{LANE_BASIS_NOTE}</p>
-      {lanes.map((lane) => (
-        <section className="task-lane" key={lane.key}>
-          <header className="task-lane-header">
-            <div>
-              <strong>{lane.title}</strong>
-              {lane.specId && lane.specId !== lane.title && <small>{lane.specId}</small>}
-            </div>
-            <p className="task-lane-counts">
-              <em>전체 기준</em>
-              {taskColumns.map((column) => (
-                <span key={column.status}>{statusLabels[column.status]} {lane.counts[column.status]}</span>
-              ))}
-              {lane.unknownCount > 0 && <span>규격 밖 {lane.unknownCount}</span>}
-            </p>
-            {lane.signal && <span className="task-lane-signal">{LANE_SIGNAL_LABEL}</span>}
-          </header>
-          {/* region 이름은 제목이 아니라 레인 키로 짓는다. 서로 다른 기획서가 같은 제목을 가질 수 있다. */}
-          <BoardView
-            items={lane.items}
-            label={`${lane.specId ?? UNASSIGNED_LANE_TITLE} 칸반 보드`}
-            onOpen={onOpen}
-            statusFilter={statusFilter}
-          />
-        </section>
-      ))}
+      {lanes.map((lane) => {
+        const laneCollapsed = collapsed[lane.key] ?? false;
+        return (
+          <section className={laneCollapsed ? "task-lane collapsed" : "task-lane"} key={lane.key}>
+            {/* 접혀도 헤더는 통째로 남는다. 접기는 카드를 줄이는 것이지 사실을 감추는 것이 아니다. */}
+            <header className="task-lane-header">
+              <div>
+                <strong>{lane.title}</strong>
+                {lane.specId && lane.specId !== lane.title && <small>{lane.specId}</small>}
+              </div>
+              <p className="task-lane-counts">
+                <em>전체 기준</em>
+                {taskColumns.map((column) => (
+                  <span key={column.status}>{statusLabels[column.status]} {lane.counts[column.status]}</span>
+                ))}
+                {lane.unknownCount > 0 && <span>규격 밖 {lane.unknownCount}</span>}
+              </p>
+              {lane.signal && <span className="task-lane-signal">{LANE_SIGNAL_LABEL}</span>}
+              {/* 신호 하나로 갈린다. 신호가 꺼진 레인과 미분류 레인에는 액션이 없다(R1). 접힌 레인에도
+                  헤더는 남으므로 액션도 남는다 — 접기는 카드를 줄이는 것이지 사실을 감추는 것이 아니다. */}
+              {lane.signal && (
+                <button
+                  className="task-lane-batch"
+                  onClick={() => setOpenLane(lane)}
+                  type="button"
+                >
+                  이 그룹 {lane.qaWaiting.length}건 QA 확인
+                </button>
+              )}
+              {/* 이름은 제목이 아니라 레인 키로 짓는다. 개정으로 갈린 두 기획서가 같은 제목을 갖고
+                  그 둘을 병합하지 않는 것이 SPEC-029의 결정이라, 제목으로 지으면 이름이 겹친다.
+                  아래 보드 region과 같은 근거다. 보이는 글자는 이름이 그대로 담는다. */}
+              <button
+                aria-expanded={!laneCollapsed}
+                aria-label={`${lane.specId ?? UNASSIGNED_LANE_TITLE} 레인 ${laneCollapsed ? "펼치기" : "접기"}`}
+                className="task-lane-toggle"
+                onClick={() => onToggleCollapsed(lane.key)}
+                type="button"
+              >
+                {laneCollapsed ? "펼치기" : "접기"}
+              </button>
+            </header>
+            {/* 숨기지 않고 그리지 않는다. 2.5초마다 다시 읽히는 자리라 접힌 레인의 카드를 계속 그리지 않는 편이 낫다. */}
+            {/* region 이름은 제목이 아니라 레인 키로 짓는다. 서로 다른 기획서가 같은 제목을 가질 수 있다. */}
+            {!laneCollapsed && (
+              // 보드가 최소 950px이라 좁은 창에서 레인 상자 밖으로 넘친다. 스크롤 상자를 보드에만
+              // 씌워 레인 테두리 안에 가둔다. 헤더는 이 상자 밖이라 스크롤해도 자리를 지킨다.
+              <div className="task-lane-scroll">
+                <BoardView
+                  items={lane.items}
+                  label={`${lane.specId ?? UNASSIGNED_LANE_TITLE} 칸반 보드`}
+                  onOpen={onOpen}
+                  statusFilter={statusFilter}
+                />
+              </div>
+            )}
+          </section>
+        );
+      })}
       {lanes.length === 0 && <EmptyTasks />}
       {hiddenLaneCount > 0 && (
         <p className="task-lane-hidden">
@@ -515,7 +644,158 @@ function SpecLaneBoard({
             : `완료만 있어 표시하지 않은 기획서 ${hiddenLaneCount}개`}
         </p>
       )}
+      {openLane && (
+        <LaneQaDialog
+          busy={busy}
+          hasFilters={hasFilters}
+          key={openLane.key}
+          lane={openLane}
+          onClose={() => setOpenLane(null)}
+          onConfirm={onTaskQaBatch}
+        />
+      )}
     </>
+  );
+}
+
+/** 실행 결과. `entries`가 `null`이면 호출 자체가 실패한 것이고, 아직 실행 전이면 이 값이 없다. */
+interface LaneQaOutcome {
+  entries: TaskQaBatchEntry[] | null;
+}
+
+/**
+ * 레인 하나를 통째로 QA 확인하는 화면.
+ *
+ * 대상은 `lane.qaWaiting`, 즉 필터·완료 절단 이전의 레인 전체 `qa_waiting`이다(승인된 확인 필요 3번).
+ * 실행은 콜백을 **한 번**만 부르고, 끝난 뒤 건별 결과를 이 화면 안에서 말한다 — 전역 에러 문구 하나에
+ * 맡기면 42건 중 어느 건이 실패했는지 읽을 수 없다(R4).
+ *
+ * `lane`은 연 시점의 스냅샷이라 이 화면이 떠 있는 동안 목록이 흔들리지 않는다. 실행 뒤 대상이
+ * `completed`가 되어도 결과와 목록이 같은 건을 가리킨다.
+ */
+function LaneQaDialog({
+  busy,
+  hasFilters,
+  lane,
+  onClose,
+  onConfirm,
+}: {
+  busy: boolean;
+  hasFilters: boolean;
+  lane: SpecLane;
+  onClose(): void;
+  onConfirm(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
+}) {
+  const [excluded, setExcluded] = useState<Set<string>>(() => new Set());
+  const [comment, setComment] = useState("");
+  const [running, setRunning] = useState(false);
+  const [outcome, setOutcome] = useState<LaneQaOutcome | null>(null);
+  const confirmBatch = useArmedConfirm();
+
+  const selected = lane.qaWaiting.filter((item) => !excluded.has(item.fileName));
+  const locked = busy || running;
+  const titleId = `lane-qa-title-${lane.key}`;
+  const commentId = `lane-qa-comment-${lane.key}`;
+
+  function toggleTarget(fileName: string) {
+    // 목록이 바뀌면 무장을 푼다. 단건 패널이 코멘트 입력에서 하는 것과 같은 어법이다.
+    confirmBatch.disarm();
+    const next = new Set(excluded);
+    if (next.has(fileName)) next.delete(fileName);
+    else next.add(fileName);
+    setExcluded(next);
+  }
+
+  async function run() {
+    setRunning(true);
+    const entries = await onConfirm(selected.map((item) => item.fileName), comment.trim());
+    setRunning(false);
+    setOutcome({ entries });
+  }
+
+  const failures = outcome?.entries?.filter((entry) => !entry.recorded) ?? [];
+  const recorded = outcome?.entries?.filter((entry) => entry.recorded).length ?? 0;
+
+  return (
+    <div
+      className="lane-qa-overlay"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !running) onClose();
+      }}
+    >
+      <section aria-labelledby={titleId} aria-modal="true" className="lane-qa-dialog" role="dialog">
+        <h2 id={titleId}>{lane.title} · QA 대기 {lane.qaWaiting.length}건 일괄 확인</h2>
+        {hasFilters && <p className="lane-qa-note">{LANE_QA_BASIS_NOTE}</p>}
+        <ul className="lane-qa-targets">
+          {lane.qaWaiting.map((item) => (
+            <li key={item.fileName}>
+              <label>
+                <input
+                  checked={!excluded.has(item.fileName)}
+                  disabled={locked}
+                  onChange={() => toggleTarget(item.fileName)}
+                  type="checkbox"
+                />
+                <strong>{item.id}</strong>
+                <span>{item.title}</span>
+              </label>
+            </li>
+          ))}
+        </ul>
+        <label htmlFor={commentId}>전 건에 함께 남길 확인 메모</label>
+        <textarea
+          id={commentId}
+          maxLength={2_000}
+          onChange={(event) => {
+            confirmBatch.disarm();
+            setComment(event.target.value);
+          }}
+          placeholder={"1. 실행한 동작\n2. 확인한 결과"}
+          value={comment}
+        />
+        {confirmBatch.armed && (
+          <p className="confirm-warning" role="status">
+            선택한 {selected.length}건을 완료 처리합니다. 되돌릴 수 없습니다.
+          </p>
+        )}
+        {outcome && (
+          <div className="lane-qa-result" role="status">
+            {outcome.entries === null ? (
+              <strong>일괄 확인 호출이 실패해 건별 결과를 받지 못했습니다.</strong>
+            ) : (
+              <>
+                <strong>{recorded}건을 기록했습니다.</strong>
+                {failures.length > 0 && (
+                  <ul className="lane-qa-failures">
+                    {failures.map((entry) => (
+                      <li key={entry.fileName}>
+                        {/* 문서를 읽지 못하면 앱이 `taskId`를 `null`로 돌려준다. 추정으로 채우지 않고 파일 이름을 쓴다. */}
+                        <strong>{entry.taskId ?? entry.fileName}</strong>
+                        <span>{entry.message ?? "사유가 기록되지 않았습니다."}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        <div className="task-qa-actions">
+          <button className="secondary-button" disabled={running} onClick={onClose} type="button">
+            닫기
+          </button>
+          <button
+            className={`stamp-button ${confirmBatch.armed ? "armed" : ""}`}
+            disabled={locked || selected.length === 0}
+            onClick={() => confirmBatch.fire(() => void run())}
+            type="button"
+          >
+            {confirmBatch.armed ? "한 번 더 누르면 완료" : `선택한 ${selected.length}건 확인 완료`}
+            {confirmBatch.armed && <i aria-hidden="true" className="confirm-timer" />}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -708,6 +988,8 @@ interface SpecLane {
   /** 그 다섯에 없는 상태의 건수. 규격 밖 작업이 수치에서 조용히 빠지지 않게 따로 센다. */
   unknownCount: number;
   signal: boolean;
+  /** 이 레인의 `qa_waiting` 전체. 필터와 완료 절단 이전 집합이라 `items`와 어긋날 수 있다. */
+  qaWaiting: WorkflowItemSummary[];
   /** 화면에 그릴 카드. */
   items: WorkflowItemSummary[];
 }
@@ -735,6 +1017,9 @@ function buildSpecLanes(
     const lane = drafts.get(key) ?? emptyLane(key, specTitles);
     if (knownStatuses.has(item.status)) lane.counts[item.status] += 1;
     else lane.unknownCount += 1;
+    // 일괄 확인의 대상도 이 순회에서 모은다. `visibleTasks` 쪽에서 모으면 필터에 가려진 건이 빠져
+    // 액션 문구의 건수와 목록의 건수가 어긋난다(승인된 확인 필요 3번).
+    if (item.status === "qa_waiting") lane.qaWaiting.push(item);
     drafts.set(key, lane);
   }
   // 표시 집합은 전체 집합의 부분이므로 여기서 새 레인이 생기지 않는다.
@@ -765,6 +1050,7 @@ function emptyLane(key: string, specTitles: Map<string, string>): SpecLane {
     counts: Object.fromEntries(taskColumns.map((column) => [column.status, 0])),
     unknownCount: 0,
     signal: false,
+    qaWaiting: [],
     items: [],
   };
 }

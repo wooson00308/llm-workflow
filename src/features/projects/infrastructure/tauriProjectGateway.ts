@@ -7,6 +7,7 @@ import type {
   ProjectSummary,
   SpecDocument,
   TaskDocument,
+  TaskQaBatchResult,
 } from "../domain/types";
 
 export const tauriProjectGateway: ProjectGateway = {
@@ -75,6 +76,15 @@ export const tauriProjectGateway: ProjectGateway = {
       workflowDirectory,
       fileName,
       outcome,
+      comment,
+    });
+  },
+
+  confirmTaskQaBatch(path, workflowDirectory, fileNames, comment) {
+    return invoke<TaskQaBatchResult>("confirm_task_qa_batch", {
+      path,
+      workflowDirectory,
+      fileNames,
       comment,
     });
   },
