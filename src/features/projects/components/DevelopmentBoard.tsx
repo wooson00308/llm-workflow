@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
 import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
-import type { TaskDocument, TaskQaOutcome, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import type { TaskDependency, TaskDocument, TaskQaOutcome, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { MarkdownBody } from "./MarkdownBody";
 
 const taskColumns = [
@@ -20,13 +20,37 @@ const statusLabels: Record<string, string> = {
   completed: "완료",
 };
 
+const dependencyLabels: Record<string, string> = {
+  satisfied: "준비됨",
+  pending: "대기 중",
+  missing: "없는 작업",
+  cyclic: "순환 선언",
+};
+
+/** 기다려도 풀리지 않는 판정. `pending`과 달리 사람이 선언을 고쳐야 한다. */
+const permanentDependencyStates = new Set(["missing", "cyclic"]);
+
+const PERMANENT_DEPENDENCY_NOTE =
+  "이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다.";
+
+/** 미분류 레인의 키. 기획서 문서 id에 `#`이 들어가는 경로가 없어 실제 id와 충돌하지 않는다. */
+const UNASSIGNED_LANE_KEY = "#unassigned";
+
+const UNASSIGNED_LANE_TITLE = "미분류";
+
+/** 레인 수치와 신호가 무엇을 센 값인지 밝히는 문장. 레인마다 반복하지 않고 목록 위에 한 번만 둔다. */
+const LANE_BASIS_NOTE = "레인의 수치와 QA 신호는 필터·완료 절단 이전의 전체 작업을 셉니다";
+
+/** 앞부분이 집계 사실이고 뒷부분이 그 사실의 뜻이다. 판정이 아니라 집계라는 것을 문구가 말한다. */
+const LANE_SIGNAL_LABEL = "QA 대기만 남음 · 통째로 QA 가능";
+
 const viewModes = [
   { value: "board", label: "보드" },
   { value: "list", label: "리스트" },
   { value: "calendar", label: "타임라인" },
 ] as const;
 
-const eventKinds = [
+export const eventKinds = [
   { kind: "created", label: "생성" },
   { kind: "in_progress", label: "시작" },
   { kind: "blocked", label: "막힘" },
@@ -46,6 +70,7 @@ interface Props {
 
 export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
+  const [laneGrouping, setLaneGrouping] = useState(false);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [calendarCursor, setCalendarCursor] = useState(() => startOfMonth(new Date()));
@@ -148,7 +173,25 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, workflow }: Props
       {taskLoading && <div className="loading-toast">개발 작업을 불러오는 중…</div>}
 
       {viewMode === "board" && (
-        <BoardView items={filteredTasks} onOpen={(item) => void openTask(item)} statusFilter={statusFilter} />
+        <>
+          <div className="task-lane-controls">
+            <button aria-pressed={laneGrouping} onClick={() => setLaneGrouping((value) => !value)}>
+              기획서별 묶기
+            </button>
+          </div>
+          {laneGrouping ? (
+            <SpecLaneBoard
+              allTasks={workflow.items.tasks}
+              hasFilters={hasFilters}
+              onOpen={(item) => void openTask(item)}
+              specs={workflow.items.specs}
+              statusFilter={statusFilter}
+              visibleTasks={filteredTasks}
+            />
+          ) : (
+            <BoardView items={filteredTasks} onOpen={(item) => void openTask(item)} statusFilter={statusFilter} />
+          )}
+        </>
       )}
       {viewMode === "list" && <ListView items={filteredTasks} onOpen={(item) => void openTask(item)} />}
       {viewMode === "calendar" && (
@@ -254,6 +297,10 @@ function TaskDetail({
       >
         <article className="task-detail-document">
           <div className="task-detail-meta"><span>최근 변경 {formatDate(document.summary.updatedAt)}</span><span>{document.summary.dueAt ? `목표 ${formatDueDate(document.summary.dueAt)}` : "일정 없음"}</span></div>
+          <TaskDependencies
+            dependencies={document.dependencies ?? []}
+            formatError={document.dependencyFormatError ?? false}
+          />
           <div className="spec-paper embedded"><MarkdownBody body={document.body} /></div>
         </article>
         <aside className="task-qa-panel">
@@ -333,12 +380,49 @@ function TaskDetail({
   );
 }
 
+/**
+ * 선언된 선행 작업과 각각의 판정을 그린다. 선언이 없고 형식 오류도 아니면 아무것도 그리지 않는다.
+ *
+ * `missing`·`cyclic`·형식 오류는 기다려서 풀리는 `pending`과 구분해 경고 톤과 안내 문구를 준다.
+ * 이 구분이 없으면 사용자가 영원히 열리지 않는 작업을 "기다리면 되는 작업"으로 읽는다.
+ */
+function TaskDependencies({ dependencies, formatError }: { dependencies: TaskDependency[]; formatError: boolean }) {
+  if (!formatError && dependencies.length === 0) return null;
+  const startable = !formatError && dependencies.every((entry) => entry.state === "satisfied");
+  const permanent = formatError || dependencies.some((entry) => permanentDependencyStates.has(entry.state));
+
+  return (
+    <section aria-label="선행 작업" className={`task-dependencies ${startable ? "startable" : "waiting"}`}>
+      <header>
+        <strong>선행 작업</strong>
+        <span className="task-dependency-summary">{startable ? "시작 가능" : "시작할 수 없음"}</span>
+      </header>
+      {formatError ? (
+        <p className="task-dependency-error">선행 선언의 형식이 잘못되어 목록으로 읽지 못했습니다.</p>
+      ) : (
+        <ul>
+          {dependencies.map((entry, index) => (
+            <li className={`task-dependency state-${entry.state}`} key={`${entry.id}:${index}`}>
+              <strong>{entry.id}</strong>
+              <span>{dependencyLabels[entry.state] ?? entry.state}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {permanent && <p className="task-dependency-note">{PERMANENT_DEPENDENCY_NOTE}</p>}
+    </section>
+  );
+}
+
 function BoardView({
   items,
+  label = "개발 작업 칸반 보드",
   onOpen,
   statusFilter,
 }: {
   items: WorkflowItemSummary[];
+  /** region 이름. 레인 수만큼 보드가 생길 때 같은 이름이 겹치지 않게 레인이 갈아 끼운다. */
+  label?: string;
   onOpen(item: WorkflowItemSummary): void;
   statusFilter: string;
 }) {
@@ -349,7 +433,7 @@ function BoardView({
     : taskColumns.filter((column) => column.status === statusFilter);
 
   return (
-    <div className={`task-board columns-${columns.length}`} aria-label="개발 작업 칸반 보드" role="region">
+    <div className={`task-board columns-${columns.length}`} aria-label={label} role="region">
       {columns.map((column) => (
         <TaskColumn
           description={column.description}
@@ -364,6 +448,74 @@ function BoardView({
         <TaskColumn description="규격을 확인해야 하는 상태" items={unknown} onOpen={onOpen} title="확인 필요" tone="danger" />
       )}
     </div>
+  );
+}
+
+/**
+ * 보드를 기획서별 레인으로 나눠 그린다. 레인 안의 열 구성은 지금의 `BoardView` 그대로다.
+ *
+ * 묶기를 켰을 때만 마운트되므로 꺼진 보드에서는 파생 비용이 아예 들지 않는다.
+ */
+function SpecLaneBoard({
+  allTasks,
+  hasFilters,
+  onOpen,
+  specs,
+  statusFilter,
+  visibleTasks,
+}: {
+  /** 수치와 신호의 계산 집합. 필터와 완료 절단 이전의 워크플로 작업 전체다. */
+  allTasks: WorkflowItemSummary[];
+  hasFilters: boolean;
+  onOpen(item: WorkflowItemSummary): void;
+  specs: WorkflowItemSummary[];
+  statusFilter: string;
+  /** 카드로 그릴 집합. 완료 절단과 검색·상태 필터를 이미 거쳤다. */
+  visibleTasks: WorkflowItemSummary[];
+}) {
+  // 목록은 2.5초마다 다시 읽히는 자리라 매 렌더가 아니라 작업 목록이 바뀔 때만 다시 센다.
+  const { hiddenLaneCount, lanes } = useMemo(
+    () => buildSpecLanes(allTasks, visibleTasks, specs),
+    [allTasks, specs, visibleTasks],
+  );
+
+  return (
+    <>
+      <p className="task-lane-note">{LANE_BASIS_NOTE}</p>
+      {lanes.map((lane) => (
+        <section className="task-lane" key={lane.key}>
+          <header className="task-lane-header">
+            <div>
+              <strong>{lane.title}</strong>
+              {lane.specId && lane.specId !== lane.title && <small>{lane.specId}</small>}
+            </div>
+            <p className="task-lane-counts">
+              <em>전체 기준</em>
+              {taskColumns.map((column) => (
+                <span key={column.status}>{statusLabels[column.status]} {lane.counts[column.status]}</span>
+              ))}
+              {lane.unknownCount > 0 && <span>규격 밖 {lane.unknownCount}</span>}
+            </p>
+            {lane.signal && <span className="task-lane-signal">{LANE_SIGNAL_LABEL}</span>}
+          </header>
+          {/* region 이름은 제목이 아니라 레인 키로 짓는다. 서로 다른 기획서가 같은 제목을 가질 수 있다. */}
+          <BoardView
+            items={lane.items}
+            label={`${lane.specId ?? UNASSIGNED_LANE_TITLE} 칸반 보드`}
+            onOpen={onOpen}
+            statusFilter={statusFilter}
+          />
+        </section>
+      ))}
+      {lanes.length === 0 && <EmptyTasks />}
+      {hiddenLaneCount > 0 && (
+        <p className="task-lane-hidden">
+          {hasFilters
+            ? `조건에 맞는 카드가 없어 표시하지 않은 기획서 ${hiddenLaneCount}개`
+            : `완료만 있어 표시하지 않은 기획서 ${hiddenLaneCount}개`}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -544,6 +696,102 @@ function tasksForDevelopment(items: WorkflowItemSummary[]) {
     .slice(0, 3);
   const recentFiles = new Set(recentCompleted.map((item) => item.fileName));
   return items.filter((item) => item.status !== "completed" || recentFiles.has(item.fileName));
+}
+
+interface SpecLane {
+  key: string;
+  /** 미분류 레인은 `null`이다. */
+  specId: string | null;
+  title: string;
+  /** `taskColumns`의 다섯 상태별 건수. 0이어도 전부 담는다. */
+  counts: Record<string, number>;
+  /** 그 다섯에 없는 상태의 건수. 규격 밖 작업이 수치에서 조용히 빠지지 않게 따로 센다. */
+  unknownCount: number;
+  signal: boolean;
+  /** 화면에 그릴 카드. */
+  items: WorkflowItemSummary[];
+}
+
+/**
+ * 작업을 기획서별 레인으로 나눈다.
+ *
+ * 수치와 신호는 `allTasks`를 세고 카드만 `visibleTasks`에서 온다. DECISION-DD348ED0의 확인 필요
+ * 1번이 정한 계산 집합이고, 필터에 가려진 `todo` 하나 때문에 "통째로 QA 가능"이 켜지는 것을 막는
+ * 자리다. 그래서 헤더 수치와 눈에 보이는 카드 수는 어긋날 수 있고, 그것이 정상이다.
+ *
+ * 카드가 한 장도 없는 레인은 목록에서 빼고 그 수를 함께 돌려준다. 화면이 그 수를 문장으로 남긴다.
+ */
+function buildSpecLanes(
+  allTasks: WorkflowItemSummary[],
+  visibleTasks: WorkflowItemSummary[],
+  specs: WorkflowItemSummary[],
+) {
+  const knownStatuses = new Set<string>(taskColumns.map((column) => column.status));
+  const specTitles = new Map(specs.map((spec) => [spec.id, spec.title]));
+  const drafts = new Map<string, SpecLane>();
+
+  for (const item of allTasks) {
+    const key = laneKeyOf(item);
+    const lane = drafts.get(key) ?? emptyLane(key, specTitles);
+    if (knownStatuses.has(item.status)) lane.counts[item.status] += 1;
+    else lane.unknownCount += 1;
+    drafts.set(key, lane);
+  }
+  // 표시 집합은 전체 집합의 부분이므로 여기서 새 레인이 생기지 않는다.
+  for (const item of visibleTasks) drafts.get(laneKeyOf(item))?.items.push(item);
+
+  const lanes: SpecLane[] = [];
+  let hiddenLaneCount = 0;
+  for (const lane of drafts.values()) {
+    lane.signal = laneSignal(lane);
+    if (lane.items.length === 0) hiddenLaneCount += 1;
+    else lanes.push(lane);
+  }
+  lanes.sort(compareLanes);
+  return { hiddenLaneCount, lanes };
+}
+
+function laneKeyOf(item: WorkflowItemSummary) {
+  const trimmed = item.sourceSpecId?.trim();
+  return trimmed ? trimmed : UNASSIGNED_LANE_KEY;
+}
+
+function emptyLane(key: string, specTitles: Map<string, string>): SpecLane {
+  const specId = key === UNASSIGNED_LANE_KEY ? null : key;
+  return {
+    key,
+    specId,
+    title: specId ? specTitles.get(specId) ?? specId : UNASSIGNED_LANE_TITLE,
+    counts: Object.fromEntries(taskColumns.map((column) => [column.status, 0])),
+    unknownCount: 0,
+    signal: false,
+    items: [],
+  };
+}
+
+/**
+ * `todo`·`in_progress`·`blocked`가 0이고 `qa_waiting`이 1건 이상인가.
+ *
+ * 규격 밖 상태는 막는 쪽에 센다 — 무엇인지 모르는 상태를 "QA 대기만 남았다"의 근거로 삼을 수 없다.
+ * 미분류 레인은 하나의 기획서가 아니라 "통째로 QA"의 대상이 아니므로 신호를 붙이지 않는다.
+ */
+function laneSignal(lane: SpecLane) {
+  if (!lane.specId) return false;
+  const blocking = lane.counts.todo + lane.counts.in_progress + lane.counts.blocked + lane.unknownCount;
+  return blocking === 0 && lane.counts.qa_waiting > 0;
+}
+
+/**
+ * 신호가 켜진 레인이 위, 그 안에서 기획서 id 오름차순이다.
+ *
+ * 미분류 레인은 늘 맨 뒤다. 신호가 붙지 않아 아랫 무리에 속하고, 키가 기획서 id가 아니라 id 정렬에
+ * 섞을 수 없기 때문이다.
+ */
+function compareLanes(left: SpecLane, right: SpecLane) {
+  if (left.signal !== right.signal) return left.signal ? -1 : 1;
+  if (!left.specId) return 1;
+  if (!right.specId) return -1;
+  return left.specId.localeCompare(right.specId);
 }
 
 function matchesFilters(item: WorkflowItemSummary, query: string, statusFilter: string) {

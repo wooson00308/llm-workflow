@@ -1,12 +1,12 @@
 # 하트비트 가이드
 
-LLM Workflow는 LLM을 실행하지 않는다. 앱은 프로젝트의 Markdown/YAML 파일로 상태를 관리할 뿐이고, "누가 언제 역할 세션을 깨우는가"는 전적으로 사용자 환경(스케줄러, 반복 실행 명령, CI 잡)의 책임이다. 이 문서는 그 주기적 기동을 하트비트라고 부르고, 세 역할을 각각 어떤 잡으로 돌리는지, 처리할 대상이 있는지 어떻게 판정하는지, 그 판정이 선점 프로토콜과 어떤 관계인지를 정리한다.
+LLM Workflow는 LLM을 실행하지 않는다. 앱은 프로젝트의 Markdown/YAML 파일로 상태를 관리할 뿐이고, "누가 언제 역할 세션을 깨우는가"는 전적으로 사용자 환경(스케줄러, 반복 실행 명령, CI 잡)의 책임이다. 이 문서는 그 주기적 기동을 하트비트라고 부르고, 세 역할을 각각 어떤 잡으로 돌리는지, 앱이 그 잡을 어느 파일에 쓰는지, 처리할 대상이 있는지 어떻게 판정하는지, 그 판정이 선점 프로토콜과 어떤 관계인지를 정리한다.
 
 ## 하트비트의 기본 구조
 
 모든 역할 잡은 같은 세 단계를 갖는다.
 
-1. 조건 검사: `scripts/wf-eligible.sh`로 그 역할이 처리할 대상이 있는지 확인한다.
+1. 조건 검사: `.workflow/rules/wf-eligible.sh`로 그 역할이 처리할 대상이 있는지 확인한다.
 2. 역할 세션 실행: 대상이 있을 때만 LLM 세션을 한 번 실행한다.
 3. 종료: 세션이 끝나면 잡은 아무것도 하지 않는다. 다음 주기에 1번부터 다시 검사한다.
 
@@ -22,7 +22,7 @@ LLM Workflow는 LLM을 실행하지 않는다. 앱은 프로젝트의 Markdown/Y
 
 ```sh
 cd /path/to/project || exit 1
-sh scripts/wf-eligible.sh planner || exit 0
+sh .workflow/rules/wf-eligible.sh planner || exit 0
 <llm-cli> "기획자 역할로 진행해줘. .workflow의 공통 규칙과 planner 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰."
 ```
 
@@ -36,7 +36,7 @@ sh scripts/wf-eligible.sh planner || exit 0
 
 ```sh
 cd /path/to/project || exit 1
-sh scripts/wf-eligible.sh architect || exit 0
+sh .workflow/rules/wf-eligible.sh architect || exit 0
 <llm-cli> "프로젝트 아키텍트 역할로 진행해줘. .workflow의 공통 규칙과 architect 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰."
 ```
 
@@ -50,7 +50,7 @@ sh scripts/wf-eligible.sh architect || exit 0
 
 ```sh
 cd /path/to/project || exit 1
-sh scripts/wf-eligible.sh developer || exit 0
+sh .workflow/rules/wf-eligible.sh developer || exit 0
 <llm-cli> "개발자 역할로 진행해줘. .workflow의 공통 규칙과 developer 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰."
 ```
 
@@ -64,12 +64,40 @@ sh scripts/wf-eligible.sh developer || exit 0
 
 그래서 권장값의 기준은 "한 건을 처리하는 데 걸리는 시간과 비슷하거나 그보다 긴 주기"다. 위 숫자는 출발점이고, 실제 세션 소요 시간을 재서 조정한다.
 
+## 앱이 쓰는 잡 파일
+
+앱에서 역할 잡이나 dream 잡을 설치하면 그 정의는 `~/.claude/heartbeat/jobs.d/<slug>.md` 한 파일에 기록된다. `<slug>`는 프로젝트 경로로 만든 이름이라 프로젝트마다 파일이 갈리고, 한 프로젝트에서 저장한 결과가 다른 프로젝트의 잡을 건드리지 않는다. 앱은 저장할 때 자기 파일 하나만 통째로 쓰며 다른 파일은 읽지도 않는다.
+
+위 예시가 보여준 두 단계는 이 파일 안에서 잡의 필드가 된다. 조건 검사는 `condition`, 역할 세션 실행은 `prompt`다. 잡을 앱으로 설치하든 스케줄러에 직접 걸든 "대상이 있을 때만 세션을 한 번 띄운다"는 구조는 같다.
+
+전역 설정은 이 파일에 들어가지 않는다. 데몬의 `tick`은 여전히 `~/.claude/HEARTBEAT.md`에서만 읽히고, 앱은 그 값을 읽지도 쓰지도 않는다. jobs.d 파일에 전역 설정을 적어도 데몬이 버린다.
+
+### 데몬 0.8.0 미만에서 벌어지는 일
+
+`jobs.d` 디렉터리를 읽는 것은 하트비트 0.8.0부터다. 그보다 낮은 데몬은 이 디렉터리를 아예 열지 않으므로, 앱이 저장한 잡은 파일에 있지만 한 번도 실행되지 않는다. 그런데도 연동 화면은 "설치됨"으로 보인다. 설치 판정이 파일과 디렉터리와 프로세스의 존재만 보고 데몬 버전은 보지 않기 때문이다.
+
+앱은 데몬 버전을 판정하지 않는다. 여러 파이썬 환경 중 어느 실행 파일이 도는 데몬인지 가려낼 방법이 없어서, 판정을 만들어 저장을 막으면 그 판정이 틀렸을 때 사용자가 우회할 수단이 없다. 대신 앱은 그 잡의 실행 기록이 아직 없다는 사실만 화면에 보여준다. 방금 설치해서 첫 주기가 오지 않은 잡도 같은 모양이므로, 주기를 몇 번 넘겼는데도 기록이 생기지 않으면 데몬 버전을 확인한다.
+
+### 전환과 `heartbeat migrate`의 순서
+
+`heartbeat migrate`는 `~/.claude/HEARTBEAT.md`에 남아 있는 잡을 slug별로 갈라 `jobs.d`로 옮기는 명령이다. 앱의 쓰기 대상이 jobs.d로 바뀌기 전과 후에 돌린 결과가 다르므로, 순서를 알고 돌려야 한다.
+
+**앱이 전환된 뒤에 migrate를 돌리는 것은 안전하다.** migrate는 대상 파일이 이미 있으면 그 slug를 건너뛰므로, 앱이 쓴 파일을 덮지 않는다.
+
+**전환 전 버전의 앱에서 migrate를 먼저 돌리면 같은 잡이 두 곳에 정의된다.** 그 시점의 앱은 아직 `HEARTBEAT.md`의 관리 블록에 잡을 쓴다. migrate가 잡을 jobs.d로 옮겨 두어도 앱이 다음에 저장하는 순간 블록이 다시 채워지기 때문이다. 데몬은 이름이 겹치는 잡을 하나만 남기면서 jobs.d 쪽을 이기게 하고 경고 로그만 적으므로, 실제로 도는 것은 migrate가 옮겨 둔 옛 정의이고 앱에서 고친 값은 조용히 무시된다. 사용자 눈에는 "앱에서 고쳤는데 아무 일도 안 일어난다"로 보인다.
+
+migrate는 앱의 관리 마커를 치우지 않는다. 마커는 HTML 주석 줄이고 migrate가 옮기는 것은 잡뿐이라, 마커 한 쌍은 짝이 맞은 채 `HEARTBEAT.md`에 남는다. 그 안에 남은 이 프로젝트의 잡은 앱이 다음 저장에서 자기 것만 지우고, 다른 프로젝트의 잡은 그대로 둔다.
+
+앱은 `heartbeat migrate`를 대신 실행하지 않는다. 언제 돌릴지는 사용자가 정한다.
+
 ## 조건 스크립트 사용법
 
-`scripts/wf-eligible.sh`는 역할별로 지금 처리 가능한 대상이 있는지만 판정한다. 파일을 만들거나 고치지 않는 읽기 전용 스크립트다.
+`.workflow/rules/wf-eligible.sh`는 역할별로 지금 처리 가능한 대상이 있는지만 판정한다. 파일을 만들거나 고치지 않는 읽기 전용 스크립트다.
+
+**이 파일은 저장소에 들어 있지 않다.** 앱이 역할 잡을 설치할 때 프로젝트의 `.workflow/rules/`에 만들어 준다. 저장소를 클론하기만 한 상태에는 없으므로, 위 잡 예시를 스케줄러에 걸기 전에 앱에서 역할 잡 설치를 한 번 끝내야 한다. 설치되는 것은 실행 플랫폼의 구현 하나뿐이다. Windows에서는 같은 자리에 `.workflow/rules/wf-eligible.ps1`이 설치되며, 판정 규칙과 종료 코드는 아래 설명과 같다.
 
 - 실행 위치: 프로젝트 루트. 스크립트가 `.workflow/...` 상대 경로를 쓰므로 다른 위치에서 실행하면 판정이 틀어진다.
-- 호출: `sh scripts/wf-eligible.sh <role>`. 파일 모드에 실행 권한이 없으므로 `sh`로 실행한다.
+- 호출: `sh .workflow/rules/wf-eligible.sh <role>`. 파일 모드에 실행 권한이 없으므로 `sh`로 실행한다.
 - 인자: `planner` | `architect` | `developer` 중 하나.
 
 종료 코드는 세 가지다.

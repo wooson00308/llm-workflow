@@ -1,7 +1,12 @@
+pub mod claim_helper;
 pub mod fs_project_repository;
 pub mod heartbeat_condition;
 pub mod heartbeat_dream;
 pub mod heartbeat_jobs;
+pub mod heartbeat_process;
 pub mod heartbeat_roles;
+pub mod heartbeat_setup;
 pub mod heartbeat_status;
+pub mod managed_script;
 pub mod project_instructions;
+pub mod role_eligibility;

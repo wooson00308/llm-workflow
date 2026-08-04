@@ -2,12 +2,14 @@
 schema: workflow-labs/task@1
 id: TASK-032
 title: lease 계약에 역할을 더하고 심장박동·기획서 결정 시각을 화면까지 나른다
-status: todo
+status: completed
 source_spec_id: SPEC-011
 source_decision_id: DECISION-FE4BCCC7
-updated_at: 2026-08-03T02:45:00Z
+updated_at: 2026-08-03T12:42:56Z
 history:
   - { at: 2026-08-03T02:45:00Z, kind: created }
+  - { at: 2026-08-03T07:09:00Z, kind: in_progress }
+  - { at: 2026-08-03T07:21:00Z, kind: qa_waiting }
 ---
 
 # lease 계약에 역할을 더하고 심장박동·기획서 결정 시각을 화면까지 나른다

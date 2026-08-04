@@ -1,7 +1,11 @@
 import Markdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
-export function MarkdownBody({ body }: { body: string }) {
+export function MarkdownBody({
+  body,
+  preserveLineBreaks = false,
+}: { body: string; preserveLineBreaks?: boolean }) {
   return (
     <div className="markdown-body">
       <Markdown
@@ -10,7 +14,7 @@ export function MarkdownBody({ body }: { body: string }) {
             <a href={href} rel="noopener noreferrer" target="_blank">{children}</a>
           ),
         }}
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={preserveLineBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
       >
         {body}
       </Markdown>

@@ -1,6 +1,7 @@
 import type { SVGProps } from "react";
 
 export type IconName =
+  | "activity"
   | "archive"
   | "board"
   | "chevron"
@@ -17,6 +18,7 @@ export type IconName =
   | "workflow";
 
 const paths: Record<IconName, React.ReactNode> = {
+  activity: <path d="M3 12h3.5l2-6 3.5 12 2.5-8 1.5 2H21" />,
   archive: <path d="M4 7h16M6 7v12h12V7M9 11h6M5 4h14v3H5z" />,
   board: <path d="M4 5h6v14H4zM14 5h6v8h-6zM14 17h6v2h-6z" />,
   chevron: <path d="m9 18 6-6-6-6" />,

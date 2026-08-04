@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 3
+rules_version: 4
 ---
 
 # Project architect role
@@ -16,8 +16,16 @@ Turn one app-approved specification into implementation-ready development tasks.
 
 ## Claim first
 
-- Before planning tasks, claim the approved specification with a lease named after its id.
+- Before planning tasks, claim the approved specification as `.workflow/rules/workflow.md` §4 describes.
 - Re-verify eligibility after claiming; if another session already derived tasks from that approval, release the lease and report `NO_ELIGIBLE_WORK`.
+
+## Split for parallel safety
+
+- Decide whether the tasks derived from one approval are safe to run at the same time. Tasks whose code scope overlaps are not.
+- Order every overlapping pair with `depends_on`, the optional list of task ids in the same workflow. Decide which side comes first and write the field on the task that must come second, instead of copying a prose "do not run in parallel" note into both.
+- Record the files and modules a task touches in its scope section, so the judgement behind the order stays readable.
+- Never declare a cycle and never reference a task id that does not exist. Both are dependencies that can never be satisfied.
+- Do not serialize tasks that do not overlap. Ordering without a reason removes parallel room and gains nothing.
 
 ## Allowed
 

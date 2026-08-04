@@ -2,9 +2,11 @@ import { useId } from "react";
 import type { ComponentType, ReactNode } from "react";
 import type {
   DuplicateIntegrationJob,
+  HeartbeatRunControls,
   IntegrationActions,
   IntegrationReadFailure,
   IntegrationsSnapshot,
+  PendingRoleWork,
 } from "../../domain/types";
 
 /** 연동 본문이 받는 값. 섹션은 이 객체를 그대로 넘기기만 하고 내용을 들여다보지 않는다. */
@@ -17,6 +19,15 @@ export interface IntegrationCardProps {
   /** 펼침 상태의 주인은 뷰다. 카드는 받은 값을 골격에 그대로 넘긴다. */
   expanded: boolean;
   onToggleExpanded(): void;
+  /** 프로젝트의 역할별 대기 물량. 카드가 자기 판정에 쓰고, 섹션은 내용을 들여다보지 않는다. */
+  pendingWork?: PendingRoleWork;
+  /**
+   * 잡 실행의 진행·실패 상태와 실행 통로. 섹션은 내용을 들여다보지 않고 그대로 넘긴다.
+   *
+   * 선택이 아니라 필수다. 선택으로 두면 배선을 빠뜨려도 컴파일이 통과하고, 카드는 조용히 실행
+   * 액션이 없는 화면이 된다.
+   */
+  heartbeatRuns: HeartbeatRunControls;
 }
 
 /** 내장 연동 목록의 항목. */
@@ -53,6 +64,11 @@ interface Props {
    * 지금처럼 연동 본문이다.
    */
   writeError: string | null;
+  /**
+   * 연동 본문만 아는 경고가 있는지. 골격은 그 경고가 무엇인지 알지 못하고 접힘 요약 판정에만 쓴다.
+   * 세 번째 연동이 같은 통로를 그대로 쓴다.
+   */
+  bodyWarning: boolean;
   expanded: boolean;
   onToggleExpanded(): void;
   /** 연동별 본문. 이 연동만 아는 내용은 전부 여기에 있다. */
@@ -80,15 +96,20 @@ export function IntegrationCard({
   duplicateWarning,
   readFailures,
   writeError,
+  bodyWarning,
   expanded,
   onToggleExpanded,
   children,
 }: Props) {
   const shown = error ? unknownBadge : (badge ?? pendingBadge);
   const bodyId = useId();
-  /** 골격이 아는 경고 신호 넷. 상세는 본문에 있고 요약은 있다는 사실까지만 알린다. */
+  /** 골격이 아는 경고 신호. 상세는 본문에 있고 요약은 있다는 사실까지만 알린다. */
   const hasWarning =
-    Boolean(error) || Boolean(writeError) || duplicateJobs.length > 0 || readFailures.length > 0;
+    Boolean(error) ||
+    Boolean(writeError) ||
+    duplicateJobs.length > 0 ||
+    readFailures.length > 0 ||
+    bodyWarning;
 
   return (
     <article aria-label={name} className="integration-item">
