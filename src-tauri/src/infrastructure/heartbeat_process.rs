@@ -112,7 +112,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use pretty_assertions::assert_eq;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::tempdir;
+    #[cfg(unix)]
+    use tempfile::TempDir;
 
     use super::{candidates_for, manual_command, run_once, RunFailure};
 
