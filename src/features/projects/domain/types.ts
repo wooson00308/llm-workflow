@@ -37,9 +37,28 @@ export interface WorkflowItemSummary {
   fileName: string;
   id: string;
   title: string;
+  /**
+   * 문서의 상태. 아이디어에서는 파일 값이 아니라 조회 시점 파생값이며 `inbox`·`drafting`·
+   * `closed`·`adopted` 넷 중 하나다. `closed`는 참조 기획서가 모두 반려로 끝난 경우다. 앱은
+   * 판정 결과를 아이디어 파일에 쓰지 않는다.
+   */
   status: string;
   updatedAt: string | null;
   dueAt?: string | null;
+  /** 개발 작업이 어떤 기획서에서 나왔는지. 아이디어·기획서에서는 늘 null이다. */
+  sourceSpecId?: string | null;
+  /** 개발 작업이 어떤 승인 결정에서 나왔는지. 아이디어·기획서에서는 늘 null이다. */
+  sourceDecisionId?: string | null;
+  /**
+   * 중단 의심의 근거. 아이디어가 반영중인데 선점한 미만료 lease가 없을 때 걸려 있는 draft 기획서의
+   * 문서 id다. 비어 있지 않다는 것과 중단 의심은 같은 뜻이다. 기획서·개발 작업 항목에서는 비어 있다.
+   */
+  stalledSpecIds?: string[];
+  /**
+   * 문서에 일어난 사실. 시각 오름차순이다. 개발 작업은 상태 전이, 기획서는 사용자 결정이 실리고
+   * 아이디어는 늘 비어 있다. `kind`의 뜻은 문서 종류에 따라 다르다 — 기획서의
+   * `revision_requested`는 "수정 요청"이고 개발 작업의 같은 값은 "반려"다.
+   */
   events?: TaskEvent[];
   excerpt: string;
 }
@@ -49,9 +68,24 @@ export interface SpecDocument {
   body: string;
 }
 
+/**
+ * 선언된 선행 작업 하나의 판정 결과. `pending`은 시간이 지나면 풀리지만 `missing`·`cyclic`은
+ * 영원히 충족되지 않는다.
+ */
+export type TaskDependencyState = "satisfied" | "pending" | "missing" | "cyclic";
+
+export interface TaskDependency {
+  id: string;
+  state: TaskDependencyState;
+}
+
 export interface TaskDocument {
   summary: WorkflowItemSummary;
   body: string;
+  /** 선언된 선행 작업과 각각의 판정 결과. 선언 순서 그대로다. */
+  dependencies?: TaskDependency[];
+  /** 선언 줄이 계약 형식이 아니어서 목록으로 읽지 못했는가. 참이면 이 작업은 미충족이다. */
+  dependencyFormatError?: boolean;
 }
 
 export interface IdeaDocument {
@@ -69,8 +103,19 @@ export type TaskQaOutcome = "confirmed" | "revision_requested";
 export interface AgentLeaseSummary {
   leaseId: string;
   agent: string;
+  /** 선점 세션이 적은 역할. 계약상 선택 필드라 없으면 null이다. 추정으로 채우지 않는다. */
+  role: string | null;
   taskId: string | null;
+  /** lease 파일의 `heartbeat_at` 원문(RFC3339). 최초 시작 시각이 아니다. */
+  heartbeatAt: string;
   expiresAt: string;
+}
+
+/** 역할별 대기 물량. 조건 스크립트가 그 역할로 종료 코드 0을 돌려주는 상태가 true다. */
+export interface PendingRoleWork {
+  planner: boolean;
+  architect: boolean;
+  developer: boolean;
 }
 
 export interface ProjectSummary {
@@ -81,6 +126,8 @@ export interface ProjectSummary {
   compatibility: SchemaCompatibility;
   activeLeases: AgentLeaseSummary[];
   workflows: WorkflowSummary[];
+  /** 값이 없으면 "대기 물량을 모른다"이고, 모르는 상태에서는 경고하지 않는다. */
+  pendingWork?: PendingRoleWork;
 }
 
 /**
@@ -96,6 +143,13 @@ export interface HeartbeatJobRun {
   at: string | null;
   result: string | null;
   durationSeconds: number | null;
+  /**
+   * 마지막 조건 검사의 표준 출력 첫 줄. 건너뜀 사유가 여기 실린다.
+   *
+   * 선택 필드다. 데몬은 출력이 비면 이 키를 지우고, 이 키를 아예 주지 않는 데몬도 아직 쓰인다.
+   * 값 없음이 정상 상태이므로 화면은 없을 때를 기본으로 그린다(SPEC-023 R2).
+   */
+  conditionOutput?: string | null;
 }
 
 export interface HeartbeatRoleStatus {
@@ -105,7 +159,35 @@ export interface HeartbeatRoleStatus {
   defaults: JobDefaults;
   /** null은 "실행 기록 없음"이다. 오류가 아니다. */
   lastRun: HeartbeatJobRun | null;
+  /** 이 잡의 실행 한도 사용량. 관리 블록을 읽지 못하면 unknown이다. */
+  quota: JobQuota;
 }
+
+/**
+ * 잡 하나의 실행 한도 사용량. "값을 모른다"·"한도가 없다"·"기록이 없다"가 서로 다른 값이다.
+ *
+ * used가 0인 것과 기록이 없는 것을 화면이 같은 것으로 읽으면 안 된다. 기록이 없는 것을 0으로 읽으면
+ * 사용자는 한도가 비어 있다고 판단한다.
+ *
+ * 무제한도 한 낱말이 아니다. `unlimited`는 사용자가 고른 정상 상태이고, `ignoredLimit`은 파일의 값이
+ * 데몬 기준에 미치지 못해 무제한이 된 상태라 손볼 곳이 있다는 신호다.
+ */
+export type JobQuota =
+  | { kind: "unknown" }
+  /** 사용자가 고른 제한 없음. 관리 블록의 그 잡에 max_per 줄이 없다. 보여줄 원문이 없다. */
+  | { kind: "unlimited" }
+  /** max_per 값이 있으나 하트비트가 한도로 인정하지 않는다. 형식 위반·0 이하 횟수·0 기간이 모두 여기다. */
+  | { kind: "ignoredLimit"; value: string }
+  | { kind: "noRuns"; limit: number; window: string }
+  | {
+      kind: "counted";
+      used: number;
+      limit: number;
+      window: string;
+      exhausted: boolean;
+      /** RFC3339. 화면이 로컬 시각으로 바꾼다. 계산할 수 없으면 null이다. */
+      recoversAt: string | null;
+    };
 
 /**
  * 잡 하나의 앱 기본값. 사용자가 편집할 수 있는 세 필드뿐이다.
@@ -117,6 +199,7 @@ export interface JobDefaults {
   interval: string;
   maxPer: string;
   model: string;
+  timeout: string;
 }
 
 /** 앱 관리 블록 밖에 있는 같은 프로젝트의 잡. 감지만 하고 수정하지 않는다. */
@@ -138,6 +221,7 @@ export interface ManagedRoleJob {
   interval: string | null;
   maxPer: string | null;
   model: string | null;
+  timeout: string | null;
   /**
    * 앱이 다시 쓸 값과 다른 앱 소유 필드 이름. 저장하면 이 필드들이 앱 값으로 되돌아간다.
    *
@@ -151,8 +235,32 @@ export interface ManagedDreamJob {
   interval: string | null;
   maxPer: string | null;
   model: string | null;
+  timeout: string | null;
   /** 역할 잡과 같은 값이다. */
   appOwnedDrift: string[];
+}
+
+/**
+ * 설치 마법사의 단계 이름. 목록은 언제나 넷이고 이 순서가 고정이다. 화면이 다시 정렬하지 않는다.
+ */
+export type HeartbeatSetupStep = "package" | "init" | "service" | "dream";
+
+/**
+ * 단계 하나의 표시 상태. `unknown`은 앱이 판정 근거를 갖지 못한 상태이며 `not_done`과 다른 문구로
+ * 보여준다. "모른다"를 "아니다"로 번역하면 사용자는 이미 끝낸 일을 다시 한다.
+ */
+export type HeartbeatSetupState = "done" | "not_done" | "unknown";
+
+/** 설치 마법사가 보여주는 단계 하나. 접혀 있던 설치 판정을 단계로 펼친 값이다. */
+export interface HeartbeatSetupStage {
+  step: HeartbeatSetupStep;
+  state: HeartbeatSetupState;
+  /** 1~3은 참, dream은 거짓이다. 선택 단계가 미완료여도 마법사는 접힌다. */
+  required: boolean;
+  /** 사용자가 자기 터미널에 그대로 붙여 넣을 명령 원문. 화면에서 조각을 조립하지 않는다. */
+  command: string;
+  /** 판정에 쓴 경로. 감지하지 않는 단계와 이 플랫폼에서 볼 경로가 없는 단계는 null이다. */
+  evidence: string | null;
 }
 
 /** 하트비트 연동 payload. 공통 설치 상태 위에 데몬 실행 여부와 역할 잡을 얹는다. */
@@ -160,6 +268,11 @@ export interface HeartbeatIntegration {
   installation: IntegrationInstallation;
   /** pid 파일 존재로만 판정한다. 프로세스 생존은 확인하지 않는다. */
   daemonRunning: boolean;
+  /**
+   * 설치 단계 넷. installation을 대체하지 않고 그 옆에 실린다. dream 단계가 여기 들어가는 이유는
+   * 이것이 하트비트 카드의 마법사이기 때문이며, dream 카드는 이 값을 읽지 않는다.
+   */
+  setupStages: HeartbeatSetupStage[];
   conditionScriptPath: string;
   roles: HeartbeatRoleStatus[];
   managedJobs: ManagedRoleJob[];
@@ -196,6 +309,8 @@ export interface DreamIntegration {
   managedJob: ManagedDreamJob | null;
   /** null은 "실행 기록 없음"이다. 오류가 아니다. */
   lastRun: HeartbeatJobRun | null;
+  /** dream 잡의 실행 한도 사용량. 역할 잡과 같은 규칙이다. */
+  quota: JobQuota;
   duplicateJobs: DuplicateIntegrationJob[];
   readFailures: IntegrationReadFailure[];
 }
@@ -219,9 +334,24 @@ export interface IntegrationsSnapshot {
    * 두 연동이 HEARTBEAT.md 한 파일을 공유하므로 섹션 공통 값이다.
    */
   managedBlockFailure: IntegrationReadFailure | null;
+  /**
+   * 앱이 이 프로젝트의 잡을 읽고 쓰는 파일의 절대 경로. 백엔드가 실제로 여는 값을 그대로 받는다.
+   *
+   * 화면은 이 값을 그리기만 하고 조립하지 않는다. 경로에 slug가 들어가므로 화면이 만들면 백엔드와
+   * 갈라질 자리가 생긴다. `conditionScriptPath`·`conditionCommand`가 payload에 있는 것과 같은 규칙이다.
+   */
+  jobsFilePath: string;
   heartbeat: HeartbeatIntegration;
   dream: DreamIntegration;
 }
+
+/**
+ * 저장 요청이 정하는 실행 한도. null은 "이번 편집에서 지정하지 않음"이다.
+ *
+ * 한도 값 하나로는 "지정 안 함"과 "제한 없음"을 함께 담을 수 없다. 제한 없음은 관리 블록에 한도
+ * 줄을 쓰지 않는 상태이고, 지정 안 함은 파일에 적힌 값을 그대로 두는 상태라 결과가 다르다.
+ */
+export type MaxPerRequestValue = { kind: "unlimited" } | { kind: "limit"; value: string };
 
 /**
  * 설치 커맨드에 넘기는 역할별 요청. 비활성 역할도 함께 보낸다.
@@ -233,16 +363,18 @@ export interface RoleJobRequest {
   role: string;
   enabled: boolean;
   interval: string | null;
-  maxPer: string | null;
+  maxPer: MaxPerRequestValue | null;
   model: string | null;
+  timeout: string | null;
 }
 
 /** 설치 커맨드에 넘기는 dream 잡 요청. 역할 잡 값은 담지 않는다. */
 export interface DreamJobRequest {
   enabled: boolean;
   interval: string | null;
-  maxPer: string | null;
+  maxPer: MaxPerRequestValue | null;
   model: string | null;
+  timeout: string | null;
 }
 
 /**
@@ -256,12 +388,39 @@ export interface IntegrationWriteError {
   message: string;
 }
 
+/** 실행을 시작하지 못했거나 비정상 종료한 사유. 백엔드가 만든 값을 그대로 들고 있는다. */
+export interface HeartbeatRunFailure {
+  jobName: string;
+  message: string;
+  /** 사용자가 직접 칠 명령 원문. 화면은 이 문자열을 다시 조립하지 않는다. */
+  command: string;
+}
+
+/** 앱이 띄운 잡 실행의 진행·실패 상태와 실행 통로. 카드는 이 묶음 하나만 받는다. */
+export interface HeartbeatRunControls {
+  /** 지금 앱이 띄워 둔 잡 이름. 역할마다 따로 담기므로 한 역할이 다른 역할을 막지 않는다(R3). */
+  running: string[];
+  /** 마지막 실패 하나. 조회 주기가 지우지 않는다(R6). */
+  failure: HeartbeatRunFailure | null;
+  run(jobName: string): Promise<boolean>;
+}
+
 export interface IntegrationsState {
   /** 아직 읽지 않았거나 조회에 실패하면 null이다. */
   snapshot: IntegrationsSnapshot | null;
   error: string | null;
   /** 설치 쓰기가 실패한 사유. 2.5초 주기 조회는 이 값을 지우지 않는다. */
   writeError: IntegrationWriteError | null;
+  /**
+   * 잡 실행의 진행·실패 상태. 조회 상태와 수명이 달라 훅이 따로 들고 있다가 여기에 합쳐 내보낸다.
+   *
+   * 연동 뷰는 조건부 렌더라 다른 메뉴를 다녀오면 언마운트되므로, 이 값의 주인은 화면이 아니라
+   * 훅이다(R3).
+   *
+   * `useProjectWorkspace`는 언제나 이 값을 채워 내보낸다. 선택 필드인 것은 이 묶음을 조립하는
+   * 테스트 리터럴이 아직 이 필드를 모르기 때문이며, 그 리터럴들이 필드를 갖추면 필수로 좁힌다.
+   */
+  heartbeatRuns?: HeartbeatRunControls;
 }
 
 /**
@@ -343,6 +502,12 @@ export interface ProjectGateway {
     dream: DreamJobRequest,
     baseline: ManagedDreamJob | null,
   ): Promise<IntegrationsSnapshot>;
+  /**
+   * 역할 잡 하나를 지금 한 번 실행한다. 어떤 파일도 쓰지 않으므로 스냅샷을 돌려주지 않는다.
+   *
+   * 실패는 `HeartbeatRunFailure` 모양으로 거절된다. 사용자가 의도해 누른 자리에서만 부른다.
+   */
+  runHeartbeatJob(path: string, jobName: string): Promise<void>;
 }
 
 export interface RecentProjectStore {

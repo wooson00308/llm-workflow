@@ -2,12 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-031
 title: dream 카드가 같은 통로로 실행 한도 사용량과 미정제 대기 경고를 보여준다
-status: todo
+status: completed
 source_spec_id: SPEC-009
 source_decision_id: DECISION-85491D81
-updated_at: 2026-08-03T00:45:00Z
+updated_at: 2026-08-04T11:45:39.596748+00:00
 history:
   - { at: 2026-08-03T00:45:00Z, kind: created }
+  - { at: 2026-08-03T06:19:00Z, kind: in_progress }
+  - { at: 2026-08-03T06:31:00Z, kind: qa_waiting }
+  - { at: 2026-08-04T11:45:39.596748+00:00, kind: completed }
 ---
 
 # dream 카드가 같은 통로로 실행 한도 사용량과 미정제 대기 경고를 보여준다

@@ -5,9 +5,9 @@
 #![allow(dead_code)]
 
 use crate::domain::project::JobDefaults;
-use crate::infrastructure::heartbeat_jobs::ManagedJob;
+use crate::infrastructure::heartbeat_condition::CONDITION_SCRIPT;
+use crate::infrastructure::heartbeat_jobs::{ManagedJob, MaxPer};
 
-const CONDITION_SCRIPT: &str = ".workflow/rules/wf-eligible.sh";
 const NOTIFY: &str = "all";
 
 const PLANNER_PROMPT: &str = "기획자 역할로 진행해줘. .workflow의 공통 규칙과 planner 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.";
@@ -40,26 +40,22 @@ impl HeartbeatRole {
         }
     }
 
-    pub fn default_settings(self) -> RoleJobSettings {
+    /// 앱 기본값. 언제나 한도가 있는 값이므로 정의를 `JobDefaults` 쪽에 두고 설정을 그것에서
+    /// 만든다(SPEC-017 R1). 반대 방향이면 `MaxPer::Unlimited`를 문자열로 바꿀 수 없는 자리가 생긴다.
+    pub fn default_settings(self) -> JobDefaults {
         match self {
-            Self::Developer => RoleJobSettings {
-                model: "opus".to_owned(),
+            Self::Developer => JobDefaults {
                 interval: "20m".to_owned(),
                 max_per: "6/24h".to_owned(),
-            },
-            _ => RoleJobSettings {
                 model: "opus".to_owned(),
+                timeout: "30m".to_owned(),
+            },
+            _ => JobDefaults {
                 interval: "30m".to_owned(),
                 max_per: "4/24h".to_owned(),
+                model: "opus".to_owned(),
+                timeout: "20m".to_owned(),
             },
-        }
-    }
-
-    /// 앱이 소유하는 값이라 사용자 편집 대상이 아니다.
-    fn timeout(self) -> &'static str {
-        match self {
-            Self::Developer => "30m",
-            _ => "20m",
         }
     }
 }
@@ -69,16 +65,18 @@ impl HeartbeatRole {
 pub struct RoleJobSettings {
     pub model: String,
     pub interval: String,
-    pub max_per: String,
+    pub max_per: MaxPer,
+    pub timeout: String,
 }
 
 /// 화면이 보여주는 기본값과 파일에 쓰이는 기본값을 같은 값에서 만든다(R5).
-impl From<RoleJobSettings> for JobDefaults {
-    fn from(settings: RoleJobSettings) -> Self {
+impl From<JobDefaults> for RoleJobSettings {
+    fn from(defaults: JobDefaults) -> Self {
         Self {
-            interval: settings.interval,
-            max_per: settings.max_per,
-            model: settings.model,
+            model: defaults.model,
+            interval: defaults.interval,
+            max_per: MaxPer::Limit(defaults.max_per),
+            timeout: defaults.timeout,
         }
     }
 }
@@ -94,6 +92,26 @@ pub fn job_name(role: HeartbeatRole, slug: &str) -> String {
     format!("wf-{}{}", role.as_argument(), slug)
 }
 
+/// 관리 블록에 쓰는 한 줄 조건 명령. 실행 플랫폼에서 그대로 실행 가능한 형태다(R4).
+///
+/// 경로는 화면이 보여주는 조건 스크립트 경로와 같은 자산 서술(`CONDITION_SCRIPT`)에서 나온다.
+/// 두 값이 우연히 같은 문자열인 상태를 없앤 것이 기획서 완료 조건 24다.
+///
+/// Windows 형태의 근거: `powershell.exe`는 기본 탑재라 사용자가 더 설치할 것이 없고(R1),
+/// `-ExecutionPolicy Bypass`는 그 프로세스에만 걸려 시스템 정책을 바꾸지 않으며(D1),
+/// `-NoProfile`은 사용자 프로필 스크립트가 판정에 끼어드는 것을 막고, `-File`은 스크립트의 `exit`
+/// 코드를 그대로 프로세스 종료 코드로 낸다. 판정 로직은 명령 문자열이 아니라 파일에 있다(D1).
+/// 경로 구분자는 두 플랫폼 모두 `/`다 — PowerShell이 `/`를 받고, `relative_path()`가 이미 `/`로만
+/// 조립한다(`7b6fc69`).
+pub fn condition_command(role_argument: &str) -> String {
+    let script = CONDITION_SCRIPT.relative_path();
+    if cfg!(windows) {
+        format!("powershell -NoProfile -ExecutionPolicy Bypass -File {script} {role_argument}")
+    } else {
+        format!("sh {script} {role_argument}")
+    }
+}
+
 /// 역할 잡을 관리 블록이 쓰는 공통 잡으로 바꾼다. 호출자가 필드를 직접 조립하지 않는다.
 pub fn role_managed_jobs(jobs: &[RoleJob], slug: &str) -> Vec<ManagedJob> {
     jobs.iter()
@@ -103,8 +121,8 @@ pub fn role_managed_jobs(jobs: &[RoleJob], slug: &str) -> Vec<ManagedJob> {
             model: job.settings.model.clone(),
             prompt: job.role.prompt().to_owned(),
             interval: job.settings.interval.clone(),
-            timeout: job.role.timeout().to_owned(),
-            condition: format!("sh {CONDITION_SCRIPT} {}", job.role.as_argument()),
+            timeout: job.settings.timeout.clone(),
+            condition: condition_command(job.role.as_argument()),
             notify: NOTIFY.to_owned(),
             max_per: job.settings.max_per.clone(),
         })
@@ -118,10 +136,13 @@ mod tests {
 
     use tempfile::{tempdir, TempDir};
 
-    use super::{job_name, role_managed_jobs, HeartbeatRole, RoleJob, RoleJobSettings};
+    use super::{
+        condition_command, job_name, role_managed_jobs, HeartbeatRole, RoleJob, RoleJobSettings,
+    };
+    use crate::infrastructure::heartbeat_condition::{install_condition_script, CONDITION_SCRIPT};
     use crate::infrastructure::heartbeat_jobs::{
-        install_managed_jobs, parse_heartbeat, project_slug, HeartbeatJobsError, MANAGED_END,
-        MANAGED_START,
+        install_managed_jobs, parse_heartbeat, project_slug, HeartbeatJobsError, MaxPer,
+        MANAGED_END, MANAGED_START,
     };
 
     const PROJECT_ROOT: &str = "/Users/catze/project/workflow-labs";
@@ -131,7 +152,7 @@ mod tests {
             .iter()
             .map(|role| RoleJob {
                 role: *role,
-                settings: role.default_settings(),
+                settings: role.default_settings().into(),
             })
             .collect()
     }
@@ -149,15 +170,109 @@ mod tests {
 
     fn install(path: &Path, jobs: &[RoleJob]) -> Result<bool, HeartbeatJobsError> {
         let slug = project_slug(Path::new(PROJECT_ROOT));
-        install_managed_jobs(path, &role_managed_jobs(jobs, &slug))
+        // 소유 이름은 끈 역할까지 포함한 세 개다. 설치 목록으로 좁히면 역할을 끄는 저장이 그 잡을
+        // 남의 잡으로 오인해 되살린다.
+        let owned = HeartbeatRole::ALL
+            .iter()
+            .map(|role| job_name(*role, &slug))
+            .collect::<Vec<_>>();
+        install_managed_jobs(path, &role_managed_jobs(jobs, &slug), &owned)
     }
 
     fn read(path: &Path) -> String {
         fs::read_to_string(path).expect("target file")
     }
 
+    /// 조건 명령은 한 줄이어야 한다(R4). 하트비트 파서가 관리 블록의 값을 줄 단위로 읽는다.
+    #[test]
+    fn the_condition_command_is_one_line_pointing_at_the_platform_asset() {
+        let command = condition_command("developer");
+
+        assert!(!command.contains('\n'));
+        assert!(command.contains(&CONDITION_SCRIPT.relative_path()));
+        assert!(command.ends_with(" developer"));
+        // 경로 구분자는 두 플랫폼 모두 `/`다. `\`가 섞이면 `7b6fc69`가 고친 문제가 되돌아온다.
+        assert!(!command.contains('\\'));
+    }
+
+    /// 관리 블록에 적히는 값과 화면이 보여주는 경로가 같은 자산 서술에서 나온다(완료 조건 24).
+    #[test]
+    fn every_role_condition_points_at_the_same_asset_path() {
+        let jobs = role_managed_jobs(&default_jobs(), "-demo");
+
+        for job in &jobs {
+            assert!(job.condition.contains(&CONDITION_SCRIPT.relative_path()));
+        }
+    }
+
+    /// 완료 조건 11. 기록된 조건 명령을 셸을 거쳐 프로젝트 루트에서 실행하면 조건 스크립트의 종료
+    /// 코드가 그대로 나온다. 하트비트가 `shell=True`로 부르므로 여기서도 셸을 거친다.
+    ///
+    /// `HeartbeatService::install`을 거치지 않는다 — 그 경로는 TASK-045 전까지 Windows에서 막혀
+    /// 있고, 이 확인은 차단 해제와 무관하다.
+    fn run_recorded_condition(project_root: &Path, role: &str) -> i32 {
+        use std::process::Command;
+
+        let condition = condition_command(role);
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.arg("/C").arg(&condition);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(&condition);
+            command
+        };
+        command
+            .current_dir(project_root)
+            .status()
+            .expect("run recorded condition")
+            .code()
+            .expect("exit code")
+    }
+
+    #[test]
+    fn the_recorded_condition_returns_the_condition_scripts_exit_code() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+        install_condition_script(&control).expect("install condition script");
+        let workflow = control.join("wf-demo");
+        fs::create_dir_all(workflow.join("tasks")).expect("tasks root");
+        fs::create_dir_all(workflow.join("decisions")).expect("decisions root");
+
+        fs::write(
+            workflow.join("tasks/TASK-001.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: todo\n---\n",
+        )
+        .expect("todo task");
+        assert_eq!(run_recorded_condition(root.path(), "developer"), 0);
+
+        fs::write(
+            workflow.join("tasks/TASK-001.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: qa_waiting\n---\n",
+        )
+        .expect("claimed task");
+        assert_eq!(run_recorded_condition(root.path(), "developer"), 1);
+    }
+
+    /// 조건 줄만 플랫폼별로 갈린다. 나머지 여덟 줄은 두 플랫폼에서 같은 바이트다.
+    ///
+    /// 리터럴을 각 플랫폼에서 유지하려고 `condition_command`를 부르지 않는다. 제품 코드가 만든
+    /// 값을 그대로 되먹이면 바이트 고정이 아니라 항등식이 된다.
+    #[cfg(not(windows))]
+    fn expected_condition(role: &str) -> String {
+        format!("sh .workflow/rules/wf-eligible.sh {role}")
+    }
+
+    #[cfg(windows)]
+    fn expected_condition(role: &str) -> String {
+        format!("powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 {role}")
+    }
+
     /// SPEC-003 완료 조건 12. 역할 잡만 설치한 결과가 구조 변경 전과 바이트 단위로 같아야 한다.
-    /// 이 문자열은 변경 전 코드가 실제로 만든 파일에서 그대로 가져왔다.
+    /// 이 문자열은 변경 전 코드가 실제로 만든 파일에서 그대로 가져왔다. 조건 줄은 자산이 플랫폼별로
+    /// 갈린 뒤(SPEC-015 R2·R4) 플랫폼마다 다른 리터럴을 갖는다.
     #[test]
     fn role_only_block_matches_the_bytes_written_before_the_split() {
         let directory = tempdir().expect("temporary directory");
@@ -165,16 +280,20 @@ mod tests {
 
         assert!(install(&path, &default_jobs()).expect("install"));
 
+        let planner = expected_condition("planner");
+        let architect = expected_condition("architect");
+        let developer = expected_condition("developer");
         assert_eq!(
             read(&path),
-            "<!-- workflow-labs:heartbeat-jobs:start -->\n\
+            format!(
+                "<!-- workflow-labs:heartbeat-jobs:start -->\n\
              ## wf-planner-Users-catze-project-workflow-labs\n\
              - slug: -Users-catze-project-workflow-labs\n\
              - model: opus\n\
              - prompt: 기획자 역할로 진행해줘. .workflow의 공통 규칙과 planner 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.\n\
              - interval: 30m\n\
              - timeout: 20m\n\
-             - condition: sh .workflow/rules/wf-eligible.sh planner\n\
+             - condition: {planner}\n\
              - notify: all\n\
              - max_per: 4/24h\n\
              \n\
@@ -184,7 +303,7 @@ mod tests {
              - prompt: 프로젝트 아키텍트 역할로 진행해줘. .workflow의 공통 규칙과 architect 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.\n\
              - interval: 30m\n\
              - timeout: 20m\n\
-             - condition: sh .workflow/rules/wf-eligible.sh architect\n\
+             - condition: {architect}\n\
              - notify: all\n\
              - max_per: 4/24h\n\
              \n\
@@ -194,10 +313,11 @@ mod tests {
              - prompt: 개발자 역할로 진행해줘. .workflow의 공통 규칙과 developer 역할 계약을 따르고, 처리할 대상이 없으면 NO_ELIGIBLE_WORK만 보고하고 멈춰.\n\
              - interval: 20m\n\
              - timeout: 30m\n\
-             - condition: sh .workflow/rules/wf-eligible.sh developer\n\
+             - condition: {developer}\n\
              - notify: all\n\
              - max_per: 6/24h\n\
              <!-- workflow-labs:heartbeat-jobs:end -->\n"
+            )
         );
     }
 
@@ -243,7 +363,7 @@ mod tests {
         assert_eq!(developer.field("notify"), Some("all"));
         assert_eq!(
             developer.field("condition"),
-            Some("sh .workflow/rules/wf-eligible.sh developer")
+            Some(expected_condition("developer").as_str())
         );
         assert_eq!(
             developer.field("prompt"),
@@ -388,7 +508,8 @@ mod tests {
                 RoleJobSettings {
                     model: "opus".to_owned(),
                     interval: "30분".to_owned(),
-                    max_per: "4/24h".to_owned(),
+                    max_per: MaxPer::Limit("4/24h".to_owned()),
+                    timeout: "20m".to_owned(),
                 },
             ),
             (
@@ -396,7 +517,8 @@ mod tests {
                 RoleJobSettings {
                     model: "opus".to_owned(),
                     interval: "30m".to_owned(),
-                    max_per: "4번".to_owned(),
+                    max_per: MaxPer::Limit("4번".to_owned()),
+                    timeout: "20m".to_owned(),
                 },
             ),
             (
@@ -404,7 +526,8 @@ mod tests {
                 RoleJobSettings {
                     model: "claude opus".to_owned(),
                     interval: "30m".to_owned(),
-                    max_per: "4/24h".to_owned(),
+                    max_per: MaxPer::Limit("4/24h".to_owned()),
+                    timeout: "20m".to_owned(),
                 },
             ),
         ] {

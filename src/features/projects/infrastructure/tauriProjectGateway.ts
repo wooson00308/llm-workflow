@@ -102,4 +102,8 @@ export const tauriProjectGateway: ProjectGateway = {
       baseline,
     });
   },
+
+  runHeartbeatJob(path, jobName) {
+    return invoke<void>("run_heartbeat_job", { path, jobName });
+  },
 };

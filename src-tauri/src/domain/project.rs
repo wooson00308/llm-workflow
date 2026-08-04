@@ -34,6 +34,10 @@ pub struct AgentLease {
     pub schema_version: u32,
     pub lease_id: String,
     pub agent: String,
+    /// 선점 세션이 스스로 적은 역할. 계약상 선택 필드라 없을 수 있고, 없으면 `None`이다.
+    /// `#[serde(default)]`가 없으면 이 키가 없는 기존 lease 파일이 파싱에 실패해 화면에서 사라진다.
+    #[serde(default)]
+    pub role: Option<String>,
     pub task_id: Option<String>,
     pub heartbeat_at: String,
     pub expires_at: String,
@@ -56,6 +60,16 @@ pub struct ProjectSummary {
     pub compatibility: SchemaCompatibility,
     pub active_leases: Vec<AgentLeaseSummary>,
     pub workflows: Vec<WorkflowSummary>,
+    pub pending_work: PendingRoleWork,
+}
+
+/// 역할별 대기 물량. 조건 스크립트가 그 역할로 종료 코드 0을 돌려주는 상태가 `true`다.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRoleWork {
+    pub planner: bool,
+    pub architect: bool,
+    pub developer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -94,10 +108,25 @@ pub struct WorkflowItemSummary {
     pub file_name: String,
     pub id: String,
     pub title: String,
+    /// 문서의 상태. 아이디어에서는 파일 값이 아니라 조회 시점 파생값이며 `inbox`·`drafting`·
+    /// `closed`·`adopted` 넷 중 하나다(SPEC-012 R1, SPEC-018 R6). `closed`는 참조 기획서가 모두
+    /// 반려로 끝난 경우다. 앱은 판정 결과를 아이디어 파일에 쓰지 않는다.
     pub status: String,
     pub updated_at: Option<String>,
     pub due_at: Option<String>,
-    /// 개발 작업의 상태 전이 사실. 시각 오름차순이며 아이디어·기획서에서는 항상 비어 있다.
+    /// 이 작업이 어떤 기획서에서 나왔는지. 아이디어·기획서에서는 항상 `None`이다.
+    /// 보드가 이 값으로 작업을 기획서별 레인에 모은다(SPEC-029 R8).
+    pub source_spec_id: Option<String>,
+    /// 이 작업이 어떤 승인 결정에서 나왔는지. 아이디어·기획서에서는 항상 `None`이다.
+    /// 앱은 이 참조로 "승인됐지만 아직 작업으로 분해되지 않은 결정"을 판정한다.
+    pub source_decision_id: Option<String>,
+    /// 중단 의심의 근거. 이 아이디어가 반영중인데 선점한 미만료 lease가 없을 때, 걸려 있는 `draft`
+    /// 기획서의 문서 id다. 문서 id 오름차순이며 그 조합이 아니면 비어 있다. 비어 있지 않다는 것과
+    /// 중단 의심은 같은 뜻이다(SPEC-012 R5). 기획서·개발 작업 항목에서는 항상 비어 있다.
+    pub stalled_spec_ids: Vec<String>,
+    /// 문서에 일어난 사실. 시각 오름차순이다. 개발 작업은 상태 전이, 기획서는 사용자 결정이
+    /// 실리고 아이디어는 항상 비어 있다. `kind`의 뜻은 문서 종류에 따라 다르다 — 기획서의
+    /// `revision_requested`는 "수정 요청"이고 개발 작업의 같은 값은 "반려"다.
     pub events: Vec<TaskEvent>,
     pub excerpt: String,
 }
@@ -118,11 +147,38 @@ pub struct SpecDocument {
     pub body: String,
 }
 
+/// 선언된 선행 작업 하나의 판정 결과(SPEC-013 R2).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskDependencyState {
+    /// 선행 작업이 `qa_waiting` 또는 `completed`다. 후행이 딛고 설 코드가 트리에 있다.
+    Satisfied,
+    /// 선행 작업이 아직 그 상태에 이르지 못했다. 시간이 지나면 풀릴 수 있다.
+    Pending,
+    /// 그 id의 개발 작업 문서가 이 워크플로우에 없다. 영원히 충족되지 않는다.
+    Missing,
+    /// 선언을 따라가면 자기 자신으로 돌아온다. 영원히 충족되지 않는다.
+    Cyclic,
+}
+
+/// 작업 하나가 선언한 선행 작업 하나.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDependency {
+    pub id: String,
+    pub state: TaskDependencyState,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDocument {
     pub summary: WorkflowItemSummary,
     pub body: String,
+    /// 선언된 선행 작업과 각각의 판정 결과. 선언이 없거나 형식 오류면 비어 있다.
+    pub dependencies: Vec<TaskDependency>,
+    /// 선언 줄이 계약 형식이 아니어서 목록으로 읽지 못했는가(SPEC-013 R3). 참이면 `dependencies`는
+    /// 비어 있고 이 작업은 미충족이다.
+    pub dependency_format_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -152,7 +208,12 @@ pub enum TaskQaOutcome {
 pub struct AgentLeaseSummary {
     pub lease_id: String,
     pub agent: String,
+    /// lease 파일의 `role` 원문. 앱은 값을 검사하지 않는다. 계약을 어긴 세션을 드러내는 것이
+    /// 이 값을 그리는 화면의 목적이라, 모르는 값을 걸러 내면 그 사실이 사라진다.
+    pub role: Option<String>,
     pub task_id: Option<String>,
+    /// lease 파일의 `heartbeat_at` 원문(RFC3339). 최초 시작 시각이 아니다. 화면이 로컬로 바꾼다.
+    pub heartbeat_at: String,
     pub expires_at: String,
 }
 
@@ -222,6 +283,42 @@ pub enum HeartbeatInstallation {
     InstalledDaemonRunning,
 }
 
+/// 설치 마법사가 보여주는 단계 하나(SPEC-016). 접혀 있던 설치 판정을 단계로 펼친 값이며,
+/// `HeartbeatInstallation`을 대체하지 않고 그 옆에 실린다(R1).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatSetupStage {
+    pub step: HeartbeatSetupStep,
+    pub state: HeartbeatSetupState,
+    /// 1~3은 참, dream은 거짓(R9). 선택 단계가 미완료여도 마법사는 접힌다.
+    pub required: bool,
+    /// 사용자가 자기 터미널에 그대로 붙여 넣을 명령 원문(R6). 화면이 조각을 조립하지 않는다.
+    pub command: String,
+    /// 판정에 쓴 경로. 감지하지 않는 단계와 이 플랫폼에서 볼 경로가 없는 단계는 `None`이다.
+    pub evidence: Option<String>,
+}
+
+/// 설치 단계의 이름. 목록은 언제나 넷이고 이 순서가 고정이다(R2). 문자열로 두지 않는 이유는
+/// 화면이 단계마다 다른 문구를 쓰기 때문이다 — 값 집합이 닫혀 있어야 한다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatSetupStep {
+    Package,
+    Init,
+    Service,
+    Dream,
+}
+
+/// 단계 하나의 표시 상태(R4). 확인 불가는 앱이 판정 근거를 갖지 못한 상태이며 미완료와 다르다.
+/// 앱이 "모른다"를 "아니다"로 번역하면 사용자는 이미 끝낸 일을 다시 한다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatSetupState {
+    Done,
+    NotDone,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HeartbeatRoleStatus {
@@ -231,6 +328,41 @@ pub struct HeartbeatRoleStatus {
     pub defaults: JobDefaults,
     /// `None`은 "실행 기록 없음"이다. 상태 파일이 없거나 깨졌거나 잡 기록이 없는 경우를 구분하지 않는다.
     pub last_run: Option<HeartbeatJobRun>,
+    /// 이 잡의 실행 한도 사용량(R1). 한도 값은 관리 블록에 있고 상태 조회는 그 블록을 모르므로,
+    /// 조회는 `Unknown`으로 두고 서비스가 채운다. 관리 블록을 읽지 못한 조회에서는 이 값이 그대로
+    /// 나가야 한다(R5).
+    pub quota: JobQuota,
+}
+
+/// 잡 하나의 실행 한도 사용량. "값을 모른다"·"한도가 없다"·"기록이 없다"를 서로 다른 값으로
+/// 구분한다(R5). 화면이 `used == 0`을 "기록 없음"으로 오독할 수 없어야 한다.
+///
+/// 무제한도 한 낱말이 아니다(SPEC-017 R5). 사용자가 고른 제한 없음은 정상 상태이고, 값이 어긋나
+/// 무제한이 된 것은 손볼 곳이 있다는 신호다. 둘을 같은 변형으로 부르면 화면이 그 차이를 말할 수 없다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum JobQuota {
+    /// 앱이 한도 값을 모른다. 관리 블록을 읽지 못했거나 그 잡이 블록에 없다.
+    Unknown,
+    /// 사용자가 고른 제한 없음. 그 잡이 블록에 있고 `max_per` 줄이 없다(SPEC-017 R6). 정상 상태다.
+    /// 보여줄 원문이 없으므로 값을 담지 않는다 — 파일에 그 줄 자체가 없다.
+    Unlimited,
+    /// `max_per` 값이 있으나 데몬이 한도로 인정하지 않아 결과가 무제한이다(SPEC-017 R5).
+    /// 형식 위반·0 이하 횟수·0 기간이 모두 여기다. 손볼 곳이라는 신호이므로 원문을 함께 담는다.
+    IgnoredLimit { value: String },
+    /// 한도는 알지만 실행 기록이 없다. 0회로 단정하지 않는다.
+    #[serde(rename_all = "camelCase")]
+    NoRuns { limit: u64, window: String },
+    #[serde(rename_all = "camelCase")]
+    Counted {
+        used: u64,
+        limit: u64,
+        window: String,
+        exhausted: bool,
+        /// 소진 상태에서 한 번 분의 여유가 생기는 예상 시각. RFC3339(UTC)이고 화면이 로컬로
+        /// 바꾼다. `TaskEvent.at`과 같은 규칙이다.
+        recovers_at: Option<String>,
+    },
 }
 
 /// 잡 하나의 앱 기본값. 사용자가 편집할 수 있는 세 필드뿐이다.
@@ -244,6 +376,7 @@ pub struct JobDefaults {
     pub interval: String,
     pub max_per: String,
     pub model: String,
+    pub timeout: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -254,6 +387,10 @@ pub struct HeartbeatJobRun {
     /// `success`, `failure`, `skipped`, `quota_skipped`, `timeout` 외의 값도 원문 그대로 전달한다.
     pub result: Option<String>,
     pub duration_seconds: Option<f64>,
+    /// 마지막 condition의 표준 출력 첫 줄. 데몬이 빈 출력이면 키를 지우므로 없을 수 있고, 이 키를
+    /// 주지 않는 데몬도 있다. `result`와 같은 취급이다 — 앱은 내용을 검증하거나 정규화하지 않고
+    /// 원문 그대로 전달한다. 사유 코드를 문장으로 옮기는 일은 화면이 한다.
+    pub condition_output: Option<String>,
 }
 
 /// 앱 관리 블록 밖에 있는 같은 프로젝트의 잡. 감지만 하고 수정하지 않는다.

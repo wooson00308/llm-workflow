@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::domain::project::{
     DreamRefinement, DreamStatus, HeartbeatReadFailure, IntegrationInstallation, JobDefaults,
 };
-use crate::infrastructure::heartbeat_jobs::ManagedJob;
+use crate::infrastructure::heartbeat_jobs::{ManagedJob, MaxPer};
 use crate::infrastructure::heartbeat_status::{failure, probe, read_text};
 
 const MODEL: &str = "opus";
@@ -56,39 +56,42 @@ pub fn job_name(slug: &str) -> String {
 pub struct DreamJobSettings {
     pub model: String,
     pub interval: String,
-    pub max_per: String,
+    pub max_per: MaxPer,
+    pub timeout: String,
 }
 
-/// R5 기본값.
+/// R5 기본값. 역할 잡과 같은 이유로 정의를 `JobDefaults` 쪽에 둔다(SPEC-017 R1).
 ///
 /// 기본 주기가 역할 잡보다 성긴 이유: 관측된 dream 실행은 15분 규모이고, 정제할 트랜스크립트는
 /// 역할 세션이 끝난 뒤에야 생긴다. 역할 잡보다 촘촘하게 돌릴 이유가 없다.
-pub fn default_settings() -> DreamJobSettings {
-    DreamJobSettings {
-        model: MODEL.to_owned(),
+pub fn default_settings() -> JobDefaults {
+    JobDefaults {
         interval: INTERVAL.to_owned(),
         max_per: MAX_PER.to_owned(),
+        model: MODEL.to_owned(),
+        timeout: TIMEOUT.to_owned(),
     }
 }
 
 /// 역할 잡과 같은 이유로 둔다. 화면이 보여주는 기본값과 파일에 쓰이는 기본값이 같은 값에서 나온다.
-impl From<DreamJobSettings> for JobDefaults {
-    fn from(settings: DreamJobSettings) -> Self {
+impl From<JobDefaults> for DreamJobSettings {
+    fn from(defaults: JobDefaults) -> Self {
         Self {
-            interval: settings.interval,
-            max_per: settings.max_per,
-            model: settings.model,
+            model: defaults.model,
+            interval: defaults.interval,
+            max_per: MaxPer::Limit(defaults.max_per),
+            timeout: defaults.timeout,
         }
     }
 }
 
 /// dream 잡 하나를 R5 기본값으로 만든다.
 pub fn dream_job(slug: &str) -> ManagedJob {
-    dream_job_with(slug, &default_settings())
+    dream_job_with(slug, &default_settings().into())
 }
 
-/// dream 잡 하나를 주어진 설정으로 만든다. 앱 소유 필드(`prompt`, `timeout`, `condition`,
-/// `notify`, `slug`)는 설정과 무관하게 항상 여기서 다시 만든다.
+/// dream 잡 하나를 주어진 설정으로 만든다. 앱 소유 필드(`prompt`, `condition`, `notify`,
+/// `slug`)는 설정과 무관하게 항상 여기서 다시 만든다.
 pub fn dream_job_with(slug: &str, settings: &DreamJobSettings) -> ManagedJob {
     ManagedJob {
         name: job_name(slug),
@@ -96,7 +99,7 @@ pub fn dream_job_with(slug: &str, settings: &DreamJobSettings) -> ManagedJob {
         model: settings.model.clone(),
         prompt: DREAM_PROMPT.to_owned(),
         interval: settings.interval.clone(),
-        timeout: TIMEOUT.to_owned(),
+        timeout: settings.timeout.clone(),
         condition: format!("{CONDITION_COMMAND} check-unprocessed --slug={slug}"),
         notify: NOTIFY.to_owned(),
         max_per: settings.max_per.clone(),
@@ -550,7 +553,8 @@ mod tests {
 
     use super::{dream_job, job_name, DREAM_PROMPT};
     use crate::infrastructure::heartbeat_jobs::{
-        install_managed_jobs, parse_heartbeat, HeartbeatJobsError, MANAGED_END, MANAGED_START,
+        install_managed_jobs, parse_heartbeat, HeartbeatJobsError, ManagedJob, MANAGED_END,
+        MANAGED_START,
     };
     use crate::infrastructure::heartbeat_roles::{role_managed_jobs, HeartbeatRole, RoleJob};
 
@@ -564,12 +568,18 @@ mod tests {
         fs::read_to_string(path).expect("target file")
     }
 
+    /// 이 모듈의 시험 파일에는 다른 호출자의 잡이 없다. 소유 이름 집합은 언제나 설치 목록과 같다.
+    fn install(path: &Path, jobs: &[ManagedJob]) -> Result<bool, HeartbeatJobsError> {
+        let owned = jobs.iter().map(|job| job.name.clone()).collect::<Vec<_>>();
+        install_managed_jobs(path, jobs, &owned)
+    }
+
     fn default_role_jobs() -> Vec<RoleJob> {
         HeartbeatRole::ALL
             .iter()
             .map(|role| RoleJob {
                 role: *role,
-                settings: role.default_settings(),
+                settings: role.default_settings().into(),
             })
             .collect()
     }
@@ -579,7 +589,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let path = target(&directory);
 
-        assert!(install_managed_jobs(&path, &[dream_job(SLUG)]).expect("install"));
+        assert!(install(&path, &[dream_job(SLUG)]).expect("install"));
 
         let document = parse_heartbeat(&read(&path));
         assert_eq!(document.jobs.len(), 1);
@@ -609,9 +619,9 @@ mod tests {
         let slug = SLUG.to_owned();
         let mut jobs = role_managed_jobs(&default_role_jobs(), &slug);
 
-        assert!(install_managed_jobs(&roles_only, &jobs).expect("install roles"));
+        assert!(install(&roles_only, &jobs).expect("install roles"));
         jobs.push(dream_job(&slug));
-        assert!(install_managed_jobs(&both, &jobs).expect("install roles and dream"));
+        assert!(install(&both, &jobs).expect("install roles and dream"));
 
         let contents = read(&both);
         assert_eq!(contents.matches(MANAGED_START).count(), 1);
@@ -650,7 +660,7 @@ mod tests {
         let mut job = dream_job(SLUG);
         job.interval = "2시간".to_owned();
 
-        let error = install_managed_jobs(&path, &[job]).expect_err("must fail");
+        let error = install(&path, &[job]).expect_err("must fail");
 
         match error {
             HeartbeatJobsError::InvalidValue { field, .. } => assert_eq!(field, "interval"),
@@ -666,9 +676,9 @@ mod tests {
         let mut jobs = role_managed_jobs(&default_role_jobs(), SLUG);
         jobs.push(dream_job(SLUG));
 
-        assert!(install_managed_jobs(&path, &jobs).expect("first install"));
+        assert!(install(&path, &jobs).expect("first install"));
         let first = read(&path);
-        assert!(!install_managed_jobs(&path, &jobs).expect("second install"));
+        assert!(!install(&path, &jobs).expect("second install"));
         assert_eq!(read(&path), first);
     }
 }

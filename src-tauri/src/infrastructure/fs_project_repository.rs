@@ -9,19 +9,24 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::project::{
-    AgentLease, AgentLeaseSummary, IdeaDocument, ProjectManifest, ProjectSummary,
-    SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskEvent, TaskQaOutcome,
-    WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
-    WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    AgentLease, AgentLeaseSummary, IdeaDocument, PendingRoleWork, ProjectManifest, ProjectSummary,
+    SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
+    TaskDocument, TaskEvent, TaskQaOutcome, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
+    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+};
+use crate::infrastructure::claim_helper::{
+    install_claim_helper, validate_claim_helper, ClaimHelperError,
 };
 use crate::infrastructure::project_instructions::{
     install_project_instructions, validate_project_instructions, ProjectInstructionError,
 };
+use crate::infrastructure::role_eligibility::{pending_role_work, WorkflowInput};
 
 const CONTROL_DIRECTORY: &str = ".workflow";
 const PROJECT_MANIFEST: &str = "project.yml";
 const WORKFLOW_MANIFEST: &str = "workflow.yml";
 const RUNTIME_DIRECTORY: &str = ".runtime";
+const MIGRATION_LOCK_FILE: &str = "migration.lock";
 const WORKFLOW_DIRECTORIES: [&str; 6] =
     ["ideas", "specs", "decisions", "tasks", "reports", "state"];
 /// 개발 작업 `history` 항목의 `kind`로 인정하는 값. 이 밖의 값은 항목째 버린다.
@@ -84,6 +89,8 @@ pub enum ProjectError {
     Persist(String),
     #[error(transparent)]
     ProjectInstructions(#[from] ProjectInstructionError),
+    #[error(transparent)]
+    ClaimHelper(#[from] ClaimHelperError),
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +128,7 @@ impl FileSystemProjectRepository {
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
         validate_project_instructions(&root, &control_root)?;
+        validate_claim_helper(&control_root)?;
         ensure_managed_control_root(&control_root)?;
 
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -146,6 +154,7 @@ impl FileSystemProjectRepository {
         };
 
         install_project_instructions(&root, &control_root)?;
+        install_claim_helper(&control_root)?;
 
         let id = format!("wf_{}", &compact_uuid()[..8]);
         let directory = format!("{}--{}", slugify(workflow_name), id);
@@ -179,11 +188,16 @@ impl FileSystemProjectRepository {
         });
         write_yaml_atomically(&project_manifest_path, &project)?;
 
+        // 이 호출은 방금 만든 워크플로우뿐 아니라 기존 워크플로우의 아이디어까지 다시 실어 보낸다.
+        // 빈 목록을 넘기면 살아 있는 lease가 무시되어 정상 반영중인 아이디어가 한 조회 동안
+        // 중단 의심으로 보인다. 경고를 거짓으로 띄우는 것은 그 경고를 못 믿게 만든다.
+        let active_leases = read_active_leases(&control_root)?;
+
         Ok(summary_from_manifest(
             &root,
             project,
             SchemaCompatibility::Current,
-            Vec::new(),
+            active_leases,
         ))
     }
 
@@ -265,9 +279,19 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
-        let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name)?;
+        let tasks_root = workflow_root.join("tasks");
+        let task_path = safe_markdown_file(&tasks_root, file_name)?;
         let (summary, body) = read_markdown_document(&task_path, "todo")?;
-        Ok(TaskDocument { summary, body })
+        // 선행 판정에는 워크플로우의 모든 작업 문서가 필요하다. 카드를 눌렀을 때만 도는 경로라
+        // `inspect`의 2.5초 주기와 다르고, 목록 payload는 이 값을 싣지 않는다(SPEC-013 R5).
+        let graph = task_dependency_graph(&tasks_root);
+        let (dependencies, dependency_format_error) = task_dependencies(&summary.id, &graph);
+        Ok(TaskDocument {
+            summary,
+            body,
+            dependencies,
+            dependency_format_error,
+        })
     }
 
     pub fn read_idea(
@@ -283,10 +307,15 @@ impl FileSystemProjectRepository {
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let idea_path = safe_markdown_file(&workflow_root.join("ideas"), file_name)?;
         let (mut summary, body) = read_markdown_document(&idea_path, "inbox")?;
-        // 목록(`workflow_items`)이 하는 채택 판정과 같아야 화면의 상태 표시가 갈리지 않는다.
-        if adopted_idea_ids(&workflow_root.join("specs")).contains(&summary.id) {
-            summary.status = "adopted".to_owned();
-        }
+        // 목록(`workflow_items`)이 하는 판정과 같아야 화면의 상태 표시가 갈리지 않는다.
+        // 여기서만 `unwrap_or_default()`를 쓴다. 이 경로에는 마이그레이션 차단 같은 안전 판정이
+        // 걸려 있지 않고, lease를 못 읽었다고 아이디어 전문이 통째로 안 열리는 편이 더 나쁘다.
+        let leases = read_active_leases(&control_root).unwrap_or_default();
+        derive_idea_states(
+            std::slice::from_mut(&mut summary),
+            &spec_references(&workflow_root, &read_spec_decisions(&workflow_root)),
+            &leases,
+        );
         Ok(IdeaDocument { summary, body })
     }
 
@@ -305,6 +334,7 @@ impl FileSystemProjectRepository {
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
         install_project_instructions(&root, &control_root)?;
+        install_claim_helper(&control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
         let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
@@ -356,6 +386,7 @@ impl FileSystemProjectRepository {
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
         install_project_instructions(&root, &control_root)?;
+        install_claim_helper(&control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name)?;
         let (task, _) = read_markdown_document(&task_path, "todo")?;
@@ -438,7 +469,7 @@ impl MigrationLock {
     fn acquire(control_root: &Path) -> Result<Self, ProjectError> {
         let runtime = control_root.join(RUNTIME_DIRECTORY);
         fs::create_dir_all(&runtime)?;
-        let path = runtime.join("migration.lock");
+        let path = runtime.join(MIGRATION_LOCK_FILE);
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -565,7 +596,18 @@ fn validate_workflow_directories(
     Ok(())
 }
 
-fn read_active_leases(control_root: &Path) -> Result<Vec<AgentLeaseSummary>, ProjectError> {
+/// 만료 전인 lease 하나. `stem`은 파일 이름에서 확장자를 뺀 것이고, 자격 판정의 키다. lease 안의
+/// `task_id`가 아니다 — 조건 스크립트가 파일 이름으로 판정하므로 앱도 그래야 한다.
+struct UnexpiredLease {
+    stem: String,
+    summary: AgentLeaseSummary,
+}
+
+/// `leases/` 아래에서 만료 전인 lease만 읽는다. 앱의 만료 규칙은 이 함수 하나뿐이다. 두 곳에 두면
+/// 화면과 자격 판정이 서로 다른 만료 개념을 갖는다.
+///
+/// 열지 못하거나 `expires_at`을 RFC3339로 읽지 못한 파일은 조용히 건너뛴다. 파일은 읽기만 한다.
+fn read_unexpired_leases(control_root: &Path) -> Result<Vec<UnexpiredLease>, ProjectError> {
     let leases_root = control_root.join(RUNTIME_DIRECTORY).join("leases");
     if !leases_root.is_dir() {
         return Ok(Vec::new());
@@ -578,7 +620,11 @@ fn read_active_leases(control_root: &Path) -> Result<Vec<AgentLeaseSummary>, Pro
         if path.extension().and_then(|value| value.to_str()) != Some("yml") {
             continue;
         }
-        let file = match File::open(path) {
+        let stem = match path.file_stem().and_then(|value| value.to_str()) {
+            Some(value) => value.to_owned(),
+            None => continue,
+        };
+        let file = match File::open(&path) {
             Ok(file) => file,
             Err(_) => continue,
         };
@@ -591,16 +637,44 @@ fn read_active_leases(control_root: &Path) -> Result<Vec<AgentLeaseSummary>, Pro
             Err(_) => continue,
         };
         if expires_at > now {
-            leases.push(AgentLeaseSummary {
-                lease_id: lease.lease_id,
-                agent: lease.agent,
-                task_id: lease.task_id,
-                expires_at: lease.expires_at,
+            leases.push(UnexpiredLease {
+                stem,
+                summary: AgentLeaseSummary {
+                    lease_id: lease.lease_id,
+                    agent: lease.agent,
+                    // 공백뿐인 역할은 비어 있는 것과 같다. `Some("")`가 화면에 도달하면 "역할 칸이
+                    // 비어 있다"와 "역할이 빈 문자열이다"가 같은 모양이 된다.
+                    role: lease.role.filter(|value| !value.trim().is_empty()),
+                    task_id: lease.task_id,
+                    heartbeat_at: lease.heartbeat_at,
+                    expires_at: lease.expires_at,
+                },
             });
         }
     }
+    Ok(leases)
+}
+
+fn read_active_leases(control_root: &Path) -> Result<Vec<AgentLeaseSummary>, ProjectError> {
+    let mut leases: Vec<AgentLeaseSummary> = read_unexpired_leases(control_root)?
+        .into_iter()
+        .map(|lease| lease.summary)
+        .collect();
     leases.sort_by(|left, right| left.expires_at.cmp(&right.expires_at));
     Ok(leases)
+}
+
+/// 판정용 lease 목록. 만료된 파일은 빠진다 — 조건 스크립트의 `lease_blocks`와 같은 규칙이고, 세션
+/// 하나가 죽어 남긴 lease가 그 대상을 영원히 막는 것을 그 규칙이 없앤다. 화면 payload를 만드는
+/// `read_active_leases`와 반환형만 다르고, 만료 판정은 둘 다 `read_unexpired_leases`에서 온다.
+///
+/// 디렉터리를 읽지 못하면 빈 집합이다. 선점이 없는 것으로 떨어지고 판정 자체는 계속된다.
+fn lease_ids(control_root: &Path) -> HashSet<String> {
+    read_unexpired_leases(control_root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|lease| lease.stem)
+        .collect()
 }
 
 fn write_yaml_atomically<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ProjectError> {
@@ -627,6 +701,30 @@ fn summary_from_manifest(
     active_leases: Vec<AgentLeaseSummary>,
 ) -> ProjectSummary {
     let control_root = root.join(CONTROL_DIRECTORY);
+    let prepared: Vec<PreparedWorkflow> = manifest
+        .workflows
+        .iter()
+        .map(|workflow| {
+            PreparedWorkflow::read(control_root.join(&workflow.directory), &active_leases)
+        })
+        .collect();
+    let pending_work = {
+        let inputs: Vec<WorkflowInput<'_>> = prepared
+            .iter()
+            .map(|workflow| WorkflowInput {
+                items: &workflow.items,
+                approved_decisions: &workflow.approved_decisions,
+                revision_requested_decisions: &workflow.revision_requested_decisions,
+                unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
+            })
+            .collect();
+        let migration_locked = control_root
+            .join(RUNTIME_DIRECTORY)
+            .join(MIGRATION_LOCK_FILE)
+            .exists();
+        pending_role_work(migration_locked, &lease_ids(&control_root), &inputs)
+    };
+
     ProjectSummary {
         root_path: root.display().to_string(),
         initialized: true,
@@ -637,12 +735,48 @@ fn summary_from_manifest(
         workflows: manifest
             .workflows
             .iter()
-            .map(|workflow| {
-                let workflow_root = control_root.join(&workflow.directory);
-                let items = workflow_items(&workflow_root);
-                workflow.to_summary(workflow_counts(&workflow_root, &items), items)
+            .zip(prepared)
+            .map(|(workflow, prepared)| {
+                workflow.to_summary(
+                    workflow_counts(&prepared.root, &prepared.items),
+                    prepared.items,
+                )
             })
             .collect(),
+        pending_work,
+    }
+}
+
+/// 워크플로우 하나를 읽은 결과. 요약과 대기 물량 판정이 같은 읽기를 나눠 쓴다.
+struct PreparedWorkflow {
+    root: PathBuf,
+    items: WorkflowItems,
+    /// 같은 기획서에 더 늦은 결정이 없는 `outcome: approved` 결정의 `(결정 id, spec_id)`
+    /// (SPEC-028 R4).
+    approved_decisions: Vec<(String, String)>,
+    /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
+    revision_requested_decisions: Vec<String>,
+    /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2).
+    unsatisfied_dependencies: HashSet<String>,
+}
+
+impl PreparedWorkflow {
+    fn read(root: PathBuf, leases: &[AgentLeaseSummary]) -> Self {
+        let decisions = read_spec_decisions(&root);
+        let items = workflow_items(&root, &decisions, leases);
+        let revision_requested_decisions = latest_revision_requests(&decisions);
+        let approved_decisions = latest_approvals(&decisions);
+        // 선행 판정에는 워크플로우의 모든 작업 문서가 필요하다. 목록 읽기는 선언을 담지 않으므로
+        // (`WorkflowItemSummary`에 필드를 더하지 않는다 — TASK-037) `tasks/`를 한 번 더 훑는다.
+        let unsatisfied_dependencies =
+            unsatisfied_dependency_task_ids(&task_dependency_graph(&root.join("tasks")));
+        Self {
+            root,
+            items,
+            approved_decisions,
+            revision_requested_decisions,
+            unsatisfied_dependencies,
+        }
     }
 }
 
@@ -655,6 +789,7 @@ fn uninitialized_summary(root: &Path) -> ProjectSummary {
         compatibility: SchemaCompatibility::NotInitialized,
         active_leases: Vec::new(),
         workflows: Vec::new(),
+        pending_work: PendingRoleWork::default(),
     }
 }
 
@@ -839,22 +974,31 @@ fn safe_markdown_file(directory: &Path, file_name: &str) -> Result<PathBuf, Proj
     Ok(path)
 }
 
-fn workflow_items(workflow_root: &Path) -> WorkflowItems {
+fn workflow_items(
+    workflow_root: &Path,
+    decisions: &[SpecDecisionRecord],
+    leases: &[AgentLeaseSummary],
+) -> WorkflowItems {
     let mut specs = read_markdown_summaries(&workflow_root.join("specs"), "draft");
-    let decisions = latest_spec_decisions(workflow_root);
+    let latest = latest_spec_decisions(decisions);
+    let mut decision_events = spec_decision_events(decisions);
     for spec in &mut specs {
         normalize_spec_status(spec);
-        if let Some((_, outcome)) = decisions.get(&spec.id) {
+        if let Some((_, outcome)) = latest.get(&spec.id) {
             spec.status.clone_from(outcome);
         }
-    }
-    let adopted = adopted_idea_ids(&workflow_root.join("specs"));
-    let mut ideas = read_markdown_summaries(&workflow_root.join("ideas"), "inbox");
-    for idea in &mut ideas {
-        if adopted.contains(&idea.id) {
-            idea.status = "adopted".to_owned();
+        if let Some(events) = decision_events.remove(&spec.id) {
+            spec.events.extend(events);
+            spec.events
+                .sort_by_key(|event| parse_event_instant(&event.at));
         }
     }
+    let mut ideas = read_markdown_summaries(&workflow_root.join("ideas"), "inbox");
+    derive_idea_states(
+        &mut ideas,
+        &spec_references(workflow_root, decisions),
+        leases,
+    );
     let mut tasks = read_markdown_summaries(&workflow_root.join("tasks"), "todo");
     merge_qa_decision_events(workflow_root, &mut tasks);
     WorkflowItems {
@@ -864,8 +1008,22 @@ fn workflow_items(workflow_root: &Path) -> WorkflowItems {
     }
 }
 
-fn adopted_idea_ids(specs_root: &Path) -> HashSet<String> {
-    fs::read_dir(specs_root)
+/// 아이디어를 참조하는 기획서 하나. 판정에 필요한 값만 담는다.
+struct SpecReference {
+    idea_id: String,
+    spec_id: String,
+    /// 화면 기준 상태가 `draft`인가. 정규화와 결정 덮어쓰기를 반영한 결과다.
+    is_draft: bool,
+    /// 최신 결정이 `rejected`인가. 반려는 계약이 정한 종료 상태이므로, 이 값이 참인 기획서는
+    /// 더 갈 곳이 없다(SPEC-018 R6). 결정이 없으면 거짓이다.
+    is_rejected: bool,
+}
+
+/// `source_idea_id`를 가진 기획서만 모은다. 없는 문서는 아이디어에서 출발하지 않은 기획서이므로
+/// 판정 대상이 아니다. 결정 목록은 이미 읽어 둔 것을 받는다 — 결정 판정 규칙을 새로 쓰지 않는다.
+fn spec_references(workflow_root: &Path, decisions: &[SpecDecisionRecord]) -> Vec<SpecReference> {
+    let decided = latest_spec_decisions(decisions);
+    fs::read_dir(workflow_root.join("specs"))
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
@@ -876,9 +1034,84 @@ fn adopted_idea_ids(specs_root: &Path) -> HashSet<String> {
             }
             let contents = fs::read_to_string(&path).ok()?;
             let (metadata, _) = split_frontmatter(&contents.replace("\r\n", "\n"));
-            yaml_text(metadata.as_ref(), "source_idea_id")
+            let idea_id = yaml_text(metadata.as_ref(), "source_idea_id")?;
+            // `read_markdown_document`의 fallback과 같은 규칙이어야 화면이 짚어 주는 id와
+            // 목록의 기획서 id가 어긋나지 않는다.
+            let spec_id = yaml_text(metadata.as_ref(), "id").unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("DOCUMENT")
+                    .to_owned()
+            });
+            // 화면 기준 상태가 `draft`인가를 본다. 파일에 적힌 글자가 아니다. 결정이 있으면 그
+            // 결정이 상태를 덮어쓰고, 정규화가 알 수 없는 값을 `draft`로 떨어뜨리므로 `draft`가
+            // 아니라고 말하려면 `user_review`가 명시돼 있어야 한다.
+            let latest_outcome = decided.get(&spec_id).map(|(_, outcome)| outcome.as_str());
+            let is_draft = latest_outcome.is_none()
+                && yaml_text(metadata.as_ref(), "status").as_deref() != Some("user_review");
+            // 최신 결정 하나만 본다. `rejected` 뒤에 다른 결정이 붙으면 그 기획서는 반려로 끝난
+            // 것이 아니고, `latest_spec_decisions`가 이미 그 규칙을 판정해 둔다.
+            let is_rejected = latest_outcome == Some("rejected");
+            Some(SpecReference {
+                idea_id,
+                spec_id,
+                is_draft,
+                is_rejected,
+            })
         })
         .collect()
+}
+
+/// 아이디어 항목의 `status`와 `stalled_spec_ids`를 파생값으로 채운다.
+/// 목록 조회와 전문 읽기가 같은 결론을 내도록 두 경로가 이 함수만 부른다(SPEC-012 R7).
+///
+/// 파일에 적힌 아이디어 `status`는 payload로 흘려보내지 않는다. 네 상태가 배타적이려면 판정이 네
+/// 경우 모두에 값을 써야 한다. 파일에 쓰지는 않는다 — 읽은 값을 화면에 그대로 흘리지 않을 뿐이다.
+fn derive_idea_states(
+    ideas: &mut [WorkflowItemSummary],
+    references: &[SpecReference],
+    leases: &[AgentLeaseSummary],
+) {
+    for idea in ideas {
+        // 받은 목록이 이미 미만료 lease만 담고 있으므로 만료 판정은 하지 않는다.
+        // `task_id`가 없는 lease는 무엇을 물고 있는지 말하지 않으므로 세지 않는다.
+        let preempted = leases
+            .iter()
+            .any(|lease| lease.task_id.as_deref() == Some(idea.id.as_str()));
+        let mut drafts: Vec<String> = references
+            .iter()
+            .filter(|reference| reference.idea_id == idea.id && reference.is_draft)
+            .map(|reference| reference.spec_id.clone())
+            .collect();
+        // `fs::read_dir` 순서는 플랫폼마다 다르므로 정렬하지 않으면 같은 상태에서 화면 문구가
+        // 흔들린다.
+        drafts.sort();
+        let referenced = references
+            .iter()
+            .any(|reference| reference.idea_id == idea.id);
+        // 남은 길이 없는가. `all`은 빈 반복자에서 참이므로 참조가 하나라도 있는지를 함께 본다.
+        let all_rejected = referenced
+            && references
+                .iter()
+                .filter(|reference| reference.idea_id == idea.id)
+                .all(|reference| reference.is_rejected);
+
+        if !referenced && !preempted {
+            idea.status = "inbox".to_owned();
+            idea.stalled_spec_ids = Vec::new();
+        } else if preempted || !drafts.is_empty() {
+            // 반려가 섞여 있어도 아직 쓰는 중인 기획서가 있으면 종결이 아니다(SPEC-018 R6). 그래서
+            // 이 가지가 종결보다 앞선다.
+            idea.status = "drafting".to_owned();
+            idea.stalled_spec_ids = if preempted { Vec::new() } else { drafts };
+        } else if all_rejected {
+            idea.status = "closed".to_owned();
+            idea.stalled_spec_ids = Vec::new();
+        } else {
+            idea.status = "adopted".to_owned();
+            idea.stalled_spec_ids = Vec::new();
+        }
+    }
 }
 
 fn normalize_spec_status(spec: &mut WorkflowItemSummary) {
@@ -944,6 +1177,8 @@ fn read_markdown_document(
                 .map(|value| DateTime::<Utc>::from(value).to_rfc3339())
         });
     let due_at = yaml_text(metadata.as_ref(), "due_at");
+    let source_spec_id = yaml_text(metadata.as_ref(), "source_spec_id");
+    let source_decision_id = yaml_text(metadata.as_ref(), "source_decision_id");
     let events = read_task_events(metadata.as_ref());
     Ok((
         WorkflowItemSummary {
@@ -954,6 +1189,10 @@ fn read_markdown_document(
                 .unwrap_or_else(|| default_status.to_owned()),
             updated_at,
             due_at,
+            source_spec_id,
+            source_decision_id,
+            // 아이디어 판정(`derive_idea_states`)만 이 값을 채운다.
+            stalled_spec_ids: Vec::new(),
             events,
             excerpt: markdown_excerpt(&body),
         },
@@ -997,6 +1236,193 @@ fn split_frontmatter(contents: &str) -> (Option<serde_yaml::Value>, String) {
     let yaml = &rest[..end];
     let body = rest[end + 5..].to_owned();
     (serde_yaml::from_str(yaml).ok(), body)
+}
+
+/// 프론트매터 원문 구간. `split_frontmatter`는 파싱된 값과 본문만 돌려주므로 줄 단위로 읽어야 하는
+/// 선행 선언에는 쓸 수 없다. 구분자가 없으면 프론트매터가 없는 것이다.
+fn frontmatter_source(contents: &str) -> Option<&str> {
+    let rest = contents.strip_prefix("---\n")?;
+    let end = rest.find("\n---\n")?;
+    Some(&rest[..end])
+}
+
+/// 프론트매터의 선행 선언 한 줄을 읽은 결과.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DependencyDeclaration {
+    /// 키가 없다. 선행 작업이 없다는 뜻이다.
+    Absent,
+    /// 계약 형식의 목록을 읽었다. 빈 목록일 수 있다.
+    Declared(Vec<String>),
+    /// 키는 있는데 계약 형식이 아니다. 미충족으로 다룬다(SPEC-013 R3).
+    Malformed,
+}
+
+/// 계약이 정하는 표기는 열 0에서 시작하는 한 줄 흐름 시퀀스 하나뿐이라 `serde_yaml`로 읽지 않는다.
+/// 파서는 블록 표기와 흐름 표기를 구분해 주지 않는데, 블록 표기는 `append_task_history`의 스캔에
+/// 걸려 문서를 깨뜨리고 조건 스크립트(TASK-040)가 sh로 읽을 수도 없다.
+///
+/// 아래 순서가 SPEC-013 R2의 단일 정의이고 조건 스크립트가 같은 결론을 내야 한다.
+fn parse_dependency_declaration(frontmatter: &str) -> DependencyDeclaration {
+    let mut declarations = frontmatter
+        .lines()
+        .filter_map(|line| line.strip_prefix("depends_on:"));
+    let Some(value) = declarations.next() else {
+        return DependencyDeclaration::Absent;
+    };
+    // 같은 키가 두 줄이면 YAML 중복 키이기도 하다.
+    if declarations.next().is_some() {
+        return DependencyDeclaration::Malformed;
+    }
+    let value = value.trim();
+    // 값이 비어 있는 것은 블록 표기이거나 값 없는 키다.
+    if !value.starts_with('[') || !value.ends_with(']') {
+        return DependencyDeclaration::Malformed;
+    }
+    let tokens: Vec<&str> = value[1..value.len() - 1]
+        .split(',')
+        .map(str::trim)
+        .collect();
+    if tokens.iter().all(|token| token.is_empty()) {
+        return DependencyDeclaration::Declared(Vec::new());
+    }
+    // 따옴표로 감싼 표기도 여기서 걸린다. 계약이 정하는 것은 따옴표 없는 문서 id다.
+    if tokens.iter().any(|token| {
+        token.is_empty()
+            || !token
+                .chars()
+                .all(|value| value.is_ascii_alphanumeric() || value == '_' || value == '-')
+    }) {
+        return DependencyDeclaration::Malformed;
+    }
+    DependencyDeclaration::Declared(tokens.into_iter().map(str::to_owned).collect())
+}
+
+/// 판정에 필요한 값만 담은 워크플로우의 작업 목록. 문서 id로 찾고 값은 상태와 선언이다.
+///
+/// id와 상태는 목록 화면이 쓰는 규칙 그대로 읽고 선언만 줄 단위로 읽는다. 같은 id를 가진 문서가
+/// 둘 이상이면 파일 이름이 앞서는 쪽을 남긴다 — 중복 id는 계약 위반이라 여기서 다루지 않는다.
+fn task_dependency_graph(tasks_root: &Path) -> HashMap<String, (String, DependencyDeclaration)> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(tasks_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().and_then(|value| value.to_str()) == Some("md")
+                && matches!(fs::symlink_metadata(path), Ok(metadata) if metadata.file_type().is_file())
+        })
+        .collect();
+    paths.sort();
+
+    let mut graph = HashMap::new();
+    for path in paths {
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let normalized = contents.replace("\r\n", "\n");
+        let (metadata, _) = split_frontmatter(&normalized);
+        let fallback_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("DOCUMENT")
+            .to_owned();
+        let id = yaml_text(metadata.as_ref(), "id").unwrap_or(fallback_id);
+        let status = yaml_text(metadata.as_ref(), "status").unwrap_or_else(|| "todo".to_owned());
+        let declaration =
+            parse_dependency_declaration(frontmatter_source(&normalized).unwrap_or_default());
+        graph.entry(id).or_insert((status, declaration));
+    }
+    graph
+}
+
+/// 작업 하나의 선언을 판정해 상세 payload에 실을 값으로 만든다. 순서는 선언에 적힌 그대로다 —
+/// 아키텍트가 쓴 순서에 뜻이 있을 수 있다.
+fn task_dependencies(
+    task_id: &str,
+    graph: &HashMap<String, (String, DependencyDeclaration)>,
+) -> (Vec<TaskDependency>, bool) {
+    match graph.get(task_id) {
+        Some((_, DependencyDeclaration::Declared(ids))) => (
+            ids.iter()
+                .map(|id| TaskDependency {
+                    id: id.clone(),
+                    state: dependency_state(task_id, id, graph),
+                })
+                .collect(),
+            false,
+        ),
+        Some((_, DependencyDeclaration::Malformed)) => (Vec::new(), true),
+        Some((_, DependencyDeclaration::Absent)) | None => (Vec::new(), false),
+    }
+}
+
+/// 선행 선언이 미충족인 작업의 id. 자격 판정이 쓰는 모양으로 접은 것이고, 판정 자체는 상세 화면과
+/// 같은 `task_dependencies`가 한다 — 같은 규칙의 구현을 두 벌 만들지 않는다(SPEC-013 R2).
+///
+/// 선언이 없는 작업은 이 집합에 들어가지 않는다. 그래서 여기 없는 id는 제약이 없는 것이고, 그래프에
+/// 잡히지 않은 작업도 조건 스크립트와 같이 충족으로 떨어진다.
+fn unsatisfied_dependency_task_ids(
+    graph: &HashMap<String, (String, DependencyDeclaration)>,
+) -> HashSet<String> {
+    graph
+        .keys()
+        .filter(|task_id| {
+            let (dependencies, format_error) = task_dependencies(task_id, graph);
+            format_error
+                || dependencies
+                    .iter()
+                    .any(|dependency| dependency.state != TaskDependencyState::Satisfied)
+        })
+        .cloned()
+        .collect()
+}
+
+/// 선행 작업 하나의 판정. 순서는 `Missing` → `Cyclic` → 상태다.
+///
+/// 선행 작업 자신의 선언이 형식 오류인 것은 지금 작업의 판정을 바꾸지 않는다. 형식 오류는 그 문서를
+/// 미충족으로 만들지, 그 문서에 기대는 문서까지 막지는 않는다.
+fn dependency_state(
+    task_id: &str,
+    dependency_id: &str,
+    graph: &HashMap<String, (String, DependencyDeclaration)>,
+) -> TaskDependencyState {
+    let Some((status, _)) = graph.get(dependency_id) else {
+        return TaskDependencyState::Missing;
+    };
+    // 순환은 상태 판정보다 앞선다. 뒤에 두면 `completed`인 선행이 고리를 이룰 때 결론이 갈린다.
+    if declaration_reaches(dependency_id, task_id, graph) {
+        return TaskDependencyState::Cyclic;
+    }
+    // 계약에 없는 상태값도 미충족이다. 모르는 값을 충족 쪽으로 넘기지 않는다.
+    if status == "qa_waiting" || status == "completed" {
+        TaskDependencyState::Satisfied
+    } else {
+        TaskDependencyState::Pending
+    }
+}
+
+/// `from`에서 선언 그래프의 간선을 따라 `target`에 닿는가. 방문 집합이 종료를 보장하므로 순환을 따라
+/// 무한히 돌지 않는다. 자기 참조는 `from`과 `target`이 같은 길이 0의 경우다.
+fn declaration_reaches<'a>(
+    from: &'a str,
+    target: &str,
+    graph: &'a HashMap<String, (String, DependencyDeclaration)>,
+) -> bool {
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut pending = vec![from];
+    while let Some(current) = pending.pop() {
+        if current == target {
+            return true;
+        }
+        if !visited.insert(current) {
+            continue;
+        }
+        // `Absent`·`Malformed`인 작업에는 나가는 간선이 없다.
+        if let Some((_, DependencyDeclaration::Declared(ids))) = graph.get(current) {
+            pending.extend(ids.iter().map(String::as_str));
+        }
+    }
+    false
 }
 
 fn yaml_text(metadata: Option<&serde_yaml::Value>, key: &str) -> Option<String> {
@@ -1124,10 +1550,19 @@ fn parse_event_instant(at: &str) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn latest_spec_decisions(workflow_root: &Path) -> HashMap<String, (String, String)> {
-    let mut latest = HashMap::new();
+/// 기획서 결정 문서 하나. 조회는 이 목록 하나로 기획서 상태와 아키텍트 대기 물량을 함께 만든다.
+/// 두 판정 때문에 결정 디렉터리를 두 번 훑지 않는다.
+struct SpecDecisionRecord {
+    id: String,
+    spec_id: String,
+    outcome: String,
+    created_at: String,
+}
+
+fn read_spec_decisions(workflow_root: &Path) -> Vec<SpecDecisionRecord> {
+    let mut records = Vec::new();
     let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
-        return latest;
+        return records;
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1144,6 +1579,10 @@ fn latest_spec_decisions(workflow_root: &Path) -> HashMap<String, (String, Strin
         {
             continue;
         }
+        // 조건 스크립트도 `[ -n "$did" ]`로 id 없는 결정을 건너뛴다.
+        let Some(id) = yaml_text(metadata.as_ref(), "id") else {
+            continue;
+        };
         let Some(spec_id) = yaml_text(metadata.as_ref(), "spec_id") else {
             continue;
         };
@@ -1153,19 +1592,105 @@ fn latest_spec_decisions(workflow_root: &Path) -> HashMap<String, (String, Strin
         if outcome != "approved" && outcome != "revision_requested" && outcome != "rejected" {
             continue;
         }
-        let created_at = yaml_text(metadata.as_ref(), "created_at").unwrap_or_default();
+        records.push(SpecDecisionRecord {
+            id,
+            spec_id,
+            outcome,
+            created_at: yaml_text(metadata.as_ref(), "created_at").unwrap_or_default(),
+        });
+    }
+    records
+}
+
+/// 기획서 결정을 기획서 항목의 이벤트로 바꾼다. 원천이 결정 문서 하나뿐이고 앱이 결정 하나당
+/// 문서 하나를 쓰므로, 작업 이벤트와 달리 중복 제거가 필요 없다. 한 기획서에 결정이 여럿이면
+/// 전부 남긴다. "언제 승인됐고 언제 반려됐나"가 감사 로그에 묻는 질문이다.
+///
+/// 이미 읽어 둔 결정 목록을 받는다. 이 목록은 스키마·`created_by: user`·`outcome` 세 값을 이미
+/// 걸렀고, 결정 디렉터리를 한 번 더 훑지 않으려고 `SpecDecisionRecord`가 만들어졌다.
+fn spec_decision_events(records: &[SpecDecisionRecord]) -> HashMap<String, Vec<TaskEvent>> {
+    let mut events: HashMap<String, Vec<TaskEvent>> = HashMap::new();
+    for record in records {
+        // 시각을 읽을 수 없는 결정은 그 문서만 건너뛴다. 피드가 시간 위에 놓이는 화면이라
+        // 시각 없는 항목은 놓을 자리가 없다.
+        if parse_event_instant(&record.created_at).is_none() {
+            continue;
+        }
+        events
+            .entry(record.spec_id.clone())
+            .or_default()
+            .push(TaskEvent {
+                kind: record.outcome.clone(),
+                at: record.created_at.clone(),
+            });
+    }
+    for entries in events.values_mut() {
+        entries.sort_by_key(|event| parse_event_instant(&event.at));
+    }
+    events
+}
+
+fn latest_spec_decisions(records: &[SpecDecisionRecord]) -> HashMap<String, (String, String)> {
+    let mut latest: HashMap<String, (String, String)> = HashMap::new();
+    for record in records {
         let should_replace = latest
-            .get(&spec_id)
-            .is_none_or(|(current, _)| created_at >= *current);
+            .get(&record.spec_id)
+            .is_none_or(|(current, _)| record.created_at >= *current);
         if should_replace {
-            latest.insert(spec_id, (created_at, outcome));
+            latest.insert(
+                record.spec_id.clone(),
+                (record.created_at.clone(), record.outcome.clone()),
+            );
         }
     }
     latest
 }
 
+/// 같은 `spec_id`를 가진 다른 결정 중 `created_at` 문자열이 더 큰 것이 없는 `revision_requested`
+/// 결정의 id(SPEC-018 R1).
+///
+/// `latest_spec_decisions`를 쓰지 않는 이유는 동률 처리다. 그쪽은 `>=`라 `created_at`이 같은 결정이
+/// 둘이면 나중에 읽힌 하나만 최신으로 남는데, 디렉터리 순회 순서는 정해져 있지 않다. 조건 스크립트는
+/// "더 큰 것이 있는가"만 보므로 동률을 양쪽 다 최신으로 본다. 여기서 갈라지면 두 판정이 어긋난다.
+fn latest_revision_requests(records: &[SpecDecisionRecord]) -> Vec<String> {
+    records
+        .iter()
+        .filter(|record| record.outcome == "revision_requested")
+        .filter(|record| {
+            !records.iter().any(|other| {
+                other.spec_id == record.spec_id && other.created_at > record.created_at
+            })
+        })
+        .map(|record| record.id.clone())
+        .collect()
+}
+
+/// 같은 `spec_id`를 가진 다른 결정 중 `created_at` 문자열이 더 큰 것이 없는 `approved` 결정의
+/// `(결정 id, spec_id)`(SPEC-028 R4).
+///
+/// 비교 어법이 [`latest_revision_requests`]와 같다. 세 역할이 서로 다른 방식으로 최신을 판정하지
+/// 않는 것이 R4의 요구라, 두 함수가 같은 비교와 같은 동률 처리를 쓴다. 조건 스크립트의 `architect)`
+/// 분기도 같은 모양이다.
+///
+/// 비교 대상이 `records`인 것은 승인만 보면 안 되기 때문이다. 승인 뒤에 온 수정 요청·반려도 그 승인을
+/// 최신 자리에서 밀어낸다 — 계약 문언이 요구하는 것은 "최신 결정이 `approved`"다.
+fn latest_approvals(records: &[SpecDecisionRecord]) -> Vec<(String, String)> {
+    records
+        .iter()
+        .filter(|record| record.outcome == "approved")
+        .filter(|record| {
+            !records.iter().any(|other| {
+                other.spec_id == record.spec_id && other.created_at > record.created_at
+            })
+        })
+        .map(|record| (record.id.clone(), record.spec_id.clone()))
+        .collect()
+}
+
 fn apply_latest_decision(workflow_root: &Path, spec: &mut WorkflowItemSummary) {
-    if let Some((_, outcome)) = latest_spec_decisions(workflow_root).get(&spec.id) {
+    if let Some((_, outcome)) =
+        latest_spec_decisions(&read_spec_decisions(workflow_root)).get(&spec.id)
+    {
         spec.status.clone_from(outcome);
     }
 }
@@ -1285,18 +1810,28 @@ due_at: YYYY-MM-DD # 선택
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
 
     use chrono::{Duration, Utc};
     use pretty_assertions::assert_eq;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     use super::{
-        slugify, update_task_frontmatter, validate_decision, validate_task_qa,
-        FileSystemProjectRepository, ProjectError, ProjectSummary,
+        apply_latest_decision, latest_spec_decisions, normalize_spec_status,
+        read_markdown_document, read_spec_decisions, slugify, update_task_frontmatter,
+        validate_decision, validate_task_qa, FileSystemProjectRepository, ProjectError,
+        ProjectSummary,
     };
-    use crate::domain::project::{SchemaCompatibility, SpecDecisionOutcome, TaskQaOutcome};
+    use crate::domain::project::{
+        SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
+        WorkflowItemSummary,
+    };
+    // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
+    use crate::infrastructure::claim_helper::claim_helper_path;
+    use crate::infrastructure::heartbeat_condition::install_condition_script;
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -1378,6 +1913,93 @@ mod tests {
         assert_eq!(summary.active_leases[0].lease_id, "active");
     }
 
+    fn write_lease(root: &Path, file_name: &str, contents: &str) {
+        fs::write(
+            root.join(".workflow/.runtime/leases").join(file_name),
+            contents,
+        )
+        .expect("write lease");
+    }
+
+    #[test]
+    fn carries_the_lease_role_and_heartbeat_without_rewriting_them() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        // 만료 오름차순 정렬에 기대어 순서를 고정한다.
+        let legacy_expiry = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        let role_expiry = (Utc::now() + Duration::minutes(6)).to_rfc3339();
+        let blank_expiry = (Utc::now() + Duration::minutes(7)).to_rfc3339();
+        write_lease(
+            root.path(),
+            "legacy.yml",
+            &format!(
+                "schema_version: 1\nlease_id: legacy\nagent: codex\ntask_id: TASK-1\nheartbeat_at: 2026-08-03T00:41:00+00:00\nexpires_at: {legacy_expiry}\n"
+            ),
+        );
+        write_lease(
+            root.path(),
+            "with-role.yml",
+            &format!(
+                "schema_version: 1\nlease_id: with-role\nagent: codex\nrole: architect\ntask_id: SPEC-1\nheartbeat_at: 2026-08-03T00:42:00Z\nexpires_at: {role_expiry}\n"
+            ),
+        );
+        write_lease(
+            root.path(),
+            "blank-role.yml",
+            &format!(
+                "schema_version: 1\nlease_id: blank-role\nagent: codex\nrole: \"   \"\ntask_id: null\nheartbeat_at: 2026-08-03T00:43:00Z\nexpires_at: {blank_expiry}\n"
+            ),
+        );
+
+        let summary = repository.inspect(root.path()).expect("inspect leases");
+
+        // 계약에 없던 필드라 `role` 키가 없는 기존 lease가 목록에서 사라지면 안 된다.
+        assert_eq!(
+            summary
+                .active_leases
+                .iter()
+                .map(|lease| (lease.lease_id.as_str(), lease.role.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("legacy", None),
+                ("with-role", Some("architect")),
+                ("blank-role", None),
+            ]
+        );
+        // 원문 그대로다. `+00:00`이 `Z`로 바뀌지 않는다.
+        assert_eq!(
+            summary.active_leases[0].heartbeat_at,
+            "2026-08-03T00:41:00+00:00"
+        );
+    }
+
+    #[test]
+    fn reports_the_readable_leases_when_one_file_is_broken() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let expiry = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        write_lease(
+            root.path(),
+            "healthy.yml",
+            &format!(
+                "schema_version: 1\nlease_id: healthy\nagent: codex\nrole: developer\ntask_id: TASK-1\nheartbeat_at: 2026-08-03T00:41:00Z\nexpires_at: {expiry}\n"
+            ),
+        );
+        write_lease(root.path(), "broken.yml", "이것은: [YAML이: 아니다\n");
+
+        let summary = repository.inspect(root.path()).expect("inspect leases");
+
+        assert_eq!(summary.active_leases.len(), 1);
+        assert_eq!(summary.active_leases[0].lease_id, "healthy");
+        assert_eq!(summary.active_leases[0].role.as_deref(), Some("developer"));
+    }
+
     #[test]
     fn creates_markdown_idea_and_updates_counts() {
         let root = tempdir().expect("temp project");
@@ -1412,30 +2034,734 @@ mod tests {
         assert!(contents.contains("빠르게 생각을 기록한다."));
     }
 
+    fn write_idea_document(root: &Path, directory: &str, id: &str, status: &str) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("ideas")
+                .join(format!("{id}.md")),
+            format!(
+                "---\nschema: workflow-labs/idea@1\nid: {id}\ntitle: {id} 아이디어\nstatus: {status}\ncreated_at: 2026-08-01T00:00:00Z\n---\n\n본문이다.\n"
+            ),
+        )
+        .expect("write idea");
+    }
+
+    fn write_spec_for_idea(
+        root: &Path,
+        directory: &str,
+        spec_id: &str,
+        idea_id: &str,
+        status: &str,
+    ) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("specs")
+                .join(format!("{spec_id}.md")),
+            format!(
+                "---\nschema: workflow-labs/spec@1\nid: {spec_id}\ntitle: {spec_id} 기획서\nstatus: {status}\nsource_idea_id: {idea_id}\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n기획 내용이다.\n"
+            ),
+        )
+        .expect("write spec for idea");
+    }
+
+    fn write_idea_lease(root: &Path, file_name: &str, task_id: &str, minutes_from_now: i64) {
+        let expiry = (Utc::now() + Duration::minutes(minutes_from_now)).to_rfc3339();
+        write_lease(
+            root,
+            file_name,
+            &format!(
+                "schema_version: 1\nlease_id: {file_name}\nagent: codex\ntask_id: {task_id}\nheartbeat_at: {expiry}\nexpires_at: {expiry}\n"
+            ),
+        );
+    }
+
+    /// 아이디어 항목의 파생 상태와 중단 의심 근거.
+    fn idea_state(project: &ProjectSummary, workflow: usize, id: &str) -> (String, Vec<String>) {
+        let idea = project.workflows[workflow]
+            .items
+            .ideas
+            .iter()
+            .find(|item| item.id == id)
+            .expect("idea summary");
+        (idea.status.clone(), idea.stalled_spec_ids.clone())
+    }
+
     #[test]
-    fn marks_ideas_referenced_by_specs_as_adopted() {
+    fn treats_an_unreferenced_idea_without_a_lease_as_collected() {
         let root = tempdir().expect("temp project");
         let repository = FileSystemProjectRepository;
         let project = repository
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
-        let workflow = &project.workflows[0];
-        let updated = repository
-            .create_idea(root.path(), &workflow.directory, "채택될 아이디어")
-            .expect("create idea");
-        let idea_id = updated.workflows[0].items.ideas[0].id.clone();
-
-        let workflow_root = root.path().join(".workflow").join(&workflow.directory);
-        fs::write(
-            workflow_root.join("specs").join("SPEC-001.md"),
-            format!(
-                "---\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 채택 기획\nstatus: draft\nsource_idea_id: {idea_id}\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 채택 기획\n"
-            ),
-        )
-        .expect("write spec");
+        let directory = &project.workflows[0].directory;
+        // 파일에 적힌 상태가 무엇이든 판정이 값을 정한다. 그러지 않으면 `status: adopted`라고
+        // 적힌 파일이 참조 없이도 채택으로 보인다.
+        write_idea_document(root.path(), directory, "IDEA-001", "adopted");
 
         let inspected = repository.inspect(root.path()).expect("inspect");
-        assert_eq!(inspected.workflows[0].items.ideas[0].status, "adopted");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("inbox".to_owned(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn treats_an_idea_with_a_draft_spec_as_drafting_and_names_the_stalled_spec() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(root.path(), directory, "SPEC-001", "IDEA-001", "draft");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("drafting".to_owned(), vec!["SPEC-001".to_owned()])
+        );
+    }
+
+    #[test]
+    fn treats_a_preempted_idea_without_specs_as_drafting_without_a_stalled_spec() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_idea_lease(root.path(), "IDEA-001.yml", "IDEA-001", 5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("drafting".to_owned(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn treats_an_idea_with_a_reviewed_spec_as_adopted() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("adopted".to_owned(), Vec::new())
+        );
+    }
+
+    // 결정을 받은 기획서는 셋 중 어느 결과든 `draft`가 아니다. 그중 `rejected`만 갈 곳이 없으므로
+    // 종결이고, 나머지 둘은 채택이다(SPEC-018 R6). 수정 요청은 기획자 재작업 대기라 종결의 반대편이다.
+    #[test]
+    fn derives_the_idea_state_from_the_latest_decision_outcome() {
+        for (outcome, expected) in [
+            ("approved", "adopted"),
+            ("revision_requested", "adopted"),
+            ("rejected", "closed"),
+        ] {
+            let root = tempdir().expect("temp project");
+            let repository = FileSystemProjectRepository;
+            let project = repository
+                .create_workflow(root.path(), "Feature")
+                .expect("create workflow");
+            let directory = &project.workflows[0].directory;
+            write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+            write_spec_for_idea(root.path(), directory, "SPEC-001", "IDEA-001", "draft");
+            write_decision(
+                root.path(),
+                directory,
+                "DECISION-001.md",
+                &spec_decision("DECISION-001", "SPEC-001", outcome, "2026-08-02T00:00:00Z"),
+            );
+
+            let inspected = repository.inspect(root.path()).expect("inspect");
+
+            assert_eq!(
+                idea_state(&inspected, 0, "IDEA-001"),
+                (expected.to_owned(), Vec::new()),
+                "결정 결과 {outcome}"
+            );
+        }
+    }
+
+    // 참조 기획서가 여럿이어도 전부 반려로 끝나야 종결이다.
+    #[test]
+    fn treats_an_idea_as_closed_when_every_referenced_spec_ended_rejected() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        for (spec_id, decision_id) in [("SPEC-001", "DECISION-001"), ("SPEC-002", "DECISION-002")] {
+            write_spec_for_idea(root.path(), directory, spec_id, "IDEA-001", "user_review");
+            write_decision(
+                root.path(),
+                directory,
+                &format!("{decision_id}.md"),
+                &spec_decision(decision_id, spec_id, "rejected", "2026-08-02T00:00:00Z"),
+            );
+        }
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("closed".to_owned(), Vec::new())
+        );
+    }
+
+    // 살아 있는 기획서가 하나라도 있으면 종결이 아니다. 승인이든 아직 결정을 기다리는 검토든 같다.
+    #[test]
+    fn keeps_an_idea_adopted_when_a_live_spec_sits_next_to_a_rejected_one() {
+        for live_outcome in [Some("approved"), None] {
+            let root = tempdir().expect("temp project");
+            let repository = FileSystemProjectRepository;
+            let project = repository
+                .create_workflow(root.path(), "Feature")
+                .expect("create workflow");
+            let directory = &project.workflows[0].directory;
+            write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+            write_spec_for_idea(
+                root.path(),
+                directory,
+                "SPEC-001",
+                "IDEA-001",
+                "user_review",
+            );
+            write_decision(
+                root.path(),
+                directory,
+                "DECISION-001.md",
+                &spec_decision(
+                    "DECISION-001",
+                    "SPEC-001",
+                    "rejected",
+                    "2026-08-02T00:00:00Z",
+                ),
+            );
+            write_spec_for_idea(
+                root.path(),
+                directory,
+                "SPEC-002",
+                "IDEA-001",
+                "user_review",
+            );
+            if let Some(outcome) = live_outcome {
+                write_decision(
+                    root.path(),
+                    directory,
+                    "DECISION-002.md",
+                    &spec_decision("DECISION-002", "SPEC-002", outcome, "2026-08-02T00:00:00Z"),
+                );
+            }
+
+            let inspected = repository.inspect(root.path()).expect("inspect");
+
+            assert_eq!(
+                idea_state(&inspected, 0, "IDEA-001"),
+                ("adopted".to_owned(), Vec::new()),
+                "살아 있는 기획서의 결정 {live_outcome:?}"
+            );
+        }
+    }
+
+    // 아직 쓰는 중인 기획서가 있으면 종결보다 반영중이 이긴다.
+    #[test]
+    fn prefers_drafting_when_a_draft_and_a_rejected_spec_share_an_idea() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-001.md",
+            &spec_decision(
+                "DECISION-001",
+                "SPEC-001",
+                "rejected",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        write_spec_for_idea(root.path(), directory, "SPEC-002", "IDEA-001", "draft");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("drafting".to_owned(), vec!["SPEC-002".to_owned()])
+        );
+    }
+
+    // 선점도 종결보다 앞선다. 누군가 그 아이디어를 지금 쥐고 있으면 끝난 것이 아니다.
+    #[test]
+    fn prefers_drafting_when_a_lease_preempts_an_otherwise_closed_idea() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-001.md",
+            &spec_decision(
+                "DECISION-001",
+                "SPEC-001",
+                "rejected",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        write_idea_lease(root.path(), "IDEA-001.yml", "IDEA-001", 5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("drafting".to_owned(), Vec::new())
+        );
+    }
+
+    // 반려 판정은 최신 결정 하나만 본다. 뒤에 다른 결정이 붙으면 반려로 끝난 것이 아니다.
+    #[test]
+    fn does_not_close_an_idea_whose_rejection_was_superseded() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-001.md",
+            &spec_decision(
+                "DECISION-001",
+                "SPEC-001",
+                "rejected",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-002.md",
+            &spec_decision(
+                "DECISION-002",
+                "SPEC-001",
+                "approved",
+                "2026-08-03T00:00:00Z",
+            ),
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("adopted".to_owned(), Vec::new())
+        );
+    }
+
+    /// 종결 표시가 아이디어를 처리 대상으로 되돌리지 않는다(기획서 완료 조건 20). 조건 스크립트를
+    /// 고치지 않고도 성립하는 것이 요점이라, `role_eligibility.rs`와 같은 대조를 여기서 한 번 더 한다.
+    /// 그 파일의 대조 헬퍼는 자기 테스트 모듈 안에 있어 다른 모듈에서 부를 수 없다.
+    #[test]
+    fn a_closed_idea_is_not_planner_work_in_either_judgement() {
+        use std::process::Command;
+
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-001.md",
+            &spec_decision(
+                "DECISION-001",
+                "SPEC-001",
+                "rejected",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        install_condition_script(&root.path().join(".workflow")).expect("install condition script");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(idea_state(&inspected, 0, "IDEA-001").0, "closed");
+        assert!(!inspected.pending_work.planner);
+        for (role, app_flag) in [
+            ("planner", inspected.pending_work.planner),
+            ("architect", inspected.pending_work.architect),
+            ("developer", inspected.pending_work.developer),
+        ] {
+            let code = Command::new("sh")
+                .arg(".workflow/rules/wf-eligible.sh")
+                .arg(role)
+                .current_dir(root.path())
+                .status()
+                .expect("run condition script")
+                .code()
+                .expect("exit code");
+            assert_eq!(app_flag, code == 0, "{role} 판정이 조건 스크립트와 다르다");
+        }
+    }
+
+    #[test]
+    fn prefers_drafting_when_a_draft_and_a_reviewed_spec_share_an_idea() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-001",
+            "IDEA-001",
+            "user_review",
+        );
+        write_spec_for_idea(root.path(), directory, "SPEC-002", "IDEA-001", "draft");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("drafting".to_owned(), vec!["SPEC-002".to_owned()])
+        );
+    }
+
+    #[test]
+    fn lists_every_stalled_draft_spec_in_document_id_order() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(root.path(), directory, "SPEC-050", "IDEA-001", "draft");
+        write_spec_for_idea(root.path(), directory, "SPEC-004", "IDEA-001", "draft");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            (
+                "drafting".to_owned(),
+                vec!["SPEC-004".to_owned(), "SPEC-050".to_owned()]
+            )
+        );
+    }
+
+    #[test]
+    fn ignores_expired_leases_when_deriving_idea_states() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_idea_lease(root.path(), "IDEA-001.yml", "IDEA-001", -5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("inbox".to_owned(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn ignores_leases_without_a_task_id_when_deriving_idea_states() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_idea_lease(root.path(), "anonymous.yml", "null", 5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("inbox".to_owned(), Vec::new())
+        );
+    }
+
+    // 기획자가 기획서 id로 선점하면 아이디어를 선점한 것이 아니다. 그 기획서가 결정까지 받았다면
+    // 아이디어는 채택이고, lease가 그 판정을 되돌리지 않는다.
+    #[test]
+    fn keeps_an_idea_adopted_when_the_lease_points_at_its_spec() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(root.path(), directory, "SPEC-001", "IDEA-001", "draft");
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-001.md",
+            &spec_decision(
+                "DECISION-001",
+                "SPEC-001",
+                "approved",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        write_idea_lease(root.path(), "SPEC-001.yml", "SPEC-001", 5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("adopted".to_owned(), Vec::new())
+        );
+    }
+
+    // lease는 프로젝트 전역이라 워크플로우를 가리지 않지만, 기획서 참조는 자기 워크플로우 안에서만
+    // 본다.
+    #[test]
+    fn keeps_idea_derivation_inside_its_workflow() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let project = repository
+            .create_workflow(root.path(), "Other")
+            .expect("create second workflow");
+        let first = project.workflows[0].directory.clone();
+        let second = project.workflows[1].directory.clone();
+        write_idea_document(root.path(), &first, "IDEA-001", "inbox");
+        write_idea_document(root.path(), &second, "IDEA-002", "inbox");
+        write_spec_for_idea(root.path(), &first, "SPEC-001", "IDEA-002", "draft");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("inbox".to_owned(), Vec::new())
+        );
+        assert_eq!(
+            idea_state(&inspected, 1, "IDEA-002"),
+            ("inbox".to_owned(), Vec::new())
+        );
+    }
+
+    // 목록과 전문 읽기가 갈리면 같은 아이디어가 화면 두 곳에서 다르게 보인다.
+    #[test]
+    fn reports_the_same_idea_state_from_the_list_and_the_full_read() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        write_idea_document(root.path(), &directory, "IDEA-002", "inbox");
+        write_idea_document(root.path(), &directory, "IDEA-003", "inbox");
+        write_idea_document(root.path(), &directory, "IDEA-004", "inbox");
+        write_spec_for_idea(root.path(), &directory, "SPEC-002", "IDEA-002", "draft");
+        write_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-003",
+            "IDEA-003",
+            "user_review",
+        );
+        write_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-004",
+            "IDEA-004",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-004.md",
+            &spec_decision(
+                "DECISION-004",
+                "SPEC-004",
+                "rejected",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        for id in ["IDEA-001", "IDEA-002", "IDEA-003", "IDEA-004"] {
+            let document = repository
+                .read_idea(root.path(), &directory, &format!("{id}.md"))
+                .expect("read idea");
+            assert_eq!(
+                (
+                    document.summary.status.clone(),
+                    document.summary.stalled_spec_ids.clone()
+                ),
+                idea_state(&inspected, 0, id),
+                "{id}의 목록과 전문이 갈렸다"
+            );
+        }
+        assert_eq!(idea_state(&inspected, 0, "IDEA-001").0, "inbox");
+        assert_eq!(idea_state(&inspected, 0, "IDEA-002").0, "drafting");
+        assert_eq!(idea_state(&inspected, 0, "IDEA-003").0, "adopted");
+        assert_eq!(idea_state(&inspected, 0, "IDEA-004").0, "closed");
+    }
+
+    // 판정은 읽기이고 파생이다. 아이디어 문서의 `status`는 파일에서 그대로 남는다.
+    #[test]
+    fn deriving_idea_states_does_not_touch_the_workflow_files() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        write_spec_for_idea(root.path(), &directory, "SPEC-001", "IDEA-001", "draft");
+        write_idea_lease(root.path(), "IDEA-002.yml", "IDEA-002", 5);
+        let control_root = root.path().join(".workflow");
+        let before = file_snapshot(&control_root);
+
+        repository.inspect(root.path()).expect("inspect");
+        repository
+            .read_idea(root.path(), &directory, "IDEA-001.md")
+            .expect("read idea");
+
+        assert_eq!(file_snapshot(&control_root), before);
+        assert!(fs::read_to_string(
+            control_root
+                .join(&directory)
+                .join("ideas")
+                .join("IDEA-001.md")
+        )
+        .expect("idea after read")
+        .contains("status: inbox"));
+    }
+
+    #[test]
+    fn lists_ideas_when_the_lease_directory_is_missing() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        fs::remove_dir_all(root.path().join(".workflow/.runtime/leases")).expect("drop leases");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("inbox".to_owned(), Vec::new())
+        );
+        let document = repository
+            .read_idea(root.path(), &directory, "IDEA-001.md")
+            .expect("read idea without lease directory");
+        assert_eq!(document.summary.status, "inbox");
+    }
+
+    // 세션이 죽으면 lease는 만료되지만 draft 스켈레톤은 남는다. 그 순간부터 중단 의심이다.
+    // 파일을 두 번 쓰는 것으로 시각 경과를 대신한다 — 실제로 기다리면 테스트가 느려진다.
+    #[test]
+    fn fills_the_stalled_spec_when_the_lease_expires() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        write_spec_for_idea(root.path(), &directory, "SPEC-001", "IDEA-001", "draft");
+        write_idea_lease(root.path(), "IDEA-001.yml", "IDEA-001", 5);
+
+        let while_active = repository
+            .inspect(root.path())
+            .expect("inspect while active");
+        write_idea_lease(root.path(), "IDEA-001.yml", "IDEA-001", -5);
+        let after_expiry = repository
+            .inspect(root.path())
+            .expect("inspect after expiry");
+
+        assert_eq!(
+            idea_state(&while_active, 0, "IDEA-001"),
+            ("drafting".to_owned(), Vec::new())
+        );
+        assert_eq!(
+            idea_state(&after_expiry, 0, "IDEA-001"),
+            ("drafting".to_owned(), vec!["SPEC-001".to_owned()])
+        );
     }
 
     #[test]
@@ -1461,6 +2787,47 @@ mod tests {
             inspected.workflows[0].items.tasks[0].due_at.as_deref(),
             Some("2026-08-07")
         );
+    }
+
+    #[test]
+    fn reads_the_source_decision_of_a_task_and_leaves_it_empty_elsewhere() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        repository
+            .create_idea(root.path(), &directory, "출처가 없는 아이디어")
+            .expect("create idea");
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("specs/SPEC-001.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 기획서\nstatus: user_review\ncreated_at: 2026-07-30T00:00:00Z\nupdated_at: 2026-07-30T00:00:00Z\n---\n\n# 기획서\n",
+        )
+        .expect("write spec");
+
+        let inspected = write_task_with_frontmatter(
+            root.path(),
+            &directory,
+            "source_spec_id: SPEC-001\nsource_decision_id: DECISION-001\n",
+        );
+
+        let workflow = &inspected.workflows[0];
+        assert_eq!(
+            workflow.items.tasks[0].source_decision_id.as_deref(),
+            Some("DECISION-001")
+        );
+        assert_eq!(workflow.items.ideas[0].source_decision_id, None);
+        assert_eq!(workflow.items.specs[0].source_decision_id, None);
+        assert_eq!(
+            workflow.items.tasks[0].source_spec_id.as_deref(),
+            Some("SPEC-001")
+        );
+        assert_eq!(workflow.items.ideas[0].source_spec_id, None);
+        assert_eq!(workflow.items.specs[0].source_spec_id, None);
     }
 
     fn write_task_with_frontmatter(root: &Path, directory: &str, extra: &str) -> ProjectSummary {
@@ -1775,6 +3142,282 @@ mod tests {
             .iter()
             .map(|event| (event.kind.clone(), event.at.clone()))
             .collect()
+    }
+
+    fn write_spec(root: &Path, directory: &str, id: &str) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("specs")
+                .join(format!("{id}.md")),
+            format!(
+                "---\nschema: workflow-labs/spec@1\nid: {id}\ntitle: {id} 기획서\nstatus: user_review\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n본문\n"
+            ),
+        )
+        .expect("write spec");
+    }
+
+    fn spec_decision(id: &str, spec_id: &str, outcome: &str, created_at: &str) -> String {
+        format!(
+            "---\nschema: workflow-labs/decision@1\nid: {id}\nspec_id: {spec_id}\noutcome: {outcome}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n결정 사유\n"
+        )
+    }
+
+    fn spec_events(project: &ProjectSummary, workflow: usize, id: &str) -> Vec<(String, String)> {
+        project.workflows[workflow]
+            .items
+            .specs
+            .iter()
+            .find(|item| item.id == id)
+            .expect("spec summary")
+            .events
+            .iter()
+            .map(|event| (event.kind.clone(), event.at.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn carries_spec_decisions_as_events_in_time_order() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_spec(root.path(), directory, "SPEC-001");
+        write_spec(root.path(), directory, "SPEC-002");
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-LATE.md",
+            &spec_decision(
+                "DECISION-LATE",
+                "SPEC-001",
+                "approved",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-EARLY.md",
+            &spec_decision(
+                "DECISION-EARLY",
+                "SPEC-001",
+                "revision_requested",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-OTHER.md",
+            &spec_decision(
+                "DECISION-OTHER",
+                "SPEC-002",
+                "rejected",
+                "2026-08-03T00:00:00Z",
+            ),
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect specs");
+
+        // 한 기획서의 결정이 여럿이면 전부 남는다. "언제 승인됐고 언제 반려됐나"가 감사 로그의 질문이다.
+        assert_eq!(
+            spec_events(&inspected, 0, "SPEC-001"),
+            vec![
+                (
+                    "revision_requested".to_owned(),
+                    "2026-08-01T00:00:00Z".to_owned()
+                ),
+                ("approved".to_owned(), "2026-08-02T00:00:00Z".to_owned()),
+            ]
+        );
+        assert_eq!(
+            spec_events(&inspected, 0, "SPEC-002"),
+            vec![("rejected".to_owned(), "2026-08-03T00:00:00Z".to_owned())]
+        );
+    }
+
+    #[test]
+    fn skips_unreadable_spec_decisions_and_keeps_the_others() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_spec(root.path(), directory, "SPEC-001");
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-GOOD.md",
+            &spec_decision(
+                "DECISION-GOOD",
+                "SPEC-001",
+                "approved",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-AGENT.md",
+            &spec_decision(
+                "DECISION-AGENT",
+                "SPEC-001",
+                "approved",
+                "2026-08-01T01:00:00Z",
+            )
+            .replace("created_by: user", "created_by: agent"),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-NO-TIME.md",
+            &spec_decision("DECISION-NO-TIME", "SPEC-001", "approved", "어제"),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-ODD.md",
+            &spec_decision(
+                "DECISION-ODD",
+                "SPEC-001",
+                "archived",
+                "2026-08-01T02:00:00Z",
+            ),
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-BROKEN.md",
+            "프론트매터가 없는 문서\n",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect specs");
+
+        assert_eq!(
+            spec_events(&inspected, 0, "SPEC-001"),
+            vec![("approved".to_owned(), "2026-08-01T00:00:00Z".to_owned())]
+        );
+    }
+
+    #[test]
+    fn keeps_spec_decision_events_inside_their_workflow() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "First")
+            .expect("create first workflow");
+        let project = repository
+            .create_workflow(root.path(), "Second")
+            .expect("create second workflow");
+        let first = project.workflows[0].directory.clone();
+        let second = project.workflows[1].directory.clone();
+        write_spec(root.path(), &first, "SPEC-001");
+        write_spec(root.path(), &second, "SPEC-001");
+        write_decision(
+            root.path(),
+            &first,
+            "DECISION-FIRST.md",
+            &spec_decision(
+                "DECISION-FIRST",
+                "SPEC-001",
+                "approved",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect specs");
+
+        assert_eq!(
+            spec_events(&inspected, 0, "SPEC-001"),
+            vec![("approved".to_owned(), "2026-08-01T00:00:00Z".to_owned())]
+        );
+        assert!(spec_events(&inspected, 1, "SPEC-001").is_empty());
+    }
+
+    #[test]
+    fn inspecting_the_project_does_not_touch_the_workflow_files() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = &project.workflows[0].directory;
+        write_spec(root.path(), directory, "SPEC-001");
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-GOOD.md",
+            &spec_decision(
+                "DECISION-GOOD",
+                "SPEC-001",
+                "approved",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
+        // 종결 판정도 읽기다(SPEC-018 R6). 반려 픽스처가 없으면 이 성질이 새 가지를 지나지 않는다.
+        write_idea_document(root.path(), directory, "IDEA-001", "inbox");
+        write_spec_for_idea(
+            root.path(),
+            directory,
+            "SPEC-002",
+            "IDEA-001",
+            "user_review",
+        );
+        write_decision(
+            root.path(),
+            directory,
+            "DECISION-REJECTED.md",
+            &spec_decision(
+                "DECISION-REJECTED",
+                "SPEC-002",
+                "rejected",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+        write_task_with_frontmatter(
+            root.path(),
+            directory,
+            "history:\n  - { at: 2026-07-30T09:00:00Z, kind: created }\n",
+        );
+        write_lease(
+            root.path(),
+            "TASK-001.yml",
+            &format!(
+                "schema_version: 1\nlease_id: active\nagent: codex\nrole: developer\ntask_id: TASK-001\nheartbeat_at: 2026-08-03T00:41:00Z\nexpires_at: {}\n",
+                (Utc::now() + Duration::minutes(5)).to_rfc3339()
+            ),
+        );
+        let control_root = root.path().join(".workflow");
+        let before = file_snapshot(&control_root);
+
+        repository.inspect(root.path()).expect("inspect project");
+
+        assert_eq!(file_snapshot(&control_root), before);
+    }
+
+    /// 컨트롤 디렉터리 아래 모든 파일의 경로와 수정 시각.
+    fn file_snapshot(control_root: &Path) -> BTreeMap<String, SystemTime> {
+        let mut entries = BTreeMap::new();
+        collect_modified_times(control_root, &mut entries);
+        entries
+    }
+
+    fn collect_modified_times(directory: &Path, entries: &mut BTreeMap<String, SystemTime>) {
+        for entry in fs::read_dir(directory).expect("directory listing") {
+            let path = entry.expect("directory entry").path();
+            let metadata = fs::symlink_metadata(&path).expect("entry metadata");
+            entries.insert(
+                path.display().to_string(),
+                metadata.modified().expect("modified time"),
+            );
+            if metadata.is_dir() {
+                collect_modified_times(&path, entries);
+            }
+        }
     }
 
     #[test]
@@ -2291,6 +3934,156 @@ mod tests {
         assert_eq!(inspected.workflows[0].counts.decisions, 1);
     }
 
+    /// `record_spec_decision`이 도장 가능 여부를 판정할 때 보는 상태. 그 경로의
+    /// `read_markdown_document` → `normalize_spec_status` → `apply_latest_decision` 세 줄과 같다.
+    fn spec_status_after_latest_decision(workflow_root: &Path, file_name: &str) -> String {
+        let (mut spec, _) =
+            read_markdown_document(&workflow_root.join("specs").join(file_name), "draft")
+                .expect("read spec document");
+        normalize_spec_status(&mut spec);
+        apply_latest_decision(workflow_root, &mut spec);
+        spec.status
+    }
+
+    /// 앱이 방금 쓴 결정 문서의 `id`와 `created_at`. 미리 놓아 둔 픽스처 하나를 빼면 남는 것이
+    /// 그 문서다.
+    fn app_recorded_decision(workflow_root: &Path, fixture_file_name: &str) -> (String, String) {
+        let mut recorded: Vec<String> = fs::read_dir(workflow_root.join("decisions"))
+            .expect("decisions")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy() != fixture_file_name)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .collect();
+        assert_eq!(recorded.len(), 1, "앱이 쓴 결정 문서는 하나여야 한다");
+        let text = recorded.remove(0);
+        let field = |key: &str| {
+            let prefix = format!("{key}: ");
+            text.lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("결정 문서에 {key}가 없다"))
+        };
+        (field("id"), field("created_at"))
+    }
+
+    // SPEC-028 R3(TASK-087). 위임을 받아 적은 대리 결정은 `created_by: user-delegate`를 달고,
+    // 앱의 기획서 결정 읽기 경로는 `created_by: user`인 문서만 센다. 그래서 기획서가
+    // `user_review`로 남고 사용자가 뒤늦게 앱 도장으로 재가할 수 있다. 그 필터가 느슨해지면
+    // 대리 결정이 기획서를 `approved`로 만들어 재가 경로가 조용히 막히므로 여기서 고정한다.
+    #[test]
+    fn records_a_user_reapproval_on_a_spec_that_carries_a_delegate_decision() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        write_spec(root.path(), &directory, "SPEC-001");
+        // 앱이 쓰는 결정 문서와 다른 것은 `created_by` 하나여야 이 테스트가 그 값을 검사하는 것이 된다.
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-DELEGATE.md",
+            &spec_decision(
+                "DECISION-DELEGATE",
+                "SPEC-001",
+                "approved",
+                "2026-08-04T08:58:00Z",
+            )
+            .replace("created_by: user", "created_by: user-delegate"),
+        );
+
+        assert_eq!(
+            spec_status_after_latest_decision(&workflow_root, "SPEC-001.md"),
+            "user_review"
+        );
+        let before = repository
+            .inspect(root.path())
+            .expect("inspect before reapproval");
+        assert_eq!(before.workflows[0].items.specs[0].status, "user_review");
+
+        let decided = repository
+            .record_spec_decision(
+                root.path(),
+                &directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::Approved,
+                "위임으로 대신 적힌 승인을 사용자가 재가한다",
+            )
+            .expect("대리 결정이 있는 기획서에도 재가 도장을 찍을 수 있어야 한다");
+
+        assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
+        // 기록 뒤의 최신 결정은 방금 앱이 쓴 재가 결정이다. 대리 결정은 목록에 들어오지 않는다.
+        let (recorded_id, recorded_at) =
+            app_recorded_decision(&workflow_root, "DECISION-DELEGATE.md");
+        let counted = read_spec_decisions(&workflow_root);
+        assert_eq!(
+            counted
+                .iter()
+                .map(|record| record.id.clone())
+                .collect::<Vec<_>>(),
+            vec![recorded_id]
+        );
+        assert_eq!(
+            latest_spec_decisions(&counted).get("SPEC-001"),
+            Some(&(recorded_at, "approved".to_owned()))
+        );
+        assert_eq!(
+            spec_status_after_latest_decision(&workflow_root, "SPEC-001.md"),
+            "approved"
+        );
+    }
+
+    // 위 테스트의 대조군. `created_by: user`인 승인 결정은 앱이 세므로 기획서가 `approved`가 되고
+    // 같은 경로가 지금처럼 `SpecNotAwaitingDecision`으로 막는다. 이것이 없으면 위 테스트가
+    // "필터가 동작한다"가 아니라 "아무나 통과한다"를 확인하는 것이 될 수 있다.
+    #[test]
+    fn refuses_a_second_decision_on_a_spec_the_app_already_decided() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        write_spec(root.path(), &directory, "SPEC-001");
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-APP.md",
+            &spec_decision(
+                "DECISION-APP",
+                "SPEC-001",
+                "approved",
+                "2026-08-04T07:34:27.458543+00:00",
+            ),
+        );
+
+        assert_eq!(
+            spec_status_after_latest_decision(&workflow_root, "SPEC-001.md"),
+            "approved"
+        );
+
+        let error = repository
+            .record_spec_decision(
+                root.path(),
+                &directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::Approved,
+                "이미 결정된 기획서에는 덧쓸 수 없다",
+            )
+            .expect_err("앱이 이미 결정한 기획서에는 결정을 덧쓸 수 없어야 한다");
+
+        assert!(matches!(error, ProjectError::SpecNotAwaitingDecision));
+        assert_eq!(
+            fs::read_dir(workflow_root.join("decisions"))
+                .expect("decisions")
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn rejects_document_path_traversal() {
         let root = tempdir().expect("temp project");
@@ -2352,7 +4145,7 @@ mod tests {
 
     // 전문 읽기의 상태가 목록과 갈리면 같은 아이디어가 화면 두 곳에서 다르게 보인다.
     #[test]
-    fn reports_adopted_status_for_an_idea_referenced_by_a_spec() {
+    fn reports_the_stalled_draft_spec_when_reading_an_idea_in_full() {
         let root = tempdir().expect("temp project");
         let repository = FileSystemProjectRepository;
         let project = repository
@@ -2362,7 +4155,7 @@ mod tests {
         let workflow_root = root.path().join(".workflow").join(&workflow.directory);
         fs::write(
             workflow_root.join("ideas/IDEA-001.md"),
-            "---\nschema: workflow-labs/idea@1\nid: IDEA-001\ntitle: 채택된 아이디어\nstatus: inbox\n---\n\n본문이다.\n",
+            "---\nschema: workflow-labs/idea@1\nid: IDEA-001\ntitle: 반영중인 아이디어\nstatus: inbox\n---\n\n본문이다.\n",
         )
         .expect("write idea");
         fs::write(
@@ -2375,7 +4168,8 @@ mod tests {
             .read_idea(root.path(), &workflow.directory, "IDEA-001.md")
             .expect("read idea");
 
-        assert_eq!(document.summary.status, "adopted");
+        assert_eq!(document.summary.status, "drafting");
+        assert_eq!(document.summary.stalled_spec_ids, vec!["SPEC-001"]);
     }
 
     #[test]
@@ -2490,5 +4284,630 @@ mod tests {
             .inspect(root.path())
             .expect_err("path traversal must be rejected");
         assert!(matches!(error, ProjectError::UnsafeWorkflowDirectory(_)));
+    }
+
+    #[test]
+    fn installs_the_claim_helper_with_the_workflow() {
+        let root = tempdir().expect("temp project");
+        FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let helper = fs::read_to_string(claim_helper_path(&root.path().join(".workflow")))
+            .expect("claim helper");
+        assert!(helper.contains("# managed_by: workflow-labs"));
+        assert!(helper.contains("# claim_helper_version: 1"));
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_unmanaged_claim_helper() {
+        let root = tempdir().expect("temp project");
+        let helper = claim_helper_path(&root.path().join(".workflow"));
+        fs::create_dir_all(helper.parent().expect("rules root")).expect("rules root");
+        let foreign = "#!/bin/sh\nexit 0\n";
+        fs::write(&helper, foreign).expect("foreign helper");
+
+        let error = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect_err("an unmanaged helper must stop workflow creation");
+
+        assert!(matches!(error, ProjectError::ClaimHelper(_)));
+        assert_eq!(fs::read_to_string(&helper).expect("helper"), foreign);
+        assert!(!root.path().join(".workflow/project.yml").exists());
+    }
+
+    /// 헬퍼가 쓴 lease를 앱의 lease 읽기 경로가 활성 lease로 인식한다(SPEC-013 완료 조건 22).
+    #[cfg(unix)]
+    #[test]
+    fn reads_a_lease_written_by_the_installed_helper() {
+        use std::process::Command;
+
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let output = Command::new("sh")
+            .arg(".workflow/rules/wf-claim.sh")
+            .args(["acquire", "TASK-001", "dev-a", "30"])
+            .current_dir(root.path())
+            .output()
+            .expect("run claim helper");
+        assert_eq!(output.status.code(), Some(0));
+        let lease_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+        assert_eq!(inspected.active_leases.len(), 1);
+        assert_eq!(inspected.active_leases[0].lease_id, lease_id);
+        assert_eq!(inspected.active_leases[0].agent, "dev-a");
+        assert_eq!(
+            inspected.active_leases[0].task_id.as_deref(),
+            Some("TASK-001")
+        );
+    }
+
+    fn dependency_workflow() -> (TempDir, String) {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        (root, directory)
+    }
+
+    /// 선행 판정 픽스처 하나. `extra`는 프론트매터 끝에 그대로 붙는다.
+    fn write_task_document(root: &Path, directory: &str, id: &str, status: &str, extra: &str) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("tasks")
+                .join(format!("{id}.md")),
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: {id}\ntitle: {id} 작업\nstatus: {status}\nupdated_at: 2026-08-03T00:00:00Z\n{extra}---\n\n# {id} 작업\n"
+            ),
+        )
+        .expect("write task");
+    }
+
+    fn read_task_document(root: &Path, directory: &str, file_name: &str) -> TaskDocument {
+        FileSystemProjectRepository
+            .read_task(root, directory, file_name)
+            .expect("read task")
+    }
+
+    fn declared_dependencies(
+        root: &Path,
+        directory: &str,
+        file_name: &str,
+    ) -> Vec<(String, TaskDependencyState)> {
+        read_task_document(root, directory, file_name)
+            .dependencies
+            .into_iter()
+            .map(|dependency| (dependency.id, dependency.state))
+            .collect()
+    }
+
+    fn dependency(id: &str, state: TaskDependencyState) -> (String, TaskDependencyState) {
+        (id.to_owned(), state)
+    }
+
+    fn task_summary(project: &ProjectSummary, id: &str) -> WorkflowItemSummary {
+        project.workflows[0]
+            .items
+            .tasks
+            .iter()
+            .find(|item| item.id == id)
+            .expect("task summary")
+            .clone()
+    }
+
+    #[test]
+    fn treats_a_task_without_a_declaration_as_having_no_dependencies() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-001", "todo", "");
+
+        let inspected = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect");
+        let document = read_task_document(root.path(), &directory, "TASK-001.md");
+
+        assert_eq!(document.summary, task_summary(&inspected, "TASK-001"));
+        assert!(document.dependencies.is_empty());
+        assert!(!document.dependency_format_error);
+    }
+
+    #[test]
+    fn reads_an_empty_declaration_as_no_dependencies() {
+        let (root, directory) = dependency_workflow();
+
+        for (id, declaration) in [("TASK-001", "[]"), ("TASK-002", "[ ]")] {
+            write_task_document(
+                root.path(),
+                &directory,
+                id,
+                "todo",
+                &format!("depends_on: {declaration}\n"),
+            );
+            let document = read_task_document(root.path(), &directory, &format!("{id}.md"));
+            assert!(document.dependencies.is_empty(), "{declaration}");
+            assert!(!document.dependency_format_error, "{declaration}");
+        }
+    }
+
+    #[test]
+    fn treats_declarations_outside_the_contract_form_as_a_format_error() {
+        let (root, directory) = dependency_workflow();
+        let cases = [
+            ("TASK-BLOCK", "depends_on:\n  - TASK-001\n"),
+            ("TASK-EMPTY", "depends_on:\n"),
+            ("TASK-OPEN", "depends_on: [TASK-001\n"),
+            ("TASK-QUOTED", "depends_on: [\"TASK-001\"]\n"),
+            ("TASK-BLANK", "depends_on: [TASK-001, ]\n"),
+            (
+                "TASK-TWICE",
+                "depends_on: [TASK-001]\ndepends_on: [TASK-002]\n",
+            ),
+        ];
+
+        for (id, extra) in cases {
+            write_task_document(root.path(), &directory, id, "todo", extra);
+            let document = read_task_document(root.path(), &directory, &format!("{id}.md"));
+            assert!(document.dependency_format_error, "{id}의 선언이 통과했다");
+            assert!(document.dependencies.is_empty(), "{id}");
+        }
+    }
+
+    // 파싱 대상은 프론트매터다. 본문에 열 0으로 적힌 같은 문자열은 선언이 아니다.
+    #[test]
+    fn ignores_a_declaration_written_in_the_body() {
+        let (root, directory) = dependency_workflow();
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("tasks/TASK-001.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 본문 언급\nstatus: todo\nupdated_at: 2026-08-03T00:00:00Z\n---\n\n# 본문 언급\n\ndepends_on: [TASK-002]\n",
+        )
+        .expect("write task");
+
+        let document = read_task_document(root.path(), &directory, "TASK-001.md");
+        assert!(document.dependencies.is_empty());
+        assert!(!document.dependency_format_error);
+    }
+
+    #[test]
+    fn satisfies_a_dependency_that_reached_qa_or_completion() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-QA", "qa_waiting", "");
+        write_task_document(root.path(), &directory, "TASK-DONE", "completed", "");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-QA, TASK-DONE]\n",
+        );
+
+        // 선언에 적힌 순서 그대로다. 정렬하면 아키텍트가 쓴 순서의 뜻이 사라진다.
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![
+                dependency("TASK-QA", TaskDependencyState::Satisfied),
+                dependency("TASK-DONE", TaskDependencyState::Satisfied),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_a_dependency_pending_until_it_reaches_qa() {
+        let (root, directory) = dependency_workflow();
+        // 계약에 없는 상태값도 미충족이다. 모르는 값을 충족 쪽으로 넘기지 않는다.
+        let cases = [
+            ("TASK-TODO", "todo"),
+            ("TASK-PROGRESS", "in_progress"),
+            ("TASK-BLOCKED", "blocked"),
+            ("TASK-UNKNOWN", "검토중"),
+        ];
+
+        for (id, status) in cases {
+            write_task_document(root.path(), &directory, id, status, "");
+            write_task_document(
+                root.path(),
+                &directory,
+                "TASK-001",
+                "todo",
+                &format!("depends_on: [{id}]\n"),
+            );
+
+            assert_eq!(
+                declared_dependencies(root.path(), &directory, "TASK-001.md"),
+                vec![dependency(id, TaskDependencyState::Pending)],
+                "{status}이 충족으로 넘어갔다"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_every_entry_when_only_one_dependency_is_satisfied() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-DONE", "completed", "");
+        write_task_document(root.path(), &directory, "TASK-OPEN", "todo", "");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-DONE, TASK-OPEN]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![
+                dependency("TASK-DONE", TaskDependencyState::Satisfied),
+                dependency("TASK-OPEN", TaskDependencyState::Pending),
+            ]
+        );
+    }
+
+    #[test]
+    fn marks_a_declaration_without_a_document_as_missing() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-404]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("TASK-404", TaskDependencyState::Missing)]
+        );
+    }
+
+    #[test]
+    fn marks_a_self_reference_as_cyclic() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "completed",
+            "depends_on: [TASK-001]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("TASK-001", TaskDependencyState::Cyclic)]
+        );
+    }
+
+    #[test]
+    fn marks_a_two_task_cycle_as_cyclic_on_both_sides() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "todo",
+            "depends_on: [TASK-001]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("TASK-002", TaskDependencyState::Cyclic)]
+        );
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-002.md"),
+            vec![dependency("TASK-001", TaskDependencyState::Cyclic)]
+        );
+    }
+
+    #[test]
+    fn marks_a_three_task_cycle_as_cyclic() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "todo",
+            "depends_on: [TASK-003]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-003",
+            "todo",
+            "depends_on: [TASK-001]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("TASK-002", TaskDependencyState::Cyclic)]
+        );
+    }
+
+    // 상태 판정이 순환보다 앞서면 여기서 갈라진다. 순환이 먼저다.
+    #[test]
+    fn prefers_the_cycle_over_the_state_of_a_completed_dependency() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "completed",
+            "depends_on: [TASK-001]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("TASK-002", TaskDependencyState::Cyclic)]
+        );
+    }
+
+    // 선행 작업 자신의 형식 오류는 그 문서만 미충족으로 만든다. 기대는 문서까지 막지는 않는다.
+    #[test]
+    fn reads_only_the_state_of_a_dependency_with_a_malformed_declaration() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "completed",
+            "depends_on: 없음\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &directory, "TASK-001.md"),
+            vec![dependency("TASK-002", TaskDependencyState::Satisfied)]
+        );
+        assert!(read_task_document(root.path(), &directory, "TASK-002.md").dependency_format_error);
+    }
+
+    #[test]
+    fn separates_missing_cyclic_and_malformed_declarations() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002, TASK-404]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "todo",
+            "depends_on: [TASK-001]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-003",
+            "todo",
+            "depends_on: TASK-001\n",
+        );
+
+        let declared = read_task_document(root.path(), &directory, "TASK-001.md");
+        assert_eq!(
+            declared
+                .dependencies
+                .into_iter()
+                .map(|value| (value.id, value.state))
+                .collect::<Vec<_>>(),
+            vec![
+                dependency("TASK-002", TaskDependencyState::Cyclic),
+                dependency("TASK-404", TaskDependencyState::Missing),
+            ]
+        );
+        assert!(!declared.dependency_format_error);
+
+        let malformed = read_task_document(root.path(), &directory, "TASK-003.md");
+        assert!(malformed.dependency_format_error);
+        assert!(malformed.dependencies.is_empty());
+    }
+
+    // 판정 범위는 워크플로우 안이다(SPEC-013 R1).
+    #[test]
+    fn keeps_dependency_resolution_inside_its_workflow() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let first = repository
+            .create_workflow(root.path(), "First")
+            .expect("create first workflow");
+        let second = repository
+            .create_workflow(root.path(), "Second")
+            .expect("create second workflow");
+        let first_directory = first.workflows[0].directory.clone();
+        let second_directory = second.workflows[1].directory.clone();
+        write_task_document(root.path(), &second_directory, "TASK-002", "completed", "");
+        write_task_document(
+            root.path(),
+            &first_directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002]\n",
+        );
+
+        assert_eq!(
+            declared_dependencies(root.path(), &first_directory, "TASK-001.md"),
+            vec![dependency("TASK-002", TaskDependencyState::Missing)]
+        );
+    }
+
+    // 목록 payload는 이 기능으로 늘지 않는다. `inspect`는 2.5초마다 도는 경로다.
+    #[test]
+    fn keeps_the_declaration_out_of_the_list_payload() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(root.path(), &directory, "TASK-002", "completed", "");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002]\n",
+        );
+        let declared = task_summary(
+            &FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("inspect declared"),
+            "TASK-001",
+        );
+
+        write_task_document(root.path(), &directory, "TASK-001", "todo", "");
+        let plain = task_summary(
+            &FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("inspect plain"),
+            "TASK-001",
+        );
+
+        assert_eq!(declared, plain);
+    }
+
+    /// 선언 줄이 `history:` 앞에 있는 픽스처. 앱이 QA 전이를 기록해도 원문 그대로여야 한다.
+    const DECLARATION_BEFORE_HISTORY: &str = "schema: workflow-labs/task@1\nid: TASK-BEFORE\ntitle: 선언이 앞\nstatus: qa_waiting\ndepends_on: [TASK-A, TASK-B]\nhistory:\n  - { at: 2026-08-01T00:00:00Z, kind: qa_waiting }\nupdated_at: 2026-08-02T00:00:00Z\n";
+    /// 선언 줄이 `history:` 뒤에 있는 픽스처. `append_task_history`의 스캔이 열 0에서 멈추는지를
+    /// 확인하는 자리다.
+    const DECLARATION_AFTER_HISTORY: &str = "schema: workflow-labs/task@1\nid: TASK-AFTER\ntitle: 선언이 뒤\nstatus: qa_waiting\nhistory:\n  - { at: 2026-08-01T00:00:00Z, kind: qa_waiting }\ndepends_on: [TASK-A, TASK-B]\nupdated_at: 2026-08-02T00:00:00Z\n";
+
+    fn assert_qa_keeps_the_declaration_line(outcome: TaskQaOutcome, kind: &str) {
+        for (file_name, frontmatter, after_history) in [
+            ("TASK-BEFORE.md", DECLARATION_BEFORE_HISTORY, false),
+            ("TASK-AFTER.md", DECLARATION_AFTER_HISTORY, true),
+        ] {
+            let (root, directory) = dependency_workflow();
+            let path = qa_waiting_task(root.path(), &directory, file_name, frontmatter);
+            write_task_document(root.path(), &directory, "TASK-A", "completed", "");
+
+            FileSystemProjectRepository
+                .record_task_qa(
+                    root.path(),
+                    &directory,
+                    file_name,
+                    outcome.clone(),
+                    "확인했습니다.",
+                )
+                .expect("record qa");
+
+            let source = fs::read_to_string(&path).expect("task source");
+            let updated_at = source
+                .lines()
+                .find_map(|line| line.strip_prefix("updated_at: "))
+                .expect("updated_at");
+            let entry = format!("  - {{ at: {updated_at}, kind: {kind} }}");
+            assert!(
+                source.contains("\ndepends_on: [TASK-A, TASK-B]\n"),
+                "{file_name}의 선언 줄이 원문 그대로 남지 않았다"
+            );
+            assert_eq!(source.matches("depends_on:").count(), 1, "{file_name}");
+            assert!(
+                source.contains("  - { at: 2026-08-01T00:00:00Z, kind: qa_waiting }"),
+                "{file_name}의 기존 이력이 사라졌다"
+            );
+            assert!(source.contains(&entry), "{file_name}에 전이 항목이 없다");
+            assert_eq!(
+                source.find("\ndepends_on:") > source.find(&entry),
+                after_history,
+                "{file_name}의 전이 항목이 선언 줄을 넘어갔다"
+            );
+
+            // 선언 줄이 이력 블록에 섞였으면 프론트매터가 깨져 여기서 드러난다.
+            let document = read_task_document(root.path(), &directory, file_name);
+            assert_eq!(document.summary.events.len(), 2, "{file_name}");
+            assert_eq!(
+                document
+                    .dependencies
+                    .into_iter()
+                    .map(|value| (value.id, value.state))
+                    .collect::<Vec<_>>(),
+                vec![
+                    dependency("TASK-A", TaskDependencyState::Satisfied),
+                    dependency("TASK-B", TaskDependencyState::Missing),
+                ],
+                "{file_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_declaration_line_when_qa_confirms_a_task() {
+        assert_qa_keeps_the_declaration_line(TaskQaOutcome::Confirmed, "completed");
+    }
+
+    #[test]
+    fn keeps_the_declaration_line_when_qa_returns_a_task() {
+        assert_qa_keeps_the_declaration_line(
+            TaskQaOutcome::RevisionRequested,
+            "revision_requested",
+        );
+    }
+
+    // 판정은 읽는 시점의 파생이다. 앱은 이 기능 때문에 작업 문서를 쓰지 않는다(SPEC-013 R5).
+    #[test]
+    fn reading_the_task_detail_does_not_touch_the_workflow_files() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "depends_on: [TASK-002, TASK-404]\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "completed",
+            "depends_on: [TASK-001]\n",
+        );
+        let control_root = root.path().join(".workflow");
+        let before = file_snapshot(&control_root);
+
+        let document = read_task_document(root.path(), &directory, "TASK-001.md");
+
+        assert_eq!(file_snapshot(&control_root), before);
+        assert_eq!(
+            document
+                .dependencies
+                .into_iter()
+                .map(|value| (value.id, value.state))
+                .collect::<Vec<_>>(),
+            vec![
+                dependency("TASK-002", TaskDependencyState::Cyclic),
+                dependency("TASK-404", TaskDependencyState::Missing),
+            ]
+        );
     }
 }

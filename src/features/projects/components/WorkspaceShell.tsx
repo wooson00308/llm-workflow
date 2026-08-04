@@ -14,6 +14,7 @@ import type {
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
+import { ActivityView } from "./ActivityView";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
@@ -74,6 +75,7 @@ const viewLabels = {
   specs: "기획서",
   tasks: "개발",
   archive: "기록",
+  activity: "활동",
   integrations: "연동",
   help: "도움말",
   settings: "설정",
@@ -103,7 +105,7 @@ export function WorkspaceShell({
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
-    "today" | "ideas" | "specs" | "tasks" | "archive" | "integrations" | "help" | "settings"
+    "today" | "ideas" | "specs" | "tasks" | "archive" | "activity" | "integrations" | "help" | "settings"
   >("today");
   const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
@@ -233,6 +235,7 @@ export function WorkspaceShell({
           <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
           <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
           <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
+          <button className={view === "activity" ? "active" : ""} onClick={() => setView("activity")}><Icon name="activity" />활동</button>
         </nav>
 
         <div className="workflow-nav">
@@ -314,14 +317,16 @@ export function WorkspaceShell({
               </div>
 
               {project.activeLeases.length > 0 && (
-                <div className="agent-activity">
+                <button className="agent-activity" onClick={() => setView("activity")} type="button">
                   <span className="pulse" />
                   <div><strong>{project.activeLeases[0].agent}가 문서를 작업 중입니다</strong><small>{project.activeLeases[0].taskId ?? "워크플로우 작업"} · 마이그레이션 보호 활성</small></div>
-                  <span>{project.activeLeases.length} active</span>
-                </div>
+                  <span className="agent-activity-count">{project.activeLeases.length} active</span>
+                  <span className="agent-activity-more">자세히 보기<Icon className="chevron" name="chevron" /></span>
+                </button>
               )}
 
-              <IdeaComposer busy={busy} compact disabled={!writable || !workflow} onAdd={addIdea} />
+              {/* key가 있어야 워크플로를 바꿨을 때 이전 워크플로의 초안이 입력창에 남지 않는다(R3). */}
+              <IdeaComposer busy={busy} compact disabled={!writable || !workflow} key={workflow?.directory} onAdd={addIdea} workflowDirectory={workflow?.directory} />
 
               <section className="stage-section">
                 <div className="section-heading"><div><p className="eyebrow">WORKFLOW</p><h2>흐름 한눈에 보기</h2></div><span className="flow-hint"><Icon name="workflow" />단계 카드를 선택해 전용 화면으로 이동</span></div>
@@ -388,11 +393,27 @@ export function WorkspaceShell({
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
-          {/* 워크플로우와 무관한 화면이라 workflow 조건을 걸지 않는다. */}
-          {view === "integrations" && (
+          {/* 활성 lease는 프로젝트 전역이라 워크플로우가 없어도 그릴 것이 있다. */}
+          {view === "activity" && (
+            <ActivityView
+              onOpenDocument={(result) => void openSearchResult(result)}
+              project={project}
+              workflow={workflow}
+            />
+          )}
+
+          {/* 워크플로우와 무관한 화면이라 workflow 조건을 걸지 않는다.
+
+              `heartbeatRuns`를 함께 거는 것은 그 필드가 `IntegrationsState`에서 아직 선택이기
+              때문이다(카드 쪽 prop은 필수다). `useProjectWorkspace`는 언제나 채워 내보내므로 이
+              조건은 실사용에서 참이고, 손으로 조립한 상태가 이 값을 빠뜨리면 화면이 통째로 비어
+              바로 드러난다 — 액션만 조용히 사라지는 것보다 낫다. */}
+          {view === "integrations" && integrations.heartbeatRuns && (
             <IntegrationsView
               actions={integrationActions}
               error={integrations.error}
+              heartbeatRuns={integrations.heartbeatRuns}
+              pendingWork={project.pendingWork}
               snapshot={integrations.snapshot}
               writeError={integrations.writeError}
             />

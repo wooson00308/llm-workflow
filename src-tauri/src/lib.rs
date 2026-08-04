@@ -10,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             commands::projects::inspect_project,
             commands::projects::create_workflow,
@@ -23,6 +24,7 @@ pub fn run() {
             commands::heartbeat::inspect_integrations,
             commands::heartbeat::install_heartbeat_jobs,
             commands::heartbeat::install_dream_job,
+            commands::heartbeat::run_heartbeat_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
