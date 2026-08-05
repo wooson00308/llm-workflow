@@ -2194,6 +2194,7 @@ mod tests {
     // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
     use crate::infrastructure::claim_helper::claim_helper_path;
     use crate::infrastructure::heartbeat_condition::install_condition_script;
+    use crate::infrastructure::heartbeat_condition::test_support::run_condition;
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -4763,10 +4764,9 @@ mod tests {
 
     /// 앱의 대기 물량 판정과 조건 스크립트의 종료 코드를 세 역할에서 대조하고 앱의 판정을 낸다.
     /// 대조 어법은 `a_closed_idea_is_not_planner_work_in_either_judgement`과 같다 —
-    /// `role_eligibility.rs`의 대조 헬퍼는 자기 테스트 모듈 안에 있어 다른 모듈에서 부를 수 없다.
+    /// 스크립트를 부르는 일은 `heartbeat_condition`의 공용 헬퍼가 한다. 셸 이름과 파일 이름을 여기
+    /// 다시 적으면 그것이 세 번째 사본이 되고, 플랫폼마다 다른 자산이 깔리므로 그 사본은 곧 틀린다.
     fn pending_work_matching_condition_script(project_root: &Path) -> PendingRoleWork {
-        use std::process::Command;
-
         let pending = FileSystemProjectRepository
             .inspect(project_root)
             .expect("inspect project")
@@ -4776,14 +4776,7 @@ mod tests {
             ("architect", pending.architect),
             ("developer", pending.developer),
         ] {
-            let code = Command::new("sh")
-                .arg(".workflow/rules/wf-eligible.sh")
-                .arg(role)
-                .current_dir(project_root)
-                .status()
-                .expect("run condition script")
-                .code()
-                .expect("exit code");
+            let code = run_condition(project_root, role).code;
             assert_eq!(app_flag, code == 0, "{role} 판정이 조건 스크립트와 다르다");
         }
         pending
