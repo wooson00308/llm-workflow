@@ -9,7 +9,7 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 /// 하트비트 실행 파일 이름. PATH 후보와 사용자 설치 후보가 같은 이름을 쓴다.
 const EXECUTABLE: &str = "heartbeat";
@@ -33,9 +33,31 @@ pub enum RunFailure {
     ExitStatus { program: PathBuf, code: Option<i32> },
 }
 
+/// 출력을 받아 온 실행의 결과. 종료 코드가 0이 아닌 것이 여기서는 실패가 아니다 —
+/// `heartbeat update`는 종료 코드로 원인을 말하므로(계약), 그 값을 실패로 접으면 원인이 사라진다.
+/// 실패로 접는 쪽은 `run_once`이고 그쪽 규약은 그대로다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Captured {
+    /// 실제로 띄운 후보. 어느 실행 파일이 답했는지가 사유의 일부다.
+    pub program: PathBuf,
+    /// 종료 코드. `None`이면 시그널로 끝난 것이다.
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// 사용자가 손으로 같은 일을 할 때 칠 명령 원문(R6). 실패 값의 `command`가 여기서만 나온다.
 pub fn manual_command(job_name: &str) -> String {
     format!("{EXECUTABLE} {SUBCOMMAND} {JOB_FLAG} {job_name}")
+}
+
+/// 인자 목록에서 명령 원문을 만든다. `manual_command`는 잡 이름을 받는 형태라 `once -j` 밖의
+/// 실행에 쓸 수 없어서 나눠 둔다.
+pub fn manual_command_for(arguments: &[&str]) -> String {
+    std::iter::once(EXECUTABLE)
+        .chain(arguments.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 실행 파일 후보를 볼 순서대로 만든다.
@@ -92,6 +114,39 @@ pub fn run_once(candidates: &[PathBuf], job_name: &str) -> Result<(), RunFailure
     })
 }
 
+/// 고정 인자로 한 번 띄우고 stdout·stderr·종료 코드를 함께 받아 온다.
+///
+/// 후보 순서와 폴스루 규칙은 `run_once`와 같다 — 앞 후보가 `NotFound`일 때만 다음 후보를 본다.
+/// 다른 것은 출력을 버리지 않는다는 것 하나다. `run_once`는 세션 하나가 수십 분이라 파이프를 열면
+/// 막히지만, 이쪽이 부르는 명령은 출력 자체가 계약이라 받아 와야 한다.
+///
+/// `arguments`는 백엔드 상수에서만 온다. 화면이 준 문자열이 여기 섞이는 경로가 이 모듈에 없다.
+pub fn run_capturing(candidates: &[PathBuf], arguments: &[&str]) -> Result<Captured, RunFailure> {
+    for candidate in candidates {
+        match output_of(candidate, arguments) {
+            Ok(output) => {
+                return Ok(Captured {
+                    program: candidate.clone(),
+                    code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(RunFailure::NotStarted {
+                    program: candidate.clone(),
+                    reason: error.to_string(),
+                })
+            }
+        }
+    }
+
+    Err(RunFailure::NotFound {
+        looked: candidates.to_vec(),
+    })
+}
+
 /// 표준 입출력 셋 다 닫는다. 세션 출력을 앱 안에서 보여주는 것은 기획서 제외 범위이고, 파이프를
 /// 열어 두고 읽지 않으면 20~30분짜리 세션에서 버퍼가 막힌다.
 ///
@@ -107,6 +162,17 @@ fn status_of(program: &Path, job_name: &str) -> std::io::Result<ExitStatus> {
         .status()
 }
 
+/// stdout·stderr를 파이프로 받는다. 표준 입력은 닫는다 — 앱이 띄우는 프로세스에 사람이 답할
+/// 자리가 없고, 열어 두면 입력을 기다리는 명령이 영원히 끝나지 않는다.
+///
+/// 작업 디렉터리를 지정하지 않는 것은 `status_of`와 같다.
+fn output_of(program: &Path, arguments: &[&str]) -> std::io::Result<Output> {
+    Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -116,9 +182,16 @@ mod tests {
     #[cfg(unix)]
     use tempfile::TempDir;
 
-    use super::{candidates_for, manual_command, run_once, RunFailure};
+    #[cfg(unix)]
+    use super::Captured;
+    use super::{
+        candidates_for, manual_command, manual_command_for, run_capturing, run_once, RunFailure,
+    };
 
     const JOB: &str = "wf-planner-Users-catze-project-workflow-labs";
+
+    /// 캡처 실행이 쓰는 고정 인자. 서비스 쪽 상수와 같은 값이고, 여기서는 원문 조립만 확인한다.
+    const UPDATE: [&str; 1] = ["update"];
 
     fn missing(home: &Path) -> Vec<PathBuf> {
         vec![home.join("없는-후보-1"), home.join("없는-후보-2")]
@@ -221,5 +294,79 @@ mod tests {
                 code: Some(3),
             })
         );
+    }
+
+    #[test]
+    fn the_manual_command_for_an_argument_list_names_the_executable_first() {
+        assert_eq!(manual_command_for(&UPDATE), "heartbeat update");
+    }
+
+    #[test]
+    fn capturing_reports_every_path_that_was_looked_at_when_nothing_is_found() {
+        let home = tempdir().expect("temp home");
+        let looked = missing(home.path());
+
+        assert_eq!(
+            run_capturing(&looked, &UPDATE),
+            Err(RunFailure::NotFound { looked })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capturing_carries_stdout_stderr_and_the_exit_code_together() {
+        let directory = tempdir().expect("temp dir");
+        let script = recorder(
+            &directory,
+            "#!/bin/sh\nprintf '%s' \"$*\" > \"$(dirname \"$0\")/arguments\"\n\
+             printf 'result=ok version=0.8.1 exit=0\\n'\n\
+             printf '진단 한 줄\\n' >&2\nexit 0\n",
+        );
+
+        assert_eq!(
+            run_capturing(std::slice::from_ref(&script), &UPDATE),
+            Ok(Captured {
+                program: script,
+                code: Some(0),
+                stdout: "result=ok version=0.8.1 exit=0\n".to_owned(),
+                stderr: "진단 한 줄\n".to_owned(),
+            })
+        );
+        assert_eq!(recorded_arguments(&directory).as_deref(), Some("update"));
+    }
+
+    /// 0이 아닌 종료 코드는 이 경로에서 실패가 아니다. 계약이 코드로 원인을 말하므로 그 값이
+    /// 결과에 실려야 하고, 실패로 접으면 stdout·stderr도 함께 사라진다.
+    #[cfg(unix)]
+    #[test]
+    fn a_nonzero_exit_code_is_not_a_capture_failure() {
+        let directory = tempdir().expect("temp dir");
+        let script = recorder(
+            &directory,
+            "#!/bin/sh\nprintf 'step=repo status=failed detail=dirty-tree\\n'\nexit 11\n",
+        );
+
+        let captured = run_capturing(std::slice::from_ref(&script), &UPDATE)
+            .expect("종료 코드가 0이 아니어도 결과다");
+
+        assert_eq!(captured.code, Some(11));
+        assert_eq!(
+            captured.stdout,
+            "step=repo status=failed detail=dirty-tree\n"
+        );
+        assert_eq!(captured.stderr, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_candidate_falls_through_to_the_next_one_while_capturing() {
+        let directory = tempdir().expect("temp dir");
+        let script = recorder(&directory, "#!/bin/sh\nprintf 'result=ok\\n'\n");
+        let candidates = vec![directory.path().join("없는-후보"), script.clone()];
+
+        let captured = run_capturing(&candidates, &UPDATE).expect("두 번째 후보가 답한다");
+
+        assert_eq!(captured.program, script);
+        assert_eq!(captured.stdout, "result=ok\n");
     }
 }

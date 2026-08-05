@@ -2,13 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-098
 title: 계약에서 기획자 분기 임시 불릿을 걷어내고 rules_version을 올린다
-status: todo
+status: completed
 source_spec_id: SPEC-030
 source_decision_id: DECISION-4B917B03
 depends_on: [TASK-097]
-updated_at: 2026-08-04T11:32:00Z
+updated_at: 2026-08-04T15:29:46.439588+00:00
 history:
   - { at: 2026-08-04T11:32:00Z, kind: created }
+  - { at: 2026-08-04T15:12:00Z, kind: in_progress }
+  - { at: 2026-08-04T15:18:30Z, kind: qa_waiting }
+  - { at: 2026-08-04T15:29:46.439588+00:00, kind: completed }
 ---
 
 # 계약에서 기획자 분기 임시 불릿을 걷어내고 rules_version을 올린다

@@ -26,6 +26,12 @@ const DAEMON_DIRECTORY: &str = "heartbeat";
 const PID_FILE: &str = "heartbeat.pid";
 const STATE_FILE: &str = "state.json";
 
+/// 상태 파일에서 데몬이 예약한 항목과 그 안의 버전 키(`docs/heartbeat.md` 3번 절). 밑줄로 시작하는
+/// 최상위 키는 잡 이름이 아니라 데몬 예약 영역이다.
+const DAEMON_ENTRY: &str = "_daemon";
+const DAEMON_ENTRY_PREFIX: &str = "_";
+const DAEMON_VERSION: &str = "version";
+
 /// 중복 감지 결과에 담을 하트비트 연동 이름.
 pub const INTEGRATION: &str = "heartbeat";
 
@@ -142,6 +148,47 @@ impl JobRuns {
         let entry = self.0.as_ref()?.get(job_name)?.as_object()?;
         let values = entry.get("recent_runs")?.as_array()?;
         Some(values.iter().filter_map(Value::as_f64).collect())
+    }
+
+    /// 상태 파일에 실행 기록이 있는 잡 이름 전체. 이름 오름차순이고 데몬 예약 항목은 빠진다.
+    ///
+    /// 밑줄로 시작하는 최상위 키는 잡 이름이 아니라 데몬 예약 영역이다(`docs/heartbeat.md` 3번 절).
+    /// 지금 있는 예약 키는 `_daemon` 하나이고, 예약 키가 느는 것은 하위호환 변경이라 접두사로
+    /// 거른다.
+    ///
+    /// 이름을 해석하지 않는다. 이름에서 프로젝트나 역할을 뽑아내지 않고 파일에 적힌 문자열
+    /// 그대로 돌려준다(SPEC-036 R2). 정렬을 고정하는 이유는 JSON 객체의 키 순서에 화면이 기대게
+    /// 두지 않기 위해서다.
+    ///
+    /// 상태 파일이 없거나 깨졌으면 빈 목록이고 오류가 아니다(머리주석의 규칙).
+    pub fn job_names(&self) -> Vec<String> {
+        let Some(entries) = self.0.as_ref().and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut names = entries
+            .keys()
+            .filter(|name| !name.starts_with(DAEMON_ENTRY_PREFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// 마지막으로 뜬 데몬이 물고 있던 버전(`_daemon.version`).
+    ///
+    /// `None`은 "모름"이고 오류가 아니다. 상태 파일이 없는 것, JSON이 깨진 것, `_daemon` 항목이
+    /// 없는 것, 그 안에 `version`이 없는 것이 전부 여기서 같은 값으로 끝난다 — 이 모듈은 없는
+    /// 파일을 오류로 올리지 않는다(머리주석). 데몬이 한 번도 뜬 적 없으면 키 자체가 없다.
+    ///
+    /// 이 값은 "지금 돌고 있는 버전"이 아니라 "마지막으로 뜬 데몬이 이랬다"는 뜻이다. `_daemon`은
+    /// 종료 시 지워지지 않는다(`docs/heartbeat.md` 3번 절).
+    pub fn daemon_version(&self) -> Option<String> {
+        self.0
+            .as_ref()?
+            .get(DAEMON_ENTRY)?
+            .get(DAEMON_VERSION)?
+            .as_str()
+            .map(str::to_owned)
     }
 }
 
@@ -858,6 +905,132 @@ mod tests {
         let runs = read_heartbeat_status(directory.path(), SLUG).runs;
 
         assert_eq!(runs.recent_runs(DEVELOPER_JOB), Some(Vec::new()));
+    }
+
+    /// 도는 데몬의 버전은 잡 항목이 아니라 데몬 예약 항목에서 온다. 잡 기록과 같은 파일이므로
+    /// 조회 한 번으로 함께 나온다.
+    #[test]
+    fn the_daemon_version_comes_from_the_reserved_entry() {
+        let directory = home();
+        write(
+            directory.path(),
+            "heartbeat/state.json",
+            &format!(
+                r#"{{
+  "_daemon": {{ "version": "0.8.0", "pid": 84213, "started_at": "2026-08-05T09:12:03" }},
+  "{DEVELOPER_JOB}": {{ "last_result": "success" }}
+}}"#
+            ),
+        );
+
+        let read = read_heartbeat_status(directory.path(), SLUG);
+
+        assert_eq!(read.runs.daemon_version().as_deref(), Some("0.8.0"));
+        // 예약 항목이 잡 기록을 밀어내지 않는다.
+        assert_eq!(
+            read.runs
+                .get(DEVELOPER_JOB)
+                .and_then(|run| run.result)
+                .as_deref(),
+            Some("success")
+        );
+    }
+
+    /// 완료 조건 1. 파일 없음·JSON 깨짐·`_daemon` 없음·`version` 없음이 전부 "모름"이고, 넷 중
+    /// 어느 것도 읽기 실패로 올라가지 않는다.
+    #[test]
+    fn a_missing_broken_or_absent_daemon_entry_is_unknown_and_not_a_failure() {
+        let missing = home();
+        let broken = home();
+        write(broken.path(), "heartbeat/state.json", "{ not json");
+        let no_entry = home();
+        write(
+            no_entry.path(),
+            "heartbeat/state.json",
+            &format!(r#"{{ "{DEVELOPER_JOB}": {{ "last_result": "success" }} }}"#),
+        );
+        let no_version = home();
+        write(
+            no_version.path(),
+            "heartbeat/state.json",
+            r#"{ "_daemon": { "pid": 84213 } }"#,
+        );
+        let not_a_string = home();
+        write(
+            not_a_string.path(),
+            "heartbeat/state.json",
+            r#"{ "_daemon": { "version": 8 } }"#,
+        );
+
+        for directory in [&missing, &broken, &no_entry, &no_version, &not_a_string] {
+            let read = read_heartbeat_status(directory.path(), SLUG);
+
+            assert_eq!(read.runs.daemon_version(), None);
+            assert!(read.status.read_failures.is_empty());
+        }
+    }
+
+    /// SPEC-036 완료 조건 8. 잡 목록은 상태 파일의 최상위 키에서 오고, 데몬 예약 항목은 빠지며,
+    /// 이름 오름차순이다. 파일에 적힌 순서와 다른 순서를 단정해 정렬이 실제로 걸리는지 본다.
+    #[test]
+    fn the_job_names_come_from_the_top_level_keys_without_the_daemon_entry() {
+        let directory = home();
+        write(
+            directory.path(),
+            "heartbeat/state.json",
+            &format!(
+                r#"{{
+  "wf-planner-Users-catze-Git-mech-arena": {{ "last_result": "skipped" }},
+  "_daemon": {{ "version": "0.8.0", "pid": 875 }},
+  "{DEVELOPER_JOB}": {{ "last_result": "success" }},
+  "dream-catze": {{ "last_result": "success" }}
+}}"#
+            ),
+        );
+
+        let runs = read_heartbeat_status(directory.path(), SLUG).runs;
+
+        assert_eq!(
+            runs.job_names(),
+            vec![
+                "dream-catze",
+                DEVELOPER_JOB,
+                "wf-planner-Users-catze-Git-mech-arena",
+            ]
+        );
+    }
+
+    /// 예약 항목만 있는 파일에는 잡이 없다. 데몬이 뜬 적은 있으나 잡이 한 번도 돌지 않은 기기다.
+    #[test]
+    fn a_state_file_holding_only_the_daemon_entry_has_no_job_names() {
+        let directory = home();
+        write(
+            directory.path(),
+            "heartbeat/state.json",
+            r#"{ "_daemon": { "version": "0.8.0" } }"#,
+        );
+
+        let runs = read_heartbeat_status(directory.path(), SLUG).runs;
+
+        assert!(runs.job_names().is_empty());
+    }
+
+    /// 파일 없음·JSON 깨짐·최상위가 객체가 아님이 전부 빈 목록이고 읽기 실패가 아니다.
+    /// 없는 파일을 오류로 올리지 않는 이 모듈의 규칙이 새 값에도 그대로 걸린다.
+    #[test]
+    fn a_missing_broken_or_non_object_state_file_has_no_job_names() {
+        let missing = home();
+        let broken = home();
+        write(broken.path(), "heartbeat/state.json", "{ not json");
+        let not_an_object = home();
+        write(not_an_object.path(), "heartbeat/state.json", "[1, 2]");
+
+        for directory in [&missing, &broken, &not_an_object] {
+            let read = read_heartbeat_status(directory.path(), SLUG);
+
+            assert!(read.runs.job_names().is_empty());
+            assert!(read.status.read_failures.is_empty());
+        }
     }
 
     /// 한도 값은 관리 블록에 있고 이 모듈은 블록을 모른다. 서비스가 채울 때까지 `unknown`이다.

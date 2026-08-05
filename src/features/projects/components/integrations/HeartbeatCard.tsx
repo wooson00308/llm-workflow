@@ -1,15 +1,30 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { MaxPerField, maxPerFieldError } from "../MaxPerField";
 import { ModelField, isSupportedModel } from "../ModelField";
 import type {
+  AgentLeaseSummary,
   DuplicateIntegrationJob,
   HeartbeatIntegration,
   HeartbeatJobRun,
+  HeartbeatRecordedJob,
   HeartbeatSetupStage,
   HeartbeatRunControls,
   HeartbeatRunFailure,
+  HeartbeatServiceControlResult,
+  HeartbeatServiceControls,
+  HeartbeatServiceOperation,
+  HeartbeatServiceOutcome,
+  HeartbeatServiceTarget,
+  HeartbeatSetupRunControls,
+  HeartbeatSetupRunResult,
   HeartbeatSetupState,
   HeartbeatSetupStep,
+  HeartbeatUpdateControls,
+  HeartbeatVersionControls,
+  HeartbeatVersionUndeterminedReason,
+  HeartbeatVersions,
+  HeartbeatUpdateGuide as UpdateGuide,
+  HeartbeatUpdateResult,
   IntegrationReadFailure,
   IntegrationsSnapshot,
   JobDefaults,
@@ -25,6 +40,7 @@ import {
   type IntegrationCardProps,
 } from "./IntegrationCard";
 import { JobChanges, type RemovedJob, type WrittenJob } from "./JobChanges";
+import { HeartbeatUpdateGuide } from "./HeartbeatUpdateGuide";
 import { browserJobValueMemoryStore } from "../../infrastructure/jobValueMemoryStore";
 import { browserSetupGuideCollapseStore } from "../../infrastructure/browserSetupGuideCollapseStore";
 import { copy } from "../../infrastructure/clipboard";
@@ -355,6 +371,230 @@ function stepNote(stage: HeartbeatSetupStage, daemonRunning: boolean): string | 
   }
 }
 
+/**
+ * 실행 확인 화면이 알리는 "무엇이 만들어지는가"(SPEC-037 R3). 두 명령은 파일을 쓰므로 무엇이
+ * 만들어지는지 알린 뒤 실행한다.
+ *
+ * **이 표가 버튼이 붙는 자리를 정하지 않는다.** 그 판정은 백엔드가 실은 `runnable` 하나이고, 여기
+ * 있는 것은 이미 붙기로 정해진 단계의 문구뿐이다. 문구가 없는 단계도 확인 화면은 명령 원문과
+ * 판정 근거 경로로 설 수 있다.
+ */
+const setupRunEffects: Partial<Record<HeartbeatSetupStep, string[]>> = {
+  init: ["하트비트 홈에 설정과 상태 문서를 만듭니다."],
+  service: ["서비스 등록물을 만듭니다.", "등록한 서비스로 데몬을 띄웁니다."],
+};
+
+/**
+ * 설치 단계 실행의 종료 코드 한 줄. 숫자만 싣고 뜻을 붙이지 않는다 — 이 두 명령은 원인별 종료
+ * 코드가 계약에 없고(`docs/heartbeat.md` 4·5번 절), 앱이 실패 사유를 지어내지 않는다.
+ *
+ * 업데이트의 `exitNote`와 나눠 두는 이유가 그것이다. 그쪽은 계약이 코드로 원인을 가르는 자리라
+ * 문장을 붙이고, 이쪽은 붙일 계약이 없다.
+ */
+function setupExitNote(code: number | null): string {
+  return code === null
+    ? "하트비트가 종료 코드 없이 끝났습니다. 프로세스가 시그널로 끝난 경우입니다."
+    : `종료 코드 ${code}.`;
+}
+
+/**
+ * 버전 판정이 불가능한 사유(SPEC-037 확인 필요 2번). 넷이 서로 다른 문장이어야 한다 — 사용자가 할
+ * 다음 행동이 서로 다르다.
+ */
+const undeterminedReasonNotes: Record<HeartbeatVersionUndeterminedReason, string> = {
+  executableNotFound:
+    "앱이 하트비트 실행 파일을 찾지 못해 디스크의 버전을 읽지 못했습니다.",
+  executableNotStarted:
+    "하트비트 실행 파일은 찾았지만 띄우지 못해 디스크의 버전을 읽지 못했습니다.",
+  diskVersionOffContract:
+    "하트비트가 낸 출력이 계약의 모양이 아니라 디스크의 버전을 읽지 못했습니다. 버전 표면을 모르는 옛 설치본일 수 있습니다.",
+  runningVersionUnknown:
+    "상태 파일에 도는 데몬의 버전이 없어 읽지 못했습니다. 데몬이 한 번도 뜬 적 없으면 이 항목이 없습니다.",
+};
+
+/**
+ * 업데이트 결과의 단계 이름. 계약이 정한 셋뿐이고, 어휘 밖의 값은 받은 문자열을 그대로 보여준다 —
+ * 새 단계가 늘면 앱이 그것을 감추는 쪽보다 날문자로라도 보이는 쪽이 낫다(SPEC-034 R2).
+ */
+const updateStepLabels: Record<string, string> = {
+  repo: "저장소 갱신",
+  deps: "의존성 설치",
+  service: "데몬 재기동",
+};
+
+/** 단계 상태의 낱말. 셋이 서로 다른 낱말이어야 한다. 어휘 밖의 값은 그대로 보여준다. */
+const updateStatusLabels: Record<string, string> = {
+  ok: "완료",
+  failed: "실패",
+  skipped: "건너뜀",
+};
+
+/**
+ * 결과 낱말 셋. `partial`이 성공으로도 실패로도 읽히지 않는다는 것이 이 표의 요점이다 — 그 상태의
+ * 뜻은 "코드는 갱신됐는데 도는 프로세스는 갱신 전 코드일 수 있다"이고, 그것이 08-05 사고의 모양이다.
+ */
+const updateResultLabels: Record<string, string> = {
+  ok: "갱신이 끝났습니다",
+  partial: "코드는 갱신됐지만 뒤가 따라오지 못했습니다",
+  failed: "갱신하지 못했습니다",
+};
+
+const partialNote =
+  "성공도 실패도 아닌 상태입니다. 저장소의 코드는 새것인데 지금 도는 프로세스는 갱신 전 코드를 그대로 들고 있을 수 있습니다. 아래 단계와 사유를 보고 남은 걸음을 직접 끝내야 합니다.";
+
+/**
+ * 종료 코드별로 다음 행동이 다르다(R4). 계약(`docs/heartbeat.md`의 인용 절)이 코드로 원인을
+ * 가르므로 그 갈림을 그대로 문장으로 옮긴다. 하나의 문구로 뭉뚱그리지 않는다.
+ *
+ * 10번대는 저장소, 20번대는 의존성, 30번대는 프로세스다. 그 자리수 안에서 번호가 느는 것은 계약이
+ * 하위호환으로 허용한 변경이라, 이 표에 없는 코드에 뜻을 붙이지 않는다 — 아는 척하지 않는 쪽이
+ * SPEC-034 R2가 세운 선이다.
+ */
+const exitGuidance: Record<number, string> = {
+  0: "갱신과 재기동이 필요한 만큼 끝났습니다.",
+  10: "이 설치본은 git 저장소가 아닙니다. pip으로 깔았다면 아래 갱신 안내의 pip 갈래로 갱신하세요. 하트비트가 소스 체크아웃을 갱신하는 명령이라 wheel 설치는 대상이 아닙니다.",
+  11: "하트비트 저장소에 미커밋 변경이 있어 갱신하지 않았습니다. 그 저장소에서 변경을 커밋하거나 되돌린 뒤 다시 실행하세요.",
+  12: "로컬 커밋이 갈라져 fast-forward할 수 없습니다. 하트비트 저장소에서 직접 병합하거나 브랜치를 정리한 뒤 다시 실행하세요.",
+  13: "원격에서 가져오지 못했습니다. 네트워크와 원격 접근 권한을 확인한 뒤 다시 실행하세요.",
+  14: "현재 브랜치에 upstream이 없어 무엇을 당길지 알 수 없습니다. 하트비트 저장소에서 upstream을 지정한 뒤 다시 실행하세요.",
+  20: "코드는 갱신됐는데 의존성 설치가 실패했습니다. 하트비트 저장소에서 설치를 직접 끝내야 합니다.",
+  30: "코드는 갱신됐는데 재기동 명령이 실패했습니다. 하트비트를 직접 재시작해야 갱신한 코드가 반영됩니다.",
+  31: "코드는 갱신됐는데 데몬이 OS 스케줄러 밖에서 돌고 있어 앱이 재기동하지 못했습니다. 그 프로세스를 직접 재시작해야 합니다.",
+  32: "데몬 자신의 프로세스 트리 안에서 불려 재기동하지 않았습니다.",
+};
+
+/** 종료 코드 한 줄. 숫자는 언제나 보이고, 모르는 코드에는 뜻을 붙이지 않는다. */
+function exitNote(code: number | null): string {
+  if (code === null) {
+    return "하트비트가 종료 코드 없이 끝났습니다. 프로세스가 시그널로 끝난 경우입니다.";
+  }
+  const guidance = exitGuidance[code];
+  return guidance
+    ? `종료 코드 ${code} — ${guidance}`
+    : `종료 코드 ${code} — 앱이 아는 코드가 아닙니다. 아래 원문에서 무엇이 있었는지 확인하세요.`;
+}
+
+/** 두 조작의 이름. 화면이 보내는 식별자와 짝이고, 문구는 이 한 자리에서만 적는다. */
+const serviceOperationLabels: Record<HeartbeatServiceOperation, string> = {
+  stop: "데몬 끄기",
+  start: "데몬 켜기",
+};
+
+/** 대상이 확정되지 않은 넷. 스냅샷의 판정과 조작 결과가 같은 집합을 쓴다. */
+type ServiceUnresolvedReason =
+  | "notRegistered"
+  | "ambiguous"
+  | "unsupportedPlatform"
+  | "unreadable";
+
+/** 사유 하나를 그리는 데 필요한 값 전부. 담을 것이 없는 사유는 두 자리가 비어 있다. */
+interface ServiceUnresolvedView {
+  reason: ServiceUnresolvedReason;
+  /** 대상 모호에서 찾은 등록물 경로. 나머지 셋은 빈 목록이다. */
+  plistPaths: string[];
+  /** 읽지 못한 경로. 나머지 셋은 null이다. */
+  path: string | null;
+}
+
+/**
+ * 넷의 문구(R5). 사유마다 사용자가 할 다음 행동이 다르므로 하나의 실패 문구로 뭉뚱그리지 않는다.
+ *
+ * 스냅샷의 판정과 조작 결과가 같은 사유를 다르게 말하지 않도록 문구가 이 한 자리에 있다. 백엔드가
+ * 두 값의 갈래를 이미 나눠 두었고, 화면은 그 갈래를 문장으로 옮기기만 한다.
+ */
+const serviceUnresolvedNotes: Record<
+  ServiceUnresolvedReason,
+  { title: string; note: string }
+> = {
+  notRegistered: {
+    title: "이 기기에 등록된 하트비트 서비스가 없습니다",
+    note: "등록물 디렉터리는 읽었는데 하트비트 등록물이 없습니다. 데몬이 OS 스케줄러 밖에서 손으로 떠 있거나 아예 없는 상태입니다. 등록을 만드는 자리는 위 설치 마법사의 서비스 등록 단계입니다.",
+  },
+  ambiguous: {
+    title: "등록물이 여럿이라 앱이 대상을 고르지 않습니다",
+    note: "앱이 하나를 골라 내리면 엉뚱한 서비스가 내려가고 데몬은 계속 도는데 화면은 껐다고 말하게 됩니다. 그 어긋남을 앱이 확인할 수단이 없어 고르지 않습니다. 아래 등록물을 정리해 하나만 남겨야 합니다.",
+  },
+  unsupportedPlatform: {
+    title: "이 플랫폼에서는 앱이 데몬을 끄고 켤 수 없습니다",
+    note: "앱이 확인한 정지·기동 절차는 macOS(launchd)뿐입니다. 확인하지 않은 명령을 대신 싣지 않습니다.",
+  },
+  unreadable: {
+    title: "등록물을 읽지 못해 대상을 확정하지 못했습니다",
+    note: "등록물 디렉터리를 열지 못했거나, 등록물은 하나인데 그 안의 서비스 이름을 읽지 못했습니다. 읽지 못한 것을 없는 것으로 읽지 않습니다.",
+  },
+};
+
+/** 스냅샷의 판정을 사유로 옮긴다. 확정된 대상이면 사유가 없다. */
+function unresolvedFromTarget(target: HeartbeatServiceTarget): ServiceUnresolvedView | null {
+  switch (target.kind) {
+    case "resolved":
+      return null;
+    case "not_registered":
+      return { reason: "notRegistered", plistPaths: [], path: null };
+    case "ambiguous":
+      return { reason: "ambiguous", plistPaths: target.plist_paths, path: null };
+    case "unsupported_platform":
+      return { reason: "unsupportedPlatform", plistPaths: [], path: null };
+    case "unreadable":
+      return { reason: "unreadable", plistPaths: [], path: target.path };
+  }
+}
+
+/**
+ * 조작 결과의 앞 넷을 같은 사유로 옮긴다.
+ *
+ * 버튼이 확정된 대상에서만 나가므로 정상 경로에서는 나오지 않는다. 누르는 사이에 스냅샷이 바뀌면
+ * 도착할 수 있고, 그때도 사용자가 읽을 문장은 같아야 한다.
+ */
+function unresolvedFromResult(
+  result: HeartbeatServiceControlResult,
+): ServiceUnresolvedView | null {
+  switch (result.kind) {
+    case "notRegistered":
+      return { reason: "notRegistered", plistPaths: [], path: null };
+    case "ambiguous":
+      return { reason: "ambiguous", plistPaths: result.plistPaths, path: null };
+    case "unsupportedPlatform":
+      return { reason: "unsupportedPlatform", plistPaths: [], path: null };
+    case "unreadable":
+      return { reason: "unreadable", plistPaths: [], path: result.path };
+    default:
+      return null;
+  }
+}
+
+/**
+ * 종료 코드 한 줄. 숫자는 언제나 보이고 뜻은 붙지 않는다(R7).
+ *
+ * `bootout`의 "No such process"와 `bootstrap`의 "already loaded"는 launchctl이 stderr로 말하는
+ * 것이고, 앱이 그 문장을 자기 어휘로 옮기면 옮긴 만큼이 지어낸 것이 된다. 업데이트 쪽이 코드를
+ * 뜻으로 옮기는 것은 그쪽 계약이 코드로 원인을 갈라 두었기 때문이며, 여기에는 그 계약이 없다.
+ */
+function serviceExitNote(code: number | null): string {
+  if (code === null) {
+    return "launchctl이 종료 코드 없이 끝났습니다. 프로세스가 시그널로 끝난 경우입니다.";
+  }
+  if (code === 0) return "종료 코드 0.";
+  return `종료 코드 ${code} — 앱은 이 숫자의 뜻을 옮기지 않습니다. 사유는 아래 원문에 있습니다.`;
+}
+
+/**
+ * 명령이 끝난 것과 데몬이 그 상태가 된 것은 다른 사실이다(R7).
+ *
+ * 앱의 실행 여부 판정은 pid 파일 존재 하나이고 조회 주기를 타고 늦게 따라온다. 그래서 "꺼짐"과
+ * "실행 중"이 한 화면에 함께 서지 않도록, 아직 따라오지 않은 순간을 그 순간 그대로 말한다.
+ */
+function serviceStateNote(
+  operation: HeartbeatServiceOperation,
+  daemonRunning: boolean,
+): string {
+  const settled =
+    "앱이 보는 데몬 상태가 이 조작의 방향과 같아졌습니다. 판정 근거는 pid 파일의 존재 하나입니다.";
+  const waiting =
+    "명령은 끝났고 앱이 보는 데몬 상태는 아직 바뀌지 않았습니다. 상태 갱신을 기다리는 중입니다.";
+  return (operation === "stop") === daemonRunning ? waiting : settled;
+}
+
 function duplicateLine(job: DuplicateIntegrationJob): string {
   return job.role ? `${job.name} · ${roleLabels[job.role] ?? job.role}` : job.name;
 }
@@ -417,8 +657,38 @@ export function HeartbeatCard({
   onToggleExpanded,
   pendingWork,
   heartbeatRuns,
+  activeLeases,
+  heartbeatUpdate,
+  heartbeatSetupRuns,
+  heartbeatVersions,
+  heartbeatService,
 }: IntegrationCardProps) {
   const heartbeat = snapshot?.heartbeat ?? null;
+
+  // 꺼 놓은 것을 잊게 두지 않는 판정(R6). 미설치는 데몬이 멈춘 것과 다른 상태이고 마법사가 이미
+  // 말하므로 여기서 다시 말하지 않는다.
+  const daemonStopped =
+    heartbeat !== null &&
+    heartbeat.installation !== "not_installed" &&
+    !heartbeat.daemonRunning;
+
+  // 버전 조회를 부를 자리. 설치본이 없는 기기에서는 두 값이 모두 "확인 불가"일 뿐이라 새 사실이
+  // 없고, 그 상태는 마법사가 이미 말한다. 프로세스를 하나 띄우는 조작이므로 부를 이유가 없는
+  // 자리에서는 부르지 않는다.
+  const versionsShown = heartbeat !== null && heartbeat.installation !== "not_installed";
+  const checkVersions = heartbeatVersions?.check;
+
+  // 펼쳐지는 순간 한 번 부른다. **조회 주기는 이 자리를 지나지 않는다** — 주기가 새 스냅샷을 넣어
+  // 다시 렌더돼도 의존값이 그대로라 효과가 다시 돌지 않고, 통로 자신이 겹쳐 부르기를 막는다.
+  useEffect(() => {
+    if (!expanded || !versionsShown || !checkVersions) return;
+    void checkVersions();
+  }, [checkVersions, expanded, versionsShown]);
+
+  // 갱신 안내가 펼쳐진 주 통로가 되는 조건. 직전 업데이트가 "실행 수단 없음"으로 끝났는가 하나다.
+  // 앱은 사전 탐색으로 실행 가능 여부를 판정하지 않는다 — 조회 주기에 프로세스를 띄우지 않는다는
+  // 이 저장소의 선을 지키기 위해서다. 그래서 이 판정에 쓸 다른 값이 없다.
+  const updateUnavailable = heartbeatUpdate?.result?.kind === "notRun";
 
   // 잡 폼이 그려지는 조건. 미설치와 잡 파일 읽기 실패에서는 아래 두 분기가 폼 자체를 그리지 않으므로
   // 접힘 요약도 그 상태에서는 조용해야 한다. 요약이 본문에 없는 경고를 알리면 사용자는 카드를 펼쳐
@@ -429,14 +699,19 @@ export function HeartbeatCard({
     !snapshot?.managedBlockFailure;
 
   // 골격에 값을 넘기는 것은 카드다. 재료가 모두 이 자리에 있어 상태를 끌어올릴 필요가 없다.
-  const bodyWarning = roleOrder.some((role) => {
-    const status = heartbeat?.roles.find((entry) => entry.role === role);
-    const quota = status?.quota;
-    if (quota && quotaWarned(quota, role, pendingWork)) return true;
-    if (!jobsShown) return false;
-    const installed = heartbeat?.managedJobs.some((entry) => entry.role === role) ?? false;
-    return missingRunEvidence(installed, status?.lastRun ?? null);
-  });
+  //
+  // 데몬이 멈춘 사실도 여기 실린다(R6). 084가 세운 본문 경고 통로를 그대로 쓰고 접힘·펼침의 동작에
+  // 새 규칙을 만들지 않는다는 것이 그 뜻이라, 접힌 카드에서도 이 사실이 드러난다.
+  const bodyWarning =
+    daemonStopped ||
+    roleOrder.some((role) => {
+      const status = heartbeat?.roles.find((entry) => entry.role === role);
+      const quota = status?.quota;
+      if (quota && quotaWarned(quota, role, pendingWork)) return true;
+      if (!jobsShown) return false;
+      const installed = heartbeat?.managedJobs.some((entry) => entry.role === role) ?? false;
+      return missingRunEvidence(installed, status?.lastRun ?? null);
+    });
 
   return (
     <IntegrationCard
@@ -462,14 +737,63 @@ export function HeartbeatCard({
           <p className="integration-note">{installationNote(heartbeat)}</p>
 
           {/* 마법사는 설치 분기 밖이다(R8). 표시 조건은 남은 필수 단계이지 `installation`이 아니다. */}
-          <HeartbeatSetupWizard heartbeat={heartbeat} />
+          <HeartbeatSetupWizard heartbeat={heartbeat} setupRuns={heartbeatSetupRuns} />
 
           {heartbeat.installation !== "not_installed" && (
             <>
+              {/* 꺼 놓은 것을 잊게 두지 않는다(R6). 사용자가 끄는 이유는 잠깐 멈추기 위해서이고,
+                  끈 채로 잊으면 루프 전체가 조용히 서는데 그 상태는 화면에서 "아무 일도 일어나지
+                  않음"과 구별되지 않는다. 문구가 원인을 단정하지 않는 것은 판정이 셋을 구분하지
+                  못하기 때문이다 — `noRunEvidenceNote`가 같은 어법을 이미 쓴다. */}
+              {daemonStopped && (
+                <IntegrationWarning title="하트비트 데몬이 멈춰 있습니다">
+                  <p>
+                    데몬이 멈춰 있는 동안에는 이 기기의 어떤 잡도 깨어나지 않습니다. 잠깐 멈추려고
+                    끈 것을 잊으면 루프 전체가 조용히 섭니다.
+                  </p>
+                  <p>
+                    앱이 본 것은 ~/.claude/heartbeat/heartbeat.pid가 없다는 사실 하나입니다.
+                    사용자가 껐을 수도, 설치가 아직 끝나지 않았을 수도, 데몬이 정리 없이 죽었을
+                    수도 있으며 앱은 셋을 구분하지 못합니다. 앱이 대신 다시 켜지도 않습니다.
+                  </p>
+                </IntegrationWarning>
+              )}
+
+              {/* 버전은 카드 머리의 사실이다. 어긋남을 아는 자리와 그것을 푸는 버튼이 붙어 있어야
+                  사용자가 다음 행동을 찾는다(SPEC-037 확인 필요 2번). */}
+              {heartbeatVersions && <HeartbeatVersionLine versions={heartbeatVersions} />}
+
+              {/* 업데이트는 역할별 조작이 아니라 설치 전체의 일이다. 그래서 역할 잡 폼 안이 아니라
+                  마법사 아래·잡 목록 위의 공통 자리에 선다. 관리 블록을 읽지 못한 상태에서도
+                  남는다 — 잡을 읽는 것과 설치본을 갱신하는 것은 서로를 막지 않는다(R9). */}
+              {heartbeatUpdate && (
+                <HeartbeatUpdateSection
+                  activeLeases={activeLeases ?? []}
+                  update={heartbeatUpdate}
+                />
+              )}
+
+              {/* 끄기·켜기도 역할별 조작이 아니라 데몬 전체의 일이다. 그래서 역할 잡 폼 안이 아니라
+                  업데이트 통로 옆의 공통 자리에 선다. dream 카드에는 이 통로를 만들지 않는다 —
+                  데몬은 하나이고 조작 자리도 하나다.
+
+                  판정이 아직 도착하지 않았으면 통로를 세우지 않는다. 대상을 모르는 채로 버튼을
+                  내미는 것이 R4가 막는 일이다. */}
+              {heartbeatService && heartbeat.serviceTarget && (
+                <HeartbeatServiceSection
+                  activeLeases={activeLeases ?? []}
+                  daemonRunning={heartbeat.daemonRunning}
+                  recordedJobs={heartbeat.recordedJobs ?? []}
+                  service={heartbeatService}
+                  target={heartbeat.serviceTarget}
+                />
+              )}
+
               {snapshot.managedBlockFailure ? (
                 <UnreadableManagedBlock failure={snapshot.managedBlockFailure} />
               ) : (
                 <HeartbeatRoleJobs
+                  guideExpanded={updateUnavailable}
                   heartbeatRuns={heartbeatRuns}
                   key={snapshot.slug}
                   onInstall={actions.installHeartbeatJobs}
@@ -501,9 +825,18 @@ export function HeartbeatCard({
  * 둘이 되면 3단계의 "없다고 없는 것이 아니다" 규칙이 화면에서 무너진다.
  *
  * `supported`로 가리지 않는다. 마법사는 쓰기 액션이 아니라 안내이고, 미지원 배너는 뷰가 따로 그린다.
- * 단계마다 실행 버튼을 두지 않는다 — 실행은 사용자 터미널의 몫이다(R11).
+ *
+ * 실행 버튼이 붙는 단계는 백엔드가 정한다(SPEC-037 R2). SPEC-016 R11은 "실행은 사용자 터미널의
+ * 몫"이었고 그 선을 승인된 새 결정(DECISION-6C2F2639)이 두 단계에 한해 옮겼다. 화면은 단계 종류를
+ * 보고 스스로 갈리지 않는다 — 갈림이 둘로 늘면 백엔드와 화면이 다른 답을 낼 자리가 생긴다.
  */
-function HeartbeatSetupWizard({ heartbeat }: { heartbeat: HeartbeatIntegration }) {
+function HeartbeatSetupWizard({
+  heartbeat,
+  setupRuns,
+}: {
+  heartbeat: HeartbeatIntegration;
+  setupRuns?: HeartbeatSetupRunControls;
+}) {
   // 마지막으로 복사한 단계 하나만 들고 있는다(R6). 두 단계에 동시에 "복사됨"이 떠 있으면 사용자는
   // 무엇이 클립보드에 있는지 알 수 없다.
   const [copied, setCopied] = useState<{ step: HeartbeatSetupStep; ok: boolean } | null>(null);
@@ -566,8 +899,11 @@ function HeartbeatSetupWizard({ heartbeat }: { heartbeat: HeartbeatIntegration }
       {/* 접기는 언마운트가 아니다. 조건부 렌더로 빼면 어느 단계를 복사했는지 같은 화면 상태가
           사라진다. 연동 카드 본문과 같이 DOM에 남긴 채 `hidden`으로 감춘다. */}
       <div hidden={!open} id={guideId}>
+        {/* 실행 버튼이 없는 단계가 남아 있다는 사실을 문장이 감추지 않는다(R2). 버튼이 하나도 붙지
+            않은 화면에서도 이 문장은 그대로 참이다. */}
         <p className="integration-note">
-          앱이 하트비트를 대신 설치하지 않습니다. 아래 단계는 사용자가 자기 터미널에서 직접 실행합니다.
+          앱은 실행 버튼이 있는 단계만 대신 실행합니다. 나머지 단계는 사용자가 자기 터미널에서 직접
+          실행합니다.
         </p>
 
         <ol className="heartbeat-setup-steps">
@@ -610,6 +946,11 @@ function HeartbeatSetupWizard({ heartbeat }: { heartbeat: HeartbeatIntegration }
                     </span>
                   )}
                 </div>
+                {/* 실행 통로는 복사 통로를 대체하지 않는다. 실행이 실패한 자리에서 사용자가 손으로
+                    끝낼 수 있어야 하므로 위의 원문과 복사 버튼은 실행형 단계에도 그대로 남는다. */}
+                {setupRuns && stage.runnable && (
+                  <SetupStepRun controls={setupRuns} stage={stage} title={title} />
+                )}
                 {stage.evidence && <p className="integration-note">판정 근거: {stage.evidence}</p>}
               </li>
             );
@@ -621,6 +962,947 @@ function HeartbeatSetupWizard({ heartbeat }: { heartbeat: HeartbeatIntegration }
           명령을 실행하고 앱으로 돌아오면 자동으로 다시 확인해 이 목록을 채웁니다. 따로 누를 것은 없습니다.
         </p>
         <p className="integration-note">공식 문서: https://github.com/wooson00308/claude-heartbeat</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 단계 하나의 실행 통로(SPEC-037 R2). 이 컴포넌트가 그려지는 조건은 백엔드가 실은 `runnable`
+ * 하나이고, 여기서 단계 종류를 다시 보지 않는다.
+ *
+ * 진행 중 여부와 결과의 주인은 훅이다. 카드가 따로 들면 다른 메뉴를 다녀와 언마운트된 순간
+ * 갈라진다 — 업데이트 통로가 같은 이유로 같은 모양을 쓴다. 여기 있는 상태는 확인 화면의 열림과
+ * 복사 결과뿐이다.
+ */
+function SetupStepRun({
+  controls,
+  stage,
+  title,
+}: {
+  controls: HeartbeatSetupRunControls;
+  stage: HeartbeatSetupStage;
+  title: string;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // 실행 수단을 찾지 못했을 때 내미는 명령의 복사 결과. 실행마다 새로 시작한다.
+  const [copied, setCopied] = useState<boolean | null>(null);
+
+  // 단계마다 따로 담기므로 한 단계의 실행이 다른 단계의 버튼을 잠그지 않는다.
+  const running = controls.running.includes(stage.step);
+  const result = controls.results[stage.step] ?? null;
+
+  /**
+   * 확인 화면을 닫고 실행 통로를 부른다. 누르면 화면이 닫히므로 같은 버튼을 두 번 눌러도 실행은
+   * 한 번이다. 겹쳐 누르기를 막는 두 번째 선은 훅에 있다.
+   */
+  async function start() {
+    setConfirming(false);
+    setCopied(null);
+    // payload의 명령을 그대로 넘긴다. 훅은 이 값을 커맨드가 답하지 못했을 때의 폴백으로만 쓴다.
+    await controls.run(stage.step, stage.command);
+  }
+
+  return (
+    <div className="heartbeat-setup-run">
+      <div className="heartbeat-setup-run-head">
+        {/* 실행 중에는 눌리지 않는다. 표시가 없으면 사용자는 눌리지 않았다고 판단하고 다시 누른다. */}
+        <button
+          aria-label={`${title} 실행`}
+          className="secondary-button heartbeat-setup-run-button"
+          disabled={running}
+          onClick={() => setConfirming(true)}
+          type="button"
+        >
+          앱이 실행
+        </button>
+        {running && (
+          <span className="heartbeat-setup-run-progress" role="status">
+            실행하고 있습니다. 끝나면 이 표시가 사라지고 단계 상태를 다시 확인합니다.
+          </span>
+        )}
+      </div>
+
+      {confirming && (
+        <SetupRunConfirm
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void start()}
+          stage={stage}
+          title={title}
+        />
+      )}
+
+      {result && (
+        <SetupRunResultView
+          copied={copied}
+          onCopy={async (command) => setCopied(await copy(command))}
+          result={result}
+          title={title}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 실행 전 확인 화면(SPEC-037 R3). 두 명령은 파일을 쓰므로 무엇이 만들어지는지 알린 뒤 실행한다.
+ *
+ * 파일을 쓰는 것은 데몬이고 앱이 아니다. 그 구분이 이 화면의 문구이며, 같은 자리의 "지금 실행"
+ * 확인 화면("이 조작은 어떤 파일도 쓰지 않습니다")과 갈리는 지점이기도 하다.
+ */
+function SetupRunConfirm({
+  onCancel,
+  onConfirm,
+  stage,
+  title,
+}: {
+  onCancel(): void;
+  onConfirm(): void;
+  stage: HeartbeatSetupStage;
+  title: string;
+}) {
+  const effects = setupRunEffects[stage.step] ?? [];
+
+  return (
+    <div
+      aria-label={`${title} 실행 확인`}
+      className="heartbeat-confirm heartbeat-setup-confirm"
+      role="group"
+    >
+      <strong>확인 후 앱이 이 단계를 대신 실행합니다</strong>
+      <p>앱이 실행하는 명령입니다.</p>
+      <pre>
+        <code>{stage.command}</code>
+      </pre>
+      {effects.length > 0 && (
+        <ul>
+          {effects.map((effect) => (
+            <li key={effect}>{effect}</li>
+          ))}
+        </ul>
+      )}
+      {/* 판정 근거 경로가 곧 만들어지는 자리다. 앱이 경로를 지어내지 않고 payload의 값을 그대로 쓴다. */}
+      {stage.evidence && <p>만들어지는 자리: {stage.evidence}</p>}
+      <p>파일을 만드는 것은 하트비트입니다. 앱은 이 경로에서 어떤 파일도 쓰지 않습니다.</p>
+
+      <div className="heartbeat-confirm-actions">
+        <button className="primary-button" onClick={onConfirm} type="button">
+          확인하고 실행
+        </button>
+        <button className="secondary-button" onClick={onCancel} type="button">
+          취소
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 단계 실행의 결과(SPEC-037 R2·R5). 셋을 서로 다른 값으로 그린다.
+ *
+ * **앱이 실패 사유를 지어내지 않는다.** 이 두 명령은 원인별 종료 코드가 계약에 없으므로 화면의
+ * 몫은 성공/실패와 종료 코드, 그리고 원문까지다. 업데이트 결과가 종료 코드마다 다음 행동을 적는
+ * 것과 갈리는 지점이고, 그 갈림의 근거는 계약에 그 목록이 있느냐 없느냐다.
+ */
+function SetupRunResultView({
+  copied,
+  onCopy,
+  result,
+  title,
+}: {
+  copied: boolean | null;
+  onCopy(command: string): void;
+  result: HeartbeatSetupRunResult;
+  title: string;
+}) {
+  if (result.kind === "notRun") {
+    return (
+      <IntegrationWarning title={`앱이 ${title} 단계를 실행하지 못했습니다`}>
+        <p>{result.message}</p>
+        {/* 앱이 찾은 척하는 경로를 지어내지 않는다(R5). 본 것이 없으면 목록 자체가 없다. */}
+        {result.looked.length > 0 && (
+          <>
+            <p>앱이 실행 파일을 찾아본 경로입니다.</p>
+            <ul>
+              {result.looked.map((path) => (
+                <li key={path}>{path}</li>
+              ))}
+            </ul>
+          </>
+        )}
+        <p>위 단계의 명령을 터미널에서 직접 실행하면 같은 걸음을 끝낼 수 있습니다.</p>
+        {/* 복사에 실패해도 원문은 단계 안에 남아 사용자가 직접 선택할 수 있다. */}
+        <div className="heartbeat-setup-run-copy">
+          <button
+            aria-label={`${title} 실행 실패 명령 복사`}
+            className="secondary-button"
+            onClick={() => onCopy(result.command)}
+            type="button"
+          >
+            명령 복사
+          </button>
+          {copied !== null && (
+            <span
+              className={`heartbeat-setup-copied${copied ? "" : " copy-failed"}`}
+              role="status"
+            >
+              {copied ? "복사됨" : "복사하지 못했습니다 — 위 명령을 직접 선택해 복사하세요."}
+            </span>
+          )}
+        </div>
+      </IntegrationWarning>
+    );
+  }
+
+  if (result.kind === "notRunnable") {
+    return (
+      <IntegrationWarning title={`앱이 대신 실행하지 않는 단계입니다`}>
+        <p>{result.message}</p>
+      </IntegrationWarning>
+    );
+  }
+
+  return (
+    <div
+      aria-label={`${title} 실행 결과`}
+      className={`heartbeat-setup-run-result result-${result.succeeded ? "ok" : "failed"}`}
+      role="group"
+    >
+      <strong>{result.succeeded ? "명령이 끝났습니다" : "명령이 실패했습니다"}</strong>
+      <p>{setupExitNote(result.code)}</p>
+      {!result.succeeded && (
+        <p>
+          앱은 이 명령의 종료 코드를 사유로 옮기지 않습니다. 무엇이 있었는지는 아래 원문에
+          있습니다.
+        </p>
+      )}
+      <UpdateOutput stderr={result.stderr} stdout={result.stdout} />
+    </div>
+  );
+}
+
+/**
+ * 도는 데몬과 디스크의 버전(SPEC-037 확인 필요 2번). 판정은 백엔드가 이미 했고 여기서는 그 값을
+ * 문장으로 옮기기만 한다.
+ *
+ * **한쪽만 아는 상태를 "같다"로도 "다르다"로도 접지 않는다.** 아는 값만 싣고 사유를 함께 싣는다.
+ * 084 경고의 판정은 이 표시가 대체하지도 감추지도 않는다 — 그 자리는 SPEC-024 R4가 정했다.
+ */
+function HeartbeatVersionLine({ versions }: { versions: HeartbeatVersionControls }) {
+  const { checking, error, versions: read } = versions;
+
+  if (error) {
+    return (
+      <IntegrationWarning title="하트비트 버전을 조회하지 못했습니다">
+        <p>{error}</p>
+      </IntegrationWarning>
+    );
+  }
+
+  // 첫 조회가 끝나기 전에는 자리만 알린다. 이미 읽은 값이 있으면 그 값을 지우지 않고 그대로 둔다.
+  if (!read) {
+    return checking ? (
+      <p className="integration-note" role="status">
+        하트비트 버전을 확인하고 있습니다.
+      </p>
+    ) : null;
+  }
+
+  return (
+    <div aria-label="하트비트 버전" className="heartbeat-versions" role="group">
+      <dl className="heartbeat-version-values">
+        <div>
+          <dt>도는 데몬</dt>
+          <dd>{read.running.kind === "known" ? read.running.version : "확인 불가"}</dd>
+        </div>
+        <div>
+          <dt>디스크</dt>
+          <dd>{read.disk.kind === "known" ? read.disk.version : "확인 불가"}</dd>
+        </div>
+      </dl>
+      <HeartbeatVersionVerdictLine versions={read} />
+    </div>
+  );
+}
+
+/** 판정 한 줄. 셋이 서로 다른 문장이고, 판정 불가는 사유마다 다시 갈린다. */
+function HeartbeatVersionVerdictLine({ versions }: { versions: HeartbeatVersions }) {
+  const { disk, verdict } = versions;
+
+  if (verdict.kind === "match") {
+    return <p className="integration-note">도는 데몬과 디스크가 같은 버전입니다.</p>;
+  }
+
+  if (verdict.kind === "mismatch") {
+    return (
+      <p className="heartbeat-version-mismatch">
+        도는 데몬과 디스크의 버전이 다릅니다. 코드는 갱신됐는데 지금 도는 프로세스는 옛 코드입니다.
+        위의 하트비트 업데이트가 그 상태를 푸는 다음 행동입니다.
+      </p>
+    );
+  }
+
+  return (
+    <div className="heartbeat-version-undetermined">
+      <p>어긋났는지 판정하지 못했습니다. 아는 값만 위에 있습니다.</p>
+      <ul>
+        {verdict.reasons.map((reason) => (
+          <li key={reason}>{undeterminedReasonNotes[reason]}</li>
+        ))}
+      </ul>
+      {/* 앱이 찾은 척하는 경로를 지어내지 않는다(R5). 본 것이 있을 때만 목록이 있다. */}
+      {disk.kind === "notFound" && disk.looked.length > 0 && (
+        <>
+          <p>앱이 실행 파일을 찾아본 경로입니다.</p>
+          <ul>
+            {disk.looked.map((path) => (
+              <li key={path}>{path}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {/* 계약 밖 출력은 원문이 유일한 단서다. 앱이 그 안에서 버전을 잘라 내지 않는다. */}
+      {disk.kind === "offContract" && (
+        <UpdateOutput stderr={disk.stderr} stdout={disk.stdout} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 업데이트 통로(SPEC-037 R1·R3·R4·R5). 버튼 하나로 `heartbeat update`가 실행되고, 성공 경로에서
+ * 사용자가 터미널을 열지 않는다.
+ *
+ * 진행 중 여부와 결과의 주인은 훅이다. 카드가 따로 들면 다른 메뉴를 다녀와 언마운트된 순간
+ * 갈라진다 — "지금 실행"이 같은 이유로 같은 모양을 쓴다. 여기 있는 상태는 확인 화면의 열림과
+ * 복사 결과뿐이고, 둘 다 이 화면을 떠나면 사라져도 되는 표시다.
+ *
+ * 앱은 갱신 절차의 갈래를 스스로 고르지 않는다. 저장소 갱신·의존성 반영·재기동의 순서와 실패
+ * 처리는 데몬이 소유하고, 앱은 명령 하나를 부르고 그 답을 문장으로 옮긴다.
+ */
+function HeartbeatUpdateSection({
+  activeLeases,
+  update,
+}: {
+  activeLeases: AgentLeaseSummary[];
+  update: HeartbeatUpdateControls;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // 실행 수단을 찾지 못했을 때 내미는 명령의 복사 결과. 실행마다 새로 시작한다.
+  const [copied, setCopied] = useState<boolean | null>(null);
+
+  /**
+   * 확인 화면을 닫고 실행 통로를 부른다. 누르면 화면이 닫히므로 같은 버튼을 두 번 눌러도 실행은
+   * 한 번이다. 겹쳐 누르기를 막는 두 번째 선은 훅에 있다.
+   *
+   * 진행 표시도 결과도 여기서 만들지 않는다. 그 값의 주인은 훅이다.
+   */
+  async function start() {
+    setConfirming(false);
+    setCopied(null);
+    await update.update();
+  }
+
+  return (
+    <div className="heartbeat-update">
+      <div className="heartbeat-update-head">
+        <strong>하트비트 업데이트</strong>
+        {/* 실행 중에는 눌리지 않는다. 저장소를 가져오고 의존성을 다시 까는 조작이라 표시가 없으면
+            사용자는 눌리지 않았다고 판단하고 다시 누른다(R1). */}
+        <button
+          className="secondary-button heartbeat-update-run"
+          disabled={update.running}
+          onClick={() => setConfirming(true)}
+          type="button"
+        >
+          하트비트 업데이트
+        </button>
+      </div>
+      <p className="integration-note">
+        앱이 하트비트를 대신 갱신합니다. 저장소 갱신·의존성 재설치·데몬 재기동은 하트비트가 한 명령
+        안에서 수행하고, 앱은 그 결과를 읽어 옮깁니다.
+      </p>
+
+      {update.running && (
+        <p className="heartbeat-update-progress" role="status">
+          하트비트를 갱신하고 있습니다. 저장소를 가져오고 의존성을 다시 까는 동안 몇 분이 걸릴 수
+          있고, 끝나면 이 표시가 사라지며 버튼이 다시 눌립니다.
+        </p>
+      )}
+
+      {confirming && (
+        <UpdateConfirm
+          activeLeases={activeLeases}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void start()}
+        />
+      )}
+
+      {update.result && (
+        <UpdateResultView
+          copied={copied}
+          onCopy={async (command) => setCopied(await copy(command))}
+          result={update.result}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 실행 전 확인 화면(R3). 버튼은 누르는 즉시 실행하지 않는다.
+ *
+ * 같은 자리의 "지금 실행" 확인 화면이 "이 조작은 어떤 파일도 쓰지 않습니다"로 시작한다. 이쪽은
+ * 정반대의 일이라 첫 줄에서 갈라 준다.
+ *
+ * 앱은 세션을 정리하지 않는다. 드레이닝을 기다리지도, lease를 지우지도 않는다 — 남의 lease에
+ * 손대는 것은 `.workflow/rules/workflow.md` §4가 금한다. 고지하고 사용자가 고른다.
+ */
+function UpdateConfirm({
+  activeLeases,
+  onCancel,
+  onConfirm,
+}: {
+  activeLeases: AgentLeaseSummary[];
+  onCancel(): void;
+  onConfirm(): void;
+}) {
+  return (
+    <div aria-label="하트비트 업데이트 확인" className="heartbeat-confirm" role="group">
+      <strong>확인 후 하트비트가 자기 저장소를 갱신하고 자신을 재기동합니다</strong>
+      <ul>
+        <li>하트비트 저장소를 원격의 최신 커밋으로 갱신합니다.</li>
+        <li>코드가 바뀌면 의존성을 다시 설치합니다.</li>
+        <li>갱신이 필요하면 데몬을 재기동합니다.</li>
+      </ul>
+
+      {/* 세션이 없을 때와 있을 때의 문구가 다르다. 고지만 하면 사용자가 확인 버튼을 습관적으로
+          누르게 되므로, 무게 차이를 문구가 감당한다(기획서 확인 필요 3번의 한계). */}
+      {activeLeases.length === 0 ? (
+        <p>지금 끊길 세션이 없습니다. 이 프로젝트에 활성 lease가 하나도 없습니다.</p>
+      ) : (
+        <>
+          <p>
+            지금 끊기는 세션 {activeLeases.length}개 — 재기동은 돌고 있는 세션을 끊습니다. 앱은 그
+            세션을 정리하지 않고 lease에도 손대지 않으므로, 끊긴 세션의 작업은 남은 lease가 만료될
+            때까지 그대로 멈춰 있습니다.
+          </p>
+          <ul>
+            {activeLeases.map((lease) => (
+              <li key={lease.leaseId}>
+                {lease.agent} · {lease.taskId ?? "워크플로우 작업"}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <p>되돌릴 수 없습니다. 앱에는 갱신한 코드를 되돌려 놓는 수단이 없습니다.</p>
+
+      <div className="heartbeat-confirm-actions">
+        <button className="primary-button" onClick={onConfirm} type="button">
+          확인하고 업데이트
+        </button>
+        <button className="secondary-button" onClick={onCancel} type="button">
+          취소
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 업데이트 결과(R4·R5·R7). "성공/실패" 두 마디가 아니라 어디까지 갔는지와 왜 멈췄는지가 남는다.
+ *
+ * 셋을 서로 다른 값으로 그린다 — 계약대로 답한 결과, 계약 밖 출력, 실행 자체의 실패. 판정은
+ * 백엔드가 이미 했고 여기서는 그 값을 문장으로 옮기기만 한다.
+ */
+function UpdateResultView({
+  result,
+  copied,
+  onCopy,
+}: {
+  result: HeartbeatUpdateResult;
+  copied: boolean | null;
+  onCopy(command: string): void;
+}) {
+  if (result.kind === "notRun") {
+    return (
+      <IntegrationWarning title="앱이 하트비트 업데이트를 실행하지 못했습니다">
+        <p>{result.message}</p>
+        {/* 앱이 찾은 척하는 경로를 지어내지 않는다(R5). 본 것이 없으면 목록 자체가 없다. */}
+        {result.looked.length > 0 && (
+          <>
+            <p>앱이 실행 파일을 찾아본 경로입니다.</p>
+            <ul>
+              {result.looked.map((path) => (
+                <li key={path}>{path}</li>
+              ))}
+            </ul>
+          </>
+        )}
+        <p>아래 명령을 터미널에서 직접 실행하면 같은 갱신을 끝낼 수 있습니다.</p>
+        {/* 복사에 실패해도 원문은 여기 남아 사용자가 직접 선택할 수 있다. 마법사와 실행 실패
+            표시가 같은 이유로 같은 모양을 쓴다. */}
+        <pre className="heartbeat-update-failure-command">
+          <code>{result.command}</code>
+        </pre>
+        <div className="heartbeat-update-failure-copy">
+          <button
+            aria-label="하트비트 업데이트 명령 복사"
+            className="secondary-button heartbeat-update-failure-copy-button"
+            onClick={() => onCopy(result.command)}
+            type="button"
+          >
+            명령 복사
+          </button>
+          {copied !== null && (
+            <span
+              className={`heartbeat-update-copied${copied ? "" : " copy-failed"}`}
+              role="status"
+            >
+              {copied ? "복사됨" : "복사하지 못했습니다 — 위 명령을 직접 선택해 복사하세요."}
+            </span>
+          )}
+        </div>
+      </IntegrationWarning>
+    );
+  }
+
+  if (result.kind === "offContract") {
+    return (
+      <IntegrationWarning title="이 설치본이 계약대로 답하지 않았습니다">
+        <p>
+          앱이 하트비트를 띄웠지만 돌아온 출력이 계약의 모양이 아닙니다. 성공으로도 실패로도 부르지
+          않습니다 — update 서브커맨드가 없는 옛 설치본일 수 있습니다. 갱신이 실제로 일어났는지는
+          아래 원문으로 확인해야 합니다.
+        </p>
+        {/* 계약 밖 출력에는 종료 코드의 뜻도 계약 밖이다. 숫자만 그대로 싣는다. */}
+        <p>
+          {result.code === null
+            ? "하트비트가 종료 코드 없이 끝났습니다. 프로세스가 시그널로 끝난 경우입니다."
+            : `종료 코드 ${result.code}.`}
+        </p>
+        <UpdateOutput stderr={result.stderr} stdout={result.stdout} />
+      </IntegrationWarning>
+    );
+  }
+
+  return (
+    <div
+      aria-label="하트비트 업데이트 결과"
+      className={`heartbeat-update-result result-${result.result}`}
+      role="group"
+    >
+      <strong>{updateResultLabels[result.result] ?? result.result}</strong>
+      {result.result === "partial" && <p>{partialNote}</p>}
+
+      {/* 데몬이 실제로 낸 줄만 순서대로 그린다. 앱이 단계 셋을 미리 만들어 두고 채우지 않는다. */}
+      {result.steps.length > 0 ? (
+        <ol className="heartbeat-update-steps-run">
+          {result.steps.map((step) => (
+            <li key={step.step}>
+              <span className="heartbeat-update-step-name">
+                {updateStepLabels[step.step] ?? step.step}
+              </span>
+              <span
+                className={`heartbeat-update-step-status status-${step.status ?? "unknown"}`}
+              >
+                {step.status ? updateStatusLabels[step.status] ?? step.status : "상태 기록 없음"}
+              </span>
+              <span className="heartbeat-update-step-detail">{step.detail ?? "사유 기록 없음"}</span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p>하트비트가 단계 줄을 하나도 내지 않았습니다.</p>
+      )}
+
+      <p>{exitNote(result.code)}</p>
+      {result.version && <p>갱신 뒤 디스크의 하트비트 버전: {result.version}</p>}
+      <UpdateOutput stderr={result.stderr} stdout={null} />
+    </div>
+  );
+}
+
+/**
+ * 원문. 요약하지도 잘라내지도 않는다(R4의 마지막 항목). 사람용 진단은 stderr에 있고, 결과 문장을
+ * 덮지 않게 접힌 자리에 둔다.
+ *
+ * `stdout`은 계약대로 읽힌 결과에는 그리지 않는다. 그 줄들은 이미 단계와 결과로 화면에 있고, 같은
+ * 값을 두 번 그리면 어느 쪽을 읽어야 하는지가 흐려진다. 계약 밖 출력에서는 그 원문이 유일한 단서다.
+ */
+function UpdateOutput({ stderr, stdout }: { stderr: string; stdout: string | null }) {
+  return (
+    <>
+      <details className="heartbeat-update-output">
+        <summary>진단 원문 (stderr)</summary>
+        <pre>{stderr === "" ? "(비어 있음)" : stderr}</pre>
+      </details>
+      {stdout !== null && (
+        <details className="heartbeat-update-output">
+          <summary>표준 출력 원문 (stdout)</summary>
+          <pre>{stdout === "" ? "(비어 있음)" : stdout}</pre>
+        </details>
+      )}
+    </>
+  );
+}
+
+/**
+ * 데몬 끄기·켜기 통로(SPEC-036 R1·R2·R3·R5·R6·R7). 버튼 둘로 이 기기의 데몬이 내려가고 다시
+ * 올라가며, 성공 경로에서 사용자가 터미널을 열지 않는다.
+ *
+ * 진행 중 여부와 결과의 주인은 훅이다. 카드가 따로 들면 다른 메뉴를 다녀와 언마운트된 순간
+ * 갈라진다 — 업데이트 통로가 같은 이유로 같은 모양을 쓴다. 여기 있는 상태는 확인 화면의 열림과
+ * 복사 결과뿐이고, 둘 다 이 화면을 떠나면 사라져도 되는 표시다.
+ *
+ * 대상이 확정되지 않았으면 버튼이 아예 나가지 않는다. 확정하지 못한 채 표준 이름으로 시도하는
+ * 경로를 만들지 않는 것이 R4이고, 왜 조작할 수 없는지는 그 자리에서 읽힌다(R5).
+ */
+function HeartbeatServiceSection({
+  activeLeases,
+  daemonRunning,
+  recordedJobs,
+  service,
+  target,
+}: {
+  activeLeases: AgentLeaseSummary[];
+  daemonRunning: boolean;
+  recordedJobs: HeartbeatRecordedJob[];
+  service: HeartbeatServiceControls;
+  target: HeartbeatServiceTarget;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // 실행 수단을 찾지 못했을 때 내미는 명령의 복사 결과. 조작마다 새로 시작한다.
+  const [copied, setCopied] = useState<boolean | null>(null);
+
+  /**
+   * 확인 화면을 닫고 실행 통로를 부른다. 누르면 화면이 닫히므로 같은 버튼을 두 번 눌러도 실행은
+   * 한 번이다. 겹쳐 누르기를 막는 두 번째 선은 훅에 있다.
+   */
+  async function start(operation: HeartbeatServiceOperation) {
+    setConfirming(false);
+    setCopied(null);
+    await service.control(operation);
+  }
+
+  const unresolved = unresolvedFromTarget(target);
+
+  return (
+    <div className="heartbeat-service">
+      <div className="heartbeat-service-head">
+        <strong>데몬 끄기·켜기</strong>
+        {/* 대상이 확정된 경우에만 버튼이 선다. 진행 중에는 눌리지 않는다 — `bootout`은 데몬이
+            내려갈 때까지 걸리므로 표시가 없으면 사용자는 눌리지 않았다고 판단하고 다시 누른다. */}
+        {!unresolved && (
+          <div className="heartbeat-service-buttons">
+            <button
+              className="secondary-button heartbeat-service-run"
+              disabled={service.running !== null}
+              onClick={() => setConfirming(true)}
+              type="button"
+            >
+              {serviceOperationLabels.stop}
+            </button>
+            {/* 켜기에는 확인 화면이 붙지 않는다. 끊을 세션이 없는 조작이고 되돌릴 수 없는 것도
+                아니다. 사정거리는 아래 문장이 말한다. */}
+            <button
+              className="secondary-button heartbeat-service-run"
+              disabled={service.running !== null}
+              onClick={() => void start("start")}
+              type="button"
+            >
+              {serviceOperationLabels.start}
+            </button>
+          </div>
+        )}
+      </div>
+      <p className="integration-note">
+        이 조작은 이 기기의 데몬 하나에 걸립니다. 화면은 이 프로젝트의 연동 탭이지만 끄면 다른
+        프로젝트의 잡과 dream 잡까지 함께 멈추고, 켜면 이 기기의 잡이 전부 다시 깨어납니다.
+      </p>
+
+      {unresolved && <ServiceUnresolvedNote view={unresolved} />}
+
+      {service.running !== null && (
+        <p className="heartbeat-service-progress" role="status">
+          {service.running === "stop"
+            ? "데몬을 내리고 있습니다. 데몬이 실제로 내려갈 때까지 걸리고, 끝나면 이 표시가 사라지며 버튼이 다시 눌립니다."
+            : "데몬을 올리고 있습니다. 끝나면 이 표시가 사라지며 버튼이 다시 눌립니다."}
+        </p>
+      )}
+
+      {confirming && (
+        <ServiceStopConfirm
+          activeLeases={activeLeases}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void start("stop")}
+          recordedJobs={recordedJobs}
+        />
+      )}
+
+      {/* 커맨드 자체가 거절한 것은 결과가 아니다. 명령 원문은 대상이 확정된 뒤에만 만들어지고 그
+          값을 아는 쪽은 백엔드라, 화면이 여기서 명령을 지어내지 않는다. */}
+      {service.error !== null && (
+        <IntegrationWarning title="앱이 데몬 조작을 시작하지 못했습니다">
+          <p>{service.error}</p>
+        </IntegrationWarning>
+      )}
+
+      {service.outcome && (
+        <ServiceOutcomeView
+          copied={copied}
+          daemonRunning={daemonRunning}
+          onCopy={async (command) => setCopied(await copy(command))}
+          outcome={service.outcome}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 조작할 수 없는 사유 하나. 담을 값이 있는 둘만 목록과 경로를 더 그린다(R5). */
+function ServiceUnresolvedNote({ view }: { view: ServiceUnresolvedView }) {
+  const { title, note } = serviceUnresolvedNotes[view.reason];
+  return (
+    <IntegrationWarning title={title}>
+      <p>{note}</p>
+      {view.plistPaths.length > 0 && (
+        <ul>
+          {view.plistPaths.map((path) => (
+            <li key={path}>{path}</li>
+          ))}
+        </ul>
+      )}
+      {view.path !== null && <p>읽지 못한 경로: {view.path}</p>}
+    </IntegrationWarning>
+  );
+}
+
+/**
+ * 끄기 전 확인 화면(R2·R3). 끄기 버튼은 누르는 즉시 실행하지 않는다.
+ *
+ * 업데이트의 확인 화면과 같은 자리·같은 모양을 쓰되 첫 줄에서 갈라 준다 — 업데이트는 저장소를
+ * 갱신하고 데몬을 다시 띄우는 것이고, 이쪽은 데몬을 내리고 그대로 둔다.
+ *
+ * **앱은 세션을 정리하지 않는다.** 드레이닝을 기다리지도, lease를 지우지도 않는다 — 남의 lease에
+ * 손대는 것은 `.workflow/rules/workflow.md` §4가 금한다. 고지하고 사용자가 고른다.
+ */
+function ServiceStopConfirm({
+  activeLeases,
+  onCancel,
+  onConfirm,
+  recordedJobs,
+}: {
+  activeLeases: AgentLeaseSummary[];
+  onCancel(): void;
+  onConfirm(): void;
+  recordedJobs: HeartbeatRecordedJob[];
+}) {
+  // 앱이 더한 것은 "이 프로젝트의 것인가" 하나다. 이름은 상태 파일에서 읽은 문자열 그대로이고,
+  // 앱이 이름에서 프로젝트나 역할을 뽑아내지 않는다(R2).
+  const ours = recordedJobs.filter((job) => job.ofThisProject);
+  const others = recordedJobs.filter((job) => !job.ofThisProject);
+
+  return (
+    <div aria-label="하트비트 데몬 끄기 확인" className="heartbeat-confirm" role="group">
+      <strong>확인하면 이 기기의 하트비트 데몬이 내려가고 그대로 있습니다</strong>
+      <p>
+        업데이트는 저장소를 갱신하고 데몬을 다시 띄우지만, 이 조작은 데몬을 내리고 그대로 둡니다.
+        다시 올리는 것은 사용자가 켜기를 누르는 때입니다.
+      </p>
+
+      {/* 화면은 프로젝트 하나의 연동 탭인데 사정거리는 기기 전체다. 그 차이를 누르기 전에 말한다. */}
+      <p>
+        멈추는 것은 이 프로젝트의 잡만이 아닙니다. 데몬은 이 기기에 하나뿐이라 실행 기록이 있는 잡{" "}
+        {recordedJobs.length}개가 모두 멈춥니다.
+      </p>
+      {recordedJobs.length === 0 ? (
+        <p>상태 파일에 실행 기록이 있는 잡이 없습니다.</p>
+      ) : (
+        <>
+          <p>이 프로젝트의 잡 {ours.length}개</p>
+          {ours.length > 0 && (
+            <ul>
+              {ours.map((job) => (
+                <li key={job.name}>{job.name}</li>
+              ))}
+            </ul>
+          )}
+          <p>그 밖의 잡 {others.length}개</p>
+          {others.length > 0 && (
+            <ul>
+              {others.map((job) => (
+                <li key={job.name}>{job.name}</li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+      {/* 목록과 별개로 한 문장이 이 사실을 말한다. 어느 이름이 dream 잡인지는 앱이 판정하지
+          않는다 — 앱은 잡 이름을 해석하지 않는다(R2). */}
+      <p>
+        dream 잡도 같은 데몬이 깨웁니다. 하트비트 카드와 dream 카드가 화면에서 갈려 있어도 데몬은
+        하나라 함께 멈춥니다.
+      </p>
+
+      {/* 세션이 없을 때와 있을 때의 문구가 다르다. 고지만 하면 사용자가 확인 버튼을 습관적으로
+          누르게 되므로, 무게 차이를 문구가 감당한다. */}
+      {activeLeases.length === 0 ? (
+        <p>
+          이 프로젝트에 활성 lease가 하나도 없어 지금 끊길 세션이 없습니다. 다만 앱이 읽은 것은 이
+          프로젝트의 lease뿐이라, 다른 프로젝트에서 도는 세션이 있으면 그쪽도 함께 끊깁니다 — 앱은
+          그 수를 알지 못합니다.
+        </p>
+      ) : (
+        <>
+          <p>
+            지금 끊기는 세션 {activeLeases.length}개 — 데몬을 내리면 돌고 있는 세션이 끊깁니다. 앱은
+            그 세션을 정리하지 않고 lease에도 손대지 않으므로, 끊긴 세션의 작업은 남은 lease가 만료될
+            때까지 그대로 멈춰 있습니다. 이 수는 이 프로젝트의 lease만 센 것이고, 다른 프로젝트에서
+            도는 세션도 함께 끊기지만 앱은 그 수를 알지 못합니다.
+          </p>
+          <ul>
+            {activeLeases.map((lease) => (
+              <li key={lease.leaseId}>
+                {lease.agent} · {lease.taskId ?? "워크플로우 작업"}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {/* 이 조작은 잠깐 내리는 것이지 등록 해제가 아니다(R8). "껐는데 다시 켜져 있다"를 사용자가
+          만나기 전에 말해 둔다. */}
+      <p>
+        재부팅하거나 다시 로그인하면 데몬이 자동으로 다시 켜집니다. 이 조작은 등록물을 지우는 것이
+        아니라 잠깐 내리는 것입니다. 자동 시작까지 없애려면 위 설치 마법사의 서비스 등록을 해제해야
+        하고, 이 버튼은 그것을 하지 않습니다.
+      </p>
+
+      <div className="heartbeat-confirm-actions">
+        <button className="primary-button" onClick={onConfirm} type="button">
+          확인하고 데몬 끄기
+        </button>
+        <button className="secondary-button" onClick={onCancel} type="button">
+          취소
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 조작 결과(R5·R7). "꺼졌습니다"로 끝나지 않는다 — 명령이 성공했다는 것과 데몬이 실제로 내려갔다는
+ * 것은 다른 사실이고, 앱의 실행 여부 판정은 pid 파일 존재 하나다.
+ */
+function ServiceOutcomeView({
+  copied,
+  daemonRunning,
+  onCopy,
+  outcome,
+}: {
+  copied: boolean | null;
+  daemonRunning: boolean;
+  onCopy(command: string): void;
+  outcome: HeartbeatServiceOutcome;
+}) {
+  const { operation, result } = outcome;
+
+  if (result.kind === "notRun") {
+    return (
+      <IntegrationWarning
+        title={`앱이 ${serviceOperationLabels[operation]} 명령을 실행하지 못했습니다`}
+      >
+        <p>{result.message}</p>
+        <p>아래 명령을 터미널에서 직접 실행하면 같은 조작을 끝낼 수 있습니다.</p>
+        {/* 복사에 실패해도 원문은 여기 남아 사용자가 직접 선택할 수 있다. 업데이트 실행 실패
+            표시가 같은 이유로 같은 모양을 쓴다. */}
+        <pre className="heartbeat-service-failure-command">
+          <code>{result.command}</code>
+        </pre>
+        <div className="heartbeat-service-failure-copy">
+          <button
+            aria-label="데몬 조작 명령 복사"
+            className="secondary-button heartbeat-service-failure-copy-button"
+            onClick={() => onCopy(result.command)}
+            type="button"
+          >
+            명령 복사
+          </button>
+          {copied !== null && (
+            <span
+              className={`heartbeat-service-copied${copied ? "" : " copy-failed"}`}
+              role="status"
+            >
+              {copied ? "복사됨" : "복사하지 못했습니다 — 위 명령을 직접 선택해 복사하세요."}
+            </span>
+          )}
+        </div>
+      </IntegrationWarning>
+    );
+  }
+
+  const unresolved = unresolvedFromResult(result);
+  if (unresolved) return <ServiceUnresolvedNote view={unresolved} />;
+  if (result.kind !== "ran") return null;
+
+  return (
+    <div
+      aria-label="데몬 조작 결과"
+      className={`heartbeat-service-result result-${result.code === 0 ? "ok" : "failed"}`}
+      role="group"
+    >
+      <strong>{serviceOperationLabels[operation]} 명령이 끝났습니다</strong>
+      <p>{serviceExitNote(result.code)}</p>
+      <p>{serviceStateNote(operation, daemonRunning)}</p>
+      <p>
+        조작한 대상: {result.label} · {result.plistPath}
+      </p>
+      {/* 0이 아닌 종료 코드에서 사유를 말하는 것은 이 원문이지 앱이 아니다. 결과 문장을 덮지 않게
+          접힌 자리에 둔다 — 업데이트 쪽 원문이 같은 자리를 쓴다. */}
+      {result.code !== 0 && (
+        <details className="heartbeat-service-output">
+          <summary>진단 원문 (stderr)</summary>
+          <pre>{result.stderr === "" ? "(비어 있음)" : result.stderr}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 084 경고 안의 갱신 안내와 그 접힘(R6, 확인 필요 6번의 승인안).
+ *
+ * 하트비트 카드에는 업데이트 버튼이 있어 안내가 주 통로가 아니므로 접어 둔다. 실행 수단을 찾지
+ * 못한 뒤에는 손으로 끝내는 길이 유일하므로 안내가 펼쳐진 주 통로가 된다. 접힘·펼침을 가르는 것은
+ * "직전 실행이 무엇으로 끝났는가" 하나이며, 그 값이 뒤집히면 사용자가 고른 상태도 함께 초기화된다
+ * — 호출부의 `key`가 그 일을 한다.
+ *
+ * 감싸기일 뿐 안내 자체는 손대지 않는다. `HeartbeatUpdateGuide`의 문구와 다섯 값이 그대로여야
+ * dream 카드와 글자까지 같다(SPEC-034 R7). dream 카드에는 이 감싸기를 쓰지 않는다 — 그쪽에는
+ * 업데이트 버튼이 없어 안내가 계속 주 통로다.
+ */
+function FoldedUpdateGuide({ expanded, guide }: { expanded: boolean; guide: UpdateGuide }) {
+  const [open, setOpen] = useState(expanded);
+  const guideId = useId();
+
+  return (
+    <div className="heartbeat-update-fold">
+      <button
+        aria-controls={guideId}
+        aria-expanded={open}
+        className="integration-toggle"
+        onClick={() => setOpen(!open)}
+        type="button"
+      >
+        {open ? "갱신 안내 접기" : "갱신 안내 펼치기"}
+      </button>
+      {/* 접기는 언마운트가 아니다. 조건부 렌더로 빼면 어느 명령을 복사했는지가 사라진다.
+          설치 가이드와 연동 카드 본문이 같은 이유로 같은 모양을 쓴다. */}
+      <div hidden={!open} id={guideId}>
+        <HeartbeatUpdateGuide guide={guide} />
       </div>
     </div>
   );
@@ -674,12 +1956,15 @@ function HeartbeatRoleJobs({
   onInstall,
   pendingWork,
   heartbeatRuns,
+  guideExpanded,
 }: {
   snapshot: IntegrationsSnapshot;
   writeError: string | null;
   onInstall(roles: RoleJobRequest[], baseline: ManagedRoleJob[]): Promise<boolean>;
   pendingWork?: PendingRoleWork;
   heartbeatRuns: HeartbeatRunControls;
+  /** 084 경고 안의 갱신 안내가 펼쳐진 주 통로인가. 판정은 카드가 하고 여기서는 넘기기만 한다. */
+  guideExpanded: boolean;
 }) {
   const { slug, supported, heartbeat } = snapshot;
   const roleDefaults = defaultsFrom(heartbeat);
@@ -1176,6 +2461,17 @@ function HeartbeatRoleJobs({
               {missingRunEvidence(Boolean(job), run) && (
                 <IntegrationWarning title={noRunEvidenceTitle}>
                   <p>{noRunEvidenceNote}</p>
+                  {/* 위 문장이 "갱신하세요"로 끝나므로 그 방법이 같은 자리에 온다(SPEC-034 R1).
+                      표시 조건을 새로 만들지 않는다 — 이 경고가 뜨는 조건이 곧 안내가 뜨는 조건이고,
+                      그래서 상시 표시가 되지 않는다.
+
+                      이제 그 갱신을 앱이 대신 실행하므로 안내는 접힌 자리로 내려간다. 실행 수단을
+                      찾지 못한 뒤에만 다시 주 통로가 된다(SPEC-037 확인 필요 6번). */}
+                  <FoldedUpdateGuide
+                    expanded={guideExpanded}
+                    guide={snapshot.updateGuide}
+                    key={guideExpanded ? "expanded" : "folded"}
+                  />
                 </IntegrationWarning>
               )}
 

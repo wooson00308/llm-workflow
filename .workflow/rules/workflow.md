@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 8
+rules_version: 12
 ---
 
 # LLM Workflow agent protocol
@@ -49,11 +49,10 @@ Ratification is the user's action alone. An agent never ratifies, and never driv
 
 The delegated decision file stays where it is. Several decisions on one specification is the design here — "when was this approved, and when was it sent back" is what the audit log answers — and the app has no path that edits or deletes a decision document, so removing one would mean a human editing app-owned state, which is what these rules exist to prevent.
 
-That leaves a document sitting in `decisions/` that the app does not see. Two judgements ignore it and one does not:
+That leaves a document sitting in `decisions/` that the app does not see. Every judgement ignores it:
 
 - The app ignores it wherever it reads specification decisions. It never sets a specification's status and never reaches the decision feed.
 - The architect eligibility judgement ignores it. It is not architect work, and it cannot displace another decision from being the latest one.
-- The condition script's planner branch does not read `created_by`. It compares `created_at` across every decision document of the specification, so a delegated decision later than a pending `revision_requested` hides that revision request from the heartbeat while the app still counts it. Until that branch reads `created_by` too, the app and the heartbeat disagree about such a specification.
 
 Decisions written before this rule carry `created_by: user` even where an agent wrote them. They are not valid delegated decisions, but the app cannot tell them from its own stamps and still reads them as user decisions, which also means the ratification above does not reach them. Do not rewrite them: `created_by` is the app's field. Report the gap instead.
 
@@ -116,6 +115,18 @@ Write `heartbeat_at` and `expires_at` as UTC in exactly `YYYY-MM-DDTHH:MM:SSZ`. 
 
 An expired lease does not hold its target. Eligibility judgements count a lease as a claim only while its `expires_at` is still ahead of the moment of judgement, and a lease whose `expires_at` is missing or written outside the shape above is not counted either. Without that, a session that dies before releasing would close its target forever. Those judgements only read: they never delete or repair a lease file, so an expired lease stays where it is until a later claim takes it over.
 
+### Taking over what a stopped session left
+
+An expired lease means the session that held it is no longer alive, and taking that claim over means starting on top of unfinished work. Sessions die halfway: a document is half written, a task sits in `in_progress`, the working tree carries changes nobody reported. That residue is not yours and it is not trustworthy on sight.
+
+So evaluate it before building on it. Read what is there and split it into what you keep, what you discard, and what you rewrite. The residue is both kinds at once — the progress inside the documents and the code changes in the working tree — and the split is a judgement you make by reading, not a procedure this contract can hand you.
+
+Write that judgement into the report. What you took over, what you discarded, and why the line fell where it did must be readable from that one report alone.
+
+When something you discard is a test, say so plainly and say why it was the dead session's mistake. Removing a wrong test somebody else added and deleting a test that stands in the way of a passing run are different acts, and the report is where a reader tells them apart. The prohibition in `.workflow/rules/roles/developer.md` is untouched by a takeover.
+
+This obligation is the same for every role that can take a claim over. It is written here once, and the role contracts point at this section instead of restating it.
+
 ## 5. Follow the document state machine
 
 ### Ideas and specifications
@@ -147,7 +158,9 @@ The app records user QA under `decisions/` with `schema: workflow-labs/qa-decisi
 
 ### Record every task transition
 
-A session that changes a task's status appends one entry to the task's `history` field in the same edit. Write entries as single-line flow mappings:
+A session that changes a task's status appends one entry to the task's `history` field in the same edit. A session that takes a stopped task over appends an `in_progress` entry as well, even though the status it finds is already `in_progress` and does not change. The takeover is a fact about the task, and the history is where facts about the task live: without that entry, nothing outside a report says the work changed hands.
+
+Write entries as single-line flow mappings:
 
 ```yaml
 history:
@@ -163,7 +176,8 @@ history:
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework.
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no seventh `kind` for a takeover, and there is none for anything else: these six are the whole list.
+- The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
 - Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
@@ -175,6 +189,8 @@ history:
 - Update `updated_at` with an RFC3339 timestamp when changing an agent-owned document.
 - When a task has a target date, store it as optional `due_at: YYYY-MM-DD`.
 - Task transition facts live in the optional `history` field; leave the key out while there are no entries.
+- The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
+- An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.
@@ -184,3 +200,51 @@ history:
 - Satisfy the task's stated completion conditions and run relevant tests before moving it to `qa_waiting`.
 - Record outcomes, verification commands, remaining risks, and follow-up work in `reports/`.
 - Leave protected state unchanged and release your lease at the end of the session.
+
+## 8. Open the document with a summary for the decision-maker
+
+Every specification, development task, and implementation report an agent writes opens with one section addressed to the person who stamps it. This section is the whole definition of that obligation. Each role contract states what its own document must say and points here for the rest; no role contract repeats what is defined below.
+
+Idea documents are outside this section. The user writes there too, so no obligation is placed on that document kind.
+
+### Where it goes and what it is called
+
+- The heading is `## 결정권자 요약`, written in exactly those characters whatever language the rest of the document uses. A later feature and a human reader must find the section by one and the same string.
+- It stands at the very top of the body, immediately after the H1 title and before every other section.
+- That position carries weight beyond order. The app builds its list previews and search results from the first three body lines, so a summary standing first is what the cards show that same day. Put the point in those first three lines.
+
+### What it says
+
+- The summary is not an abridgement of the body. It is written again on the assumption that its reader is on another layer, and it never introduces a fact the body does not carry.
+- What each document kind must say is written in the role contract that owns it. There is no exemption: all three kinds carry the section.
+- The limit is ten lines, blank lines excluded. Longer than that and the summary has become a second body.
+
+### What it must not contain
+
+Inside the summary section there are none of the following:
+
+- a token wrapped in backticks
+- a file path — a name holding a slash, or a file name holding an extension
+- a `snake_case` or `camelCase` identifier
+- a `file:line` reference
+- a function, type, or field name
+
+Document ids are the single exception: a value beginning `SPEC-`, `TASK-`, `IDEA-`, or `DECISION-` is allowed, because those are names the user meets on the app's own screens. Write them as plain text without backticks, so "no backtick tokens" holds without an exception of its own.
+
+These conditions reach the summary section and nothing else. The rest of the body keeps the language it has now: between workers that density is precision, not a defect.
+
+### Keeping the summary true
+
+- A session that transitions a document's status brings the summary up to the current facts in the same edit, exactly as it appends the `history` entry in the same edit.
+- The obligation is on agent sessions alone. The two transitions the app records — `completed` and `revision_requested` — never touch the body, so this section places no obligation on the app.
+- A specification rewritten after a revision request is a new document, so its summary is written anew. Copying the previous document's summary over is not compliance.
+
+### The confirmation walkthrough
+
+A development task that goes to `qa_waiting` carries a second section for the same reader: `## 확인 동선`, written in exactly those characters. The developer writes it, and `.workflow/rules/roles/developer.md` defines what it holds. The prohibitions above do not reach it.
+
+### Documents written before this section
+
+- A document with no summary section stays valid. It is read, displayed, and judged exactly as it was.
+- Whether a summary exists is not part of any eligibility judgement, and reading a document never fails over a missing or malformed summary. No session is stopped and no task is closed because a summary is absent.
+- Nothing is filled in retroactively. This section reaches the documents written from here on.

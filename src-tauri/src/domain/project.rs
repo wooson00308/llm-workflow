@@ -169,6 +169,17 @@ pub struct TaskDependency {
     pub state: TaskDependencyState,
 }
 
+/// 활성 lease 하나가 이 작업의 착수를 막는 근거(SPEC-032 R7).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOverlapBlock {
+    /// lease가 잡은 문서 id. 활동 뷰의 카드가 쓰는 값과 같다.
+    pub lease_target_id: String,
+    /// 두 선언이 함께 가리킨 경로. 선언에 적힌 문자열 그대로이고 오름차순·중복 없음이다.
+    /// 선언 부재나 형식 오류로 막힌 경우 비어 있다.
+    pub shared_files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDocument {
@@ -179,6 +190,9 @@ pub struct TaskDocument {
     /// 선언 줄이 계약 형식이 아니어서 목록으로 읽지 못했는가(SPEC-013 R3). 참이면 `dependencies`는
     /// 비어 있고 이 작업은 미충족이다.
     pub dependency_format_error: bool,
+    /// 이 작업의 착수를 막고 있는 활성 lease와 그 근거(SPEC-032 R7). 비어 있으면 막히지 않은
+    /// 것이다. 자기 자신을 잡은 lease는 담지 않는다 — 그것은 겹침이 아니라 자기 선점이다.
+    pub overlap_blocks: Vec<TaskOverlapBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -201,6 +215,25 @@ pub enum SpecDecisionOutcome {
 pub enum TaskQaOutcome {
     Confirmed,
     RevisionRequested,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaBatchResult {
+    pub summary: ProjectSummary,
+    /// 요청 순서 그대로. 화면이 목록과 나란히 읽는다.
+    pub results: Vec<TaskQaBatchEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaBatchEntry {
+    pub file_name: String,
+    /// 문서를 읽지 못하면 `None`. 추정으로 채우지 않는다.
+    pub task_id: Option<String>,
+    pub recorded: bool,
+    /// 실패 사유. 성공이면 `None`.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -292,6 +325,11 @@ pub struct HeartbeatSetupStage {
     pub state: HeartbeatSetupState,
     /// 1~3은 참, dream은 거짓(R9). 선택 단계가 미완료여도 마법사는 접힌다.
     pub required: bool,
+    /// 앱이 이 단계를 대신 실행할 수 있는가(SPEC-037 R2). 명령을 소유한 쪽이 백엔드이므로
+    /// "이 단계를 앱이 실행할 수 있는가"도 백엔드가 답한다 — 화면이 단계 종류를 보고 스스로
+    /// 갈리면 백엔드와 화면이 다른 답을 낼 자리가 생긴다. `command`·`evidence`를 완성해 싣는
+    /// 것과 같은 규칙이다.
+    pub runnable: bool,
     /// 사용자가 자기 터미널에 그대로 붙여 넣을 명령 원문(R6). 화면이 조각을 조립하지 않는다.
     pub command: String,
     /// 판정에 쓴 경로. 감지하지 않는 단계와 이 플랫폼에서 볼 경로가 없는 단계는 `None`이다.
@@ -317,6 +355,65 @@ pub enum HeartbeatSetupState {
     Done,
     NotDone,
     Unknown,
+}
+
+/// 이 기기에 등록된 하트비트 서비스를 앱이 얼마나 확정했는지(SPEC-036 R4·R5).
+///
+/// 확정된 경우에만 조작 대상이 있다. 나머지 넷은 서로 다른 사유이고 사용자가 할 다음 행동도
+/// 다르므로 하나의 실패 값으로 접지 않는다(R5). 확정하지 못한 채 표준 라벨로 대신 시도하는 값은
+/// 이 집합에 없다 — 그것이 R4가 막는 일이다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HeartbeatServiceTarget {
+    /// 대상 plist가 정확히 하나이고 그 `Label`을 읽었다. 이 둘이 조작에 필요한 값 전부다.
+    Resolved { label: String, plist_path: String },
+    /// 디렉터리는 읽었는데 대상 plist가 없다. 데몬 계약이 같은 상태를 `skipped/not-registered`로
+    /// 부른다.
+    NotRegistered,
+    /// 대상 plist가 둘 이상이라 앱이 대상을 고르지 않는다(확인 필요 3번). 찾은 경로를 전부 담아
+    /// 사용자가 무엇을 정리해야 하는지 보이게 한다.
+    Ambiguous { plist_paths: Vec<String> },
+    /// macOS가 아니다. 다른 플랫폼의 등록물 위치와 조작 절차는 이 저장소가 확인한 적이 없다(R9).
+    UnsupportedPlatform,
+    /// 읽어야 할 것을 읽지 못했다. 디렉터리를 열지 못했거나, plist는 하나인데 그 `Label`을 읽지
+    /// 못했다(파일을 열지 못했거나, plist가 아니거나, `Label` 키가 없거나 문자열이 아니다).
+    ///
+    /// 등록물 없음과 갈라 두는 값이다. 못 읽은 것을 없음으로 접으면 앱이 모르는 것을 안다고
+    /// 말하게 된다.
+    Unreadable { path: String },
+}
+
+/// 데몬을 내리면 함께 멈추는 잡 하나(SPEC-036 R2).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatRecordedJob {
+    /// 상태 파일 최상위 키의 원문. 앱이 이름을 해석하지 않는다 — 이름에서 프로젝트를 뽑아내지도,
+    /// 역할을 번역하지도 않는다(R2).
+    pub name: String,
+    /// 이 프로젝트의 잡인가. 앱이 자기 slug로 만든 잡 이름들과의 완전 일치로만 정한다. 부분 일치나
+    /// 접두사 판정을 쓰지 않는다.
+    pub of_this_project: bool,
+}
+
+/// 084 경고 자리에서 보여줄 하트비트 갱신 절차의 명령 원문(SPEC-034 R3·R4). 설치 마법사의
+/// `command`와 같은 규칙이다 — 화면이 조각을 조립하지 않게 완성된 문자열이 도착한다.
+///
+/// 설치 방법을 하나로 단정하지 않으므로 갱신 명령이 둘이다(R3). `identify_command`가 사용자에게
+/// 자기 갈래를 알려 주고, `package_command`와 `source_command`가 그 두 갈래다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatUpdateGuide {
+    /// 어느 갈래인지 확인하는 명령. 출력의 `Editable project location` 유무가 갈래를 가른다.
+    pub identify_command: String,
+    /// pip 배포본으로 설치한 경우의 갱신 명령.
+    pub package_command: String,
+    /// 소스 체크아웃으로 설치한 경우의 갱신 명령. 체크아웃 경로는 앱이 알지 못하므로 붙이지 않는다.
+    pub source_command: String,
+    /// 재시작에 앞서 사용자가 자기 서비스 라벨을 확인하는 명령(R4). 확인할 방법이 없는 플랫폼에서는
+    /// `None`이다 — 설치 3단계의 `evidence`가 같은 이유로 `None`이 되는 것과 같은 어법이다.
+    pub service_lookup_command: Option<String>,
+    /// 데몬 재시작 명령(R4). 라벨 자리는 사용자가 바꿔 넣는 빈자리이고 앱이 지어낸 값이 아니다.
+    pub service_restart_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

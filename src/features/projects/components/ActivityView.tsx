@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { Icon } from "../../../shared/ui/Icon";
+import { labelSpecDecisions } from "../domain/specDecisionLabels";
 import type {
   AgentLeaseSummary,
   ProjectSummary,
@@ -55,16 +56,6 @@ const taskEventLabels = new Map<string, string>(
   eventKinds.map((entry) => [entry.kind, entry.label]),
 );
 
-/**
- * 기획서 결정의 이름. `revision_requested`는 원천에 따라 다른 사건이라 작업 전이와 같은 값을
- * 다른 말로 부른다 — 기획서에서는 사용자의 수정 요청이고 작업에서는 QA 반려다.
- */
-const specEventLabels = new Map<string, string>([
-  ["approved", "승인"],
-  ["revision_requested", "수정 요청"],
-  ["rejected", "폐기"],
-]);
-
 /** 피드가 한 번에 보여주는 최근 항목 수. 넘으면 잘렸다는 사실을 함께 알린다. */
 const feedLimit = 30;
 
@@ -79,6 +70,8 @@ interface ActivityEntry {
   at: string;
   instant: number;
   kind: string;
+  /** 화면에 서는 이름. 표시 클래스는 `kind`가 정하므로 둘이 갈릴 수 있다. */
+  label: string;
   source: "spec" | "task";
   item: WorkflowItemSummary;
 }
@@ -149,7 +142,7 @@ export function ActivityView({ onOpenDocument, project, workflow }: Props) {
                     })}
                     type="button"
                   >
-                    <span className={`activity-mark event-${entry.kind}`}>{entryLabel(entry)}</span>
+                    <span className={`activity-mark event-${entry.kind}`}>{entry.label}</span>
                     <small>{entry.item.id}</small>
                     <strong>{entry.item.title}</strong>
                     <time dateTime={entry.at}>{formatMoment(entry.at)}</time>
@@ -192,22 +185,38 @@ function activityEntries(items: WorkflowSummary["items"] | undefined): ActivityE
 }
 
 function collectEntries(items: WorkflowItemSummary[], source: ActivityEntry["source"]) {
-  const labels = source === "spec" ? specEventLabels : taskEventLabels;
   const entries: ActivityEntry[] = [];
   for (const item of items) {
-    for (const event of item.events ?? []) {
-      if (!labels.has(event.kind)) continue;
-      const instant = Date.parse(event.at);
+    for (const { at, kind, label } of labeledEvents(item, source)) {
+      if (label === undefined) continue;
+      const instant = Date.parse(at);
       if (Number.isNaN(instant)) continue;
-      entries.push({ at: event.at, instant, kind: event.kind, source, item });
+      entries.push({ at, instant, kind, label, source, item });
     }
   }
   return entries;
 }
 
-function entryLabel(entry: ActivityEntry) {
-  const labels = entry.source === "spec" ? specEventLabels : taskEventLabels;
-  return labels.get(entry.kind);
+/**
+ * 한 문서의 사건에 화면 이름을 붙인다. 이름을 붙일 수 없는 종류는 `label`이 undefined로 나가고
+ * 부르는 쪽이 그 항목만 버린다.
+ *
+ * 기획서 쪽 이름은 `labelSpecDecisions`가 정한다. 같은 `revision_requested`라도 앞에 승인이
+ * 있으면 후속 기획 요청이고, 그 판별을 이 파일이 다시 쓰지 않는다 — 기획서 화면의 이력과 한
+ * 모듈을 공유해야 두 자리가 같은 결정을 같은 이름으로 부른다(SPEC-042 R5). 목록은 문서 안에서
+ * 시각 오름차순이라 그 모듈이 요구하는 순서를 그대로 만족한다.
+ *
+ * 모듈은 계약 밖의 종류를 값 그대로 돌려주므로, 이름이 종류와 같다는 것이 곧 이름이 없다는 뜻이다.
+ */
+function labeledEvents(item: WorkflowItemSummary, source: ActivityEntry["source"]) {
+  const events = item.events ?? [];
+  if (source === "task") {
+    return events.map((event) => ({ ...event, label: taskEventLabels.get(event.kind) }));
+  }
+  return labelSpecDecisions(events).map((entry) => ({
+    ...entry,
+    label: entry.label === entry.kind ? undefined : entry.label,
+  }));
 }
 
 function WorkerCard({

@@ -79,6 +79,17 @@ export interface TaskDependency {
   state: TaskDependencyState;
 }
 
+/**
+ * 이 작업의 착수를 막고 있는 활성 lease 하나와 그 근거. lease가 풀리면 사라지는 일시적인 사실이라
+ * `missing`·`cyclic`처럼 사람이 선언을 고쳐야 하는 상태와 다르다.
+ */
+export interface TaskOverlapBlock {
+  /** lease가 잡은 문서 id. */
+  leaseTargetId: string;
+  /** 두 선언이 함께 가리킨 경로. 선언 부재나 형식 오류로 막힌 경우 비어 있다. */
+  sharedFiles: string[];
+}
+
 export interface TaskDocument {
   summary: WorkflowItemSummary;
   body: string;
@@ -86,6 +97,8 @@ export interface TaskDocument {
   dependencies?: TaskDependency[];
   /** 선언 줄이 계약 형식이 아니어서 목록으로 읽지 못했는가. 참이면 이 작업은 미충족이다. */
   dependencyFormatError?: boolean;
+  /** 착수를 막고 있는 활성 lease와 그 근거. 비어 있으면 막히지 않은 것이다. */
+  overlapBlocks?: TaskOverlapBlock[];
 }
 
 export interface IdeaDocument {
@@ -99,6 +112,21 @@ export type SpecDecisionOutcome =
   | "rejected";
 
 export type TaskQaOutcome = "confirmed" | "revision_requested";
+
+export interface TaskQaBatchEntry {
+  fileName: string;
+  /** 문서를 읽지 못하면 null. 추정으로 채우지 않는다. */
+  taskId: string | null;
+  recorded: boolean;
+  /** 실패 사유. 성공이면 null. */
+  message: string | null;
+}
+
+export interface TaskQaBatchResult {
+  summary: ProjectSummary;
+  /** 요청 순서 그대로. 화면이 목록과 나란히 읽는다. */
+  results: TaskQaBatchEntry[];
+}
 
 export interface AgentLeaseSummary {
   leaseId: string;
@@ -257,10 +285,39 @@ export interface HeartbeatSetupStage {
   state: HeartbeatSetupState;
   /** 1~3은 참, dream은 거짓이다. 선택 단계가 미완료여도 마법사는 접힌다. */
   required: boolean;
+  /**
+   * 앱이 이 단계를 대신 실행할 수 있는가(SPEC-037 R2). 실행 버튼이 붙는 자리를 정하는 값은 이것
+   * 하나다 — 화면이 단계 종류를 보고 스스로 갈리면 백엔드와 화면이 다른 답을 낼 자리가 생긴다.
+   */
+  runnable: boolean;
   /** 사용자가 자기 터미널에 그대로 붙여 넣을 명령 원문. 화면에서 조각을 조립하지 않는다. */
   command: string;
   /** 판정에 쓴 경로. 감지하지 않는 단계와 이 플랫폼에서 볼 경로가 없는 단계는 null이다. */
   evidence: string | null;
+}
+
+/**
+ * 이 기기에 등록된 하트비트 서비스를 앱이 얼마나 확정했는지(SPEC-036 R4·R5). 확정된 경우에만
+ * 조작 대상이 있고, 나머지 넷은 사용자가 할 다음 행동이 서로 달라 하나의 실패 값으로 접지 않는다.
+ *
+ * 필드 이름이 이 파일의 다른 타입과 달리 snake_case인 것은 백엔드가 그 모양으로 내보내기 때문이다.
+ * 받는 값의 모양을 화면 쪽에서 고쳐 적으면 두 정의가 갈라진다.
+ */
+export type HeartbeatServiceTarget =
+  | { kind: "resolved"; label: string; plist_path: string }
+  | { kind: "not_registered" }
+  /** 등록물이 둘 이상이라 앱이 고르지 않는다. 찾은 경로가 전부 실린다. */
+  | { kind: "ambiguous"; plist_paths: string[] }
+  | { kind: "unsupported_platform" }
+  /** 디렉터리를 열지 못했거나, 등록물은 하나인데 그 이름을 읽지 못했다. 등록물 없음과 다른 값이다. */
+  | { kind: "unreadable"; path: string };
+
+/** 데몬을 내리면 함께 멈추는 잡 하나. */
+export interface HeartbeatRecordedJob {
+  /** 상태 파일 최상위 키의 원문. 앱이 이름을 해석하지 않는다. */
+  name: string;
+  /** 앱이 자기 slug로 만든 잡 이름들과의 완전 일치로만 정한다. */
+  ofThisProject: boolean;
 }
 
 /** 하트비트 연동 payload. 공통 설치 상태 위에 데몬 실행 여부와 역할 잡을 얹는다. */
@@ -276,6 +333,21 @@ export interface HeartbeatIntegration {
   conditionScriptPath: string;
   roles: HeartbeatRoleStatus[];
   managedJobs: ManagedRoleJob[];
+  /**
+   * 이 기기에 등록된 서비스의 해석 결과. 끄기·켜기의 대상이 여기서 나온다.
+   *
+   * 선택인 것은 이 payload를 조립하는 검사 리터럴이 아직 이 필드를 모르기 때문이며, 백엔드는 늘
+   * 채워 보낸다. 값이 없는 동안 화면은 조작 통로를 세우지 않는다 — 대상을 모르는 채로 버튼을
+   * 내밀지 않는다.
+   */
+  serviceTarget?: HeartbeatServiceTarget;
+  /**
+   * 데몬을 내리면 함께 멈추는 잡. **"지금 돌고 있는 잡"이 아니라 "실행 기록이 있는 잡"이다.**
+   * 데몬은 기기 하나에 하나이므로 다른 프로젝트의 잡도 들어간다.
+   *
+   * `serviceTarget`과 같은 이유로 선택이다.
+   */
+  recordedJobs?: HeartbeatRecordedJob[];
   duplicateJobs: DuplicateIntegrationJob[];
   readFailures: IntegrationReadFailure[];
 }
@@ -316,6 +388,29 @@ export interface DreamIntegration {
 }
 
 /**
+ * 하트비트를 갱신하는 명령 원문(SPEC-034 R3). 백엔드가 완성한 문자열이고 화면은 그리기만 한다 —
+ * 설치 마법사의 `command`와 같은 규칙이다.
+ *
+ * 갈래가 둘인 이유는 앱이 이 기기의 설치 방법을 알지 못하기 때문이다. 사용자가 `identifyCommand`로
+ * 자기 갈래를 확인하고 그중 하나를 고른다.
+ */
+export interface HeartbeatUpdateGuide {
+  /** 설치 갈래를 판별하는 명령. 결과에 편집 가능 설치 표시가 있으면 소스 체크아웃이다. */
+  identifyCommand: string;
+  /** pip으로 설치한 경우의 갱신 명령. */
+  packageCommand: string;
+  /** 소스 체크아웃으로 설치한 경우의 갱신 명령. 체크아웃 경로는 앱이 알지 못해 붙지 않는다. */
+  sourceCommand: string;
+  /**
+   * 사용자가 자기 서비스 등록물의 라벨을 확인하는 명령. null은 "앱이 이 플랫폼의 재시작 방법을
+   * 알지 못한다"는 뜻이며 `serviceRestartCommand`와 함께 움직인다.
+   */
+  serviceLookupCommand: string | null;
+  /** 재시작 명령. 라벨 자리는 사용자가 채운다 — 앱이 지어낸 값을 넣지 않는다. */
+  serviceRestartCommand: string | null;
+}
+
+/**
  * 연동 섹션이 한 번에 읽는 값. 섹션 공통 값과 연동별 payload를 나눠 담는다.
  *
  * 연동이 늘어나도 게이트웨이 메서드·훅 상태·조회 주기는 그대로다. 새 연동은 payload 필드 하나를
@@ -341,6 +436,14 @@ export interface IntegrationsSnapshot {
    * 갈라질 자리가 생긴다. `conditionScriptPath`·`conditionCommand`가 payload에 있는 것과 같은 규칙이다.
    */
   jobsFilePath: string;
+  /**
+   * 하트비트 갱신 절차의 명령 원문. 두 카드가 같은 값을 같은 문구로 보여야 하므로(R7) 연동별
+   * payload가 아니라 섹션 공통 값이다. `managedBlockFailure`·`jobsFilePath`와 같은 이유다.
+   *
+   * 표시 조건은 여기 없다. 084 경고가 뜨는 조건은 화면이 이미 갖고 있고, 같은 결론을 내는 자리를
+   * 둘로 만들지 않는다.
+   */
+  updateGuide: HeartbeatUpdateGuide;
   heartbeat: HeartbeatIntegration;
   dream: DreamIntegration;
 }
@@ -396,6 +499,208 @@ export interface HeartbeatRunFailure {
   command: string;
 }
 
+/**
+ * `heartbeat update`가 낸 단계 줄 하나. 데몬이 실제로 낸 줄만 실린다 — 앱이 단계 셋을 미리 만들어
+ * 두고 채우지 않는다(SPEC-037 R4).
+ *
+ * `status`·`detail`이 null인 것은 계약이 그 키를 뺄 수 있어서가 아니라, 없는 키를 앱이 지어내지
+ * 않기 때문이다.
+ */
+export interface HeartbeatUpdateStep {
+  step: string;
+  status: string | null;
+  detail: string | null;
+}
+
+/**
+ * 업데이트 실행의 결과. 셋이 서로 다른 값이다 — "계약대로 답했다"와 "계약 밖으로 끝났다"와
+ * "실행 자체를 못 했다"를 하나로 접으면 R4·R5·R7이 화면에서 사라진다.
+ *
+ * 백엔드(`heartbeat_update_service.rs`)가 만든 값을 그대로 들고 있는다. 화면은 이 값을 문장으로
+ * 옮기기만 하고 판정을 다시 하지 않는다.
+ */
+export type HeartbeatUpdateResult =
+  | {
+      kind: "contract";
+      /** 데몬이 낸 순서 그대로. 낸 적 없는 단계는 없다. */
+      steps: HeartbeatUpdateStep[];
+      /** `ok`·`partial`·`failed`. 화면이 셋을 둘로 접지 않는다. */
+      result: string;
+      /** 갱신이 끝난 뒤 디스크에 있는 버전. */
+      version: string | null;
+      /** 프로세스 종료 코드. null은 시그널로 끝난 것이다. */
+      code: number | null;
+      stdout: string;
+      stderr: string;
+    }
+  /** 실행은 됐는데 답이 계약의 모양이 아니다. 성공으로 읽지 않는다. */
+  | { kind: "offContract"; code: number | null; stdout: string; stderr: string }
+  /** 실행 자체가 실패했다. 사용자가 손으로 끝낼 수 있게 명령 원문이 함께 온다. */
+  | { kind: "notRun"; message: string; command: string; looked: string[] };
+
+/**
+ * 업데이트 실행의 진행·결과 상태와 실행 통로. 카드는 이 묶음 하나만 받는다.
+ *
+ * 실행 상태와 같은 이유로 주인이 훅이다 — 연동 뷰는 조건부 렌더라 다른 메뉴를 다녀오면
+ * 언마운트되고, 카드가 들면 진행 표시가 그때 사라진다.
+ */
+export interface HeartbeatUpdateControls {
+  running: boolean;
+  /** 마지막 실행의 결과. 조회 주기가 지우지 않는다. */
+  result: HeartbeatUpdateResult | null;
+  update(): Promise<void>;
+}
+
+/**
+ * 설치 단계 하나를 앱이 대신 실행한 결과(SPEC-037 R2). 셋이 서로 다른 값이다 — 실행까지 간 것과
+ * 실행 수단을 찾지 못한 것과 애초에 실행 대상이 아닌 것은 사용자가 할 다음 행동이 서로 다르다.
+ *
+ * 백엔드(`heartbeat_setup_run_service.rs`)가 만든 값을 그대로 들고 있는다. 두 명령은 원인별 종료
+ * 코드가 계약에 없어 갈림이 "종료 코드가 0인가" 하나뿐이고, 실패 사유는 앱이 아니라 stdout·stderr
+ * 원문이 말한다.
+ */
+export type HeartbeatSetupRunResult =
+  | {
+      kind: "ran";
+      /** 종료 코드가 0인가. 시그널로 끝난 것(`code`가 null)은 성공이 아니다. */
+      succeeded: boolean;
+      code: number | null;
+      stdout: string;
+      stderr: string;
+    }
+  /** 실행 자체가 실패했다. 사용자가 손으로 끝낼 수 있게 명령 원문이 함께 온다. */
+  | { kind: "notRun"; message: string; command: string; looked: string[] }
+  /** 앱이 대신 실행하지 않는 단계다. 화면이 실행 가능 표식만 보고 버튼을 세우므로 정상 경로에서는
+   * 나오지 않는다 — 나오면 화면과 백엔드의 답이 갈라졌다는 뜻이다. */
+  | { kind: "notRunnable"; message: string };
+
+/** 도는 데몬의 버전. `state.json`의 `_daemon.version` 하나에서 온다. */
+export type HeartbeatRunningVersion =
+  | { kind: "known"; version: string }
+  /** 상태 파일이 없거나, JSON이 깨졌거나, 항목이 없다. 셋 다 오류가 아니다. */
+  | { kind: "unknown" };
+
+/**
+ * 디스크의 버전. `heartbeat --version`의 출력에서 온다. 모르는 경우를 하나로 뭉치지 않는다 —
+ * 실행 파일을 찾지 못한 것과 띄우지 못한 것과 출력이 계약 밖인 것은 다음 행동이 서로 다르다.
+ */
+export type HeartbeatDiskVersion =
+  | { kind: "known"; version: string }
+  /** 후보를 전부 봤는데 실행 파일이 없다. 본 후보를 함께 싣는다 — 앱이 경로를 지어내지 않는다. */
+  | { kind: "notFound"; looked: string[] }
+  | { kind: "notStarted"; message: string }
+  | { kind: "offContract"; code: number | null; stdout: string; stderr: string };
+
+/** 판정 불가의 사유. 한쪽이라도 모르면 그 사유가 실린다. 둘 다 모르면 사유도 둘이다. */
+export type HeartbeatVersionUndeterminedReason =
+  | "executableNotFound"
+  | "executableNotStarted"
+  | "diskVersionOffContract"
+  | "runningVersionUnknown";
+
+/** 두 값을 모두 알 때만 나오는 판정과, 모를 때의 사유. */
+export type HeartbeatVersionVerdict =
+  | { kind: "match" }
+  /** 디스크의 코드는 갱신됐는데 메모리의 프로세스는 옛 코드라는 뜻이다. */
+  | { kind: "mismatch" }
+  | { kind: "undetermined"; reasons: HeartbeatVersionUndeterminedReason[] };
+
+/** 버전 판정 한 번의 결과. 아는 값만 싣고 사유를 함께 싣는다(SPEC-037 확인 필요 2번). */
+export interface HeartbeatVersions {
+  running: HeartbeatRunningVersion;
+  disk: HeartbeatDiskVersion;
+  verdict: HeartbeatVersionVerdict;
+}
+
+/**
+ * 설치 단계 실행의 진행·결과 상태와 실행 통로. 카드는 이 묶음 하나만 받는다.
+ *
+ * 실행 상태·업데이트 상태와 같은 이유로 주인이 훅이다 — 연동 뷰는 조건부 렌더라 다른 메뉴를
+ * 다녀오면 언마운트되고, 카드가 들면 진행 표시가 그때 사라진다.
+ */
+export interface HeartbeatSetupRunControls {
+  /** 지금 앱이 띄워 둔 단계. 단계마다 따로 담겨 한 단계가 다른 단계를 막지 않는다. */
+  running: HeartbeatSetupStep[];
+  /** 단계별 마지막 결과. 조회 주기가 지우지 않는다. */
+  results: Partial<Record<HeartbeatSetupStep, HeartbeatSetupRunResult>>;
+  /**
+   * 단계 하나를 지금 한 번 실행한다. 화면이 보내는 것은 단계 식별자이고, 명령 문자열이 명령줄에
+   * 닿는 경로는 없다 — 실행 인자는 백엔드 상수에서만 나온다.
+   *
+   * `command`는 커맨드 자체가 답하지 못했을 때만 쓰는 폴백이다. payload가 이미 완성해 실은 명령
+   * 원문을 그대로 넘겨, 화면과 훅이 같은 문자열을 따로 적는 자리를 만들지 않는다.
+   */
+  run(step: HeartbeatSetupStep, command: string): Promise<void>;
+}
+
+/**
+ * 버전 판정의 진행·결과 상태와 조회 통로. 카드는 이 묶음 하나만 받는다.
+ *
+ * **자동 새로고침 주기에는 부르지 않는다.** 이 조회는 프로세스를 하나 띄우는 조작이라 연동 조회에
+ * 얹지 않는다. 부르는 시점은 카드가 펼쳐지는 순간과 업데이트가 끝난 뒤 둘뿐이다.
+ */
+export interface HeartbeatVersionControls {
+  checking: boolean;
+  /** 마지막 판정. 조회 주기가 지우지 않는다. */
+  versions: HeartbeatVersions | null;
+  /** 커맨드 자체가 거절한 사유. 판정 결과와 다른 값이다. */
+  error: string | null;
+  check(): Promise<void>;
+}
+
+/** 앱이 데몬에 거는 두 조작. 화면이 보내는 것은 이 식별자 하나이고 명령 문자열이 아니다. */
+export type HeartbeatServiceOperation = "stop" | "start";
+
+/**
+ * 데몬을 내리거나 올리는 조작 하나의 결과(SPEC-036 R5·R7). 여섯이 서로 다른 값이다 — 앞 넷은
+ * 대상이 확정되지 않아 프로세스를 띄우지 않은 채 끝난 것이고, 뒤 둘은 띄우려 한 뒤의 결과다.
+ *
+ * 데몬이 지금 어떤 상태인지를 말하는 필드가 없다. 명령이 끝난 것과 데몬이 내려간 것은 다른 사실이고,
+ * 실행 여부 판정은 조회 주기가 pid 파일로 따라온다.
+ */
+export type HeartbeatServiceControlResult =
+  | { kind: "notRegistered" }
+  | { kind: "ambiguous"; plistPaths: string[] }
+  | { kind: "unsupportedPlatform" }
+  | { kind: "unreadable"; path: string }
+  /** `launchctl`을 띄우지 못했다. 사용자가 손으로 끝낼 수 있게 명령 원문이 함께 온다. */
+  | { kind: "notRun"; message: string; command: string }
+  | {
+      kind: "ran";
+      /** 종료 코드. null은 시그널로 끝난 것이다. 앱이 뜻으로 번역하지 않는다. */
+      code: number | null;
+      stdout: string;
+      stderr: string;
+      /** 실제로 조작한 대상. 앱이 무엇을 건드렸는지가 결과의 일부다. */
+      label: string;
+      plistPath: string;
+    };
+
+/** 마지막 조작 하나. 어느 조작의 결과인지가 함께 있어야 화면이 문장을 고를 수 있다. */
+export interface HeartbeatServiceOutcome {
+  operation: HeartbeatServiceOperation;
+  result: HeartbeatServiceControlResult;
+}
+
+/**
+ * 데몬 끄기·켜기의 진행·결과 상태와 실행 통로. 카드는 이 묶음 하나만 받는다.
+ *
+ * 다른 실행 상태와 같은 이유로 주인이 훅이다 — 연동 뷰는 조건부 렌더라 다른 메뉴를 다녀오면
+ * 언마운트되고, 카드가 들면 진행 표시가 그때 사라진다.
+ *
+ * **조회 주기는 이 통로를 부르지 않는다.** 사용자가 꺼 둔 데몬을 앱이 대신 다시 켜지 않는다
+ * (SPEC-036 R6).
+ */
+export interface HeartbeatServiceControls {
+  /** 지금 앱이 띄워 둔 조작. 도는 것이 없으면 null이다. */
+  running: HeartbeatServiceOperation | null;
+  /** 마지막 조작의 결과. 조회 주기가 지우지 않는다. */
+  outcome: HeartbeatServiceOutcome | null;
+  /** 커맨드 자체가 거절한 사유. 결과 값과 다른 값이다. */
+  error: string | null;
+  control(operation: HeartbeatServiceOperation): Promise<void>;
+}
+
 /** 앱이 띄운 잡 실행의 진행·실패 상태와 실행 통로. 카드는 이 묶음 하나만 받는다. */
 export interface HeartbeatRunControls {
   /** 지금 앱이 띄워 둔 잡 이름. 역할마다 따로 담기므로 한 역할이 다른 역할을 막지 않는다(R3). */
@@ -421,6 +726,14 @@ export interface IntegrationsState {
    * 테스트 리터럴이 아직 이 필드를 모르기 때문이며, 그 리터럴들이 필드를 갖추면 필수로 좁힌다.
    */
   heartbeatRuns?: HeartbeatRunControls;
+  /** 업데이트 실행의 진행·결과 상태. 실행 상태와 같은 이유로 훅이 따로 들고 있다가 합쳐 내보낸다. */
+  heartbeatUpdate?: HeartbeatUpdateControls;
+  /** 설치 단계 실행의 진행·결과 상태. 업데이트 상태와 같은 이유로 훅이 따로 들고 있다. */
+  heartbeatSetupRuns?: HeartbeatSetupRunControls;
+  /** 버전 판정의 진행·결과 상태. 조회 주기가 부르지 않는 값이라 스냅샷과 수명이 다르다. */
+  heartbeatVersions?: HeartbeatVersionControls;
+  /** 데몬 끄기·켜기의 진행·결과 상태. 업데이트 상태와 같은 이유로 훅이 따로 들고 있다. */
+  heartbeatService?: HeartbeatServiceControls;
 }
 
 /**
@@ -484,6 +797,13 @@ export interface ProjectGateway {
     outcome: TaskQaOutcome,
     comment: string,
   ): Promise<ProjectSummary>;
+  /** 확인 전용이라 outcome 자리가 없다. 일괄 반려는 이 길로 열지 않는다. */
+  confirmTaskQaBatch(
+    path: string,
+    workflowDirectory: string,
+    fileNames: string[],
+    comment: string,
+  ): Promise<TaskQaBatchResult>;
   migrate(path: string): Promise<ProjectSummary>;
   /** 연동 조회는 이 메서드 하나다. 연동이 늘어나도 메서드를 늘리지 않는다. */
   inspectIntegrations(path: string): Promise<IntegrationsSnapshot>;
@@ -508,6 +828,39 @@ export interface ProjectGateway {
    * 실패는 `HeartbeatRunFailure` 모양으로 거절된다. 사용자가 의도해 누른 자리에서만 부른다.
    */
   runHeartbeatJob(path: string, jobName: string): Promise<void>;
+  /**
+   * 하트비트를 한 번 갱신한다. 프로젝트와 무관한 조작이라 `path`를 받지 않고, 어떤 파일도 쓰지
+   * 않으므로 스냅샷을 돌려주지 않는다 — 파일을 쓰는 것은 데몬이다.
+   *
+   * 실행이 실패한 것도 결과 값이다(`kind: "notRun"`). 사용자가 의도해 누른 자리에서만 부른다.
+   */
+  updateHeartbeat(): Promise<HeartbeatUpdateResult>;
+  /**
+   * 설치 마법사의 단계 하나를 앱이 대신 실행한다. 프로젝트와 무관한 조작이라 `path`를 받지 않고,
+   * 스냅샷도 돌려주지 않는다 — 단계 상태의 갱신은 연동 조회를 다시 부르는 것으로 얻는다. 설치
+   * 판정의 원천을 둘로 만들지 않는다.
+   *
+   * 넘기는 것은 단계 식별자 하나다. 명령 문자열은 백엔드 상수에서만 나온다.
+   */
+  runHeartbeatSetupStep(step: HeartbeatSetupStep): Promise<HeartbeatSetupRunResult>;
+  /**
+   * 도는 데몬의 버전과 디스크의 버전을 읽어 어긋남을 판정한다. 어떤 파일도 쓰지 않는다.
+   *
+   * **조회 주기에서는 부르지 않는다.** 이 판정은 프로세스를 하나 띄운다.
+   */
+  checkHeartbeatVersions(): Promise<HeartbeatVersions>;
+  /**
+   * 이 기기에 등록된 하트비트 서비스를 내리거나 다시 올린다. 데몬은 기기 하나에 하나라 프로젝트와
+   * 무관한 조작이므로 `path`를 받지 않고, 어떤 파일도 쓰지 않으므로 스냅샷도 돌려주지 않는다 —
+   * 데몬 상태의 갱신은 연동 조회를 다시 부르는 것으로 얻는다.
+   *
+   * 넘기는 것은 조작 식별자 하나다. 명령 인자는 백엔드 상수와 백엔드가 읽어 낸 값에서만 나온다.
+   *
+   * **사용자가 누른 자리에서만 부른다.** 조회 주기가 이 메서드를 부르는 경로는 없다.
+   */
+  controlHeartbeatService(
+    operation: HeartbeatServiceOperation,
+  ): Promise<HeartbeatServiceControlResult>;
 }
 
 export interface RecentProjectStore {

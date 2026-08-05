@@ -6,15 +6,28 @@ import type {
   DreamIntegration,
   DreamJobRequest,
   DreamRefinement,
+  HeartbeatRoleStatus,
   IntegrationReadFailure,
   IntegrationsSnapshot,
   JobQuota,
   ManagedDreamJob,
 } from "../../domain/types";
 import { DreamCard } from "./DreamCard";
+import { HeartbeatCard } from "./HeartbeatCard";
 import type { IntegrationCardProps } from "./IntegrationCard";
 
 afterEach(cleanup);
+
+/**
+ * 클립보드 모듈을 대신한다. 실제 플러그인을 부르면 Tauri 런타임이 필요하고, 여기서 확인할 것은
+ * 화면이 무엇을 넘기고 결과를 어떻게 보이느냐이지 플러그인의 동작이 아니다.
+ *
+ * 복사는 `actions` prop이 아니라 모듈 import라 주입할 자리가 없다. `IntegrationsView.test.tsx`가
+ * 같은 이유로 같은 대역을 쓴다.
+ */
+const clipboard = vi.hoisted(() => ({ copy: vi.fn<(text: string) => Promise<boolean>>() }));
+
+vi.mock("../../infrastructure/clipboard", () => clipboard);
 
 const SKILL_PATH = "/Users/catze/.claude/skills/dream/SKILL.md";
 const CONDITION = "dream-prep check-unprocessed --slug=-projects-workflow-labs";
@@ -96,6 +109,19 @@ function dream(overrides: Partial<DreamIntegration> = {}): DreamIntegration {
 /** 백엔드가 계산해 내려보내는 잡 파일 경로. 화면은 이 값을 그리기만 한다. */
 const jobsFilePath = "/home/tester/.claude/heartbeat/jobs.d/-projects-workflow-labs.md";
 
+/**
+ * 갱신 안내의 명령 원문. 다섯 값을 실제 상수와 알아볼 수 있게 다르게 둔다 — 화면이 조각을 조립하면
+ * 이 값이 그대로 나올 수 없으므로 그 사실이 검사가 된다(SPEC-034 R3). `IntegrationsView.test.tsx`의
+ * 같은 이름 픽스처와 같은 선택이다.
+ */
+const updateGuide = {
+  identifyCommand: "fixture-identify claude-heartbeat",
+  packageCommand: "fixture-package -U claude-heartbeat",
+  sourceCommand: "fixture-source pull",
+  serviceLookupCommand: "fixture-lookup | grep heartbeat",
+  serviceRestartCommand: "fixture-restart gui/$(id -u)/<라벨>",
+};
+
 /** dream 카드는 스냅샷의 dream payload와 섹션 공통 값(slug, 잡 파일 경로·읽기 결과)만 읽는다. */
 function snapshot(
   overrides: Partial<DreamIntegration> = {},
@@ -106,6 +132,7 @@ function snapshot(
     slug: "-projects-workflow-labs",
     managedBlockFailure,
     jobsFilePath,
+    updateGuide,
     heartbeat: {
       installation: "installed",
       daemonRunning: true,
@@ -1388,3 +1415,169 @@ describe("dream 잡 실행 한도", () => {
     expect(requestOf(installDreamJob).maxPer).toEqual({ kind: "limit", value: "6/24h" });
   });
 });
+
+/**
+ * SPEC-034 R7. 084 경고가 "하트비트를 갱신하세요"로 끝나던 자리에서 그 갱신 방법까지 읽는다.
+ *
+ * 안내가 뜨는 조건은 084 경고의 조건 그대로다(위 "dream 카드 잡 파일에만 있는 잡"의 픽스처와 같다).
+ * 두 카드가 같은 말을 하는지는 아래 마지막 검사가 역할 잡 카드를 함께 그려 글자로 센다.
+ */
+describe("dream 카드 갱신 안내", () => {
+  const guideTitle = "하트비트를 갱신하는 방법";
+  /** 084 경고의 제목. 안내가 그 경고 안에 있다는 것을 이 제목으로 확인한다. */
+  const warningTitle = "하트비트가 이 잡을 실행한 기록이 없습니다";
+
+  /** 갱신 안내의 명령 원문 다섯. 화면이 조립하면 이 값이 그대로 나올 수 없다. */
+  const commands = [
+    updateGuide.identifyCommand,
+    updateGuide.packageCommand,
+    updateGuide.sourceCommand,
+    updateGuide.serviceLookupCommand,
+    updateGuide.serviceRestartCommand,
+  ];
+
+  /** 안내 하나의 DOM. 카드 안에서 고르므로 다른 자리의 `<pre>`와 섞이지 않는다. */
+  function guideIn(container: HTMLElement) {
+    return within(container).getByText(guideTitle).closest(".heartbeat-update-guide") as HTMLElement;
+  }
+
+  beforeEach(() => {
+    clipboard.copy.mockReset();
+    clipboard.copy.mockResolvedValue(true);
+  });
+
+  // 완료 조건 1. 다른 탭이나 외부 문서로 보내지 않는다.
+  it("puts the update steps inside the very warning that asks for the update", () => {
+    const card = renderCard({ managedJob: dreamJob() });
+
+    const warning = within(card).getByText(warningTitle).closest(
+      ".integration-warning",
+    ) as HTMLElement;
+    expect(within(warning).getByText(guideTitle)).toBeVisible();
+    expect(warning).toHaveTextContent("설치한 방법 그대로 갱신합니다");
+    // 084 문구가 그대로 남고 안내가 그 뒤에 온다. 원인을 단정하는 문장이 새로 생기지 않는다.
+    expect(warning).toHaveTextContent("앱은 하트비트 버전을 판정하지 않으므로");
+    expect(warning).not.toHaveTextContent("업데이트가 필요합니다");
+  });
+
+  // 완료 조건 5·승인된 확인 필요 4번. 상시 표시가 아니다.
+  it("stays out of sight wherever the warning itself is out of sight", () => {
+    const quiet: [string, Partial<DreamIntegration>][] = [
+      ["실행 기록이 있는 잡", { managedJob: dreamJob(), lastRun: ranOnce }],
+      ["잡이 꺼진 상태", { managedJob: null }],
+      ["미설치", { managedJob: dreamJob(), heartbeat: "not_installed" }],
+    ];
+
+    for (const [name, overrides] of quiet) {
+      renderCard(overrides);
+      expect(screen.queryByText(guideTitle), name).toBeNull();
+      expect(screen.queryByText(updateGuide.packageCommand), name).toBeNull();
+      cleanup();
+    }
+  });
+
+  // 완료 조건 4. 명령 원문은 payload 값 그대로이고 화면이 조각을 붙이지 않는다.
+  it("shows every command the payload carries and assembles none of them", () => {
+    const guide = guideIn(renderCard({ managedJob: dreamJob() }));
+
+    for (const command of commands) {
+      expect(within(guide).getByText(command)).toBeVisible();
+    }
+    // 명령 하나로 단정하지 않는다. 갈래를 고르는 방법이 그 앞에 온다.
+    expect(guide).toHaveTextContent("Editable project location 줄이 있으면 소스 체크아웃");
+    expect(guide).toHaveTextContent("pip으로 설치했다면");
+    expect(guide).toHaveTextContent("소스 체크아웃으로 설치했다면");
+  });
+
+  // 완료 조건 3. 걸음마다 복사 수단이 있고 원문 그대로 넘어간다.
+  it("copies each command exactly as it arrived", async () => {
+    const guide = guideIn(renderCard({ managedJob: dreamJob() }));
+
+    const buttons = within(guide).getAllByRole("button", { name: /명령 복사$/ });
+    expect(buttons).toHaveLength(commands.length);
+
+    for (const [index, button] of buttons.entries()) {
+      await userEvent.click(button);
+      expect(clipboard.copy).toHaveBeenNthCalledWith(index + 1, commands[index]);
+    }
+    // 마지막으로 복사한 명령 하나만 표시한다. 마법사와 같은 어법이다.
+    expect(within(guide).getAllByText("복사됨")).toHaveLength(1);
+  });
+
+  // 완료 조건 3. 복사에 실패해도 원문은 화면에 남는다.
+  it("keeps the command on screen when the copy fails", async () => {
+    clipboard.copy.mockResolvedValue(false);
+    const guide = guideIn(renderCard({ managedJob: dreamJob() }));
+
+    await userEvent.click(within(guide).getByRole("button", { name: "pip 설치 갱신 명령 복사" }));
+
+    expect(
+      within(guide).getByText("복사하지 못했습니다 — 위 명령을 직접 선택해 복사하세요."),
+    ).toBeVisible();
+    expect(within(guide).getByText(updateGuide.packageCommand)).toBeVisible();
+  });
+
+  // 완료 조건 5. 갱신을 실행하는 버튼이 없다(R5).
+  it("adds copy buttons and nothing else", () => {
+    const guide = guideIn(renderCard({ managedJob: dreamJob() }));
+
+    for (const button of within(guide).getAllByRole("button")) {
+      expect(button).toHaveAccessibleName(/명령 복사$/);
+    }
+    expect(guide).not.toHaveTextContent("갱신 실행");
+    // 저장·재설정은 그대로 눌린다(R8). 안내가 어떤 버튼도 막지 않는다.
+    expect(screen.getByRole("button", { name: "dream 잡 변경 사항 저장" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "dream 잡 기본값으로 재설정" })).toBeEnabled();
+  });
+
+  /**
+   * 완료 조건 2. 두 카드가 같은 payload에서 같은 말을 한다.
+   *
+   * "같은 컴포넌트를 쓰니까 같다"로 대신하지 않는다 — 문구가 어느 한쪽으로 갈라지는 변경이 오면
+   * 이 단언이 먼저 깨져야 한다. 안내 영역 전체의 텍스트를 글자 그대로 비교한다.
+   */
+  it("says the update guide with the very words the role job card says", () => {
+    const dreamGuide = guideIn(renderCard({ managedJob: dreamJob() }));
+    const dreamText = dreamGuide.textContent;
+    // 빈 문자열끼리 같아지는 허수 통과를 막는다. 비교하는 것이 실제 안내인지 먼저 못 박는다.
+    expect(dreamText).toContain(guideTitle);
+    expect(dreamText).toContain(updateGuide.packageCommand);
+    cleanup();
+
+    render(
+      <HeartbeatCard
+        actions={{ installHeartbeatJobs: vi.fn(), installDreamJob: vi.fn() }}
+        error={null}
+        expanded
+        heartbeatRuns={{ running: [], failure: null, run: vi.fn().mockResolvedValue(true) }}
+        onToggleExpanded={() => {}}
+        snapshot={roleJobWarned()}
+        writeError={null}
+      />,
+    );
+
+    const roleCard = screen.getByRole("article", { name: "claude-heartbeat" });
+    expect(guideIn(roleCard).textContent).toBe(dreamText);
+  });
+});
+
+/** 역할 잡 카드에도 084 경고를 띄우는 스냅샷. 개발자 잡만 파일에 있고 실행 기록이 없다. */
+function roleJobWarned(): IntegrationsSnapshot {
+  const roleDefaults = { interval: "30m", maxPer: "4/24h", model: "opus", timeout: "20m" };
+  const roles: HeartbeatRoleStatus[] = ["planner", "architect", "developer"].map((role) => ({
+    role,
+    jobName: `wf-${role}-projects-workflow-labs`,
+    defaults: roleDefaults,
+    lastRun: null,
+    quota: roomyQuota,
+  }));
+  const base = snapshot();
+  return {
+    ...base,
+    heartbeat: {
+      ...base.heartbeat,
+      roles,
+      managedJobs: [{ role: "developer", ...roleDefaults, appOwnedDrift: [] }],
+    },
+  };
+}
