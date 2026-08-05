@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  HeartbeatServiceControlResult,
+  HeartbeatSetupRunResult,
+  HeartbeatUpdateResult,
+  HeartbeatVersions,
   IdeaDocument,
   IntegrationsSnapshot,
   ProjectGateway,
@@ -115,5 +119,30 @@ export const tauriProjectGateway: ProjectGateway = {
 
   runHeartbeatJob(path, jobName) {
     return invoke<void>("run_heartbeat_job", { path, jobName });
+  },
+
+  // 인자가 없다. 실행 파일 후보를 만들 사용자 홈은 커맨드 계층이 해석하고, 화면이 준 문자열이
+  // 명령줄에 닿는 경로가 없다.
+  updateHeartbeat() {
+    return invoke<HeartbeatUpdateResult>("update_heartbeat");
+  },
+
+  // 넘기는 것은 단계 식별자 하나다. 식별자 → 고정 인자의 매핑은 백엔드의 상수이고, 그 상수에 없는
+  // 식별자는 프로세스를 띄우지 않고 실패로 끝난다.
+  runHeartbeatSetupStep(step) {
+    return invoke<HeartbeatSetupRunResult>("run_heartbeat_setup_step", { step });
+  },
+
+  // 인자가 없다. 이 커맨드는 프로세스를 하나 띄우므로 조회 주기에서는 부르지 않는다.
+  checkHeartbeatVersions() {
+    return invoke<HeartbeatVersions>("check_heartbeat_versions");
+  },
+
+  // 넘기는 것은 조작 식별자 하나다. 라벨도 plist 경로도 백엔드가 자기 파일 시스템에서 읽은 값이고,
+  // 화면이 준 문자열이 명령줄에 닿는 경로가 없다.
+  controlHeartbeatService(operation) {
+    return invoke<HeartbeatServiceControlResult>("control_heartbeat_service", {
+      operation,
+    });
   },
 };

@@ -7,6 +7,14 @@ use crate::application::heartbeat_service::{
     DreamJobRequest, HeartbeatService, IntegrationsSnapshot, ManagedDreamJob, ManagedRoleJob,
     RoleJobRequest,
 };
+use crate::application::heartbeat_service_control::{
+    HeartbeatServiceControlService, HeartbeatServiceRun,
+};
+use crate::application::heartbeat_setup_run_service::{
+    HeartbeatSetupRun, HeartbeatSetupRunService,
+};
+use crate::application::heartbeat_update_service::{HeartbeatUpdate, HeartbeatUpdateService};
+use crate::application::heartbeat_version_service::{HeartbeatVersionService, HeartbeatVersions};
 
 /// 하트비트가 설정과 상태를 두는 홈 디렉터리 이름.
 const HEARTBEAT_HOME: &str = ".claude";
@@ -95,6 +103,114 @@ pub async fn run_heartbeat_job(
     })
     .await
     .map_err(|error| RunJobFailure::new(&name, format!("실행을 시작하지 못했습니다: {error}")))?
+}
+
+/// 하트비트를 한 번 갱신한다. 앱은 이 경로에서 어떤 파일도 쓰지 않는다 — 파일을 쓰는 것은
+/// 데몬이다(SPEC-037 R1).
+///
+/// 인자를 받지 않는다. 업데이트는 프로젝트와 무관한 조작이라 `path`가 필요 없고, 실행 파일 후보를
+/// 만들 사용자 홈만 커맨드 계층이 해석한다. 화면이 준 문자열이 명령줄에 닿는 경로가 없다 —
+/// 인자는 백엔드 상수 `heartbeat update` 하나로 고정이고 셸을 거치지 않는다.
+///
+/// 사용자가 확인 화면에서 누른 자리에서만 호출한다. 화면 진입·조회 주기·프로젝트 열기에서 부르지
+/// 않는다 — 이 조작은 화면 갱신이 아니라 저장소를 갱신하고 데몬을 재기동하는 일이다(R3).
+///
+/// `git fetch`와 `pip install`이 걸리는 조작이라 블로킹 자리에서 돈다. 동기 커맨드로 두면 그동안
+/// 창이 멈춘다.
+#[tauri::command]
+pub async fn update_heartbeat(app: tauri::AppHandle) -> Result<HeartbeatUpdate, String> {
+    // 이 커맨드가 쓰는 홈은 사용자 홈이다. 실행 파일 후보가 `~/.local/bin`에 있어서이며
+    // `~/.claude`가 아니다.
+    let (_, user_home) = heartbeat_home(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || HeartbeatUpdateService.update(&user_home))
+        .await
+        .map_err(|error| format!("업데이트를 시작하지 못했습니다: {error}"))
+}
+
+/// 도는 데몬의 버전과 디스크의 버전을 읽어 어긋남을 판정한다. 앱은 이 경로에서 어떤 파일도 쓰지
+/// 않는다 — 상태 파일은 읽기만 하고, 디스크 버전은 프로세스가 낸 출력에서만 온다.
+///
+/// **조회 주기·화면 진입의 자동 갱신에서는 부르지 않는다.** 이 판정은 프로세스를 하나 띄우므로
+/// `inspect_integrations`에 얹지 않는다 — 그쪽은 자동 새로고침 주기마다 불린다. 부르는 시점은
+/// 사용자가 의도해 누른 자리이고, 화면이 정한다.
+///
+/// 인자를 받지 않는다. 버전은 프로젝트와 무관한 값이라 `path`가 필요 없고, 상태 파일이 있는
+/// 하트비트 홈과 실행 파일 후보를 만들 사용자 홈만 커맨드 계층이 해석한다. 화면이 준 문자열이
+/// 명령줄에 닿는 경로가 없다 — 인자는 백엔드 상수 `heartbeat --version` 하나로 고정이고 셸을
+/// 거치지 않는다.
+///
+/// 실행 파일 탐색이 걸리는 자리라 블로킹 자리에서 돈다.
+#[tauri::command]
+pub async fn check_heartbeat_versions(app: tauri::AppHandle) -> Result<HeartbeatVersions, String> {
+    let (home, user_home) = heartbeat_home(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        HeartbeatVersionService.versions(&home, &user_home)
+    })
+    .await
+    .map_err(|error| format!("버전 조회를 시작하지 못했습니다: {error}"))
+}
+
+/// 설치 마법사의 단계 하나를 앱이 대신 실행한다. 앱은 이 경로에서 어떤 파일도 쓰지 않는다 —
+/// 파일을 쓰는 것은 데몬이다. `heartbeat init`은 하트비트 홈에 문서를 만들고,
+/// `heartbeat install-service`는 서비스 등록물을 만들고 데몬을 띄운다. 그 구분이 확인 화면의 문구를
+/// 정한다(SPEC-037 R3).
+///
+/// 인자는 단계 식별자 하나다. `path`는 받지 않는다 — 설치는 프로젝트와 무관한 조작이다. 화면이 준
+/// 문자열이 명령줄에 닿는 경로도 없다. 식별자는 백엔드 상수의 고정 인자로 옮겨지고, 그 상수에 없는
+/// 식별자는 프로세스를 띄우지 않고 실패로 끝난다.
+///
+/// **스냅샷을 돌려주지 않는다.** 실행 결과만 돌려주고, 단계 상태의 갱신은 화면이
+/// `inspect_integrations`를 다시 부르는 것으로 얻는다. 설치 판정의 원천을 둘로 만들지 않는다.
+///
+/// 사용자가 확인 화면에서 누른 자리에서만 호출한다. `install-service`는 등록물 생성과 기동을
+/// 포함하는 걸리는 조작이라 블로킹 자리에서 돈다.
+#[tauri::command]
+pub async fn run_heartbeat_setup_step(
+    app: tauri::AppHandle,
+    step: String,
+) -> Result<HeartbeatSetupRun, String> {
+    // 이 커맨드가 쓰는 홈은 사용자 홈이다. 실행 파일 후보가 `~/.local/bin`에 있어서이며
+    // `~/.claude`가 아니다.
+    let (_, user_home) = heartbeat_home(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || HeartbeatSetupRunService.run(&user_home, &step))
+        .await
+        .map_err(|error| format!("설치 단계 실행을 시작하지 못했습니다: {error}"))
+}
+
+/// 등록된 하트비트 서비스를 내리거나 다시 올린다. 앱은 이 경로에서 **어떤 파일도 쓰지 않는다** —
+/// 특히 `~/Library/LaunchAgents`에 쓰거나 지우지 않는다. 등록과 해제는 설치 마법사 3단계와
+/// `uninstall-service`의 일이고 이 조작은 등록된 서비스를 잠깐 내렸다 올리는 것이다(SPEC-036 R8).
+/// lease 파일도 읽지도 쓰지도 않는다(R3).
+///
+/// 인자는 조작 식별자 하나다. `path`는 받지 않는다 — 데몬은 기기 하나에 하나라 프로젝트와 무관한
+/// 조작이다. 화면이 준 문자열이 명령줄에 닿는 경로도 없다. 식별자는 백엔드 상수의 고정 인자로
+/// 옮겨지고, 그 상수에 없는 식별자는 프로세스를 띄우지 않고 실패로 끝난다.
+///
+/// **스냅샷을 돌려주지 않는다.** 실행 결과만 돌려주고, 데몬 상태의 갱신은 화면이
+/// `inspect_integrations`를 다시 부르는 것으로 얻는다. 데몬 상태의 원천을 둘로 만들지 않는 것이
+/// R7의 "모순된 두 상태를 동시에 말하지 않는다"이다.
+///
+/// 사용자가 확인 화면에서 누른 자리에서만 호출한다. 화면 진입·조회 주기·프로젝트 열기에서 부르지
+/// 않는다 — 이 조작은 화면 갱신이 아니라 이 기기의 모든 잡을 멈추거나 되살리는 일이다(R2·R3).
+///
+/// `bootout`은 데몬이 내려갈 때까지 걸리는 조작이라 블로킹 자리에서 돈다.
+#[tauri::command]
+pub async fn control_heartbeat_service(
+    app: tauri::AppHandle,
+    operation: String,
+) -> Result<HeartbeatServiceRun, String> {
+    // 이 커맨드가 쓰는 홈은 사용자 홈이다. 등록물이 `~/Library/LaunchAgents`에 있고 도메인의 uid도
+    // 그 홈의 소유자에서 오며, `~/.claude`가 아니다.
+    let (_, user_home) = heartbeat_home(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        HeartbeatServiceControlService.control(&user_home, &operation)
+    })
+    .await
+    .map_err(|error| format!("데몬 조작을 시작하지 못했습니다: {error}"))?
 }
 
 /// 하트비트 홈과 사용자 홈을 함께 돌려준다. 서비스 등록 아티팩트가 `~/.claude` 밖에 있어 서비스가

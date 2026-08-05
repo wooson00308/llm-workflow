@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-105
 title: 조회 재읽기에서 이유가 사라진 중복 훑기를 걷어낸다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-033
 source_decision_id: DECISION-8D3F0D0F
 depends_on: [TASK-101]
-updated_at: 2026-08-04T19:27:38Z
+updated_at: 2026-08-05T06:13:41.590017+00:00
 history:
   - { at: 2026-08-04T16:30:00Z, kind: created }
   - { at: 2026-08-04T19:11:44Z, kind: in_progress }
   - { at: 2026-08-04T19:27:38Z, kind: qa_waiting }
+  - { at: 2026-08-05T06:13:41.590017+00:00, kind: completed }
 ---
 
 # 조회 재읽기에서 이유가 사라진 중복 훑기를 걷어낸다

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
-import type { IntegrationsState, ProjectSummary } from "../domain/types";
+import type { IntegrationsSnapshot, IntegrationsState, ProjectSummary } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { WorkspaceShell } from "./WorkspaceShell";
 
@@ -35,7 +35,13 @@ const updater: AppUpdaterState = {
   restart: vi.fn().mockResolvedValue(undefined),
 };
 
-const integrations: IntegrationsState = { snapshot: null, error: null, writeError: null, heartbeatRuns: { running: [], failure: null, run: vi.fn().mockResolvedValue(true) } };
+const integrations: IntegrationsState = {
+  snapshot: null,
+  error: null,
+  writeError: null,
+  heartbeatRuns: { running: [], failure: null, run: vi.fn().mockResolvedValue(true) },
+  heartbeatUpdate: { running: false, result: null, update: vi.fn().mockResolvedValue(undefined) },
+};
 const integrationActions = {
   installHeartbeatJobs: vi.fn().mockResolvedValue(true),
   installDreamJob: vi.fn().mockResolvedValue(true),
@@ -586,5 +592,155 @@ describe("WorkspaceShell 아이디어 초안", () => {
 
     expect(screen.getByLabelText(quickLabel)).toHaveValue("권한이 없어도 남는 글");
     expect(screen.getByLabelText(quickLabel)).toBeEnabled();
+  });
+});
+
+/**
+ * SPEC-037 R3. 재기동이 끊는 세션을 고지하려면 활성 lease가 카드까지 닿아야 한다. 그 값의 원천은
+ * 프로젝트 요약이고 앱이 새로 계산하지 않는다 — 활동 뷰가 쓰는 값 그대로다.
+ */
+describe("WorkspaceShell 연동 배선", () => {
+  const lease = {
+    leaseId: "lease-1",
+    agent: "developer-claude",
+    role: "developer",
+    taskId: "TASK-104",
+    heartbeatAt: "2026-08-05T06:00:00Z",
+    expiresAt: "2026-08-05T07:00:00Z",
+  };
+
+  const snapshot: IntegrationsSnapshot = {
+    supported: true,
+    slug: "-projects-workflow-labs",
+    managedBlockFailure: null,
+    jobsFilePath: "/home/tester/.claude/heartbeat/jobs.d/-projects-workflow-labs.md",
+    updateGuide: {
+      identifyCommand: "pip show claude-heartbeat",
+      packageCommand: "pip install -U claude-heartbeat",
+      sourceCommand: "git pull",
+      serviceLookupCommand: null,
+      serviceRestartCommand: null,
+    },
+    heartbeat: {
+      installation: "installed",
+      daemonRunning: true,
+      setupStages: [],
+      conditionScriptPath: ".workflow/rules/wf-eligible.sh",
+      // 백엔드는 늘 역할 셋을 담아 보낸다. 잡 폼이 그 값으로 시딩된다.
+      roles: ["planner", "architect", "developer"].map((role) => ({
+        role,
+        jobName: `wf-${role}-projects-workflow-labs`,
+        defaults: { interval: "30m", maxPer: "4/24h", model: "opus", timeout: "20m" },
+        lastRun: null,
+        quota: { kind: "unknown" as const },
+      })),
+      managedJobs: [],
+      serviceTarget: {
+        kind: "resolved",
+        label: "com.catze.dream-heartbeat",
+        plist_path: "/Users/catze/Library/LaunchAgents/com.catze.dream-heartbeat.plist",
+      },
+      recordedJobs: [{ name: "wf-developer-projects-workflow-labs", ofThisProject: true }],
+      duplicateJobs: [],
+      readFailures: [],
+    },
+    dream: {
+      installation: "not_installed",
+      heartbeat: "installed",
+      refinement: {
+        totalTranscripts: 0,
+        markedTranscripts: 0,
+        unrefinedTranscripts: 0,
+        lastDream: null,
+        memoryTopics: 0,
+      },
+      skillPath: "/Users/catze/.claude/skills/dream/SKILL.md",
+      conditionCommand: "dream-prep check-unprocessed --slug=-projects-workflow-labs",
+      defaults: { interval: "2h", maxPer: "6/24h", model: "opus", timeout: "30m" },
+      managedJob: null,
+      lastRun: null,
+      quota: { kind: "unknown" },
+      duplicateJobs: [],
+      readFailures: [],
+    },
+  };
+
+  it("carries the project's active leases down to the heartbeat card", () => {
+    shell({
+      project: { ...project, activeLeases: [lease] },
+      integrations: { ...integrations, snapshot },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "연동" }));
+    fireEvent.click(
+      within(screen.getByRole("article", { name: "claude-heartbeat" })).getByRole("button", {
+        name: "펼치기",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "하트비트 업데이트" }));
+
+    const confirm = screen.getByRole("group", { name: "하트비트 업데이트 확인" });
+    expect(confirm).toHaveTextContent("지금 끊기는 세션 1개");
+    expect(within(confirm).getByText("developer-claude · TASK-104")).toBeVisible();
+  });
+
+  /** lease가 없으면 없다고 말한다. 배선이 빠진 것과 세션이 없는 것을 화면이 같은 말로 하지 않는다. */
+  it("says there is nothing to cut when the project has no lease", () => {
+    shell({ integrations: { ...integrations, snapshot } });
+
+    fireEvent.click(screen.getByRole("button", { name: "연동" }));
+    fireEvent.click(
+      within(screen.getByRole("article", { name: "claude-heartbeat" })).getByRole("button", {
+        name: "펼치기",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "하트비트 업데이트" }));
+
+    expect(screen.getByRole("group", { name: "하트비트 업데이트 확인" })).toHaveTextContent(
+      "지금 끊길 세션이 없습니다",
+    );
+  });
+
+  /**
+   * 데몬 조작 통로도 같은 길로 카드까지 닿는다. 껍데기는 값의 내용을 보지 않고 그대로 넘기므로,
+   * 배선이 빠지면 버튼 자체가 서지 않는 것으로 드러난다.
+   */
+  it("carries the daemon control channel down to the heartbeat card", () => {
+    const control = vi.fn().mockResolvedValue(undefined);
+    shell({
+      integrations: {
+        ...integrations,
+        snapshot,
+        heartbeatService: { running: null, outcome: null, error: null, control },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "연동" }));
+    fireEvent.click(
+      within(screen.getByRole("article", { name: "claude-heartbeat" })).getByRole("button", {
+        name: "펼치기",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "데몬 켜기" }));
+
+    expect(control).toHaveBeenCalledWith("start");
+  });
+
+  /**
+   * 조작 통로가 없으면 그 버튼만 빠지고 카드의 나머지는 그대로 돈다. 조회·설치·업데이트가 이 값을
+   * 기다릴 이유가 없다.
+   */
+  it("draws the rest of the card when the daemon control channel is missing", () => {
+    shell({ integrations: { ...integrations, snapshot } });
+
+    fireEvent.click(screen.getByRole("button", { name: "연동" }));
+    fireEvent.click(
+      within(screen.getByRole("article", { name: "claude-heartbeat" })).getByRole("button", {
+        name: "펼치기",
+      }),
+    );
+
+    expect(screen.queryByRole("button", { name: "데몬 끄기" })).toBeNull();
+    expect(screen.getByRole("button", { name: "하트비트 업데이트" })).toBeVisible();
   });
 });

@@ -26,6 +26,10 @@ pub fn run() {
             commands::heartbeat::install_heartbeat_jobs,
             commands::heartbeat::install_dream_job,
             commands::heartbeat::run_heartbeat_job,
+            commands::heartbeat::run_heartbeat_setup_step,
+            commands::heartbeat::control_heartbeat_service,
+            commands::heartbeat::update_heartbeat,
+            commands::heartbeat::check_heartbeat_versions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-103
 title: 겹침으로 막힌 작업이 화면에서 시작 가능으로 보이지 않게 한다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-032
 source_decision_id: DECISION-0D79A7F0
 depends_on: [TASK-100, TASK-101]
-updated_at: 2026-08-04T18:28:00Z
+updated_at: 2026-08-05T03:08:56.191072+00:00
 history:
   - { at: 2026-08-04T15:46:00Z, kind: created }
   - { at: 2026-08-04T18:13:00Z, kind: in_progress }
   - { at: 2026-08-04T18:28:00Z, kind: qa_waiting }
+  - { at: 2026-08-05T03:08:56.191072+00:00, kind: completed }
 ---
 
 # 겹침으로 막힌 작업이 화면에서 시작 가능으로 보이지 않게 한다

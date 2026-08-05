@@ -414,12 +414,25 @@ export function WorkspaceShell({
               `heartbeatRuns`를 함께 거는 것은 그 필드가 `IntegrationsState`에서 아직 선택이기
               때문이다(카드 쪽 prop은 필수다). `useProjectWorkspace`는 언제나 채워 내보내므로 이
               조건은 실사용에서 참이고, 손으로 조립한 상태가 이 값을 빠뜨리면 화면이 통째로 비어
-              바로 드러난다 — 액션만 조용히 사라지는 것보다 낫다. */}
-          {view === "integrations" && integrations.heartbeatRuns && (
+              바로 드러난다 — 액션만 조용히 사라지는 것보다 낫다. `heartbeatUpdate`도 같은 이유로
+              같은 자리에 걸린다.
+
+              `activeLeases`는 프로젝트 요약이 이미 들고 있는 값이다. 앱이 새로 계산하지 않고
+              활동 뷰가 쓰는 그 값을 그대로 카드까지 내린다(SPEC-037 R3).
+
+              `heartbeatSetupRuns`·`heartbeatVersions`·`heartbeatService`는 이 조건에 걸지 않는다.
+              없으면 설치 실행 버튼과 버전 표시와 데몬 조작 통로만 빠지고 카드의 나머지는 그대로
+              돌아야 한다 — 조회·설치·업데이트가 그 셋을 기다릴 이유가 없다. */}
+          {view === "integrations" && integrations.heartbeatRuns && integrations.heartbeatUpdate && (
             <IntegrationsView
               actions={integrationActions}
+              activeLeases={project.activeLeases}
               error={integrations.error}
               heartbeatRuns={integrations.heartbeatRuns}
+              heartbeatService={integrations.heartbeatService}
+              heartbeatSetupRuns={integrations.heartbeatSetupRuns}
+              heartbeatUpdate={integrations.heartbeatUpdate}
+              heartbeatVersions={integrations.heartbeatVersions}
               pendingWork={project.pendingWork}
               snapshot={integrations.snapshot}
               writeError={integrations.writeError}

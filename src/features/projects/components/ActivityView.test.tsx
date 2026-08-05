@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FOLLOW_UP_LABEL, labelSpecDecisions } from "../domain/specDecisionLabels";
 import type {
   AgentLeaseSummary,
   ProjectSummary,
@@ -389,6 +390,63 @@ describe("ActivityView 최근 활동", () => {
     }));
 
     expect(marks()).toEqual(["반려", "수정 요청"]);
+  });
+
+  // 기획서 쪽 `revision_requested`도 하나가 아니다. 승인 뒤의 것은 승인과 파생 작업을 그대로 두고
+  // 후속 기획을 요청하는 것이라 앞선 승인이 없는 것과 다른 이름으로 불린다(SPEC-042 R5).
+  it("tells a follow-up request apart from a revision request on an undecided specification", () => {
+    renderFeed(workflowWith({
+      specs: [
+        recorded("SPEC-001", "승인된 기획서", [
+          { kind: "approved", at: "2026-08-01T00:00:00Z" },
+          { kind: "revision_requested", at: "2026-08-03T00:00:00Z" },
+        ]),
+        recorded("SPEC-002", "아직 결정되지 않은 기획서", [
+          { kind: "revision_requested", at: "2026-08-02T00:00:00Z" },
+        ]),
+      ],
+    }));
+
+    expect(marks()).toEqual([FOLLOW_UP_LABEL, "수정 요청", "승인"]);
+  });
+
+  // 이름이 갈려도 표시는 기록된 값이 정한다. 두 수정 요청이 화면에서 같은 마크를 쓴다.
+  it("keeps the mark on the recorded event value when the name splits", () => {
+    renderFeed(workflowWith({
+      specs: [
+        recorded("SPEC-001", "승인된 기획서", [
+          { kind: "approved", at: "2026-08-01T00:00:00Z" },
+          { kind: "revision_requested", at: "2026-08-03T00:00:00Z" },
+        ]),
+        recorded("SPEC-002", "아직 결정되지 않은 기획서", [
+          { kind: "revision_requested", at: "2026-08-02T00:00:00Z" },
+        ]),
+      ],
+    }));
+
+    expect(
+      within(feed())
+        .getAllByRole("listitem")
+        .map((entry) => entry.querySelector(".activity-mark")?.className),
+    ).toEqual([
+      "activity-mark event-revision_requested",
+      "activity-mark event-revision_requested",
+      "activity-mark event-approved",
+    ]);
+  });
+
+  // 이름 판별이 기획서 화면의 이력과 한 모듈에서만 나온다. 이 뷰가 같은 판별을 다시 쓰면 두 자리가
+  // 같은 결정을 다른 이름으로 부르게 되고, 이 단정이 그 자리에서 깨진다.
+  it("calls a decision what the specification screen's history calls it", () => {
+    const events: TaskEvent[] = [
+      { kind: "approved", at: "2026-08-01T00:00:00Z" },
+      { kind: "revision_requested", at: "2026-08-02T00:00:00Z" },
+      { kind: "rejected", at: "2026-08-03T00:00:00Z" },
+    ];
+    renderFeed(workflowWith({ specs: [recorded("SPEC-001", "첫 기획서", events)] }));
+
+    expect(marks()).toEqual(labelSpecDecisions(events).map((entry) => entry.label).reverse());
+    expect(marks()).toEqual(["폐기", FOLLOW_UP_LABEL, "승인"]);
   });
 
   it("drops only the records it cannot read", () => {

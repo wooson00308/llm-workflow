@@ -8,8 +8,9 @@ use thiserror::Error;
 
 use crate::domain::project::{
     DreamRefinement, DuplicateHeartbeatJob, HeartbeatInstallation, HeartbeatJobRun,
-    HeartbeatReadFailure, HeartbeatRoleStatus, HeartbeatSetupStage, HeartbeatStatus,
-    HeartbeatUpdateGuide, IntegrationInstallation, JobDefaults, JobQuota,
+    HeartbeatReadFailure, HeartbeatRecordedJob, HeartbeatRoleStatus, HeartbeatServiceTarget,
+    HeartbeatSetupStage, HeartbeatStatus, HeartbeatUpdateGuide, IntegrationInstallation,
+    JobDefaults, JobQuota,
 };
 use crate::infrastructure::heartbeat_condition::{
     install_condition_script, ConditionScriptError, CONDITION_SCRIPT,
@@ -28,6 +29,7 @@ use crate::infrastructure::heartbeat_status::{
     self, read_heartbeat_status, read_job_runs, read_text, JobRuns,
 };
 use crate::infrastructure::heartbeat_update::update_guide;
+use crate::infrastructure::launch_agents::resolve_service_target;
 
 const CONTROL_DIRECTORY: &str = ".workflow";
 /// 전환 전에 앱이 잡을 쓰던 전역 파일. 이제 앱은 이 파일에서 자기 잡을 빼는 정리만 한다(R3).
@@ -119,6 +121,19 @@ pub struct HeartbeatIntegration {
     pub roles: Vec<HeartbeatRoleStatus>,
     /// 앱 관리 블록에 실제로 기록된 역할 잡만 담는다. 블록이 없으면 빈 목록이다.
     pub managed_jobs: Vec<ManagedRoleJob>,
+    /// 이 기기에 실제로 등록된 하트비트 서비스 해석 결과(SPEC-036 R4·R5). 조작 대상의 이름과
+    /// plist 경로가 여기서 나오고, 확정이 아니면 조작할 대상이 없다는 뜻이다.
+    ///
+    /// 설치 마법사 3단계와 같은 디렉터리를 보지만 다른 질문에 답한다 — 3단계는 표준 아티팩트
+    /// 하나가 있는가를 묻고, 이 값은 이 기기의 등록물이 무엇인가를 묻는다. 그래서 3단계의 판정과
+    /// 문구는 이 값 때문에 달라지지 않는다(R8).
+    pub service_target: HeartbeatServiceTarget,
+    /// 데몬을 내리면 함께 멈추는 잡(R2). 상태 파일에 실행 기록이 있는 잡 전부이고 이름 오름차순이다.
+    ///
+    /// **"지금 돌고 있는 잡"이 아니라 "실행 기록이 있는 잡"이다.** 데몬은 기기 하나에 하나이므로
+    /// 이 목록에는 다른 프로젝트의 잡도 들어간다. 화면이 이 수를 "이만큼이 멈춘다"로 단정하지
+    /// 않는 근거가 이 뜻 차이다.
+    pub recorded_jobs: Vec<HeartbeatRecordedJob>,
     /// 이 연동의 중복 잡만 담는다. 다른 연동의 중복은 그 연동 카드가 보여준다.
     pub duplicate_jobs: Vec<DuplicateHeartbeatJob>,
     pub read_failures: Vec<HeartbeatReadFailure>,
@@ -374,6 +389,11 @@ impl HeartbeatService {
                 stages,
                 condition_script_relative_path(),
                 managed_role_jobs(document, &slug),
+                // 등록물 해석은 사용자 홈만 읽는다. 설치 3단계와 같은 디렉터리를 보지만 판정이
+                // 서로 독립이라 3단계의 결과를 바꾸지 않는다(완료 조건 13).
+                resolve_service_target(user_home),
+                // 잡 목록은 이 조회가 이미 연 상태 파일에서 나온다. 파일을 다시 열지 않는다.
+                recorded_jobs(&read.runs, &slug),
                 &read.runs,
                 now,
             ),
@@ -701,12 +721,32 @@ fn recovery_time(seconds: f64) -> Option<String> {
     DateTime::from_timestamp(whole as i64, nanos.min(999_999_999)).map(|at| at.to_rfc3339())
 }
 
+/// 데몬을 내리면 함께 멈추는 잡(SPEC-036 R2). 상태 파일의 잡 이름에 "이 프로젝트의 것인가" 하나만
+/// 더한다.
+///
+/// 판정은 앱이 이미 가진 slug로 만든 잡 이름들과의 완전 일치다. 저장 경로가 자기 잡을 가려낼 때
+/// 쓰는 목록(`owned_job_names`)을 그대로 쓰므로 두 자리의 답이 갈리지 않는다. 부분 일치나 접두사
+/// 판정을 쓰지 않는 이유는 이름에서 프로젝트를 뽑아내는 것이 곧 R2가 막는 해석이기 때문이다.
+fn recorded_jobs(runs: &JobRuns, slug: &str) -> Vec<HeartbeatRecordedJob> {
+    let owned = owned_job_names(slug);
+    runs.job_names()
+        .into_iter()
+        .map(|name| HeartbeatRecordedJob {
+            of_this_project: owned.contains(&name),
+            name,
+        })
+        .collect()
+}
+
 /// 상태 조회 결과를 하트비트 카드가 쓰는 payload로 옮긴다.
+#[allow(clippy::too_many_arguments)]
 fn heartbeat_integration(
     status: HeartbeatStatus,
     setup_stages: Vec<HeartbeatSetupStage>,
     condition_script_path: String,
     managed_jobs: Vec<ManagedRoleJob>,
+    service_target: HeartbeatServiceTarget,
+    recorded_jobs: Vec<HeartbeatRecordedJob>,
     runs: &JobRuns,
     now: DateTime<Utc>,
 ) -> HeartbeatIntegration {
@@ -732,6 +772,8 @@ fn heartbeat_integration(
         condition_script_path,
         roles,
         managed_jobs,
+        service_target,
+        recorded_jobs,
         duplicate_jobs: duplicates_of(&status.duplicate_jobs, heartbeat_status::INTEGRATION),
         read_failures: status.read_failures,
     }
@@ -954,6 +996,11 @@ mod tests {
     };
     use crate::infrastructure::heartbeat_jobs::{project_jobs_path, project_slug};
     use crate::infrastructure::heartbeat_roles::{condition_command, HeartbeatRole};
+
+    /// 등록물 해석은 macOS에서만 값이 갈리므로 그 단정도 같은 조건으로 갈려 있다. 이 자리에서
+    /// 갈라 두지 않으면 다른 플랫폼에서 쓰이지 않는 import가 되어 clippy가 막는다.
+    #[cfg(target_os = "macos")]
+    use crate::domain::project::HeartbeatServiceTarget;
 
     const PROJECT_ROOT: &str = "/projects/workflow-labs";
     const SLUG: &str = "-projects-workflow-labs";
@@ -1313,6 +1360,114 @@ mod tests {
         HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), user_home.path());
 
         assert_eq!((tree(home.path()), tree(user_home.path())), before);
+    }
+
+    /// SPEC-036 완료 조건 1. 조작 대상이 하트비트 payload에 실린다. 이 값의 라벨은 앱 상수가 아니라
+    /// 등록물에서 읽은 값이므로, 표준 라벨과 다른 이름으로 등록한 기기에서도 그 기기의 이름이 나온다.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_snapshot_carries_the_service_target_read_from_the_registered_agent() {
+        let home = tempdir().expect("temporary directory");
+        let user_home = tempdir().expect("user home");
+        write_home_file(
+            user_home.path(),
+            "Library/LaunchAgents/com.catze.dream-heartbeat.plist",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>com.catze.dream-heartbeat</string></dict></plist>\n",
+        );
+
+        let snapshot =
+            HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), user_home.path());
+
+        assert_eq!(
+            snapshot.heartbeat.service_target,
+            HeartbeatServiceTarget::Resolved {
+                label: "com.catze.dream-heartbeat".to_owned(),
+                plist_path: user_home
+                    .path()
+                    .join("Library")
+                    .join("LaunchAgents")
+                    .join("com.catze.dream-heartbeat.plist")
+                    .display()
+                    .to_string(),
+            }
+        );
+    }
+
+    /// 완료 조건 13. 등록물 해석이 설치 마법사 3단계의 판정을 바꾸지 않는다. 같은 디렉터리를 보지만
+    /// 두 판정은 서로 다른 질문에 답한다 — 3단계는 표준 아티팩트 하나를 묻고, 이 값은 이 기기의
+    /// 등록물을 묻는다. 표준 라벨이 아닌 등록물만 있는 기기에서 그 차이가 드러난다.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn resolving_the_target_does_not_move_the_service_setup_stage() {
+        let home = tempdir().expect("temporary directory");
+        let user_home = tempdir().expect("user home");
+        write_home_file(
+            user_home.path(),
+            "Library/LaunchAgents/com.catze.dream-heartbeat.plist",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>com.catze.dream-heartbeat</string></dict></plist>\n",
+        );
+
+        let snapshot =
+            HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), user_home.path());
+        let stage = setup_stage(&snapshot, HeartbeatSetupStep::Service);
+
+        // 대상은 확정됐는데 3단계는 여전히 확인 불가다. 표준 아티팩트가 없기 때문이며, 그 판정과
+        // 문구는 이 작업 전과 같다(DECISION-4F1083FF).
+        assert!(matches!(
+            snapshot.heartbeat.service_target,
+            HeartbeatServiceTarget::Resolved { .. }
+        ));
+        assert_eq!(stage.state, HeartbeatSetupState::Unknown);
+        assert_eq!(stage.command, "heartbeat install-service");
+    }
+
+    /// SPEC-036 R2·완료 조건 5·9. 함께 멈추는 잡은 상태 파일에서 읽은 값 그대로이고, 잡마다 이
+    /// 프로젝트의 것인지가 slug로 만든 이름과의 완전 일치로 정해진다. 이름을 해석하는 코드가 없으므로
+    /// 다른 프로젝트의 역할 잡은 이름이 아무리 닮아도 이 프로젝트의 것이 아니다.
+    #[test]
+    fn the_recorded_jobs_come_from_the_state_file_and_only_exact_names_belong_to_this_project() {
+        let home = tempdir().expect("temporary directory");
+        let mecha = "wf-developer-projects-mecha-arena";
+        let dream = heartbeat_dream::job_name(SLUG);
+        // 이 프로젝트 잡 이름을 접두사로 가지는 남의 잡. 접두사 판정을 쓰면 여기서 갈라진다.
+        let prefixed = format!("{DEVELOPER_JOB}-old");
+        write_home_file(
+            home.path(),
+            "heartbeat/state.json",
+            &format!(
+                r#"{{ "_daemon": {{ "version": "0.8.0" }}, "{mecha}": {{}}, "{prefixed}": {{}}, "{DEVELOPER_JOB}": {{}}, "{dream}": {{}} }}"#
+            ),
+        );
+
+        let snapshot = HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), home.path());
+
+        let reported = snapshot
+            .heartbeat
+            .recorded_jobs
+            .iter()
+            .map(|job| (job.name.as_str(), job.of_this_project))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reported,
+            vec![
+                (mecha, false),
+                (DEVELOPER_JOB, true),
+                (prefixed.as_str(), false),
+                (dream.as_str(), true),
+            ]
+        );
+    }
+
+    /// 잡 구성이 다른 두 스냅샷으로 확인한다(완료 조건 5). 상태 파일이 없으면 빈 목록이고 오류가
+    /// 아니다 — 앱이 멈출 잡을 지어내지 않는다.
+    #[test]
+    fn a_home_without_a_state_file_reports_no_recorded_jobs() {
+        let home = tempdir().expect("temporary directory");
+
+        let snapshot = HeartbeatService.inspect(Path::new(PROJECT_ROOT), home.path(), home.path());
+
+        assert!(snapshot.heartbeat.recorded_jobs.is_empty());
+        assert!(snapshot.heartbeat.read_failures.is_empty());
     }
 
     /// SPEC-034 R3·완료 조건 1. 갱신 안내가 섹션 공통 영역에 실리고, 다섯 값이 백엔드 상수 그대로다.

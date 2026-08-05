@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import type { SpecDocument, WorkflowSummary } from "../domain/types";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SpecDocument, TaskEvent, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { SpecWorkspace } from "./SpecWorkspace";
 
 const document: SpecDocument = {
@@ -15,6 +15,54 @@ const document: SpecDocument = {
   body: "# 승인 흐름\n\n## 기획 내용\n\n사용자가 기획서를 검토한다.",
 };
 
+/** 요약 절을 가진 문서. 이 저장소의 옛 문서에는 거의 없어서 픽스처로 만든다. */
+const withSummary: SpecDocument = {
+  summary: { ...document.summary, fileName: "SPEC-002.md", id: "SPEC-002" },
+  body: [
+    "# 승인 흐름",
+    "",
+    "## 결정권자 요약",
+    "",
+    "이 기획이 승인되면 평문이 먼저 열립니다.",
+    "",
+    "## 기획 내용",
+    "",
+    "작업자가 작업자에게 쓴 본문입니다.",
+  ].join("\n"),
+};
+
+const otherWithSummary: SpecDocument = {
+  summary: { ...document.summary, fileName: "SPEC-003.md", id: "SPEC-003" },
+  body: [
+    "# 다른 기획",
+    "",
+    "## 결정권자 요약",
+    "",
+    "다른 문서의 요약입니다.",
+    "",
+    "## 기획 내용",
+    "",
+    "다른 문서의 본문입니다.",
+  ].join("\n"),
+};
+
+function derivedTask(id: string, status: string, sourceSpecId: string | null): WorkflowItemSummary {
+  return {
+    fileName: `${id}.md`,
+    id,
+    title: `${id} 작업`,
+    status,
+    updatedAt: "2026-08-01T00:00:00Z",
+    dueAt: null,
+    excerpt: "",
+    sourceSpecId,
+  };
+}
+
+function workflowWithTasks(tasks: WorkflowItemSummary[]): WorkflowSummary {
+  return { ...workflow, items: { ...workflow.items, tasks } };
+}
+
 const workflow: WorkflowSummary = {
   id: "wf_1",
   directory: "feature--wf_1",
@@ -24,6 +72,52 @@ const workflow: WorkflowSummary = {
   counts: { ideas: 0, specs: 1, decisions: 1, tasks: 0, reports: 0 },
   items: { ideas: [], specs: [document.summary], tasks: [] },
 };
+
+/**
+ * 한 상태의 기획서 하나. 이력은 목록 항목에서 오므로 열린 문서와 그 항목이 같은 파일 이름을
+ * 가리키게 함께 만든다.
+ */
+function specAt(status: string, events: TaskEvent[] = []) {
+  const summary: WorkflowItemSummary = {
+    fileName: "SPEC-100.md",
+    id: "SPEC-100",
+    title: "결정 대상 기획",
+    status,
+    updatedAt: "2026-08-05T00:00:00Z",
+    excerpt: "결정 조합을 확인하는 픽스처입니다.",
+    events,
+  };
+  return {
+    document: {
+      summary,
+      body: "# 결정 대상 기획\n\n## 기획 내용\n\n결정 조합을 확인하는 픽스처입니다.",
+    } satisfies SpecDocument,
+    workflow: { ...workflow, items: { ...workflow.items, specs: [summary] } },
+  };
+}
+
+function renderSpecAt(status: string, events: TaskEvent[] = [], onDecision = vi.fn()) {
+  const fixture = specAt(status, events);
+  render(
+    <SpecWorkspace
+      busy={false}
+      document={fixture.document}
+      loading={false}
+      onDecision={onDecision}
+      onSelect={vi.fn()}
+      workflow={fixture.workflow}
+    />,
+  );
+  return onDecision;
+}
+
+const FOLLOW_UP_FACTS = [
+  "기존 승인 결정은 지워지지 않습니다.",
+  "이 기획서에서 나온 개발 작업은 그대로 진행됩니다.",
+  "대신 이 기획서가 수정을 요청한 기획으로 바뀝니다.",
+];
+
+afterEach(cleanup);
 
 describe("SpecWorkspace", () => {
   it("records approval inside the review workspace", async () => {
@@ -106,5 +200,244 @@ describe("SpecWorkspace", () => {
       ),
     );
     expect(screen.getByText("수정 요청")).toBeInTheDocument();
+  });
+
+  it("opens a spec at its decision summary and keeps the source one toggle away", () => {
+    render(
+      <SpecWorkspace
+        busy={false}
+        document={withSummary}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    expect(screen.getByText("이 기획이 승인되면 평문이 먼저 열립니다.")).toBeInTheDocument();
+    expect(screen.queryByText("작업자가 작업자에게 쓴 본문입니다.")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
+    expect(screen.getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
+    expect(screen.getByText("이 기획이 승인되면 평문이 먼저 열립니다.")).toBeInTheDocument();
+  });
+
+  it("starts at the summary again when another document is opened in the same place", () => {
+    const view = render(
+      <SpecWorkspace
+        busy={false}
+        document={withSummary}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
+    expect(screen.getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
+
+    view.rerender(
+      <SpecWorkspace
+        busy={false}
+        document={otherWithSummary}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    // 토글 상태를 저장하지 않는다. 다른 문서를 열면 다시 평문에서 시작한다.
+    expect(screen.getByRole("button", { name: "원문 전문 보기" })).toBeInTheDocument();
+    expect(screen.getByText("다른 문서의 요약입니다.")).toBeInTheDocument();
+    expect(screen.queryByText("다른 문서의 본문입니다.")).not.toBeInTheDocument();
+  });
+
+  it("leaves a spec without the summary section exactly as it opens today", () => {
+    render(
+      <SpecWorkspace
+        busy={false}
+        document={document}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    expect(screen.getByText("사용자가 기획서를 검토한다.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "원문 전문 보기" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/요약이 없/)).not.toBeInTheDocument();
+  });
+
+  it("breaks the derived tasks down by status and says what it counted", () => {
+    render(
+      <SpecWorkspace
+        busy={false}
+        document={document}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflowWithTasks([
+          derivedTask("TASK-001", "todo", "SPEC-001"),
+          derivedTask("TASK-002", "qa_waiting", "SPEC-001"),
+          derivedTask("TASK-003", "completed", "SPEC-001"),
+          derivedTask("TASK-004", "completed", "SPEC-001"),
+          // 다른 기획서에서 나온 작업과 출처가 없는 작업은 이 배지가 세지 않는다.
+          derivedTask("TASK-005", "todo", "SPEC-002"),
+          derivedTask("TASK-006", "todo", null),
+        ])}
+      />,
+    );
+
+    const counts = screen.getByRole("region", { name: "파생 개발 작업" });
+    expect([...counts.querySelectorAll("span")].map((entry) => entry.textContent)).toEqual([
+      "준비 1", "진행 중 0", "막힘 0", "QA 대기 1", "완료 2",
+    ]);
+    expect(within(counts).getByText("이 기획서를 출처로 적은 개발 작업 전체를 셉니다")).toBeInTheDocument();
+  });
+
+  it("keeps an off-contract task status out of the five and still in view", () => {
+    render(
+      <SpecWorkspace
+        busy={false}
+        document={document}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflowWithTasks([
+          derivedTask("TASK-001", "todo", "SPEC-001"),
+          derivedTask("TASK-002", "archived", "SPEC-001"),
+        ])}
+      />,
+    );
+
+    const counts = screen.getByRole("region", { name: "파생 개발 작업" });
+    expect(within(counts).getByText("규격 밖 1")).toBeInTheDocument();
+    expect(within(counts).getByText("준비 1")).toBeInTheDocument();
+  });
+
+  it("says a spec has no derived task instead of dropping the row", () => {
+    render(
+      <SpecWorkspace
+        busy={false}
+        document={document}
+        loading={false}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    const counts = screen.getByRole("region", { name: "파생 개발 작업" });
+    expect(within(counts).getByText("이 기획서에서 나온 개발 작업이 아직 없습니다.")).toBeInTheDocument();
+    expect(within(counts).getByText("이 기획서를 출처로 적은 개발 작업 전체를 셉니다")).toBeInTheDocument();
+  });
+
+  // 화면이 여는 조합이 TASK-127이 쓰기 경로에 세운 표와 같은지. 표보다 넓게 열면 사용자가 버튼을
+  // 누르고 오류를 보고, 좁게 열면 그 작업이 낸 길이 닿지 않는다.
+  const decisionActions = ["승인 도장 찍기", "수정 요청", "기획서 폐기", "후속 기획 요청"];
+  const openTable: [string, string[]][] = [
+    ["draft", []],
+    ["user_review", ["승인 도장 찍기", "수정 요청", "기획서 폐기"]],
+    ["approved", ["후속 기획 요청"]],
+    ["revision_requested", []],
+    ["rejected", []],
+  ];
+
+  for (const [status, expected] of openTable) {
+    it(`opens exactly what the write path allows on a ${status} spec`, () => {
+      renderSpecAt(status);
+
+      expect(
+        decisionActions.filter((name) => screen.queryByRole("button", { name })),
+      ).toEqual(expected);
+    });
+  }
+
+  it("keeps a follow-up planning request behind an open action and a comment", async () => {
+    const onDecision = renderSpecAt("approved", [], vi.fn().mockResolvedValue(true));
+
+    // 기획서를 열자마자 눌리는 자리가 아니다. 여는 조작이 먼저 있다.
+    expect(screen.queryByRole("button", { name: "후속 기획 요청 기록" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "후속 기획 요청" }));
+
+    for (const fact of FOLLOW_UP_FACTS) expect(screen.getByText(fact)).toBeInTheDocument();
+    expect(
+      screen.getByText("이 기획서에 후속 기획 요청을 기록합니다. 결정 기록은 되돌릴 수 없습니다."),
+    ).toBeInTheDocument();
+
+    const submit = screen.getByRole("button", { name: "후속 기획 요청 기록" });
+    expect(submit).toBeDisabled();
+    fireEvent.click(submit);
+    expect(onDecision).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("후속 기획 요청 내용"), {
+      target: { value: "결정을 취소하는 동선까지 함께 다뤄 주세요." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "후속 기획 요청 기록" }));
+
+    await waitFor(() =>
+      expect(onDecision).toHaveBeenCalledWith(
+        "revision_requested",
+        "결정을 취소하는 동선까지 함께 다뤄 주세요.",
+      ),
+    );
+    // 기록된 값은 수정 요청 그대로지만 도장은 이 화면이 부른 이름을 쓴다.
+    expect(screen.getByText("후속 기획 요청")).toBeInTheDocument();
+    expect(screen.getByText("USER DECISION")).toBeInTheDocument();
+  });
+
+  it("reads the stamps of a spec in time order and splits the two revision requests", () => {
+    renderSpecAt("revision_requested", [
+      { kind: "approved", at: "2026-08-01T02:00:00Z" },
+      { kind: "revision_requested", at: "2026-08-03T05:30:00Z" },
+    ]);
+
+    const history = screen.getByRole("region", { name: "결정 이력" });
+    expect([...history.querySelectorAll("li span")].map((node) => node.textContent)).toEqual([
+      "승인", "후속 기획 요청",
+    ]);
+    expect([...history.querySelectorAll("time")].map((node) => node.getAttribute("dateTime"))).toEqual([
+      "2026-08-01T02:00:00Z", "2026-08-03T05:30:00Z",
+    ]);
+  });
+
+  it("still opens the history as one row when a spec has a single decision", () => {
+    renderSpecAt("approved", [{ kind: "approved", at: "2026-08-01T02:00:00Z" }]);
+
+    const history = screen.getByRole("region", { name: "결정 이력" });
+    expect(within(history).getByText("승인")).toBeInTheDocument();
+    expect(history.querySelectorAll("li")).toHaveLength(1);
+  });
+
+  it("leaves no place in the history to edit or drop a decision", () => {
+    renderSpecAt("revision_requested", [
+      { kind: "approved", at: "2026-08-01T02:00:00Z" },
+      { kind: "revision_requested", at: "2026-08-03T05:30:00Z" },
+    ]);
+
+    const history = screen.getByRole("region", { name: "결정 이력" });
+    expect(within(history).queryAllByRole("button")).toHaveLength(0);
+    expect(within(history).queryAllByRole("textbox")).toHaveLength(0);
+  });
+
+  it("says nothing about a history a spec does not have yet", () => {
+    renderSpecAt("user_review");
+
+    expect(screen.queryByRole("region", { name: "결정 이력" })).not.toBeInTheDocument();
+  });
+
+  it("lets the history stand in for the sentence it replaced, and keeps that sentence otherwise", () => {
+    const preserved = "결정 기록은 원문과 분리되어 보존됩니다.";
+
+    renderSpecAt("approved", [{ kind: "approved", at: "2026-08-01T02:00:00Z" }]);
+    expect(screen.queryByText(preserved)).not.toBeInTheDocument();
+
+    cleanup();
+    // 이력이 설 것이 없는 기획서에서는 지울 수 없다. 대신할 것이 없는 자리다.
+    renderSpecAt("approved");
+    expect(screen.getByText(preserved)).toBeInTheDocument();
   });
 });

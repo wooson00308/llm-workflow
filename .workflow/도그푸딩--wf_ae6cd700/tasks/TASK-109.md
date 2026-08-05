@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-109
 title: dream 카드가 같은 갱신 안내를 같은 문구로 말한다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-034
 source_decision_id: DECISION-3ECEDCA1
 depends_on: [TASK-108]
-updated_at: 2026-08-04T20:34:20Z
+updated_at: 2026-08-05T03:09:22.387437+00:00
 history:
   - { at: 2026-08-04T17:35:00Z, kind: created }
   - { at: 2026-08-04T20:24:10Z, kind: in_progress }
   - { at: 2026-08-04T20:34:20Z, kind: qa_waiting }
+  - { at: 2026-08-05T03:09:22.387437+00:00, kind: completed }
 ---
 
 # dream 카드가 같은 갱신 안내를 같은 문구로 말한다

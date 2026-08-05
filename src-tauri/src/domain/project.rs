@@ -325,6 +325,11 @@ pub struct HeartbeatSetupStage {
     pub state: HeartbeatSetupState,
     /// 1~3은 참, dream은 거짓(R9). 선택 단계가 미완료여도 마법사는 접힌다.
     pub required: bool,
+    /// 앱이 이 단계를 대신 실행할 수 있는가(SPEC-037 R2). 명령을 소유한 쪽이 백엔드이므로
+    /// "이 단계를 앱이 실행할 수 있는가"도 백엔드가 답한다 — 화면이 단계 종류를 보고 스스로
+    /// 갈리면 백엔드와 화면이 다른 답을 낼 자리가 생긴다. `command`·`evidence`를 완성해 싣는
+    /// 것과 같은 규칙이다.
+    pub runnable: bool,
     /// 사용자가 자기 터미널에 그대로 붙여 넣을 명령 원문(R6). 화면이 조각을 조립하지 않는다.
     pub command: String,
     /// 판정에 쓴 경로. 감지하지 않는 단계와 이 플랫폼에서 볼 경로가 없는 단계는 `None`이다.
@@ -350,6 +355,44 @@ pub enum HeartbeatSetupState {
     Done,
     NotDone,
     Unknown,
+}
+
+/// 이 기기에 등록된 하트비트 서비스를 앱이 얼마나 확정했는지(SPEC-036 R4·R5).
+///
+/// 확정된 경우에만 조작 대상이 있다. 나머지 넷은 서로 다른 사유이고 사용자가 할 다음 행동도
+/// 다르므로 하나의 실패 값으로 접지 않는다(R5). 확정하지 못한 채 표준 라벨로 대신 시도하는 값은
+/// 이 집합에 없다 — 그것이 R4가 막는 일이다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HeartbeatServiceTarget {
+    /// 대상 plist가 정확히 하나이고 그 `Label`을 읽었다. 이 둘이 조작에 필요한 값 전부다.
+    Resolved { label: String, plist_path: String },
+    /// 디렉터리는 읽었는데 대상 plist가 없다. 데몬 계약이 같은 상태를 `skipped/not-registered`로
+    /// 부른다.
+    NotRegistered,
+    /// 대상 plist가 둘 이상이라 앱이 대상을 고르지 않는다(확인 필요 3번). 찾은 경로를 전부 담아
+    /// 사용자가 무엇을 정리해야 하는지 보이게 한다.
+    Ambiguous { plist_paths: Vec<String> },
+    /// macOS가 아니다. 다른 플랫폼의 등록물 위치와 조작 절차는 이 저장소가 확인한 적이 없다(R9).
+    UnsupportedPlatform,
+    /// 읽어야 할 것을 읽지 못했다. 디렉터리를 열지 못했거나, plist는 하나인데 그 `Label`을 읽지
+    /// 못했다(파일을 열지 못했거나, plist가 아니거나, `Label` 키가 없거나 문자열이 아니다).
+    ///
+    /// 등록물 없음과 갈라 두는 값이다. 못 읽은 것을 없음으로 접으면 앱이 모르는 것을 안다고
+    /// 말하게 된다.
+    Unreadable { path: String },
+}
+
+/// 데몬을 내리면 함께 멈추는 잡 하나(SPEC-036 R2).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatRecordedJob {
+    /// 상태 파일 최상위 키의 원문. 앱이 이름을 해석하지 않는다 — 이름에서 프로젝트를 뽑아내지도,
+    /// 역할을 번역하지도 않는다(R2).
+    pub name: String,
+    /// 이 프로젝트의 잡인가. 앱이 자기 slug로 만든 잡 이름들과의 완전 일치로만 정한다. 부분 일치나
+    /// 접두사 판정을 쓰지 않는다.
+    pub of_this_project: bool,
 }
 
 /// 084 경고 자리에서 보여줄 하트비트 갱신 절차의 명령 원문(SPEC-034 R3·R4). 설치 마법사의

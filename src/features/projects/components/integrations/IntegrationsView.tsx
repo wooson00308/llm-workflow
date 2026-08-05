@@ -1,6 +1,11 @@
 import { useState } from "react";
 import type {
+  AgentLeaseSummary,
   HeartbeatRunControls,
+  HeartbeatServiceControls,
+  HeartbeatSetupRunControls,
+  HeartbeatUpdateControls,
+  HeartbeatVersionControls,
   IntegrationActions,
   IntegrationsSnapshot,
   IntegrationWriteError,
@@ -20,6 +25,19 @@ interface Props {
   pendingWork?: PendingRoleWork;
   /** 잡 실행의 진행·실패 상태와 실행 통로. 뷰는 값의 내용을 보지 않고 카드에 그대로 넘긴다. */
   heartbeatRuns: HeartbeatRunControls;
+  /**
+   * 프로젝트의 활성 lease. 뷰는 값의 내용을 보지 않고 카드에 그대로 넘긴다 — 재기동이 끊는 세션을
+   * 고지하는 것은 카드의 일이고, 그 판정을 뷰가 다시 하지 않는다(`pendingWork`와 같은 어법이다).
+   */
+  activeLeases: AgentLeaseSummary[];
+  /** 업데이트 실행의 진행·결과 상태와 실행 통로. 뷰는 값의 내용을 보지 않고 카드에 그대로 넘긴다. */
+  heartbeatUpdate: HeartbeatUpdateControls;
+  /** 설치 단계 실행의 진행·결과 상태와 실행 통로. 뷰는 값의 내용을 보지 않고 그대로 넘긴다. */
+  heartbeatSetupRuns?: HeartbeatSetupRunControls;
+  /** 버전 판정의 진행·결과 상태와 조회 통로. 뷰는 값의 내용을 보지 않고 그대로 넘긴다. */
+  heartbeatVersions?: HeartbeatVersionControls;
+  /** 데몬 끄기·켜기의 진행·결과 상태와 실행 통로. 뷰는 값의 내용을 보지 않고 그대로 넘긴다. */
+  heartbeatService?: HeartbeatServiceControls;
 }
 
 /**
@@ -34,6 +52,11 @@ export function IntegrationsView({
   actions,
   pendingWork,
   heartbeatRuns,
+  activeLeases,
+  heartbeatUpdate,
+  heartbeatSetupRuns,
+  heartbeatVersions,
+  heartbeatService,
 }: Props) {
   /**
    * 연동 id를 키로 하는 펼침 여부. 값이 없는 연동은 접힘이므로 첫 화면은 전부 접혀 있다.
@@ -78,9 +101,14 @@ export function IntegrationsView({
         {integrations.map(({ id, Card }) => (
           <Card
             actions={actions}
+            activeLeases={activeLeases}
             error={error}
             expanded={expanded[id] ?? false}
             heartbeatRuns={heartbeatRuns}
+            heartbeatService={heartbeatService}
+            heartbeatSetupRuns={heartbeatSetupRuns}
+            heartbeatUpdate={heartbeatUpdate}
+            heartbeatVersions={heartbeatVersions}
             key={id}
             onToggleExpanded={() => toggle(id)}
             pendingWork={pendingWork}

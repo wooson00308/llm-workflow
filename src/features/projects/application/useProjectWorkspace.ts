@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   DreamJobRequest,
   HeartbeatRunFailure,
+  HeartbeatServiceOperation,
+  HeartbeatServiceOutcome,
+  HeartbeatSetupRunResult,
+  HeartbeatSetupStep,
+  HeartbeatUpdateResult,
+  HeartbeatVersions,
   IntegrationActions,
   IntegrationsSnapshot,
   IntegrationsState,
@@ -29,6 +35,32 @@ type IntegrationsReadState = Omit<IntegrationsState, "heartbeatRuns">;
 interface HeartbeatRunState {
   running: string[];
   failure: HeartbeatRunFailure | null;
+}
+
+/** 화면에 그릴 업데이트 상태. `update`는 훅이 붙이므로 여기에는 값만 담는다. */
+interface HeartbeatUpdateState {
+  running: boolean;
+  result: HeartbeatUpdateResult | null;
+}
+
+/** 화면에 그릴 설치 단계 실행 상태. `run`은 훅이 붙이므로 여기에는 값만 담는다. */
+interface HeartbeatSetupRunState {
+  running: HeartbeatSetupStep[];
+  results: Partial<Record<HeartbeatSetupStep, HeartbeatSetupRunResult>>;
+}
+
+/** 화면에 그릴 버전 판정 상태. `check`는 훅이 붙이므로 여기에는 값만 담는다. */
+interface HeartbeatVersionState {
+  checking: boolean;
+  versions: HeartbeatVersions | null;
+  error: string | null;
+}
+
+/** 화면에 그릴 데몬 조작 상태. `control`은 훅이 붙이므로 여기에는 값만 담는다. */
+interface HeartbeatServiceState {
+  running: HeartbeatServiceOperation | null;
+  outcome: HeartbeatServiceOutcome | null;
+  error: string | null;
 }
 
 function messageFrom(error: unknown): string {
@@ -85,9 +117,39 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     running: [],
     failure: null,
   });
+  // 업데이트도 조회·쓰기 상태와 따로 둔다. 실행 상태와 나누는 것은 수명이 아니라 소유하는 사실이
+  // 달라서다 — 잡 하나의 실행과 설치본 전체의 갱신은 서로를 가리지 않아야 한다(R9).
+  const [heartbeatUpdate, setHeartbeatUpdate] = useState<HeartbeatUpdateState>({
+    running: false,
+    result: null,
+  });
+  // 설치 단계 실행도 따로 둔다. 잡 실행·업데이트와 같은 이유이고, 단계마다 결과를 나눠 담는 것은
+  // 한 단계의 결과가 다른 단계의 자리에 나타나지 않게 하기 위해서다.
+  const [heartbeatSetupRuns, setHeartbeatSetupRuns] = useState<HeartbeatSetupRunState>({
+    running: [],
+    results: {},
+  });
+  // 버전 판정은 조회 주기가 부르지 않는 값이라 스냅샷과 수명이 다르다. 주기가 도는 동안 이 값은
+  // 그대로 남고, 새로 읽는 것은 사용자가 카드를 펼치거나 업데이트가 끝난 자리뿐이다.
+  const [heartbeatVersions, setHeartbeatVersions] = useState<HeartbeatVersionState>({
+    checking: false,
+    versions: null,
+    error: null,
+  });
+  // 데몬 조작도 따로 둔다. 이 값은 프로젝트가 아니라 기기 하나의 데몬에 대한 사실이라 조회·쓰기
+  // 상태와 수명이 다르고, 조회 주기가 이 값을 지우지도 만들지도 않는다.
+  const [heartbeatService, setHeartbeatService] = useState<HeartbeatServiceState>({
+    running: null,
+    outcome: null,
+    error: null,
+  });
   // 겹쳐 실행을 막는 판정은 ref로 한다. 같은 tick에 두 번 눌리면 state는 아직 갱신 전이라
   // 두 호출이 모두 통과한다.
   const runningJobs = useRef<string[]>([]);
+  const updating = useRef(false);
+  const runningSteps = useRef<HeartbeatSetupStep[]>([]);
+  const checkingVersions = useRef(false);
+  const controllingService = useRef(false);
 
   const remember = useCallback(
     (next: ProjectSummary) => {
@@ -436,13 +498,184 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, project],
   );
 
+  /**
+   * 도는 데몬의 버전과 디스크의 버전을 읽어 어긋남을 판정한다.
+   *
+   * **조회 주기가 이 함수를 부르지 않는다.** 이 판정은 프로세스를 하나 띄우는 조작이라
+   * `readIntegrations`에 얹지 않는다. 부르는 자리는 카드가 펼쳐지는 순간과 업데이트가 끝난 뒤
+   * 둘뿐이고, 겹쳐 부르는 것은 여기서 막는다 — 카드가 두 번 렌더되어도 프로세스는 하나다.
+   *
+   * 거절당하면 지난 판정을 지운다. 커맨드가 답하지 못한 자리에 옛 값이 남아 있으면 사용자가 그것을
+   * 지금의 판정으로 읽는다.
+   */
+  const checkHeartbeatVersions = useCallback(async () => {
+    if (checkingVersions.current) return;
+    checkingVersions.current = true;
+    setHeartbeatVersions((previous) => ({ ...previous, checking: true, error: null }));
+    try {
+      const versions = await gateway.checkHeartbeatVersions();
+      setHeartbeatVersions({ checking: false, versions, error: null });
+    } catch (reason) {
+      setHeartbeatVersions({
+        checking: false,
+        versions: null,
+        error: messageFrom(reason),
+      });
+    } finally {
+      checkingVersions.current = false;
+    }
+  }, [gateway]);
+
+  /**
+   * 설치 마법사의 단계 하나를 지금 한 번 실행한다. 사용자가 확인 화면에서 누른 자리에서만 불린다 —
+   * 조회 주기와 프로젝트 열기 경로는 이 함수를 부르지 않는다.
+   *
+   * 실행이 끝나면 연동 조회를 다시 부른다. 단계 상태를 화면이 스스로 바꾸지 않고, 커맨드도
+   * 스냅샷을 돌려주지 않는다 — 설치 판정의 원천은 조회 하나다.
+   *
+   * `command`는 커맨드 자체가 거절했을 때만 쓰는 폴백이다. 그 문자열의 원천은 백엔드(payload의
+   * `command`)이며 훅이 명령을 다시 적지 않는다 — `failureFrom`이 같은 이유로 같은 모양이다.
+   */
+  const runHeartbeatSetupStep = useCallback(
+    async (step: HeartbeatSetupStep, command: string) => {
+      if (runningSteps.current.includes(step)) return;
+
+      runningSteps.current = [...runningSteps.current, step];
+      // 이 단계에 한해 지난 결과를 지운다. 새 실행의 진행 표시 옆에 옛 결과가 남으면 사용자가
+      // 그것을 이번 결과로 읽는다.
+      setHeartbeatSetupRuns((previous) => {
+        const results = { ...previous.results };
+        delete results[step];
+        return { running: runningSteps.current, results };
+      });
+      try {
+        const result = await gateway.runHeartbeatSetupStep(step);
+        setHeartbeatSetupRuns((previous) => ({
+          ...previous,
+          results: { ...previous.results, [step]: result },
+        }));
+      } catch (reason) {
+        setHeartbeatSetupRuns((previous) => ({
+          ...previous,
+          results: {
+            ...previous.results,
+            // 본 후보 경로는 비워 둔다. 앱이 무엇을 봤는지 모르는 상태이고, 모르는 값을 지어내지
+            // 않는다(R5).
+            [step]: { kind: "notRun", message: messageFrom(reason), command, looked: [] },
+          },
+        }));
+      } finally {
+        runningSteps.current = runningSteps.current.filter((name) => name !== step);
+        const running = runningSteps.current;
+        setHeartbeatSetupRuns((previous) => ({ ...previous, running }));
+        if (project) await readIntegrations(project.rootPath);
+      }
+    },
+    [gateway, project, readIntegrations],
+  );
+
+  /**
+   * 하트비트를 한 번 갱신한다. 사용자가 확인 화면에서 누른 자리에서만 불린다 — 조회 주기와
+   * 프로젝트 열기 경로는 이 함수를 부르지 않는다(R3).
+   *
+   * 실행이 실패한 것도 결과다. 커맨드가 계약 값을 돌려주지 못한 경우(하트비트 홈을 해석하지
+   * 못했거나 IPC가 끊긴 경우)만 여기서 값을 만들고, 그때도 사용자가 손으로 끝낼 수 있게 명령
+   * 원문을 채운다. 이 문자열의 원천은 백엔드(`heartbeat_process::manual_command_for`)이며 여기
+   * 값은 그 경로가 답하지 못했을 때만 쓴다 — `failureFrom`이 같은 이유로 같은 모양이다.
+   *
+   * 본 후보 경로는 비워 둔다. 앱이 무엇을 봤는지 모르는 상태이고, 모르는 값을 지어내지 않는다(R5).
+   */
+  const updateHeartbeat = useCallback(async () => {
+    if (updating.current) return;
+    updating.current = true;
+    // 지난 결과를 지운다. 새 실행의 진행 표시 옆에 옛 결과가 남으면 그것을 이번 결과로 읽는다.
+    setHeartbeatUpdate({ running: true, result: null });
+    try {
+      const result = await gateway.updateHeartbeat();
+      setHeartbeatUpdate({ running: false, result });
+    } catch (reason) {
+      setHeartbeatUpdate({
+        running: false,
+        result: {
+          kind: "notRun",
+          message: messageFrom(reason),
+          command: "heartbeat update",
+          looked: [],
+        },
+      });
+    } finally {
+      updating.current = false;
+      // 갱신이 끝난 자리에서 한 번 다시 읽는다. 방금 바뀐 것이 바로 이 두 값이고, 그 결과를 보려고
+      // 사용자가 카드를 접었다 펴게 하지 않는다. 실패로 끝난 실행 뒤에도 읽는다 — 어디까지 갔는지가
+      // 종료 코드가 아니라 두 버전에서 읽히는 경우가 `partial`이다.
+      await checkHeartbeatVersions();
+    }
+  }, [checkHeartbeatVersions, gateway]);
+
+  /**
+   * 데몬을 내리거나 다시 올린다. 사용자가 버튼을 누른 자리에서만 불린다 — 조회 주기와 프로젝트
+   * 열기 경로는 이 함수를 부르지 않는다.
+   *
+   * **꺼진 데몬을 앱이 대신 다시 켜지 않는다(R6·확인 필요 4번).** 자동 복구는 사용자가 의도해서
+   * 꺼 둔 상태를 앱이 무르는 것이고, 커밋 컷 도중에 데몬이 되살아나면 이 기능이 없애려던 페인이
+   * 그대로 재현된다. 그래서 이 함수를 부르는 자리는 화면의 버튼 하나뿐이다.
+   *
+   * 커맨드 자체가 거절한 것은 결과가 아니다. 그 사유는 `error`에 남는다 — 명령 원문은 대상이
+   * 확정된 뒤에만 만들어지고 그 값을 아는 쪽은 백엔드다. 훅이 라벨을 지어내 명령을 적으면 그것이
+   * 곧 R4가 막는 일이다.
+   *
+   * 실행이 끝난 자리에서 연동 조회를 다시 부르지 않는다. 데몬 실행 여부의 원천은 2.5초 조회
+   * 하나이고, 그 판정이 늦게 따라오는 것은 정상이다 — 화면이 그 순간을 그대로 말한다(R7).
+   */
+  const controlHeartbeatService = useCallback(
+    async (operation: HeartbeatServiceOperation) => {
+      if (controllingService.current) return;
+      controllingService.current = true;
+      // 지난 결과를 지운다. 새 조작의 진행 표시 옆에 옛 결과가 남으면 그것을 이번 결과로 읽는다.
+      setHeartbeatService({ running: operation, outcome: null, error: null });
+      try {
+        const result = await gateway.controlHeartbeatService(operation);
+        setHeartbeatService({
+          running: null,
+          outcome: { operation, result },
+          error: null,
+        });
+      } catch (reason) {
+        setHeartbeatService({
+          running: null,
+          outcome: null,
+          error: messageFrom(reason),
+        });
+      } finally {
+        controllingService.current = false;
+      }
+    },
+    [gateway],
+  );
+
   // 연동 섹션이 한 번에 받는 묶음. 실행 상태는 따로 살다가 여기에서만 합쳐진다.
   const integrationsState = useMemo<IntegrationsState>(
     () => ({
       ...integrations,
       heartbeatRuns: { ...heartbeatRuns, run: runHeartbeatJob },
+      heartbeatUpdate: { ...heartbeatUpdate, update: updateHeartbeat },
+      heartbeatSetupRuns: { ...heartbeatSetupRuns, run: runHeartbeatSetupStep },
+      heartbeatVersions: { ...heartbeatVersions, check: checkHeartbeatVersions },
+      heartbeatService: { ...heartbeatService, control: controlHeartbeatService },
     }),
-    [heartbeatRuns, integrations, runHeartbeatJob],
+    [
+      checkHeartbeatVersions,
+      controlHeartbeatService,
+      heartbeatRuns,
+      heartbeatService,
+      heartbeatSetupRuns,
+      heartbeatUpdate,
+      heartbeatVersions,
+      integrations,
+      runHeartbeatJob,
+      runHeartbeatSetupStep,
+      updateHeartbeat,
+    ],
   );
 
   useEffect(() => {

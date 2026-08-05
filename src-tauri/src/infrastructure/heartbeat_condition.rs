@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 9;
+const CONDITION_SCRIPT_VERSION: u32 = 11;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 9;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 9
+# condition_script_version: 11
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer  (프로젝트 루트에서 실행)
@@ -34,6 +34,10 @@ set -u
 
 role="${1:-}"
 leases=".workflow/.runtime/leases"
+# 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
+# 개행이 목록의 경계가 된다.
+nl='
+'
 
 # 판정 사유를 표준 출력 첫 줄에 내고 종료한다. 하트비트가 그 줄을 state.json의
 # last_condition_output으로 옮기고, 앱이 코드를 사용자 문장으로 옮긴다.
@@ -48,30 +52,50 @@ verdict() { # $1=사유 코드 $2=종료 코드
 
 [ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
 
-# 유효한(미만료) lease가 있으면 0. 파일이 없거나 시각을 읽을 수 없으면 1.
-# 자리수가 고정된 UTC 표기는 사전순 비교가 곧 시각 비교다. POSIX sh에는 이식 가능한 날짜 파싱이 없다.
+# 만료 표기 판정 한 자리. 자리수가 고정된 UTC 표기는 사전순 비교가 곧 시각 비교다. POSIX sh에는
+# 이식 가능한 날짜 파싱이 없다.
 # 읽을 수 없는 표기를 선점으로 세지 않는다. 선점 헬퍼(wf-claim.sh)는 같은 상황을 반대로 다루는데,
 # 헬퍼가 지는 위험은 살아 있는 남의 lease를 인수하는 것이고 이 판정이 지는 위험은 대상이 영원히
 # 열리지 않는 것이다. 실제 선점은 배타적 생성이 막으므로 이 판정이 관대해도 중복 선점이 되지 않는다.
+lease_unexpired() { # $1=만료 표기 $2=판정 시각
+  case "$1" in
+    ????-??-??T??:??:??Z) [ "$1" '>' "$2" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# 유효한(미만료) lease가 있으면 0. 파일이 없거나 시각을 읽을 수 없으면 1.
+# 기획자·아키텍트 분기가 쓴다. 개발자 분기는 후보마다 이 함수를 부르는 대신 scan_leases가 모아 둔
+# 목록을 보고, 만료 판정은 위 함수 하나가 두 자리 모두에서 한다.
 # 판정은 lease 파일을 읽기만 한다. 지우거나 고치거나 새로 만들지 않는다.
 lease_blocks() { # $1=대상 id
   lease="$leases/$1.yml"
   [ -f "$lease" ] || return 1
   exp=$(sed -n 's/^expires_at: *//p' "$lease" | head -1 | tr -d '"'\''')
-  case "$exp" in
-    ????-??-??T??:??:??Z) [ "$exp" '>' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ] ;;
-    *) return 1 ;;
-  esac
+  lease_unexpired "$exp" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
-# 프론트매터의 한 줄 선언을 읽어 표준 출력에 공백으로 구분한 id 목록을 낸다.
+# 토큰 앞뒤의 공백류를 걷어낸 값을 $trimmed에 담는다. 원래 본문이 토큰마다 sed를 하나씩 띄우던
+# 자리다 — 걷어내는 문자 집합은 그 sed의 [[:space:]]와 같고, 사라지는 것은 프로세스뿐이다.
+trim_token() { # $1=토큰
+  trimmed=$1
+  while :; do
+    case "$trimmed" in [[:space:]]*) trimmed=${trimmed#?} ;; *) break ;; esac
+  done
+  while :; do
+    case "$trimmed" in *[[:space:]]) trimmed=${trimmed%?} ;; *) break ;; esac
+  done
+}
+
+# 프론트매터의 한 줄 선언을 읽어 id 목록을 $parsed에 담는다.
 # 반환값 1은 "키는 있는데 계약 형식이 아니다"이고, 그 작업은 미충족이다.
-deps_of() { # $1=작업 파일
-  count=$(grep -c '^depends_on:' "$1" 2>/dev/null || true)
-  case "$count" in '' | *[!0-9]*) count=0 ;; esac
-  [ "$count" -eq 0 ] && return 0
-  [ "$count" -gt 1 ] && return 1
-  value=$(sed -n 's/^depends_on:[[:space:]]*//p' "$1" | head -1 | sed 's/[[:space:]]*$//')
+# 선언 줄 수와 첫 줄의 값은 scan_tasks가 읽어 온 것을 받는다. 그 훑기가 세고 뽑는 규칙이 원래
+# 본문의 grep -c와 sed 그대로이므로, 이 함수가 보는 재료는 파일에서 직접 읽던 때와 같다.
+deps_of() { # $1=선언 줄 수 $2=첫 선언 줄의 값
+  parsed=""
+  [ "$1" -eq 0 ] && return 0
+  [ "$1" -gt 1 ] && return 1
+  value=$2
   [ -n "$value" ] || return 1
   case "$value" in '['*']') ;; *) return 1 ;; esac
   inner=${value#?}
@@ -80,24 +104,23 @@ deps_of() { # $1=작업 파일
   out=""
   rest="$inner,"
   while [ -n "$rest" ]; do
-    token=$(printf '%s' "${rest%%,*}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    trim_token "${rest%%,*}"
     rest=${rest#*,}
-    [ -n "$token" ] || return 1
-    case "$token" in *[!A-Za-z0-9_-]*) return 1 ;; esac
-    out="$out $token"
+    [ -n "$trimmed" ] || return 1
+    case "$trimmed" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+    out="$out $trimmed"
   done
-  printf '%s\n' "${out# }"
+  parsed=${out# }
 }
 
-# 프론트매터의 겹침 선언 한 줄을 읽어 표준 출력에 공백으로 구분한 경로 목록을 낸다.
+# 프론트매터의 겹침 선언 한 줄을 읽어 경로 목록을 $parsed에 담는다.
 # 반환값 1은 "키가 없거나 계약 형식이 아니다"이고, 그 작업은 판정 불가다. deps_of와 다른 점은
 # 둘이다 — 키가 없는 것도 1이고(선언 없는 작업은 무엇과도 겹치는 것으로 본다), 경로에 쓰이는
 # `.`과 `/`가 허용 문자에 더 있다. 공백이 든 경로는 sh의 단어 분리가 나눠 버리므로 형식 오류다.
-scope_of() { # $1=작업 파일
-  count=$(grep -c '^scope_files:' "$1" 2>/dev/null || true)
-  case "$count" in '' | *[!0-9]*) count=0 ;; esac
-  [ "$count" -eq 1 ] || return 1
-  value=$(sed -n 's/^scope_files:[[:space:]]*//p' "$1" | head -1 | sed 's/[[:space:]]*$//')
+scope_of() { # $1=선언 줄 수 $2=첫 선언 줄의 값
+  parsed=""
+  [ "$1" -eq 1 ] || return 1
+  value=$2
   [ -n "$value" ] || return 1
   case "$value" in '['*']') ;; *) return 1 ;; esac
   inner=${value#?}
@@ -106,76 +129,57 @@ scope_of() { # $1=작업 파일
   out=""
   rest="$inner,"
   while [ -n "$rest" ]; do
-    token=$(printf '%s' "${rest%%,*}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    trim_token "${rest%%,*}"
     rest=${rest#*,}
-    [ -n "$token" ] || return 1
-    case "$token" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
-    out="$out $token"
+    [ -n "$trimmed" ] || return 1
+    case "$trimmed" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
+    out="$out $trimmed"
   done
-  printf '%s\n' "${out# }"
+  parsed=${out# }
 }
 
-# 다른 문서를 잡은 미만료 lease가 이 작업의 착수를 막는가. 자기 자신을 잡은 lease는 보지 않는다 —
-# 그것은 겹침이 아니라 자기 선점이고 lease_blocks가 이미 뺐다.
+# 다른 문서를 잡은 미만료 lease가 이 작업의 착수를 막는가. 원래 본문은 후보마다 lease 디렉터리를
+# 다시 훑고 상대의 선언을 다시 읽었다. 그 값을 scan_leases와 개발자 분기의 훑기가 미리 모으므로
+# 여기 남는 것은 비교뿐이고, 판정은 그대로다.
+# 자기 자신을 잡은 lease는 여기 오지 않는다. 그런 작업은 후보 단계에서 이미 빠졌으므로, 후보가
+# 여기까지 왔다면 자기를 잡은 미만료 lease가 없다 — 원래 본문의 자기 건너뛰기와 같은 자리다.
 # 선언이 없거나 형식 오류인 쪽이 하나라도 있으면 막는다. 겹침은 대칭 관계이고, 판정 불가는 안전한
 # 쪽으로 기운다. lease가 잡은 것이 작업 문서가 아니면 비교할 상대가 없으므로 막지 않는다.
 # 비교는 문자열 완전 일치다. 경로 정규화도 글롭도 하지 않는다.
-# 자기 선언은 막을 lease를 처음 만났을 때 읽는다. 잡힌 lease가 없으면 이 함수는 파일을 열지 않는다.
-overlap_blocks() { # $1=워크플로우 경로 $2=작업 id $3=작업 파일
-  mine_read=0
-  for l in "$leases"/*.yml; do
-    [ -f "$l" ] || continue
-    lid=${l##*/}
-    lid=${lid%.yml}
-    [ "$lid" = "$2" ] && continue
-    lease_blocks "$lid" || continue
-    if [ "$mine_read" -eq 0 ]; then
-      if mine=$(scope_of "$3"); then mine_ok=1; else mine_ok=0; fi
-      mine_read=1
-    fi
-    [ "$mine_ok" -eq 0 ] && return 0
-    uf=$(task_file "$1" "$lid")
-    [ -n "$uf" ] || continue
-    theirs=$(scope_of "$uf") || return 0
-    for a in $mine; do
-      for b in $theirs; do
-        [ "$a" = "$b" ] && return 0
-      done
-    done
+# 잡힌 lease가 하나도 없으면 자기 선언을 보지 않는다. 그 게으름이 판정에 든다 — 선언이 형식
+# 오류여도 활성 lease가 없으면 막히지 않는다.
+overlap_blocks() { # $1=자기 선언의 유효 여부 $2=자기 선언의 경로 목록
+  [ "$active_count" -gt 0 ] || return 1
+  [ "$1" -eq 1 ] || return 0
+  [ "$lease_scope_bad" -eq 0 ] || return 0
+  for a in $2; do
+    case "$lease_paths" in *" $a "*) return 0 ;; esac
   done
   return 1
 }
 
-# 선행 작업 문서를 문서 id로 찾는다. 없으면 미충족이다.
-task_file() { # $1=워크플로우 경로 $2=문서 id
-  grep -ls "^id: *$2\$" "$1"tasks/*.md 2>/dev/null | head -1
-}
-
-# 선행 작업이 충족 상태인가. qa_waiting과 completed만 충족이다.
-dep_satisfied() { # $1=선행 작업 파일
-  grep -qs "^status: qa_waiting" "$1" || grep -qs "^status: completed" "$1"
-}
-
-# $2에서 선언을 따라가 $3에 닿는가. 방문 집합이 종료를 보장한다.
-reaches() { # $1=워크플로우 경로 $2=출발 id $3=목표 id
+# $1에서 선언을 따라가 $2에 닿는가. 방문 집합이 종료를 보장한다.
+# 간선은 훑기가 만든 $edge_map에서 읽는다. 표에 없는 id는 나가는 간선이 없고, 그것이 원래 본문의
+# 세 경우를 그대로 덮는다 — 그 id의 문서가 없는 경우, 선언이 없는 경우, 선언이 형식 오류인 경우다.
+reaches() { # $1=출발 id $2=목표 id
   visited=" "
-  frontier="$2"
+  frontier="$1"
   while [ -n "$frontier" ]; do
     next=""
     for node in $frontier; do
       case "$visited" in *" $node "*) continue ;; esac
       visited="$visited$node "
-      [ "$node" = "$3" ] && return 0
-      nf=$(task_file "$1" "$node")
-      [ -n "$nf" ] || continue
-      next="$next $(deps_of "$nf" || true)"
+      [ "$node" = "$2" ] && return 0
+      case "$edge_map" in *"$nl$node "*) ;; *) continue ;; esac
+      entry=${edge_map#*"$nl$node "}
+      next="$next ${entry%%"$nl"*}"
     done
     frontier="$next"
   done
   return 1
 }
 
-# 아래 셋이 판정 재료를 모으는 훑기다. 한 분기가 한 워크플로우에서 각 디렉터리를 한 번만 읽는다.
+# 아래 다섯이 판정 재료를 모으는 훑기다. 한 분기가 한 워크플로우에서 각 디렉터리를 한 번만 읽는다.
 # 후보마다 같은 디렉터리를 다시 읽으면 판정 비용이 컬렉션 크기의 곱이 되고, 문서가 늘수록 데몬의
 # 한도를 넘긴다(SPEC-033). 모은 값은 셸 변수에 담고 후보별 조회는 case와 파라미터 확장으로만 한다 —
 # 조회마다 프로세스를 띄우면 곱이 프로세스에서 문자열 비교로 옮겨 갈 뿐이다.
@@ -222,6 +226,53 @@ scan_refs() { # $1=문서 디렉터리 경로 $2=콜론까지 포함한 키
       gsub(key " +", key, line)
       print line
     }
+  ' "$@"
+}
+
+# 기획서 디렉터리를 한 번 훑어 draft가 아닌 기획서가 낸 참조 줄만 모은다. 기획자 분기의 두 조회가
+# 이 목록 하나를 본다 — 참조가 없는 원천도, 참조가 모두 draft인 원천도 목록에 없으므로 조회 한 줄이
+# 옛 조건("참조가 없다")과 새 조건("참조가 모두 draft다")을 함께 만족한다(SPEC-035 R2). 목록을 두 벌
+# 모으거나 후보마다 기획서를 다시 훑으면 SPEC-033이 걷어낸 곱이 되살아난다.
+#
+# draft 판별은 status:로 시작하는 첫 줄의 값이 정확히 draft인 것이다. 값을 읽는 어법은 scan_ideas·
+# scan_decisions와 같고, 값 전체를 비교하므로 status: 줄이 없는 문서나 계약 밖 값을 쓴 문서는
+# draft가 아니다 — 그 문서의 참조 줄은 모이고 원천은 후보가 되지 않는다. 판정 불가가 안전한 쪽으로
+# 기우는 것이고, role_eligibility.rs의 이식본이 프론트매터의 status 원문을 같은 값과 비교한다.
+# 화면용 정규화나 아이디어 파생 상태를 쓰면 계약 밖 상태에서 정확히 반대로 답한다(SPEC-035 R7).
+#
+# 정규화와 부분 일치 성질은 scan_refs 그대로다. 두 키를 한 목록에 담아도 조회가 자기 키까지 포함한
+# 문자열을 찾으므로 섞이지 않는다. status: 줄이 참조 줄보다 뒤에 올 수 있어 파일마다 참조 줄을 모아
+# 두었다가 그 파일이 끝날 때 한꺼번에 낸다.
+scan_nondraft_refs() { # $1=워크플로우 경로
+  scan_dir="$1"specs
+  set --
+  for f in "$scan_dir"/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  [ "$#" -eq 0 ] && return 0
+  awk '
+    function flush() {
+      if (status_value != "draft") {
+        for (i = 1; i <= held; i++) print buffer[i]
+      }
+      held = 0
+      got_status = 0
+      status_value = ""
+    }
+    FILENAME != prev { flush(); prev = FILENAME }
+    !got_status && index($0, "status:") == 1 {
+      got_status = 1
+      status_value = substr($0, 8)
+      sub(/^ */, "", status_value)
+    }
+    index($0, "source_idea_id:") > 0 || index($0, "source_decision_id:") > 0 {
+      line = $0
+      gsub(/source_idea_id: +/, "source_idea_id:", line)
+      gsub(/source_decision_id: +/, "source_decision_id:", line)
+      held = held + 1
+      buffer[held] = line
+    }
+    END { flush() }
   ' "$@"
 }
 
@@ -291,16 +342,118 @@ scan_decisions() { # $1=워크플로우 경로 $2=찾는 outcome 값 $3=1이면 
   ' "$@"
 }
 
+# lease 디렉터리를 한 번 훑어 미만료 lease의 대상 id를 $active_leases에 모으고 그 수를
+# $active_count에 담는다. 개발자 분기가 후보마다 이 디렉터리를 다시 훑던 자리다.
+# 판정 시각은 훑기 앞에서 한 번 정하고 그 값을 쓴다. 만료 판정이 판정 시점 기준인 것은 그대로이고,
+# 판정 순간이 하나로 모이는 것은 앱 이식본(role_eligibility.rs)이 이미 그렇게 하는 방식이다.
+# 읽는 규칙과 만료 판정은 lease_blocks와 같은 것을 쓴다. 읽지 못한 파일은 표기를 얻지 못해
+# 미만료로 세어지지 않는다.
+scan_leases() {
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  active_leases="$nl"
+  active_count=0
+  for l in "$leases"/*.yml; do
+    [ -f "$l" ] || continue
+    lid=${l##*/}
+    lid=${lid%.yml}
+    exp=$(sed -n 's/^expires_at: *//p' "$l" | head -1 | tr -d '"'\''')
+    lease_unexpired "$exp" "$now" || continue
+    active_leases="$active_leases$lid$nl"
+    active_count=$((active_count + 1))
+  done
+}
+
+# 훑기가 모은 목록에서 이 문서가 미만료 lease에 잡혔는지 본다. 파일 존재 검사를 먼저 하는 것은
+# 목록 조회가 문자열 검사이기 때문이다 — 두 검사가 함께여야 원래의 파일 이름 대조와 같은 답이 된다.
+lease_active() { # $1=대상 id
+  [ -f "$leases/$1.yml" ] || return 1
+  case "$active_leases" in *"$nl$1$nl"*) return 0 ;; esac
+  return 1
+}
+
+# 작업 디렉터리를 한 번 훑어 문서 하나마다 레코드 하나를 낸다. 원래 본문은 후보 하나마다 상태·id·
+# 선행·겹침을 따로 읽고 선행마다 디렉터리를 다시 훑었다. 그래서 비용이 작업 하나당 상수 개의
+# 프로세스였고, 문서가 늘수록 데몬의 한도에 닿았다(SPEC-041). 읽는 규칙은 원래 본문의 grep·sed
+# 그대로이므로 판정은 바뀌지 않는다.
+#
+# 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
+# 네 자리는 차례로
+#   후보 여부  — ^status: (todo|in_progress)가 파일 아무 줄에나 있는가
+#   충족 여부  — ^status: qa_waiting 또는 ^status: completed가 파일 아무 줄에나 있는가
+#   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
+#   겹침 줄 수 — 0·1·2
+# 다. 뒤따르는 줄은 있다고 적힌 것만 온다: 후보이면 첫 id 줄의 값, 선행 줄 수가 1이면 그 값,
+# 겹침 줄 수가 1이면 그 값이다. 값은 모두 한 줄에서 읽은 것이라 개행을 담을 수 없으므로 한 줄에 담긴다.
+#
+# 두 가지 id 읽기가 여기 함께 있다. 후보의 id는 첫 id 줄 하나이고(sed ... | head -1), 선행 이름
+# 해석은 파일 아무 줄이나 보며 값이 정확히 같은 것을 찾는다(grep -ls "^id: *<id>$" | head -1).
+# 뒤엣것만 계약 문자 집합으로 거르는 것은 선행 이름이 그 집합이라 그 밖의 값이 조회될 수 없기
+# 때문이고, 글롭 순서로 첫 문서가 이기는 것은 그 목록을 받는 쪽이 지킨다.
+scan_tasks() { # $1=워크플로우 경로
+  scan_dir="$1"tasks
+  set --
+  for f in "$scan_dir"/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  [ "$#" -eq 0 ] && return 0
+  awk '
+    function trim(s) {
+      sub(/^[[:space:]]*/, "", s)
+      sub(/[[:space:]]*$/, "", s)
+      return s
+    }
+    function emit(  i, line) {
+      if (!started) return
+      line = "M" cand sat depn scopen " "
+      for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
+      print line
+      if (cand) print first_id
+      if (depn == 1) print dep_value
+      if (scopen == 1) print scope_value
+    }
+    FILENAME != prev {
+      emit()
+      prev = FILENAME
+      started = 1
+      files = files + 1
+      cand = 0; sat = 0; depn = 0; scopen = 0
+      got_id = 0; first_id = ""; dep_value = ""; scope_value = ""; n_ids = 0
+    }
+    {
+      if (index($0, "id:") == 1) {
+        v = substr($0, 4)
+        sub(/^ */, "", v)
+        if (!got_id) { got_id = 1; first_id = v }
+        if (v ~ /^[A-Za-z0-9_-]+$/ && !((files, v) in seen)) {
+          seen[files, v] = 1
+          n_ids = n_ids + 1
+          id_list[n_ids] = v
+        }
+      }
+      if ($0 ~ /^status: (todo|in_progress)/) cand = 1
+      if ($0 ~ /^status: qa_waiting/ || $0 ~ /^status: completed/) sat = 1
+      if (index($0, "depends_on:") == 1) {
+        if (depn == 0) { depn = 1; dep_value = trim(substr($0, 12)) } else depn = 2
+      }
+      if (index($0, "scope_files:") == 1) {
+        if (scopen == 0) { scopen = 1; scope_value = trim(substr($0, 13)) } else scopen = 2
+      }
+    }
+    END { emit() }
+  ' "$@"
+}
+
 case "$role" in
 planner)
   for wf in .workflow/*/; do
-    # (가) 미처리 아이디어. 어떤 기획서도 참조하지 않고 선점되지 않은 것.
+    # 두 조회가 이 목록 하나를 본다. 워크플로우마다 specs/를 한 번만 훑는다.
+    nondraft_refs=$(scan_nondraft_refs "$wf")
+    # (가) 미처리 아이디어. 비-draft 기획서가 참조하지 않고 선점되지 않은 것.
     if [ -d "${wf}ideas" ]; then
-      idea_refs=$(scan_refs "${wf}specs" "source_idea_id:")
       ideas=$(scan_ideas "$wf")
       while IFS= read -r id; do
         [ -n "$id" ] || continue
-        case "$idea_refs" in *"source_idea_id:$id"*) continue ;; esac
+        case "$nondraft_refs" in *"source_idea_id:$id"*) continue ;; esac
         lease_blocks "$id" && continue
         verdict eligible 0
       done <<IDEAS
@@ -313,13 +466,12 @@ IDEAS
     # spec_id가 없다. 그 둘이 scan_decisions의 strict 인자다. created_by 필터도 그 안에 있다 —
     # 앱은 created_by가 user인 결정만 세고, 값 전체를 비교해야 위임 대리 결정의 user-delegate가
     # 걸러진다. 최신 검사도 같은 훑기에서 끝난다.
-    spec_refs=$(scan_refs "${wf}specs" "source_decision_id:")
     revisions=$(scan_decisions "$wf" revision_requested 1)
     while IFS= read -r did; do
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       # 판정 키는 결정 id다. 기획서 id로 보면 한 기획서가 여러 번 반려됐을 때 구분되지 않는다.
-      case "$spec_refs" in *"source_decision_id:$did"*) continue ;; esac
+      case "$nondraft_refs" in *"source_decision_id:$did"*) continue ;; esac
       lease_blocks "$did" && continue
       verdict eligible 0
     done <<REVISIONS
@@ -346,26 +498,97 @@ APPROVALS
   done
   ;;
 developer)
+  scan_leases
   for wf in .workflow/*/; do
     [ -d "${wf}tasks" ] || continue
-    for f in "${wf}"tasks/*.md; do
-      [ -f "$f" ] || continue
-      grep -qs "^status: todo" "$f" || continue
-      tid=$(sed -n 's/^id: *//p' "$f" | head -1)
+    scanned=$(scan_tasks "$wf")
+    known_ids=" "
+    sat_ids=" "
+    edge_map="$nl"
+    lease_paths=" "
+    lease_scope_bad=0
+    rows=""
+    # 훑기 결과를 한 번 읽어 선행 해석용 표와 후보 목록을 만든다. 후보 하나가 자기보다 뒤에 오는
+    # 문서를 선행으로 가리킬 수 있으므로 표가 먼저 완성돼야 하고, 그래서 읽기가 두 번이다.
+    # 후보를 보는 차례는 두 번째 읽기가 지키는 글롭 순서 그대로다.
+    while IFS= read -r meta; do
+      case "$meta" in M*) ;; *) continue ;; esac
+      meta=${meta#M}
+      flags=${meta%%" "*}
+      ids=${meta#* }
+      cand=${flags%???}
+      sat=${flags#?}
+      sat=${sat%??}
+      depn=${flags#??}
+      depn=${depn%?}
+      scopen=${flags#???}
+      tid=""
+      dep_value=""
+      scope_value=""
+      # 후보는 todo와 in_progress 둘이다. 죽은 세션이 남긴 in_progress 작업은 그 작업을 덮는
+      # 미만료 lease가 없으므로 아래 lease_active가 통과시키고, 살아 있는 세션의 작업은 그 lease가
+      # 막는다(SPEC-035 R1). 나머지 조건은 todo와 완전히 같고 blocked은 후보가 아니다.
+      [ "$cand" = 1 ] && IFS= read -r tid
+      [ "$depn" = 1 ] && IFS= read -r dep_value
+      [ "$scopen" = 1 ] && IFS= read -r scope_value
+      if deps_of "$depn" "$dep_value"; then deps=$parsed; deps_ok=1; else deps=""; deps_ok=0; fi
+      if scope_of "$scopen" "$scope_value"; then scope=$parsed; scope_ok=1; else scope=""; scope_ok=0; fi
+      for v in $ids; do
+        # 같은 id를 담은 문서가 여럿이면 글롭 순서로 첫 문서가 이긴다. 원래 본문의
+        # grep -ls ... | head -1이 고르던 문서가 그것이다.
+        case "$known_ids" in *" $v "*) continue ;; esac
+        known_ids="$known_ids$v "
+        [ "$sat" = 1 ] && sat_ids="$sat_ids$v "
+        [ -n "$deps" ] && edge_map="$edge_map$v $deps$nl"
+        # 활성 lease가 잡은 문서를 처음 만나면 그 겹침 선언을 여기서 읽어 둔다. 원래 본문이
+        # 후보마다 다시 읽던 값이고, 막는 쪽의 선언이 형식 오류이면 그 사실만 남는다.
+        case "$active_leases" in
+          *"$nl$v$nl"*)
+            if [ "$scope_ok" -eq 1 ]; then
+              for a in $scope; do
+                case "$lease_paths" in *" $a "*) ;; *) lease_paths="$lease_paths$a " ;; esac
+              done
+            else
+              lease_scope_bad=1
+            fi
+            ;;
+        esac
+      done
+      [ "$cand" = 1 ] || continue
       [ -n "$tid" ] || continue
-      lease_blocks "$tid" && continue
-      deps=$(deps_of "$f") || continue
+      rows="$rows$deps_ok$scope_ok|$deps|$scope|$tid$nl"
+    done <<SCAN
+$scanned
+SCAN
+    while IFS= read -r row; do
+      case "$row" in ??"|"*) ;; *) continue ;; esac
+      flags=${row%%"|"*}
+      rest=${row#*"|"}
+      deps=${rest%%"|"*}
+      rest=${rest#*"|"}
+      scope=${rest%%"|"*}
+      tid=${rest#*"|"}
+      deps_ok=${flags%?}
+      scope_ok=${flags#?}
+      lease_active "$tid" && continue
+      [ "$deps_ok" -eq 1 ] || continue
       ok=1
+      # 선행 셋이 모두 참이어야 자격이고 셋 중 어느 것도 다른 것을 바꾸지 않으므로, 보는 차례는
+      # 답을 바꾸지 않는다. 값싼 둘을 먼저 보고 순환 탐색은 그 둘을 통과한 선언에만 돈다.
       for dep in $deps; do
-        df=$(task_file "$wf" "$dep")
-        [ -n "$df" ] || { ok=0; break; }
-        reaches "$wf" "$dep" "$tid" && { ok=0; break; }
-        dep_satisfied "$df" || { ok=0; break; }
+        case "$known_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
+        case "$sat_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
       done
       [ "$ok" -eq 1 ] || continue
-      overlap_blocks "$wf" "$tid" "$f" && continue
+      for dep in $deps; do
+        reaches "$dep" "$tid" && { ok=0; break; }
+      done
+      [ "$ok" -eq 1 ] || continue
+      overlap_blocks "$scope_ok" "$scope" && continue
       verdict eligible 0
-    done
+    done <<ROWS
+$rows
+ROWS
   done
   ;;
 *)
@@ -391,7 +614,7 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 9
+# condition_script_version: 11
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role>
@@ -609,6 +832,42 @@ function Get-References([string]$Root, [string]$Kind, [string]$Key) {
   return ($collected -join "`n")
 }
 
+# Collects the reference lines of every spec that is not a draft, and joins them. The planner branch
+# looks both source kinds up in this one list: a source no spec names is absent, and so is a source
+# whose specs are all drafts, which is what SPEC-035 R2 asks for. Gathering two lists, or rereading
+# the specs per candidate, brings back the product SPEC-033 removed.
+#
+# A draft is a document whose first status line carries exactly the value draft. Values are read the
+# way Get-Value reads every other one, and the whole value is compared, so a document with no status
+# line or a value outside the contract is not a draft: its reference lines are collected and the
+# source stays closed. An unreadable verdict leans to the safe side, and role_eligibility.rs compares
+# the front matter status the same way. Using the screen normalization or the derived idea state
+# there would answer the exact opposite for a state outside the contract (SPEC-035 R7).
+#
+# Normalization and the partial match are Get-References'. Two keys share one list because each
+# lookup carries its own key in the needle. A status line may sit after the reference lines, so each
+# file's lines are held and flushed once the file ends.
+function Get-NonDraftReferences([string]$Root) {
+  $collected = @()
+  $keys = @('source_idea_id:', 'source_decision_id:')
+  foreach ($path in (Get-Documents $Root 'specs')) {
+    $lines = Get-Lines $path
+    if ((Get-Value $lines 'status') -ceq 'draft') { continue }
+    foreach ($line in $lines) {
+      $value = $line
+      $hit = $false
+      foreach ($key in $keys) {
+        if ($line.IndexOf($key, [System.StringComparison]::Ordinal) -ge 0) {
+          $value = $value -creplace ([regex]::Escape($key) + ' +'), $key
+          $hit = $true
+        }
+      }
+      if ($hit) { $collected += $value }
+    }
+  }
+  return ($collected -join "`n")
+}
+
 # Reads the decisions of one workflow once and returns the candidate rows for a branch. Want is the
 # outcome line the branch looks for, and Strict adds the schema line and a non-empty spec_id to the
 # candidate test, which is how the planner branch screens out task QA decisions. Every value is
@@ -678,13 +937,14 @@ if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
 switch -CaseSensitive ($Role) {
   'planner' {
     foreach ($root in (Get-WorkflowRoots)) {
-      # (a) An unprocessed idea: referenced by no spec and not claimed. The reference material is
-      # gathered before the candidate loop, once for the whole workflow.
-      $ideaRefs = Get-References $root 'specs' 'source_idea_id:'
+      # Both lookups read this one list, gathered before the candidate loops, once for the whole
+      # workflow.
+      $nonDraftRefs = Get-NonDraftReferences $root
+      # (a) An unprocessed idea: named by no spec that is not a draft, and not claimed.
       foreach ($path in (Get-Documents $root 'ideas')) {
         $id = Get-Value (Get-Lines $path) 'id'
         if ($id.Length -eq 0) { continue }
-        if ($ideaRefs.IndexOf('source_idea_id:' + $id,
+        if ($nonDraftRefs.IndexOf('source_idea_id:' + $id,
           [System.StringComparison]::Ordinal) -ge 0) { continue }
         if (Test-Leased $id) { continue }
         Write-Verdict 'eligible' 0
@@ -695,10 +955,9 @@ switch -CaseSensitive ($Role) {
       # created_by filter and the latest-decision verdict happen in the same scan, because the app
       # counts only decisions whose created_by is exactly user and the whole value has to be
       # compared for the delegate value user-delegate to be screened out.
-      $specRefs = Get-References $root 'specs' 'source_decision_id:'
       foreach ($row in @(Get-DecisionCandidates $root 'outcome: revision_requested' $true)) {
         # The decision id is the key, not the spec id: one spec can be sent back more than once.
-        if ($specRefs.IndexOf('source_decision_id:' + $row.Id,
+        if ($nonDraftRefs.IndexOf('source_decision_id:' + $row.Id,
           [System.StringComparison]::Ordinal) -ge 0) { continue }
         if (Test-Leased $row.Id) { continue }
         Write-Verdict 'eligible' 0
@@ -722,7 +981,11 @@ switch -CaseSensitive ($Role) {
     foreach ($root in (Get-WorkflowRoots)) {
       foreach ($path in (Get-Documents $root 'tasks')) {
         $lines = Get-Lines $path
-        if (-not (Test-Match $lines '^status: todo')) { continue }
+        # todo and in_progress are both candidates. A task a dead session left behind carries no
+        # unexpired lease, so Test-Leased below lets it through, while a live session's task is held
+        # by its lease (SPEC-035 R1). Every other condition is the one todo already had, and blocked
+        # is not a candidate.
+        if (-not (Test-Match $lines '^status: (todo|in_progress)')) { continue }
         $tid = Get-Value $lines 'id'
         if ($tid.Length -eq 0) { continue }
         if (Test-Leased $tid) { continue }
@@ -883,7 +1146,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 9"));
+        assert!(script.contains("# condition_script_version: 11"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -897,8 +1160,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
-            "# condition_script_version: 9",
-            "# condition_script_version: 8",
+            "# condition_script_version: 11",
+            "# condition_script_version: 10",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -1161,7 +1424,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 9보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 11보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -1289,6 +1552,22 @@ mod tests {
             format!("schema_version: 1\nlease_id: lease-{target_id}\nagent: agent\ntask_id: {target_id}\nheartbeat_at: {expires_at}\nexpires_at: {expires_at}\n"),
         )
         .expect("write lease");
+    }
+
+    /// 죽은 세션이 남긴 lease. 만료된 lease는 아무것도 잡지 않으므로 판정에서 파일이 없는 것과 같다
+    /// (SPEC-035 R1). 시각 표기는 [`write_lease`]와 같아야 한다 — 다른 표기는 읽히지 않아 만료 여부와
+    /// 무관하게 선점에서 빠지고, 그러면 이 헬퍼가 무엇을 보이는지 알 수 없게 된다.
+    fn write_expired_lease(control_root: &Path, target_id: &str) {
+        let leases = control_root.join(".runtime/leases");
+        fs::create_dir_all(&leases).expect("leases root");
+        let expires_at = (chrono::Utc::now() - chrono::Duration::minutes(30))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        fs::write(
+            leases.join(format!("{target_id}.yml")),
+            format!("schema_version: 1\nlease_id: lease-{target_id}\nagent: agent\ntask_id: {target_id}\nheartbeat_at: {expires_at}\nexpires_at: {expires_at}\n"),
+        )
+        .expect("write expired lease");
     }
 
     /// 작업 목록과 lease만 다른 픽스처에서 `developer` 종료 코드를 본다.
@@ -1568,11 +1847,13 @@ mod tests {
         );
     }
 
-    /// 후속 기획서가 결정 id를 참조하면 닫힌다. 선점한 lease도 같은 결과를 만든다.
+    /// 비-`draft` 후속 기획서가 결정 id를 참조하면 닫힌다. 선점한 lease도 같은 결과를 만든다.
+    /// 후속이 `draft`면 멈춘 재작업이라 닫히지 않고, 그 답은 시나리오 표의
+    /// "기획자: draft 재작업 기획서만 남은 수정 요청이 다시 열린다"가 고정한다(SPEC-035 R2).
     #[test]
     fn an_answered_or_claimed_revision_request_closes_planner_work() {
         let decision = "---\nschema: workflow-labs/decision@1\nid: DECISION-001\nspec_id: SPEC-001\noutcome: revision_requested\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n";
-        let follow_up = "---\nschema: workflow-labs/spec@1\nid: SPEC-002\nstatus: draft\nsource_decision_id: DECISION-001\n---\n";
+        let follow_up = "---\nschema: workflow-labs/spec@1\nid: SPEC-002\nstatus: user_review\nsource_decision_id: DECISION-001\n---\n";
 
         assert_eq!(
             planner_exit_code(
@@ -1750,6 +2031,9 @@ mod tests {
             build: |control: &Path| write_idea_document(control, "IDEA-001"),
         },
         Scenario {
+            // 참조하는 기획서가 `draft`이면 그 아이디어는 다시 열린다(SPEC-035 R2). 이 행이 보는
+            // 것은 닫히는 쪽이므로 참조하는 기획서를 비-`draft`로 둔다. 열리는 쪽은 아래 회수
+            // 행들이 본다.
             name: "기획자: 모든 아이디어가 참조됐다",
             roles: &["planner"],
             expected: 1,
@@ -1760,7 +2044,7 @@ mod tests {
                     control,
                     "specs",
                     "SPEC-001",
-                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\nsource_idea_id: IDEA-001\n---\n",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea_id: IDEA-001\n---\n",
                 );
             },
         },
@@ -2163,6 +2447,8 @@ mod tests {
             // 참조 판정의 부분 일치가 어느 방향인지를 명시하는 두 행 중 하나. `IDEA-1`을 참조한
             // 기획서는 `IDEA-12`를 처리 완료로 만들지 않는다 — `source_idea_id: *IDEA-12`가
             // `source_idea_id: IDEA-1` 줄에 걸리지 않기 때문이다.
+            // 두 행의 기획서는 비-`draft`다. `draft`면 그 참조 줄이 목록에 아예 들어오지 않아
+            // (SPEC-035 R2) 부분 일치가 무엇을 하는지 보이지 않는다.
             name: "기획자: IDEA-1을 참조한 기획서가 IDEA-12를 닫지 않는다",
             roles: &["planner"],
             expected: 0,
@@ -2174,7 +2460,7 @@ mod tests {
                     control,
                     "specs",
                     "SPEC-001",
-                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\nsource_idea_id: IDEA-1\n---\n",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea_id: IDEA-1\n---\n",
                 );
             },
         },
@@ -2193,7 +2479,7 @@ mod tests {
                     control,
                     "specs",
                     "SPEC-001",
-                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\nsource_idea_id: IDEA-12\n---\n",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea_id: IDEA-12\n---\n",
                 );
             },
         },
@@ -2212,6 +2498,296 @@ mod tests {
                     "SPEC-001",
                     "2026-08-02T00:00:00Z",
                 );
+            },
+        },
+        // 아래 열두 행이 SPEC-035 R1·R2의 회수 판정이다(기획서 완료 조건 15). 두 본문이 같은 답을
+        // 내야 하는 자리이고, 표는 현재 플랫폼의 구현을 돌리므로 Windows 러너가 PowerShell 본문의
+        // 같은 행들을 통과시킨다. 앱 이식본까지 셋을 대조하는 것은 `role_eligibility`의 몫이다.
+        Scenario {
+            // 죽은 개발 세션의 시그니처. lease는 풀렸는데 상태가 `in_progress`라 아무도 집지 않던
+            // 자리가 여기서 열린다.
+            name: "개발자: 멈춘 in_progress 작업에 lease가 없다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| write_task_document(control, "TASK-001", "in_progress", None),
+        },
+        Scenario {
+            // 만료된 lease는 파일이 없는 것과 같은 답을 낸다. 만료 뒤에 유예를 두지 않는다는 것이
+            // 승인된 확인 필요 2번이다.
+            name: "개발자: 멈춘 in_progress 작업을 만료된 lease가 덮는다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "in_progress", None);
+                write_expired_lease(control, "TASK-001");
+            },
+        },
+        Scenario {
+            // 살아 있는 세션의 작업. 회수가 정상적으로 일하고 있는 세션의 작업을 빼앗지 않는다.
+            name: "개발자: in_progress 작업을 미만료 lease가 덮는다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "in_progress", None);
+                write_lease(control, "TASK-001");
+            },
+        },
+        Scenario {
+            // 나머지 자격 조건은 `todo`와 완전히 같다. 상태 집합만 넓어진다.
+            name: "개발자: 멈춘 in_progress 작업의 선행 선언이 미충족이다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "in_progress",
+                    Some("depends_on: [TASK-404]"),
+                );
+            },
+        },
+        Scenario {
+            // `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니다. 상태 목록에
+            // 더해진 것은 `in_progress` 하나뿐이라는 것을 이 행과 다음 행이 함께 고정한다.
+            name: "개발자: blocked 작업은 lease가 없어도 대상이 아니다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| write_task_document(control, "TASK-001", "blocked", None),
+        },
+        Scenario {
+            name: "개발자: blocked 작업은 만료된 lease가 덮어도 대상이 아니다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "blocked", None);
+                write_expired_lease(control, "TASK-001");
+            },
+        },
+        Scenario {
+            // 죽은 기획 세션의 시그니처. 본문 한 줄 없는 `draft` 스켈레톤 하나가 아이디어를 판정에서
+            // 영원히 지우던 자리가 여기서 열린다.
+            name: "기획자: draft 기획서만 참조한 아이디어가 다시 열린다",
+            roles: &["planner"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\nsource_idea_id: IDEA-001\n---\n",
+                );
+            },
+        },
+        Scenario {
+            // 인수 세션이 그 아이디어를 선점하면 표시가 꺼진다. 선점 대상은 지금과 같은 아이디어 id다.
+            name: "기획자: draft 기획서만 참조한 아이디어를 미만료 lease가 덮는다",
+            roles: &["planner"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\nsource_idea_id: IDEA-001\n---\n",
+                );
+                write_lease(control, "IDEA-001");
+            },
+        },
+        Scenario {
+            // "**모두** `draft`"이지 "하나라도 `draft`"가 아니다. 승인까지 간 기획서와 죽은 재작업
+            // draft를 함께 가진 아이디어에서 멈춘 것은 아이디어가 아니라 재작업이다.
+            name: "기획자: 참조 기획서 하나가 user_review면 아이디어가 닫힌다",
+            roles: &["planner"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea_id: IDEA-001\n---\n",
+                );
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-002",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-002\nstatus: draft\nsource_idea_id: IDEA-001\n---\n",
+                );
+            },
+        },
+        Scenario {
+            // 수정 요청 쪽의 같은 판정. 원천이 결정 id인 것 말고는 아이디어 쪽과 같다.
+            name: "기획자: draft 재작업 기획서만 남은 수정 요청이 다시 열린다",
+            roles: &["planner"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_revision_request_document(
+                    control,
+                    "DECISION-001",
+                    "SPEC-001",
+                    "user",
+                    "2026-08-01T00:00:00Z",
+                );
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-002",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-002\nstatus: draft\nsource_decision_id: DECISION-001\n---\n",
+                );
+            },
+        },
+        Scenario {
+            name: "기획자: 재작업 기획서가 user_review면 수정 요청이 닫힌다",
+            roles: &["planner"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_revision_request_document(
+                    control,
+                    "DECISION-001",
+                    "SPEC-001",
+                    "user",
+                    "2026-08-01T00:00:00Z",
+                );
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-002",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-002\nstatus: user_review\nsource_decision_id: DECISION-001\n---\n",
+                );
+            },
+        },
+        Scenario {
+            // 판정 불가가 안전한 쪽으로 기운다. `status:` 줄이 없는 기획서는 `draft`가 아니므로 그
+            // 참조 줄이 목록에 들고 원천은 후보가 되지 않는다. 두 본문과 앱 이식본이 이 어법 하나를
+            // 공유해야 R7이 지켜진다 — 화면용 정규화는 이 문서를 `draft`로 접어 반대로 답한다.
+            name: "기획자: status 줄이 없는 기획서는 draft가 아니다",
+            roles: &["planner"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nsource_idea_id: IDEA-001\n---\n",
+                );
+            },
+        },
+        Scenario {
+            // 상태 검사는 값 전체가 아니라 앞자리 일치다. 계약 밖으로 길어진 값도 후보다.
+            // 단일 훑기가 값 전체 비교로 바뀌면 이 행에서 답이 뒤집힌다(SPEC-041 R3).
+            name: "개발자: 상태 값이 계약 밖으로 길어져도 후보다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todoish", None);
+            },
+        },
+        Scenario {
+            // 상태 줄은 프론트매터에 한정되지 않는다. 본문에 적힌 예시 줄도 잡힌다.
+            name: "개발자: 본문에 적힌 상태 줄도 후보로 만든다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_document(
+                    control,
+                    "tasks",
+                    "TASK-001",
+                    "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: archived\n---\n\n예시:\n\nstatus: todo\n",
+                );
+            },
+        },
+        Scenario {
+            // 선행 선언이 두 줄이면 값을 읽지 않고 미충족이다.
+            name: "개발자: 선행 선언이 두 줄이면 미충족이다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("depends_on: [TASK-002]\ndepends_on: [TASK-002]"),
+                );
+                write_task_document(control, "TASK-002", "completed", None);
+            },
+        },
+        Scenario {
+            // 겹침 선언이 정확히 한 줄이 아니면 판정 불가이고, 판정 불가는 막는 쪽이다.
+            // 잡힌 lease가 있어야 자기 선언을 보므로 작업이 아닌 문서를 잡은 lease를 하나 둔다.
+            name: "개발자: 겹침 선언이 두 줄이면 막힌다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("scope_files: [src/one.rs]\nscope_files: [src/one.rs]"),
+                );
+                write_lease(control, "SPEC-001");
+            },
+        },
+        Scenario {
+            // 선행 해석은 후보 id 읽기와 다른 규칙이다. 후보 id는 첫 id 줄 하나이고, 선행은 파일
+            // 아무 줄에나 있는 id 줄을 본다. 두 규칙이 갈리는 문서가 이 행이다.
+            name: "개발자: 첫 id 줄 뒤의 id 줄도 선행을 푼다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("depends_on: [TASK-ALIAS]"),
+                );
+                write_document(
+                    control,
+                    "tasks",
+                    "TASK-002",
+                    "---\nschema: workflow-labs/task@1\nid: TASK-002\nstatus: completed\n---\n\nid: TASK-ALIAS\n",
+                );
+            },
+        },
+        Scenario {
+            // 겹침 비교는 문자열 완전 일치다. 한쪽이 다른 쪽의 앞부분이어도 겹침이 아니다.
+            name: "개발자: 경로가 서로의 앞부분이어도 겹치지 않는다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("scope_files: [src/one.rs]"),
+                );
+                write_task_document(
+                    control,
+                    "TASK-002",
+                    "in_progress",
+                    Some("scope_files: [src/one.rs.bak]"),
+                );
+                write_lease(control, "TASK-002");
             },
         },
     ];
@@ -2252,6 +2828,394 @@ mod tests {
                     run.reason().len() <= 200,
                     "{} — {role}: 사유가 200자를 넘는다",
                     scenario.name
+                );
+            }
+        }
+    }
+
+    /// 판정 비용의 회귀를 잡는 장치(SPEC-033 R8).
+    ///
+    /// 벽시계가 아니라 **조건 스크립트가 띄우는 외부 프로세스의 수**를 센다. 시간을 단언하면 러너마다
+    /// 다른 값이 나와, 빡빡하게 잡으면 이유 없이 빨개지고 느슨하게 잡으면 회귀를 놓친다. 실제로 비싼
+    /// 것은 후보 하나마다 새로 뜨는 프로세스이고(확인 사실 5: 판정 한 번에 6천 개), 그 수는 기기와
+    /// 무관하게 문서 수만으로 정해진다.
+    ///
+    /// **유닉스 전용이다.** PowerShell 본문은 `$lineCache`가 있어 파일마다 프로세스를 띄우지 않으므로
+    /// 같은 계량이 성립하지 않는다. 그쪽 회귀는 [`SCENARIOS`] 표가 Windows 러너에서 도는 것으로만
+    /// 덮이고, 이 장치의 사정권 밖이다.
+    #[cfg(unix)]
+    mod judgement_cost {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        use super::*;
+
+        /// `CONDITION_SCRIPT_SH` 본문이 부르는 외부 명령 전부다. 본문을 읽어 정했고, `printf`·`echo`·
+        /// `test`는 셸 내장이라 프로세스를 띄우지 않으므로 들어 있지 않다.
+        ///
+        /// `PATH`를 shim 디렉터리 하나로만 두는 것이 이 장치의 두 번째 일이다. 이 목록에 없는 외부
+        /// 명령이 본문에 새로 들어오면 그 명령을 찾지 못해 판정이 달라지고, 아래 판정 대조가 그것을
+        /// 잡는다. 세지 않는 명령이 몰래 늘지 않는다.
+        const EXTERNAL_COMMANDS: &[&str] = &["awk", "date", "grep", "head", "sed", "tr"];
+
+        /// `PATH`에 shim만 있으므로 셸을 이름으로 찾지 못한다. 그래서 이 장치만 자체 러너를 갖고,
+        /// [`run_condition`]은 그대로 둔다 — 대조 테스트 두 곳이 그 함수를 쓰고 있어 부르는 방식이
+        /// 갈리면 대조의 뜻이 사라진다.
+        const SHELL: &str = "/bin/sh";
+
+        /// 3배 픽스처가 1배의 몇 배까지 허용되는가. 문서량에 비례하면 3배 언저리, 컬렉션 크기의 곱이면
+        /// 9배 언저리이므로 그 사이에서 갈린다. 정수로 비교하려고 3.5를 7/2로 쓴다.
+        const GROWTH_NUMERATOR: usize = 7;
+        const GROWTH_DENOMINATOR: usize = 2;
+
+        /// 세 예산 전부가 아래에 있어야 하는 상한. 목표 3초(데몬 한도 10초의 30%, SPEC-033 확인 필요
+        /// 3번)를 프로세스 수로 환산한 값의 절반이다. 환산은 shim 없이 3회 중앙값으로 잰 것이고
+        /// (2026-08-05, Apple M2 / macOS 26.5.2 arm64: 1배 919개 1.478초 · 3배 2,743개 5.299초, 곧
+        /// 초당 518~623개) 3초는 대략 1,550~1,870개에 해당한다. 아키텍트가 고정한 "그 절반 이하"가
+        /// 약 777개다.
+        ///
+        /// 예산이 이 값을 넘어야 할 것 같으면 그것은 예산의 문제가 아니라 그 분기가 상한을 넘은
+        /// 것이므로, 값을 고치지 말고 아키텍트 후속으로 넘긴다.
+        const BUDGET_CEILING: usize = 777;
+
+        // ── 프로세스 예산: 3배 픽스처가 넘어서는 안 되는 절대 프로세스 수, **역할마다 따로**
+        // (SPEC-041 R5). 선형이어도 후보 하나당 상수가 커지면 한도에 닿기 때문에 비율만으로는
+        // 부족하고, 값이 하나면 가장 비싼 분기 하나만 보게 되어 나머지 둘의 회귀가 그대로 지나간다.
+        //
+        // **세 값 모두 TASK-125 착지 후의 실측 + 1이다.** 실측은 이 검사를 그대로 돌려 받았고
+        // (2026-08-05, Apple M2 / macOS 26.5.2 arm64, 3회 전부 같은 값), 세 분기 모두 착지 후에는
+        // 문서 수와 무관한 상수라 1배와 3배가 같다. 예산은 그중 3배 값 위에 세운다.
+        //
+        // 여유를 1로 두는 근거는 이 검사가 잡아야 하는 회귀의 최소 단위다. 상수 분기에서 그 단위는
+        // "본문에 외부 명령 호출이 하나 새로 생긴다"이고 그것이 곧 +1이므로, 여유 1이면 **두 개째에서
+        // 걸린다**. 실측의 몇 퍼센트라는 어법은 여기서 뜻이 없다 — 3의 10%는 0이다.
+        //
+        // 후보 수는 build_fixture가 정한다. 3배에서 기획자 후보는 아이디어 96건과 수정 요청
+        // 결정 6건, 아키텍트 후보는 승인 결정 93건, 개발자 후보는 작업 289건이다.
+
+        /// 실측 3개(3배 `awk` 3회) + 1. 워크플로우 하나마다 `scan_nondraft_refs`·`scan_ideas`·
+        /// `scan_decisions`가 각각 한 번씩 훑는 값이고, 후보 수와 무관하다.
+        ///
+        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 5개가 되어 걸린다. 후보당 상수가 하나
+        /// 늘면 3배에서 102개가 늘어 105개가 되고 예산을 101개 넘는다. 워크플로우당 훑기가 하나 늘어도
+        /// 이 픽스처(워크플로우 1개)에서 +1이라 두 번째 것에서 걸린다.
+        const PLANNER_PROCESS_BUDGET: usize = 4;
+
+        /// 실측 2개(3배 `awk` 2회) + 1. 워크플로우 하나마다 `scan_refs`·`scan_decisions` 각 한 번이다.
+        ///
+        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 4개가 되어 걸린다. 후보당 상수가 하나
+        /// 늘면 3배에서 93개가 늘어 95개가 되고 예산을 92개 넘는다.
+        const ARCHITECT_PROCESS_BUDGET: usize = 3;
+
+        /// 실측 5개(3배 `awk` 1 · `date` 1 · `head` 1 · `sed` 1 · `tr` 1) + 1. `scan_tasks`의 `awk`
+        /// 하나, `scan_leases`의 `date` 하나, 그리고 lease 파일 하나당 `sed`·`head`·`tr` 셋이다
+        /// (이 픽스처의 lease는 1건).
+        ///
+        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 7개가 되어 걸린다. 후보당 상수가 하나
+        /// 늘면 3배에서 289개가 늘어 294개가 되고 예산을 288개 넘는다 — TASK-125 이전의 어법이 정확히
+        /// 그 모양이었고 그때 3배가 2,743개였다. lease 파일당 명령이 하나 늘면 이 픽스처에서 +1이므로
+        /// 두 번째 것에서 걸린다.
+        const DEVELOPER_PROCESS_BUDGET: usize = 6;
+
+        const _: () = assert!(
+            PLANNER_PROCESS_BUDGET < BUDGET_CEILING
+                && ARCHITECT_PROCESS_BUDGET < BUDGET_CEILING
+                && DEVELOPER_PROCESS_BUDGET < BUDGET_CEILING,
+            "프로세스 예산은 상한 아래여야 한다"
+        );
+
+        /// 역할 이름으로 그 역할의 프로세스 예산을 고른다. 단언과 실패 메시지가 같은 값을 보도록
+        /// 한 자리에서만 고른다.
+        ///
+        /// ### 예산을 다시 세워야 할 때
+        ///
+        /// 어느 분기를 정당하게 고쳐 비용이 늘면 이 검사가 걸린다. 그것이 이 장치가 사는 이유다.
+        ///
+        /// - **통과시키려고 올리지 않는다.** 값을 올리는 것이 아니라 **규칙에서 다시 세운다** — 그
+        ///   역할의 3배 실측을 새로 재고, 여유 1을 같은 규칙으로 다시 얹고, 그 값이
+        ///   [`BUDGET_CEILING`] 아래인지 확인한다.
+        /// - **왜 그 역할의 비용이 늘었는지**를 그 값의 근거 자리(바로 위 주석)에 적는다. 값만 바뀌고
+        ///   이유가 없는 변경을 남기지 않는다.
+        /// - 로컬과 CI의 값이 갈리면 그것도 올릴 이유가 아니다. 갈린 사실과 어느 값 위에 세웠는지를
+        ///   보고서에 적는다.
+        /// - 새 값이 [`BUDGET_CEILING`]을 넘으면 값을 고치지 말고 아키텍트 후속으로 넘긴다.
+        ///
+        /// ### 이 예산들이 보지 못하는 것
+        ///
+        /// 1. **벽시계 3초는 자동 검사가 아니다.** 착지 보고의 실측으로 닫는다(SPEC-041 확인 필요 1번).
+        ///    프로세스 수는 기기와 무관하게 결정적이지만 벽시계는 같은 기기에서도 앱과 데몬이 도는지에
+        ///    따라 흔들리고, 느린 러너에서 간헐적으로 실패하면 사람이 가장 먼저 하는 일이 상한을
+        ///    올리는 것이다.
+        /// 2. **셸 내장 문자열 비교의 성장은 어느 예산에도 잡히지 않는다.** 단일 훑기 어법은 비용을
+        ///    프로세스에서 셸 내장 비교로 옮기므로, TASK-125가 착지하면서 개발자 분기까지 이 사각지대로
+        ///    들어왔다. 사각지대는 닫힌 것이 아니라 넓어졌다. 근거 있는 걱정이다 — 아키텍트 분기는
+        ///    착지 후에도 문서 3배에 6.6배로 자라고 "이 기울기면 문서량 5~6배 언저리에서 3초에 닿는다"가
+        ///    이미 한계로 기록돼 있다.
+        /// 3. **윈도우 본문의 판정 비용은 아무도 재지 않는다.** 이 모듈이 유닉스 전용인 이유는 위
+        ///    모듈 주석에 있고, 그 결과 그 본문이 느려지는 회귀는 Windows에서 데몬을 돌리는 사람이
+        ///    타임아웃으로 발견한다.
+        fn process_budget(role: &str) -> usize {
+            match role {
+                "planner" => PLANNER_PROCESS_BUDGET,
+                "architect" => ARCHITECT_PROCESS_BUDGET,
+                "developer" => DEVELOPER_PROCESS_BUDGET,
+                other => panic!("{other} 역할의 프로세스 예산이 없다"),
+            }
+        }
+
+        /// 한 번 실행의 계량. 판정을 함께 들고 있어야 "shim이 판정을 바꾸지 않았다"를 같은 자리에서
+        /// 대조할 수 있다 — 계량이 판정을 흔들면 재는 값이 다른 실행의 값이 된다.
+        struct CountedRun {
+            code: i32,
+            reason: String,
+            total: usize,
+            by_command: BTreeMap<String, usize>,
+        }
+
+        fn write_fixture_document(directory: &Path, id: &str, body: &str) {
+            fs::write(directory.join(format!("{id}.md")), body).expect("write fixture document");
+        }
+
+        /// 1배는 이 저장소의 실제 규모다(확인 사실 7: 결정 122 · 작업 96 · 기획서 33 · 아이디어 32).
+        /// 3배는 넷을 각각 세 배로 만든다. **두 픽스처는 이 함수에 배수만 다르게 준 것이어야 한다** —
+        /// 모양이 갈리면 비율 단언이 뜻을 잃는다.
+        ///
+        /// 최악 경로다. 조기 종료가 걸리면 재는 것이 사라지므로(확인 사실 9), 모든 아이디어와 모든 수정
+        /// 요청을 참조하는 기획서 한 장과 모든 승인을 참조하는 작업 한 장을 넣어 세 역할이 모두 대상을
+        /// 찾지 못하게 한다. 문서는 판정이 보는 키만 갖는다.
+        fn build_fixture(multiplier: usize) -> TempDir {
+            let (root, control) = project();
+            install_condition_script(&control).expect("install condition script");
+            let workflow = control.join("wf-demo");
+            let ideas = workflow.join("ideas");
+            let specs = workflow.join("specs");
+            let tasks = workflow.join("tasks");
+            let decisions = workflow.join("decisions");
+            for directory in [&ideas, &specs, &tasks, &decisions] {
+                fs::create_dir_all(directory).expect("collection root");
+            }
+
+            let idea_count = 32 * multiplier;
+            let spec_count = 33 * multiplier;
+            let task_count = 96 * multiplier;
+            let qa_count = 89 * multiplier;
+            let approval_count = 31 * multiplier;
+            let revision_count = 2 * multiplier;
+
+            for n in 1..=idea_count {
+                write_fixture_document(
+                    &ideas,
+                    &format!("IDEA-{n:04}"),
+                    &format!(
+                        "---\nschema: workflow-labs/idea@1\nid: IDEA-{n:04}\nstatus: inbox\n---\n"
+                    ),
+                );
+            }
+            for n in 1..=spec_count {
+                write_fixture_document(
+                    &specs,
+                    &format!("SPEC-{n:04}"),
+                    &format!("---\nschema: workflow-labs/spec@1\nid: SPEC-{n:04}\nstatus: user_review\n---\n"),
+                );
+            }
+
+            // 선언이 있는 작업과 없는 작업을 섞는다. 개발자 분기의 비용이 선언 유무로 갈린다. 선언이
+            // 있는 쪽은 없는 선행을 가리켜 미충족이 되고, 없는 쪽은 아래 lease 하나가 겹침으로 막는다.
+            // 어느 쪽도 후보에서 일찍 빠지지 않으므로 분기가 목록을 끝까지 훑는다.
+            for n in 1..=task_count {
+                let declaration = if n % 2 == 0 {
+                    format!("depends_on: [TASK-MISSING-{n:04}]\n")
+                } else {
+                    String::new()
+                };
+                write_fixture_document(
+                    &tasks,
+                    &format!("TASK-{n:04}"),
+                    &format!("---\nschema: workflow-labs/task@1\nid: TASK-{n:04}\nstatus: todo\n{declaration}---\n"),
+                );
+            }
+
+            // 결정은 실제 비율에 가깝게 섞는다(확인 사실 5: 122건 중 QA 89건). 기획서 결정은 하나씩
+            // 다른 `spec_id`를 가져 최신 판정에서 서로를 밀어내지 않는다 — 밀려난 후보는 세지 않는
+            // 자리가 되어 최악 경로가 아니게 된다.
+            for n in 1..=qa_count {
+                write_fixture_document(
+                    &decisions,
+                    &format!("QA-{n:04}"),
+                    &format!("---\nschema: workflow-labs/qa-decision@1\nid: QA-{n:04}\ntask_id: TASK-{n:04}\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n"),
+                );
+            }
+            for n in 1..=approval_count {
+                write_fixture_document(
+                    &decisions,
+                    &format!("DECISION-A{n:04}"),
+                    &format!("---\nschema: workflow-labs/decision@1\nid: DECISION-A{n:04}\nspec_id: SPEC-A{n:04}\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n"),
+                );
+            }
+            for n in 1..=revision_count {
+                write_fixture_document(
+                    &decisions,
+                    &format!("DECISION-R{n:04}"),
+                    &format!("---\nschema: workflow-labs/decision@1\nid: DECISION-R{n:04}\nspec_id: SPEC-R{n:04}\noutcome: revision_requested\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n"),
+                );
+            }
+
+            let mut catch_all_spec = String::from(
+                "---\nschema: workflow-labs/spec@1\nid: SPEC-CATCHALL\nstatus: user_review\n---\n",
+            );
+            for n in 1..=idea_count {
+                catch_all_spec.push_str(&format!("source_idea_id: IDEA-{n:04}\n"));
+            }
+            for n in 1..=revision_count {
+                catch_all_spec.push_str(&format!("source_decision_id: DECISION-R{n:04}\n"));
+            }
+            write_fixture_document(&specs, "SPEC-CATCHALL", &catch_all_spec);
+
+            let mut catch_all_task = String::from(
+                "---\nschema: workflow-labs/task@1\nid: TASK-CATCHALL\nstatus: todo\n---\n",
+            );
+            for n in 1..=approval_count {
+                catch_all_task.push_str(&format!("source_decision_id: DECISION-A{n:04}\n"));
+            }
+            write_fixture_document(&tasks, "TASK-CATCHALL", &catch_all_task);
+
+            // 선언 없는 작업을 겹침으로 막는 미만료 lease 하나. 이 저장소의 지금 모습이기도 하다 —
+            // 어떤 작업도 `scope_files`를 선언하지 않으므로 lease 하나가 전부를 막는다.
+            write_lease(&control, "TASK-0001");
+            root
+        }
+
+        /// 검사가 도는 시점의 `PATH`에서 실제 명령을 찾는다. shim이 자기 자신을 부르지 않도록 절대
+        /// 경로를 박아야 하고, 그 경로는 `PATH`를 shim 디렉터리로 바꾸기 전에 정해 둔다.
+        fn resolve_command(name: &str) -> PathBuf {
+            let path = std::env::var_os("PATH").expect("PATH");
+            std::env::split_paths(&path)
+                .map(|directory| directory.join(name))
+                .find(|candidate| {
+                    fs::metadata(candidate)
+                        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| panic!("{name}을 PATH에서 찾지 못했다"))
+        }
+
+        /// shim 디렉터리 하나를 만든다. 각 shim은 호출 한 번을 카운터 파일에 한 줄로 적고, 실제 명령을
+        /// 절대 경로로 실행해 인자·표준 입출력·종료 코드를 그대로 넘긴다(`exec`이 자기 자리를 내준다).
+        /// 명령 이름도 함께 적는다 — 실패했을 때 어느 명령이 늘었는지가 메시지에 실린다.
+        fn write_shims(bin: &Path) {
+            fs::create_dir_all(bin).expect("shim root");
+            for name in EXTERNAL_COMMANDS {
+                let shim = bin.join(name);
+                fs::write(
+                    &shim,
+                    format!(
+                        "#!/bin/sh\necho {name} >> \"$WF_CONDITION_PROC_LOG\"\nexec {} \"$@\"\n",
+                        resolve_command(name).display()
+                    ),
+                )
+                .expect("write shim");
+                fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("shim mode");
+            }
+        }
+
+        /// `PATH`를 shim 디렉터리 하나로 두고 조건 스크립트를 한 번 돌린다. 셸은 절대 경로로 부른다.
+        fn run_counted(project_root: &Path, role: &str, bin: &Path, counter: &Path) -> CountedRun {
+            fs::write(counter, "").expect("reset counter");
+            let output = Command::new(SHELL)
+                .arg(CONDITION_SCRIPT.relative_path())
+                .arg(role)
+                .current_dir(project_root)
+                .env("PATH", bin)
+                .env("WF_CONDITION_PROC_LOG", counter)
+                .output()
+                .expect("run condition script under shims");
+            let log = fs::read_to_string(counter).expect("read counter");
+            let mut by_command: BTreeMap<String, usize> = BTreeMap::new();
+            for line in log.lines() {
+                *by_command.entry(line.to_string()).or_default() += 1;
+            }
+            let stdout = String::from_utf8(output.stdout).expect("condition stdout is utf-8");
+            CountedRun {
+                code: output.status.code().expect("exit code"),
+                reason: stdout.lines().next().unwrap_or_default().to_string(),
+                total: log.lines().count(),
+                by_command,
+            }
+        }
+
+        /// 실패했을 때 사람이 **무엇을 되돌려야 하는지** 읽을 수 있어야 한다. 확인 사실 2의 네 번이
+        /// 로그 속에서만 살아 있던 것을 이 문장이 대신한다.
+        fn cost_report(role: &str, one: &CountedRun, three: &CountedRun) -> String {
+            let budget = process_budget(role);
+            let ratio = three.total as f64 / one.total.max(1) as f64;
+            let mut ranked: Vec<_> = three.by_command.iter().collect();
+            ranked.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
+            let top: Vec<String> = ranked
+                .iter()
+                .take(3)
+                .map(|(name, count)| format!("{name} {count}회"))
+                .collect();
+            format!(
+                "{role} 분기의 판정 비용이 예산을 넘었다. 1배 {}개 · 3배 {}개(문서 3배에 {ratio:.1}배), \
+                 {role} 예산 {budget}개.\n판정 비용이 컬렉션 크기의 곱으로 자라면 문서가 늘수록 데몬의 \
+                 10초 한도를 넘고, 끊긴 판정은 안전을 위해 '일감 없음'으로 처리되어 세션이 아예 뜨지 \
+                 않는다(SPEC-033 확인 사실 1·2).\n문서량에 비례하면 3배 언저리, 곱이면 9배 언저리다. \
+                 비율이 넘었다면 후보 하나마다 같은 디렉터리를 다시 훑는 자리가 새로 생긴 것이므로 그 \
+                 자리를 되돌린다. 비율은 지켰는데 예산만 넘었다면 후보 하나당 프로세스가 늘어난 \
+                 것이다.\n예산은 그 역할의 3배 실측 + 1이고, 통과시키려고 올리는 자리가 아니다 — 다시 \
+                 세우는 절차는 process_budget의 주석에 있다.\n3배에서 많이 뜬 명령: {}",
+                one.total,
+                three.total,
+                top.join(", ")
+            )
+        }
+
+        /// 세 역할 각각에서 선형 단언과 절대 단언이 통과한다. 같은 자리에서 shim이 판정을 바꾸지
+        /// 않는다는 것도 대조한다.
+        #[test]
+        fn the_judgement_cost_grows_no_faster_than_the_collections() {
+            let tools = tempdir().expect("tools root");
+            let bin = tools.path().join("bin");
+            let counter = tools.path().join("spawned.log");
+            write_shims(&bin);
+
+            let small = build_fixture(1);
+            let large = build_fixture(3);
+
+            for role in EVERY_ROLE {
+                let one = run_counted(small.path(), role, &bin, &counter);
+                let three = run_counted(large.path(), role, &bin, &counter);
+
+                for (fixture, counted, size) in [(&small, &one, "1배"), (&large, &three, "3배")] {
+                    // shim이 판정을 바꾸지 않는다. `PATH`에 shim만 두었으므로, 세지 않는 외부 명령이
+                    // 본문에 새로 들어오면 그 명령을 찾지 못해 이 대조가 먼저 깨진다.
+                    let plain = run_condition(fixture.path(), role);
+                    assert_eq!(
+                        counted.code, plain.code,
+                        "{size} {role}: shim이 종료 코드를 바꿨다"
+                    );
+                    assert_eq!(
+                        counted.reason,
+                        plain.reason(),
+                        "{size} {role}: shim이 사유를 바꿨다"
+                    );
+                    // 조기 종료가 걸리면 재는 것이 사라진다(확인 사실 9).
+                    assert_eq!(
+                        counted.reason, "no-target",
+                        "{size} {role}: 픽스처가 최악 경로가 아니다"
+                    );
+                }
+
+                assert!(
+                    three.total * GROWTH_DENOMINATOR <= one.total * GROWTH_NUMERATOR,
+                    "{}",
+                    cost_report(role, &one, &three)
+                );
+                assert!(
+                    three.total <= process_budget(role),
+                    "{}",
+                    cost_report(role, &one, &three)
                 );
             }
         }

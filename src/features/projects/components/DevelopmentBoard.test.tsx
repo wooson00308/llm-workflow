@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FOLLOW_UP_LABEL } from "../domain/specDecisionLabels";
 import type {
   TaskDependency,
+  TaskDependencyState,
   TaskOverlapBlock,
   TaskQaBatchEntry,
   WorkflowItemSummary,
@@ -192,17 +194,32 @@ async function openDependencyDetail(
   dependencies: TaskDependency[],
   dependencyFormatError = false,
   overlapBlocks: TaskOverlapBlock[] = [],
+  /** 목록 payload. 선행의 제목을 여기서 찾으므로 제목 검사가 이 값을 갈아 끼운다. */
+  items: WorkflowItemSummary[] = tasks,
 ) {
   render(
     <DevelopmentBoard
       busy={false}
       onReadTask={dependencyReader(dependencies, dependencyFormatError, overlapBlocks)}
       onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()}
-      workflow={workflowWith()}
+      workflow={workflowWith(items)}
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
   return await screen.findByRole("region", { name: "선행 작업" });
+}
+
+/** 선행 한 건의 문장. id 칩 옆에 서므로 그 칩을 기준으로 집는다. */
+function sentenceOf(block: HTMLElement, id: string) {
+  return within(block).getByText(id).parentElement?.querySelector("p")?.textContent;
+}
+
+/**
+ * 시작 가능 여부의 한 줄. 선행 상자 헤더가 아니라 상태 배지 옆에 서므로 화면 전체에서 집는다
+ * (SPEC-039 R5).
+ */
+function startState(label: "시작 가능" | "시작할 수 없음") {
+  return screen.queryByText(label);
 }
 
 describe("DevelopmentBoard", () => {
@@ -577,7 +594,7 @@ describe("DevelopmentBoard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
     await screen.findByLabelText("테스트 플로우와 확인 메모");
-    const submit = screen.getByRole("button", { name: "수정 요청" });
+    const submit = screen.getByRole("button", { name: "개발 준비로 되돌리기" });
     expect(submit).toBeDisabled();
     fireEvent.change(screen.getByLabelText("테스트 플로우와 확인 메모"), {
       target: { value: "빈 상태에서 다시 확인해 주세요." },
@@ -587,7 +604,7 @@ describe("DevelopmentBoard", () => {
     expect(onTaskQa).not.toHaveBeenCalled();
     expect(screen.getByText("작업을 개발 준비로 되돌리고 수정 요청을 기록합니다.")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 수정 요청" }));
+    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 되돌리기" }));
     await waitFor(() =>
       expect(onTaskQa).toHaveBeenCalledWith(
         "TASK-002.md",
@@ -595,6 +612,27 @@ describe("DevelopmentBoard", () => {
         "빈 상태에서 다시 확인해 주세요.",
       ),
     );
+  });
+
+  // 승인된 기획에 할 말이 있어 누른 것이 개발 작업의 반려가 되는 사고가 두 자리가 같은 이름을 쓴
+  // 데서 났다. 무장 전후 두 문면과 확인 문구가 기획서 쪽 이름을 쓰지 않는다(SPEC-042 R5).
+  it("does not call the QA rejection what a specification decision is called", async () => {
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn().mockResolvedValue(true)} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    fireEvent.change(screen.getByLabelText("테스트 플로우와 확인 메모"), {
+      target: { value: "빈 상태에서 다시 확인해 주세요." },
+    });
+
+    for (const name of ["수정 요청", "수정 요청 기록", FOLLOW_UP_LABEL, `${FOLLOW_UP_LABEL} 기록`]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+
+    // 무엇이 대상이고 무엇이 일어나는지가 이름과 확인 문구에서 함께 읽힌다.
+    fireEvent.click(screen.getByRole("button", { name: "개발 준비로 되돌리기" }));
+    expect(screen.getByRole("button", { name: "한 번 더 누르면 되돌리기" })).toBeInTheDocument();
+    expect(screen.getByText("작업을 개발 준비로 되돌리고 수정 요청을 기록합니다.")).toBeInTheDocument();
   });
 
   it("resizes the QA side panel and remembers the width", async () => {
@@ -664,11 +702,28 @@ describe("DevelopmentBoard", () => {
       { id: "TASK-101", state: "satisfied" },
     ]);
 
-    expect(within(block).getByText("TASK-100")).toBeInTheDocument();
-    expect(within(block).getByText("TASK-101")).toBeInTheDocument();
-    expect(within(block).getAllByText("준비됨")).toHaveLength(2);
-    expect(within(block).getByText("시작 가능")).toBeInTheDocument();
-    expect(within(block).queryByText(/시간이 지나도 풀리지 않습니다/)).not.toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-100")).toBe("선행 작업 TASK-100의 진행이 끝났습니다.");
+    expect(sentenceOf(block, "TASK-101")).toBe("선행 작업 TASK-101의 진행이 끝났습니다.");
+    expect(startState("시작 가능")).toBeInTheDocument();
+    expect(within(block).queryByText(/선언을 고쳐야/)).not.toBeInTheDocument();
+  });
+
+  it("calls a dependency by the title the task list already carries", async () => {
+    const block = await openDependencyDetail([{ id: "TASK-002", state: "pending" }]);
+
+    expect(sentenceOf(block, "TASK-002")).toBe(
+      '선행 작업 "사용자 QA"의 진행이 아직 끝나지 않았습니다. 그 작업이 끝나면 이 선언은 풀립니다.',
+    );
+    // 제목으로 불러도 id가 문장 옆에 남는다.
+    expect(within(block).getByText("TASK-002")).toBeInTheDocument();
+  });
+
+  it("speaks with the id alone when the list has no title for the dependency", async () => {
+    const block = await openDependencyDetail([{ id: "TASK-404", state: "missing" }]);
+
+    expect(sentenceOf(block, "TASK-404")).toBe(
+      "선행 작업 TASK-404의 문서가 없습니다. 기다려서 풀리지 않고 선언을 고쳐야 열립니다.",
+    );
   });
 
   it("tells a satisfied dependency apart from a pending one", async () => {
@@ -677,41 +732,49 @@ describe("DevelopmentBoard", () => {
       { id: "TASK-101", state: "pending" },
     ]);
 
-    expect(within(block).getByText("TASK-100").parentElement).toHaveTextContent("준비됨");
-    expect(within(block).getByText("TASK-101").parentElement).toHaveTextContent("대기 중");
-    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
-    expect(within(block).queryByText(/시간이 지나도 풀리지 않습니다/)).not.toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-100")).toBe("선행 작업 TASK-100의 진행이 끝났습니다.");
+    expect(sentenceOf(block, "TASK-101")).toBe(
+      "선행 작업 TASK-101의 진행이 아직 끝나지 않았습니다. 그 작업이 끝나면 이 선언은 풀립니다.",
+    );
+    expect(startState("시작할 수 없음")).toBeInTheDocument();
+    // 기다리면 풀리는 판정에는 선언을 고치라는 말이 붙지 않는다.
+    expect(within(block).queryByText(/선언을 고쳐야/)).not.toBeInTheDocument();
   });
 
   it("marks a missing dependency id as never satisfied", async () => {
     const block = await openDependencyDetail([{ id: "TASK-404", state: "missing" }]);
 
-    expect(within(block).getByText("TASK-404").parentElement).toHaveTextContent("없는 작업");
-    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
-    expect(
-      within(block).getByText("이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다."),
-    ).toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-404")).toContain("문서가 없습니다");
+    expect(sentenceOf(block, "TASK-404")).toContain("기다려서 풀리지 않고 선언을 고쳐야 열립니다.");
+    expect(startState("시작할 수 없음")).toBeInTheDocument();
   });
 
   it("marks a cyclic declaration as never satisfied and apart from a missing id", async () => {
     const block = await openDependencyDetail([{ id: "TASK-100", state: "cyclic" }]);
 
-    expect(within(block).getByText("TASK-100").parentElement).toHaveTextContent("순환 선언");
-    expect(within(block).queryByText("없는 작업")).not.toBeInTheDocument();
-    expect(
-      within(block).getByText("이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다."),
-    ).toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-100")).toBe(
+      "선행 작업 TASK-100의 선언이 돌아서 어느 쪽도 먼저일 수 없습니다. 기다려서 풀리지 않고 선언을 고쳐야 열립니다.",
+    );
+    expect(within(block).queryByText(/문서가 없습니다/)).not.toBeInTheDocument();
+  });
+
+  it("says a dependency state outside the contract is outside it", async () => {
+    const block = await openDependencyDetail([{ id: "TASK-100", state: "archived" as TaskDependencyState }]);
+
+    expect(sentenceOf(block, "TASK-100")).toBe("선행 작업 TASK-100의 판정값이 규격 밖입니다(받은 값 archived).");
+    // 규격 밖 값이 기다리면 풀리는 쪽인지 앱은 모른다. 아는 척하지 않는다.
+    expect(within(block).queryByText(/선언을 고쳐야/)).not.toBeInTheDocument();
+    expect(startState("시작할 수 없음")).toBeInTheDocument();
   });
 
   it("reports a broken declaration without inventing the list it could not read", async () => {
     const block = await openDependencyDetail([], true);
 
-    expect(within(block).getByText("선행 선언의 형식이 잘못되어 목록으로 읽지 못했습니다.")).toBeInTheDocument();
-    expect(block.querySelectorAll(".task-dependency")).toHaveLength(0);
-    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
     expect(
-      within(block).getByText("이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다."),
+      within(block).getByText("선행 선언을 목록으로 읽지 못했습니다. 기다려서 풀리지 않고 선언을 고쳐야 열립니다."),
     ).toBeInTheDocument();
+    expect(block.querySelectorAll(".task-dependency")).toHaveLength(0);
+    expect(startState("시작할 수 없음")).toBeInTheDocument();
   });
 
   it("keeps the declared order instead of sorting the dependencies", async () => {
@@ -732,12 +795,13 @@ describe("DevelopmentBoard", () => {
       [{ leaseTargetId: "TASK-101", sharedFiles: ["src/App.css", "src/features/projects/domain/types.ts"] }],
     );
 
-    expect(within(block).getByText("준비됨")).toBeInTheDocument();
-    expect(within(block).queryByText("시작 가능")).not.toBeInTheDocument();
-    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
-    expect(within(block).getByText("TASK-101")).toBeInTheDocument();
-    expect(within(block).getByText(/src\/App\.css/)).toHaveTextContent(
-      "겹친 경로 src/App.css, src/features/projects/domain/types.ts",
+    expect(sentenceOf(block, "TASK-100")).toBe("선행 작업 TASK-100의 진행이 끝났습니다.");
+    expect(startState("시작 가능")).not.toBeInTheDocument();
+    expect(startState("시작할 수 없음")).toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-101")).toBe(
+      "범위가 겹치는 상대는 다른 세션이 잡은 문서 TASK-101입니다."
+        + " 겹친 경로는 src/App.css, src/features/projects/domain/types.ts입니다."
+        + " 그 세션의 lease가 풀리면 이 겹침은 사라집니다.",
     );
   });
 
@@ -747,29 +811,30 @@ describe("DevelopmentBoard", () => {
     ]);
 
     expect(block.querySelectorAll(".task-dependency")).toHaveLength(0);
-    expect(within(block).getByText("TASK-104")).toBeInTheDocument();
-    expect(within(block).getByText("시작할 수 없음")).toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-104")).toContain(
+      "겹친 경로는 src-tauri/src/infrastructure/heartbeat_condition.rs입니다.",
+    );
+    expect(startState("시작할 수 없음")).toBeInTheDocument();
   });
 
   it("tells an undeclared scope apart from a shared path when it reports an overlap", async () => {
     const block = await openDependencyDetail([], false, [{ leaseTargetId: "TASK-104", sharedFiles: [] }]);
 
-    expect(
-      within(block).getByText("두 작업 중 한쪽에 범위 선언이 없거나 형식이 잘못되어 겹친 것으로 봅니다."),
-    ).toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-104")).toBe(
+      "범위가 겹치는 상대는 다른 세션이 잡은 문서 TASK-104입니다."
+        + " 두 작업 중 한쪽의 범위 선언이 없거나 형식이 잘못되어 겹친 것으로 봅니다."
+        + " 그 세션의 lease가 풀리면 이 겹침은 사라집니다.",
+    );
     expect(within(block).queryByText(/겹친 경로/)).not.toBeInTheDocument();
   });
 
-  it("keeps an overlap out of the tone reserved for declarations that never open", async () => {
+  it("keeps an overlap out of the sentence reserved for declarations that never open", async () => {
     const block = await openDependencyDetail([], false, [
       { leaseTargetId: "TASK-104", sharedFiles: ["src/App.css"] },
     ]);
 
-    expect(within(block).queryByText(/시간이 지나도 풀리지 않습니다/)).not.toBeInTheDocument();
-    expect(block.querySelector(".task-dependency-note")).toBeNull();
-    expect(
-      within(block).getByText("다른 세션이 잡은 작업과 범위가 겹칩니다. 그 lease가 풀리면 착수할 수 있습니다."),
-    ).toBeInTheDocument();
+    expect(within(block).queryByText(/선언을 고쳐야/)).not.toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-104")).toContain("그 세션의 lease가 풀리면 이 겹침은 사라집니다.");
   });
 
   it("shows an unsatisfied dependency and an overlap side by side", async () => {
@@ -779,22 +844,189 @@ describe("DevelopmentBoard", () => {
       [{ leaseTargetId: "TASK-104", sharedFiles: ["src/App.css"] }],
     );
 
-    expect(within(block).getByText("TASK-100").parentElement).toHaveTextContent("없는 작업");
-    expect(within(block).getByText("TASK-104")).toBeInTheDocument();
-    expect(
-      within(block).getByText("이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다."),
-    ).toBeInTheDocument();
-    expect(
-      within(block).getByText("다른 세션이 잡은 작업과 범위가 겹칩니다. 그 lease가 풀리면 착수할 수 있습니다."),
-    ).toBeInTheDocument();
+    expect(sentenceOf(block, "TASK-100")).toContain("기다려서 풀리지 않고 선언을 고쳐야 열립니다.");
+    expect(sentenceOf(block, "TASK-104")).toContain("그 세션의 lease가 풀리면 이 겹침은 사라집니다.");
   });
 
   it("leaves the startable reading alone when nothing overlaps the task", async () => {
     const block = await openDependencyDetail([{ id: "TASK-100", state: "satisfied" }], false, []);
 
-    expect(within(block).getByText("시작 가능")).toBeInTheDocument();
+    expect(startState("시작 가능")).toBeInTheDocument();
     expect(block.querySelectorAll(".task-overlap")).toHaveLength(0);
     expect(within(block).queryByText(/lease가 풀리면/)).not.toBeInTheDocument();
+  });
+
+  it("reads the startable state beside the status badge instead of inside the dependency box", async () => {
+    const block = await openDependencyDetail([{ id: "TASK-100", state: "satisfied" }]);
+
+    // 옮긴 것이지 복제한 것이 아니다. 같은 사실이 선행 상자에 남아 있으면 두 자리에서 말하게 된다.
+    expect(within(block).queryByText("시작 가능")).not.toBeInTheDocument();
+    const state = startState("시작 가능")?.closest(".task-detail-state");
+    expect(state).not.toBeNull();
+    // 지금 상태와 시작 가능 여부가 같은 자리에서 읽힌다.
+    expect(within(state as HTMLElement).getByText("진행 중")).toBeInTheDocument();
+  });
+
+  it("says nothing about startability when a task declares no structure at all", async () => {
+    render(<DevelopmentBoard busy={false} onReadTask={taskReader(tasks[0])} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+
+    await screen.findByRole("button", { name: "← 개발 작업으로" });
+    // 판정할 구조가 없는 작업을 "시작 가능"이라고 부르면 자리를 옮기는 대신 새 사실을 만드는 것이다.
+    expect(startState("시작 가능")).not.toBeInTheDocument();
+    expect(startState("시작할 수 없음")).not.toBeInTheDocument();
+  });
+
+  it("opens a task body at its decision summary and keeps the source one toggle away", async () => {
+    const body = [
+      `# ${tasks[0].title}`,
+      "",
+      "## 결정권자 요약",
+      "",
+      "이 작업이 끝나면 평문이 먼저 열립니다.",
+      "",
+      "## 작업 범위",
+      "",
+      "작업자가 작업자에게 쓴 본문입니다.",
+    ].join("\n");
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[0], body });
+    render(<DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+
+    await screen.findByRole("button", { name: "← 개발 작업으로" });
+    expect(screen.getByText("이 작업이 끝나면 평문이 먼저 열립니다.")).toBeInTheDocument();
+    expect(screen.queryByText("작업자가 작업자에게 쓴 본문입니다.")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
+    expect(screen.getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
+    expect(screen.getByText("이 작업이 끝나면 평문이 먼저 열립니다.")).toBeInTheDocument();
+  });
+
+  it("starts at the summary again after the detail is closed and opened", async () => {
+    const body = [
+      `# ${tasks[0].title}`,
+      "",
+      "## 결정권자 요약",
+      "",
+      "이 작업이 끝나면 평문이 먼저 열립니다.",
+      "",
+      "## 작업 범위",
+      "",
+      "작업자가 작업자에게 쓴 본문입니다.",
+    ].join("\n");
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[0], body });
+    render(<DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+    await screen.findByRole("button", { name: "← 개발 작업으로" });
+    fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
+    fireEvent.click(screen.getByRole("button", { name: "← 개발 작업으로" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+    await screen.findByRole("button", { name: "← 개발 작업으로" });
+    // 토글 상태를 저장하지 않는다. 문서를 열 때마다 평문에서 시작한다.
+    expect(screen.getByRole("button", { name: "원문 전문 보기" })).toBeInTheDocument();
+    expect(screen.queryByText("작업자가 작업자에게 쓴 본문입니다.")).not.toBeInTheDocument();
+  });
+
+  // 확인 동선이 도장 옆에서 읽힌다(SPEC-039 R7). 대상은 단건 QA 패널뿐이고, 일괄 QA 다이얼로그는
+  // 목록 payload에 본문이 없어 이번 범위 밖이다.
+  const WALKTHROUGH_LINE = "개발 작업 화면에서 QA 대기 카드를 열면 도장 옆에 동선이 보입니다.";
+
+  function walkthroughBody(section: string) {
+    return [
+      `# ${tasks[1].title}`,
+      "",
+      "## 결정권자 요약",
+      "",
+      "이 작업이 끝나면 평문이 먼저 열립니다.",
+      "",
+      section,
+      "",
+      WALKTHROUGH_LINE,
+      "",
+      "## 작업 범위",
+      "",
+      "작업자가 작업자에게 쓴 본문입니다.",
+    ].join("\n");
+  }
+
+  function panelOf(container: HTMLElement) {
+    return container.querySelector(".task-qa-panel") as HTMLElement;
+  }
+
+  function documentOf(container: HTMLElement) {
+    return container.querySelector(".task-detail-document") as HTMLElement;
+  }
+
+  it("brings the confirmation walkthrough next to the QA stamp", async () => {
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[1], body: walkthroughBody("## 확인 동선") });
+    const { container } = render(
+      <DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    const walkthrough = within(panelOf(container)).getByRole("region", { name: "확인 동선" });
+    expect(within(walkthrough).getByText(WALKTHROUGH_LINE)).toBeInTheDocument();
+    // 확인 메모와 도장이 같은 패널에 있다. 동선을 읽으러 왼쪽 본문을 뒤지지 않는다.
+    expect(within(panelOf(container)).getByLabelText("테스트 플로우와 확인 메모")).toBeInTheDocument();
+    expect(within(panelOf(container)).getByRole("button", { name: "확인 완료" })).toBeInTheDocument();
+    // 옮긴 것이지 복제한 것이 아니다. 기본 뷰에는 같은 문단이 남지 않는다.
+    expect(within(documentOf(container)).queryByText(WALKTHROUGH_LINE)).not.toBeInTheDocument();
+    expect(screen.getAllByText(WALKTHROUGH_LINE)).toHaveLength(1);
+
+    // 원문은 자르지 않은 본문 그대로다. 토글 뒤에서는 동선 절도 보인다.
+    fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
+    expect(within(documentOf(container)).getByText(WALKTHROUGH_LINE)).toBeInTheDocument();
+  });
+
+  it("leaves the QA panel as it is when the task document has no walkthrough", async () => {
+    const body = [`# ${tasks[1].title}`, "", "## 작업 범위", "", "작업자가 작업자에게 쓴 본문입니다."].join("\n");
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[1], body });
+    const { container } = render(
+      <DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    expect(screen.queryByRole("region", { name: "확인 동선" })).not.toBeInTheDocument();
+    // 없다는 문구를 붙이지 않는다. 이 저장소의 옛 작업 대부분에 그 절이 없어 같은 줄이 거의 모든
+    // 화면에 뜨게 된다.
+    expect(panelOf(container).textContent).not.toContain("확인 동선");
+    expect(within(documentOf(container)).getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
+  });
+
+  it("finds the walkthrough by one heading and guesses no other candidate", async () => {
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[1], body: walkthroughBody("## 확인 절차") });
+    const { container } = render(
+      <DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    expect(screen.queryByRole("region", { name: "확인 동선" })).not.toBeInTheDocument();
+    expect(within(panelOf(container)).queryByText(WALKTHROUGH_LINE)).not.toBeInTheDocument();
+  });
+
+  it("leaves the walkthrough out of a detail that has no QA tools", async () => {
+    const body = walkthroughBody("## 확인 동선");
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[0], body });
+    const { container } = render(
+      <DevelopmentBoard busy={false} onReadTask={onReadTask} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+
+    await screen.findByRole("button", { name: "← 개발 작업으로" });
+    // 확인 도구가 없는 자리에 확인 동선만 띄우지 않는다.
+    expect(screen.queryByRole("region", { name: "확인 동선" })).not.toBeInTheDocument();
+    expect(within(panelOf(container)).getByText("QA 대기 상태가 되면 확인 도구가 활성화됩니다.")).toBeInTheDocument();
   });
 
   it("splits the board into lanes by the source spec of each task", () => {

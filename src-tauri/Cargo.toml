@@ -23,6 +23,11 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# 등록된 launchd 서비스의 `Label`을 읽는다(SPEC-036 TASK-122). 손으로 XML을 훑지 않는 이유는
+# 데몬이 `plistlib`으로 읽는 값과 갈리면 앱이 엉뚱한 서비스를 대상으로 삼기 때문이고, 바이너리
+# plist는 텍스트 훑기로 아예 읽히지 않기 때문이다. 플랫폼 갈래를 두지 않는 것은 macOS 전용
+# 의존성으로 두면 파싱 코드가 다른 플랫폼의 clippy에서 검사되지 않기 때문이다.
+plist = "1"
 thiserror = "2"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }

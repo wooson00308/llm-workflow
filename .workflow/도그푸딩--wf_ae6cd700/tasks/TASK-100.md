@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-100
 title: 레인 헤더에 일괄 QA 확인 화면을 붙이고 건별 결과를 보인다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-031
 source_decision_id: DECISION-1FAA8251
 depends_on: [TASK-095, TASK-096, TASK-099]
-updated_at: 2026-08-04T17:38:48Z
+updated_at: 2026-08-04T23:35:07.310179+00:00
 history:
   - { at: 2026-08-04T15:04:10Z, kind: created }
   - { at: 2026-08-04T17:27:09Z, kind: in_progress }
   - { at: 2026-08-04T17:38:48Z, kind: qa_waiting }
+  - { at: 2026-08-04T23:35:07.310179+00:00, kind: completed }
 ---
 
 # 레인 헤더에 일괄 QA 확인 화면을 붙이고 건별 결과를 보인다

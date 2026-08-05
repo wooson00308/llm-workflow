@@ -1,8 +1,13 @@
 import { useId } from "react";
 import type { ComponentType, ReactNode } from "react";
 import type {
+  AgentLeaseSummary,
   DuplicateIntegrationJob,
   HeartbeatRunControls,
+  HeartbeatServiceControls,
+  HeartbeatSetupRunControls,
+  HeartbeatUpdateControls,
+  HeartbeatVersionControls,
   IntegrationActions,
   IntegrationReadFailure,
   IntegrationsSnapshot,
@@ -28,6 +33,28 @@ export interface IntegrationCardProps {
    * 액션이 없는 화면이 된다.
    */
   heartbeatRuns: HeartbeatRunControls;
+  /**
+   * 프로젝트의 활성 lease. 재기동이 끊는 세션을 확인 화면에서 고지하는 데 쓴다(SPEC-037 R3).
+   * 섹션은 내용을 들여다보지 않고 그대로 넘긴다.
+   */
+  activeLeases?: AgentLeaseSummary[];
+  /**
+   * 업데이트 실행의 진행·결과 상태와 실행 통로. 섹션은 내용을 들여다보지 않고 그대로 넘긴다.
+   *
+   * `heartbeatRuns`와 달리 선택이다. 이 둘은 하트비트 카드만 쓰는 값이고, 카드를 떼어 그리는
+   * 검사가 props 리터럴을 직접 조립하기 때문이다. 배선이 빠지는 것을 막는 자리는 섹션 쪽 props로,
+   * 거기서는 필수다 — 뷰가 카드를 그릴 때 이 값이 없으면 컴파일이 통과하지 않는다.
+   */
+  heartbeatUpdate?: HeartbeatUpdateControls;
+  /**
+   * 설치 단계 실행의 진행·결과 상태와 실행 통로. 섹션은 내용을 들여다보지 않고 그대로 넘긴다.
+   * `heartbeatUpdate`와 같은 이유로 선택이다.
+   */
+  heartbeatSetupRuns?: HeartbeatSetupRunControls;
+  /** 버전 판정의 진행·결과 상태와 조회 통로. `heartbeatUpdate`와 같은 이유로 선택이다. */
+  heartbeatVersions?: HeartbeatVersionControls;
+  /** 데몬 끄기·켜기의 진행·결과 상태와 실행 통로. `heartbeatUpdate`와 같은 이유로 선택이다. */
+  heartbeatService?: HeartbeatServiceControls;
 }
 
 /** 내장 연동 목록의 항목. */

@@ -10,10 +10,13 @@ import type {
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
+import { splitSection } from "../domain/documentSections";
 import { UNASSIGNED_LANE_KEY, browserSpecLaneCollapseStore } from "../infrastructure/browserSpecLaneCollapseStore";
+import { DocumentReader } from "./DocumentReader";
 import { MarkdownBody } from "./MarkdownBody";
 
-const taskColumns = [
+/** 다섯 상태의 순서와 열 구성. 기획서 화면의 파생 작업 배지가 같은 목록으로 센다(SPEC-039 R5). */
+export const taskColumns = [
   { status: "todo", title: "준비", description: "시작할 수 있는 작업", tone: "neutral" },
   { status: "in_progress", title: "진행 중", description: "LLM이 작업하는 범위", tone: "active" },
   { status: "blocked", title: "막힘", description: "해결이 필요한 장애물", tone: "danger" },
@@ -21,7 +24,8 @@ const taskColumns = [
   { status: "completed", title: "최근 완료", description: "최근 완료된 작업 3개", tone: "done" },
 ] as const;
 
-const statusLabels: Record<string, string> = {
+/** 작업 상태의 이름. 열 제목(`taskColumns`의 `title`)과 달리 완료를 "최근 완료"로 부르지 않는다. */
+export const statusLabels: Record<string, string> = {
   todo: "준비",
   in_progress: "진행 중",
   blocked: "막힘",
@@ -29,24 +33,11 @@ const statusLabels: Record<string, string> = {
   completed: "완료",
 };
 
-const dependencyLabels: Record<string, string> = {
-  satisfied: "준비됨",
-  pending: "대기 중",
-  missing: "없는 작업",
-  cyclic: "순환 선언",
-};
-
-/** 기다려도 풀리지 않는 판정. `pending`과 달리 사람이 선언을 고쳐야 한다. */
-const permanentDependencyStates = new Set(["missing", "cyclic"]);
-
-const PERMANENT_DEPENDENCY_NOTE =
-  "이 선언은 시간이 지나도 풀리지 않습니다. 작업 문서의 선행 선언을 고쳐야 합니다.";
-
-/** 겹침은 lease가 만료되거나 풀리면 열린다. 영구 실패와 섞이지 않게 문구도 따로 둔다. */
-const OVERLAP_NOTE = "다른 세션이 잡은 작업과 범위가 겹칩니다. 그 lease가 풀리면 착수할 수 있습니다.";
-
-/** 공유 경로가 비어 있는 겹침의 뜻. 무엇을 고쳐야 열리는지가 공유 경로로 막힌 경우와 다르다. */
-const OVERLAP_UNDECLARED_NOTE = "두 작업 중 한쪽에 범위 선언이 없거나 형식이 잘못되어 겹친 것으로 봅니다.";
+/**
+ * 기다려도 풀리지 않는 판정이 무엇을 뜻하는지. 선언을 고쳐야 열린다는 것은 판정에서 유도되는 사실이라
+ * 말해도 되지만, 무엇으로 고칠지는 앱이 모르므로 말하지 않는다(SPEC-039 R4).
+ */
+const DECLARATION_FIX_NOTE = "기다려서 풀리지 않고 선언을 고쳐야 열립니다.";
 
 const UNASSIGNED_LANE_TITLE = "미분류";
 
@@ -122,6 +113,12 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
     () => workflow.items.tasks.filter((item) => matchesFilters(item, query, statusFilter)),
     [query, statusFilter, workflow.items.tasks],
   );
+  // 선행을 제목으로 부르는 문장이 쓸 값. 문서 payload에는 선행의 제목이 없고 목록에는 있어서
+  // (SPEC-039 확인 사실 6) 여기서 한 번 추려 상세로 넘긴다. 새 조회도 새 필드도 늘지 않는다.
+  const taskTitles = useMemo(
+    () => new Map(workflow.items.tasks.map((item) => [item.id, item.title])),
+    [workflow.items.tasks],
+  );
   const hasFilters = Boolean(query.trim()) || statusFilter !== "all";
 
   /**
@@ -154,6 +151,7 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
           if (succeeded) setTaskDocument(null);
           return succeeded;
         }}
+        taskTitles={taskTitles}
       />
     );
   }
@@ -282,16 +280,26 @@ function saveQaPanelWidth(value: number) {
   }
 }
 
+/**
+ * 확인 동선 절의 제목. 개발자 계약이 개발 작업 문서에 요구하는 문자열과 문자 단위로 같다(TASK-118).
+ *
+ * 이 한 문자열만 찾는다. 후보를 추측하지 않고 대소문자·공백 변형도 만들지 않는다(SPEC-039 R2).
+ */
+const TASK_WALKTHROUGH_HEADING = "## 확인 동선";
+
 function TaskDetail({
   busy,
   document,
   onBack,
   onTaskQa,
+  taskTitles,
 }: {
   busy: boolean;
   document: TaskDocument;
   onBack(): void;
   onTaskQa(outcome: TaskQaOutcome, comment: string): Promise<boolean>;
+  /** 작업 id → 제목. 선행을 제목으로 부르는 자리에서만 쓴다. */
+  taskTitles: Map<string, string>;
 }) {
   const [comment, setComment] = useState("");
   const [panelWidth, setPanelWidth] = useState(loadQaPanelWidth);
@@ -299,6 +307,21 @@ function TaskDetail({
   const confirmQa = useArmedConfirm();
   const revisionQa = useArmedConfirm();
   const awaitingQa = document.summary.status === "qa_waiting";
+  // 개발자가 적어 둔 확인 동선을 도장 옆으로 가져온다(SPEC-039 R7). 이미 읽어 온 본문 위에서 자르고
+  // 문서를 다시 읽지 않는다. 확인 도구가 활성화된 `qa_waiting`에서만 찾는다 — 도장이 없는 자리에
+  // 확인 동선만 띄우지 않는다. 절이 없으면 `null`이고, 그때 이 자리는 지금 모습 그대로다.
+  const walkthrough = useMemo(
+    () => (awaitingQa ? splitSection(document.body, TASK_WALKTHROUGH_HEADING).section : null),
+    [awaitingQa, document.body],
+  );
+  const dependencies = document.dependencies ?? [];
+  const formatError = document.dependencyFormatError ?? false;
+  const overlaps = document.overlapBlocks ?? [];
+  // 구조 선언이 하나라도 있을 때만 시작 가능 여부를 말한다. 선행도 겹침도 선언하지 않은 작업에는
+  // 판정할 구조가 없고, 없는 것을 "시작 가능"으로 부르면 자리를 옮기는 대신 새 사실을 만드는 것이다.
+  const declaresStructure = formatError || dependencies.length > 0 || overlaps.length > 0;
+  const startable = !formatError && overlaps.length === 0
+    && dependencies.every((entry) => entry.state === "satisfied");
 
   function applyPanelWidth(value: number) {
     const next = clampQaPanelWidth(value);
@@ -338,7 +361,16 @@ function TaskDetail({
       <button className="text-button task-detail-back" onClick={onBack}>← 개발 작업으로</button>
       <div className="view-heading task-detail-heading">
         <div><p className="eyebrow">{document.summary.id}</p><h1>{document.summary.title}</h1><p>개발 작업의 범위와 검증 내용을 확인합니다.</p></div>
-        <span className={`status-pill status-${document.summary.status}`}>{statusLabels[document.summary.status] ?? document.summary.status}</span>
+        {/* 지금 상태와 시작 가능 여부가 같은 자리에서 읽힌다(SPEC-039 R5). 시작 가능 여부는 선행
+            상자 헤더에서 이리로 옮겨 온 것이고, 저쪽에는 남지 않는다 — 옮기는 것이지 복제가 아니다. */}
+        <span className="task-detail-state">
+          <span className={`status-pill status-${document.summary.status}`}>{statusLabels[document.summary.status] ?? document.summary.status}</span>
+          {declaresStructure && (
+            <span className={`task-start-state ${startable ? "startable" : "waiting"}`}>
+              {startable ? "시작 가능" : "시작할 수 없음"}
+            </span>
+          )}
+        </span>
       </div>
       <div
         className={`task-detail-layout ${resizing ? "resizing" : ""}`}
@@ -347,11 +379,14 @@ function TaskDetail({
         <article className="task-detail-document">
           <div className="task-detail-meta"><span>최근 변경 {formatDate(document.summary.updatedAt)}</span><span>{document.summary.dueAt ? `목표 ${formatDueDate(document.summary.dueAt)}` : "일정 없음"}</span></div>
           <TaskDependencies
-            dependencies={document.dependencies ?? []}
-            formatError={document.dependencyFormatError ?? false}
-            overlaps={document.overlapBlocks ?? []}
+            dependencies={dependencies}
+            formatError={formatError}
+            overlaps={overlaps}
+            taskTitles={taskTitles}
           />
-          <div className="spec-paper embedded"><MarkdownBody body={document.body} /></div>
+          <div className="spec-paper embedded">
+            <DocumentReader body={document.body} key={document.summary.fileName} />
+          </div>
         </article>
         <aside className="task-qa-panel">
           <div
@@ -373,6 +408,12 @@ function TaskDetail({
           {awaitingQa ? (
             <>
               <p>테스트한 순서와 결과를 남기면 완료 기록 또는 개발자 재작업 지시로 전달됩니다.</p>
+              {/* 문서가 쓴 문장을 그대로 옮긴다. 앱이 이 절의 문장을 조립하지 않는다(SPEC-039 R4). */}
+              {walkthrough !== null && (
+                <section aria-label="확인 동선" className="task-qa-walkthrough">
+                  <MarkdownBody body={walkthrough} />
+                </section>
+              )}
               <label htmlFor="task-qa-comment">테스트 플로우와 확인 메모</label>
               <textarea
                 autoFocus
@@ -401,7 +442,12 @@ function TaskDetail({
                     revisionQa.fire(() => void onTaskQa("revision_requested", comment.trim()));
                   }}
                 >
-                  {revisionQa.armed ? "한 번 더 누르면 수정 요청" : "수정 요청"}
+                  {/*
+                    기획서 결정의 수정 요청과 같은 말을 쓰지 않는다. 두 자리가 같은 이름을 쓰면
+                    승인된 기획에 할 말이 있어 누른 것이 개발 작업의 반려가 된다(SPEC-042 R5).
+                    이름이 무엇이 대상이고 무엇이 일어나는지를 말하고, 확인 문구가 그것을 잇는다.
+                  */}
+                  {revisionQa.armed ? "한 번 더 누르면 되돌리기" : "개발 준비로 되돌리기"}
                   {revisionQa.armed && <i aria-hidden="true" className="confirm-timer" />}
                 </button>
                 <button
@@ -434,59 +480,54 @@ function TaskDetail({
  * 선언된 선행 작업과 각각의 판정, 그리고 겹침으로 막힌 사실을 그린다. 선언이 없고 형식 오류도 겹침도
  * 없으면 아무것도 그리지 않는다.
  *
- * `missing`·`cyclic`·형식 오류는 기다려서 풀리는 `pending`과 구분해 경고 톤과 안내 문구를 준다.
- * 이 구분이 없으면 사용자가 영원히 열리지 않는 작업을 "기다리면 되는 작업"으로 읽는다. 겹침은 lease가
- * 풀리면 열리므로 그 경고 톤에 넣지 않는다(SPEC-032 R7).
+ * 판정마다 평문 문장이 하나씩 붙는다(SPEC-039 R3). `missing`·`cyclic`·형식 오류는 기다려서 풀리는
+ * `pending`과 다른 문장을 갖는다. 이 구분이 없으면 사용자가 영원히 열리지 않는 작업을 "기다리면 되는
+ * 작업"으로 읽는다. 겹침은 lease가 풀리면 열리므로 기다리는 쪽 문장을 쓴다(SPEC-032 R7).
  *
  * 선행 미충족과 겹침은 동시에 성립할 수 있고, 그때 둘 다 보인다. 한쪽이 다른 쪽을 가리지 않는다.
+ *
+ * 시작 가능 여부는 여기서 말하지 않는다. 그 한 줄은 상태 배지 옆으로 옮겨 갔고(SPEC-039 R5), 같은
+ * 사실을 두 자리에서 말하지 않기 위해 이 헤더에는 남기지 않는다.
  */
 function TaskDependencies({
   dependencies,
   formatError,
   overlaps,
+  taskTitles,
 }: {
   dependencies: TaskDependency[];
   formatError: boolean;
   overlaps: TaskOverlapBlock[];
+  taskTitles: Map<string, string>;
 }) {
   if (!formatError && dependencies.length === 0 && overlaps.length === 0) return null;
-  const startable =
-    !formatError && overlaps.length === 0 && dependencies.every((entry) => entry.state === "satisfied");
-  const permanent = formatError || dependencies.some((entry) => permanentDependencyStates.has(entry.state));
 
   return (
-    <section aria-label="선행 작업" className={`task-dependencies ${startable ? "startable" : "waiting"}`}>
+    <section aria-label="선행 작업" className="task-dependencies">
       <header>
         <strong>선행 작업</strong>
-        <span className="task-dependency-summary">{startable ? "시작 가능" : "시작할 수 없음"}</span>
       </header>
       {formatError ? (
-        <p className="task-dependency-error">선행 선언의 형식이 잘못되어 목록으로 읽지 못했습니다.</p>
+        <p className="task-dependency-error">선행 선언을 목록으로 읽지 못했습니다. {DECLARATION_FIX_NOTE}</p>
       ) : (
         dependencies.length > 0 && (
           <ul>
             {dependencies.map((entry, index) => (
               <li className={`task-dependency state-${entry.state}`} key={`${entry.id}:${index}`}>
                 <strong>{entry.id}</strong>
-                <span>{dependencyLabels[entry.state] ?? entry.state}</span>
+                <p>{dependencySentence(entry, taskTitles.get(entry.id))}</p>
               </li>
             ))}
           </ul>
         )
       )}
-      {permanent && <p className="task-dependency-note">{PERMANENT_DEPENDENCY_NOTE}</p>}
       {overlaps.length > 0 && (
         <div className="task-overlaps">
-          <p className="task-overlap-note">{OVERLAP_NOTE}</p>
           <ul>
             {overlaps.map((block, index) => (
               <li className="task-overlap" key={`${block.leaseTargetId}:${index}`}>
                 <strong>{block.leaseTargetId}</strong>
-                {block.sharedFiles.length > 0 ? (
-                  <span>겹친 경로 {block.sharedFiles.join(", ")}</span>
-                ) : (
-                  <span className="task-overlap-undeclared">{OVERLAP_UNDECLARED_NOTE}</span>
-                )}
+                <p>{overlapSentence(block)}</p>
               </li>
             ))}
           </ul>
@@ -494,6 +535,44 @@ function TaskDependencies({
       )}
     </section>
   );
+}
+
+/**
+ * 선행 판정 하나를 평문 문장으로 옮긴다.
+ *
+ * 제목을 찾은 선행은 제목으로 부르고, 찾지 못하면 id로 부른다. `missing` 판정의 선행은 목록에도 없는
+ * 것이 그 판정의 뜻이라 제목을 추정으로 채우지 않는다.
+ *
+ * 규격 밖 판정값은 규격 밖이라고 말한다. 그 값이 기다리면 풀리는 쪽인지 아닌지는 앱이 모르므로
+ * `DECLARATION_FIX_NOTE`도 붙이지 않는다(SPEC-039 R4).
+ */
+function dependencySentence(entry: TaskDependency, title: string | undefined) {
+  const name = title ? `선행 작업 "${title}"` : `선행 작업 ${entry.id}`;
+  switch (entry.state) {
+    case "satisfied":
+      return `${name}의 진행이 끝났습니다.`;
+    case "pending":
+      return `${name}의 진행이 아직 끝나지 않았습니다. 그 작업이 끝나면 이 선언은 풀립니다.`;
+    case "missing":
+      return `${name}의 문서가 없습니다. ${DECLARATION_FIX_NOTE}`;
+    case "cyclic":
+      return `${name}의 선언이 돌아서 어느 쪽도 먼저일 수 없습니다. ${DECLARATION_FIX_NOTE}`;
+    default:
+      return `${name}의 판정값이 규격 밖입니다(받은 값 ${entry.state}).`;
+  }
+}
+
+/**
+ * 겹침 하나를 평문 문장으로 옮긴다.
+ *
+ * 공유 경로로 막힌 것과 선언 부재·형식 오류로 막힌 것이 서로 다른 문장을 갖는다. 둘 다 lease가 풀리면
+ * 사라지므로 마지막 문장은 같다.
+ */
+function overlapSentence(block: TaskOverlapBlock) {
+  const cause = block.sharedFiles.length > 0
+    ? `겹친 경로는 ${block.sharedFiles.join(", ")}입니다.`
+    : "두 작업 중 한쪽의 범위 선언이 없거나 형식이 잘못되어 겹친 것으로 봅니다.";
+  return `범위가 겹치는 상대는 다른 세션이 잡은 문서 ${block.leaseTargetId}입니다. ${cause} 그 세션의 lease가 풀리면 이 겹침은 사라집니다.`;
 }
 
 function BoardView({

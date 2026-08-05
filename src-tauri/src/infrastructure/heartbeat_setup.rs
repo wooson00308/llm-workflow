@@ -66,6 +66,9 @@ fn package_stage(init: HeartbeatSetupState) -> HeartbeatSetupStage {
             }
         },
         required: true,
+        // 패키지 획득은 앱이 대신 실행하지 않는다(SPEC-037 확인 필요 1번의 승인안). 이 명령은 지금
+        // 실패하므로, 버튼을 붙이면 앱이 실패를 대신 실행하게 된다.
+        runnable: false,
         command: PACKAGE_COMMAND.to_owned(),
         evidence: None,
     }
@@ -82,6 +85,8 @@ fn init_stage(document: &TextSource, heartbeat_home: &Path) -> HeartbeatSetupSta
             TextSource::Unreadable(_) => HeartbeatSetupState::Unknown,
         },
         required: true,
+        // 데몬이 명령으로 소유한 걸음이라 앱이 대신 실행한다.
+        runnable: true,
         command: INIT_COMMAND.to_owned(),
         evidence: Some(heartbeat_home.join(HEARTBEAT_FILE).display().to_string()),
     }
@@ -113,6 +118,8 @@ fn service_stage(user_home: &Path) -> HeartbeatSetupStage {
             _ => HeartbeatSetupState::Unknown,
         },
         required: true,
+        // 2단계와 같은 이유로 실행 대상이다. 등록물을 만드는 것은 데몬이고 앱이 아니다.
+        runnable: true,
         command: SERVICE_COMMAND.to_owned(),
         // 이 플랫폼에서 볼 경로가 없으면 `None`이다. 화면은 "이 경로에 표준 등록물이 없다"와
         // "이 플랫폼에서는 확인할 방법이 없다"를 이 있음·없음으로 구분해 말한다.
@@ -130,6 +137,8 @@ fn dream_stage(dream: IntegrationInstallation, heartbeat_home: &Path) -> Heartbe
             IntegrationInstallation::NotInstalled => HeartbeatSetupState::NotDone,
         },
         required: false,
+        // 승인안이 든 실행 대상은 2·3단계 둘이다. 승인 범위를 앱이 넓히지 않는다.
+        runnable: false,
         command: DREAM_COMMAND.to_owned(),
         evidence: Some(
             heartbeat_dream::skill_path(heartbeat_home)
@@ -299,6 +308,35 @@ mod tests {
                 );
                 // 명령 원문은 단계마다 하나씩이고 비어 있지 않다(R6).
                 assert!(stages.iter().all(|stage| !stage.command.is_empty()));
+            }
+        }
+    }
+
+    /// SPEC-037 R2. 앱이 대신 실행하는 단계는 2·3단계 둘뿐이고, 그 값은 입력과 무관하게 고정이다.
+    /// 1단계는 지금 실패하는 명령이고 4단계는 승인안이 들지 않은 단계다.
+    #[test]
+    fn only_the_init_and_service_steps_are_runnable_by_the_app() {
+        let (home, user_home) = homes();
+
+        for document in documents() {
+            for dream in [
+                IntegrationInstallation::Installed,
+                IntegrationInstallation::NotInstalled,
+            ] {
+                let stages = setup_stages(home.path(), user_home.path(), &document, dream);
+
+                assert_eq!(
+                    stages
+                        .iter()
+                        .map(|stage| (stage.step, stage.runnable))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        (HeartbeatSetupStep::Package, false),
+                        (HeartbeatSetupStep::Init, true),
+                        (HeartbeatSetupStep::Service, true),
+                        (HeartbeatSetupStep::Dream, false),
+                    ]
+                );
             }
         }
     }

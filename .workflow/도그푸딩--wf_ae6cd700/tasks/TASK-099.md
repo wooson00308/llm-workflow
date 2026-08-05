@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-099
 title: 확인 전용 일괄 QA 명령을 앱에 만들고 게이트웨이·훅까지 잇는다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-031
 source_decision_id: DECISION-1FAA8251
 depends_on: [TASK-095, TASK-096]
-updated_at: 2026-08-04T16:04:25Z
+updated_at: 2026-08-04T23:35:09.476542+00:00
 history:
   - { at: 2026-08-04T15:04:10Z, kind: created }
   - { at: 2026-08-04T15:54:40Z, kind: in_progress }
   - { at: 2026-08-04T16:04:25Z, kind: qa_waiting }
+  - { at: 2026-08-04T23:35:09.476542+00:00, kind: completed }
 ---
 
 # 확인 전용 일괄 QA 명령을 앱에 만들고 게이트웨이·훅까지 잇는다

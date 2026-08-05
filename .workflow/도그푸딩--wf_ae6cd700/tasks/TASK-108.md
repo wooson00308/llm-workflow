@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-108
 title: 084 경고 자리에서 갱신 절차를 읽고 복사한다 — 공용 안내와 역할 잡 카드
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-034
 source_decision_id: DECISION-3ECEDCA1
 depends_on: [TASK-107]
-updated_at: 2026-08-04T20:11:00Z
+updated_at: 2026-08-05T03:09:20.645555+00:00
 history:
   - { at: 2026-08-04T17:35:00Z, kind: created }
   - { at: 2026-08-04T20:00:30Z, kind: in_progress }
   - { at: 2026-08-04T20:11:00Z, kind: qa_waiting }
+  - { at: 2026-08-05T03:09:20.645555+00:00, kind: completed }
 ---
 
 # 084 경고 자리에서 갱신 절차를 읽고 복사한다 — 공용 안내와 역할 잡 카드

@@ -18,10 +18,10 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-const WORKFLOW_RULES_VERSION: u32 = 10;
+const WORKFLOW_RULES_VERSION: u32 = 12;
 /// 역할 계약 세 개의 `rules_version` 중 최댓값. `plan_rules_file`은 파일 버전이
 /// 이 값보다 클 때만 거부하므로 계약별 값이 서로 달라도 문제가 없다.
-const ROLE_RULES_VERSION: u32 = 5;
+const ROLE_RULES_VERSION: u32 = 7;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 ## LLM Workflow
@@ -45,7 +45,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 10
+rules_version: 12
 ---
 
 # LLM Workflow agent protocol
@@ -159,6 +159,18 @@ Write `heartbeat_at` and `expires_at` as UTC in exactly `YYYY-MM-DDTHH:MM:SSZ`. 
 
 An expired lease does not hold its target. Eligibility judgements count a lease as a claim only while its `expires_at` is still ahead of the moment of judgement, and a lease whose `expires_at` is missing or written outside the shape above is not counted either. Without that, a session that dies before releasing would close its target forever. Those judgements only read: they never delete or repair a lease file, so an expired lease stays where it is until a later claim takes it over.
 
+### Taking over what a stopped session left
+
+An expired lease means the session that held it is no longer alive, and taking that claim over means starting on top of unfinished work. Sessions die halfway: a document is half written, a task sits in `in_progress`, the working tree carries changes nobody reported. That residue is not yours and it is not trustworthy on sight.
+
+So evaluate it before building on it. Read what is there and split it into what you keep, what you discard, and what you rewrite. The residue is both kinds at once — the progress inside the documents and the code changes in the working tree — and the split is a judgement you make by reading, not a procedure this contract can hand you.
+
+Write that judgement into the report. What you took over, what you discarded, and why the line fell where it did must be readable from that one report alone.
+
+When something you discard is a test, say so plainly and say why it was the dead session's mistake. Removing a wrong test somebody else added and deleting a test that stands in the way of a passing run are different acts, and the report is where a reader tells them apart. The prohibition in `.workflow/rules/roles/developer.md` is untouched by a takeover.
+
+This obligation is the same for every role that can take a claim over. It is written here once, and the role contracts point at this section instead of restating it.
+
 ## 5. Follow the document state machine
 
 ### Ideas and specifications
@@ -190,7 +202,9 @@ The app records user QA under `decisions/` with `schema: workflow-labs/qa-decisi
 
 ### Record every task transition
 
-A session that changes a task's status appends one entry to the task's `history` field in the same edit. Write entries as single-line flow mappings:
+A session that changes a task's status appends one entry to the task's `history` field in the same edit. A session that takes a stopped task over appends an `in_progress` entry as well, even though the status it finds is already `in_progress` and does not change. The takeover is a fact about the task, and the history is where facts about the task live: without that entry, nothing outside a report says the work changed hands.
+
+Write entries as single-line flow mappings:
 
 ```yaml
 history:
@@ -206,7 +220,8 @@ history:
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework.
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no seventh `kind` for a takeover, and there is none for anything else: these six are the whole list.
+- The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
 - Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
@@ -229,13 +244,61 @@ history:
 - Satisfy the task's stated completion conditions and run relevant tests before moving it to `qa_waiting`.
 - Record outcomes, verification commands, remaining risks, and follow-up work in `reports/`.
 - Leave protected state unchanged and release your lease at the end of the session.
+
+## 8. Open the document with a summary for the decision-maker
+
+Every specification, development task, and implementation report an agent writes opens with one section addressed to the person who stamps it. This section is the whole definition of that obligation. Each role contract states what its own document must say and points here for the rest; no role contract repeats what is defined below.
+
+Idea documents are outside this section. The user writes there too, so no obligation is placed on that document kind.
+
+### Where it goes and what it is called
+
+- The heading is `## 결정권자 요약`, written in exactly those characters whatever language the rest of the document uses. A later feature and a human reader must find the section by one and the same string.
+- It stands at the very top of the body, immediately after the H1 title and before every other section.
+- That position carries weight beyond order. The app builds its list previews and search results from the first three body lines, so a summary standing first is what the cards show that same day. Put the point in those first three lines.
+
+### What it says
+
+- The summary is not an abridgement of the body. It is written again on the assumption that its reader is on another layer, and it never introduces a fact the body does not carry.
+- What each document kind must say is written in the role contract that owns it. There is no exemption: all three kinds carry the section.
+- The limit is ten lines, blank lines excluded. Longer than that and the summary has become a second body.
+
+### What it must not contain
+
+Inside the summary section there are none of the following:
+
+- a token wrapped in backticks
+- a file path — a name holding a slash, or a file name holding an extension
+- a `snake_case` or `camelCase` identifier
+- a `file:line` reference
+- a function, type, or field name
+
+Document ids are the single exception: a value beginning `SPEC-`, `TASK-`, `IDEA-`, or `DECISION-` is allowed, because those are names the user meets on the app's own screens. Write them as plain text without backticks, so "no backtick tokens" holds without an exception of its own.
+
+These conditions reach the summary section and nothing else. The rest of the body keeps the language it has now: between workers that density is precision, not a defect.
+
+### Keeping the summary true
+
+- A session that transitions a document's status brings the summary up to the current facts in the same edit, exactly as it appends the `history` entry in the same edit.
+- The obligation is on agent sessions alone. The two transitions the app records — `completed` and `revision_requested` — never touch the body, so this section places no obligation on the app.
+- A specification rewritten after a revision request is a new document, so its summary is written anew. Copying the previous document's summary over is not compliance.
+
+### The confirmation walkthrough
+
+A development task that goes to `qa_waiting` carries a second section for the same reader: `## 확인 동선`, written in exactly those characters. The developer writes it, and `.workflow/rules/roles/developer.md` defines what it holds. The prohibitions above do not reach it.
+
+### Documents written before this section
+
+- A document with no summary section stays valid. It is read, displayed, and judged exactly as it was.
+- Whether a summary exists is not part of any eligibility judgement, and reading a document never fails over a missing or malformed summary. No session is stopped and no task is closed because a summary is absent.
+- Nothing is filled in retroactively. This section reaches the documents written from here on.
 "#;
 
 const PLANNER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: planner
 managed_by: workflow-labs
-rules_version: 5
+rules_version: 7
 ---
 
 # Planner role
@@ -246,13 +309,20 @@ Turn one unprocessed idea or one app-recorded `revision_requested` decision into
 
 Two kinds of target qualify.
 
-- An idea is unprocessed only while no specification references it in `source_idea_id` and no unexpired lease covers it.
-- A revision request is unanswered only while it is the latest decision on its specification, no specification carries that decision's id in `source_decision_id`, and no unexpired lease covers it.
+- An idea is a target only while every specification that references it in `source_idea_id` is still `draft`, and no unexpired lease covers it. An idea no specification references at all is the ordinary case of that condition.
+- A revision request is a target only while it is the latest decision on its specification, every specification that carries that decision's id in `source_decision_id` is still `draft`, and no unexpired lease covers it.
 
 An expired lease covers nothing. `.workflow/rules/workflow.md` §4 defines that judgement, and both target kinds use it.
 
+A specification is what closes a source, and it closes it by leaving `draft`. So a source a stopped session left behind opens again on its own: that session's `draft` is the only thing referencing it and its lease has expired. Nothing about that source is marked, and nothing needs to be — the two values already say it.
+
+Read the condition as *every* referencing specification, never *any* one of them. An idea holding both a specification that reached the user and a rework `draft` a session abandoned is not an idea to recover. What stopped there is the rework, and the revision request that rework came from is the target instead.
+
+What you claim does not change. Recovering an idea claims the idea id, recovering a revision request claims the decision id. A specification document never becomes a claim target of its own.
+
 ## Choose in this order
 
+- Take a recovery before a source nobody has started. Work that stopped has already been paid for, and a source left in that state means the pipeline has stopped there rather than never having begun. Where this and the order below disagree, the recovery comes first.
 - Take an unanswered revision request before an unprocessed idea. A revision request is feedback the user left after reading a specification to the end, so the human review cost is already spent and the user is waiting on the answer. An idea nobody has read yet is waiting on no one.
 - Within one kind, take the earliest `created_at` of the source document: the decision document for a revision request, the idea document for an idea.
 - When the claim fails, move on to the next target in this order. When every target is already claimed, change no files and report `NO_ELIGIBLE_WORK`.
@@ -262,6 +332,19 @@ An expired lease covers nothing. `.workflow/rules/workflow.md` §4 defines that 
 
 - Before drafting anything, claim the source idea or decision as `.workflow/rules/workflow.md` §4 describes.
 - Immediately after claiming, create the specification file with `status: draft` and its source references (`source_idea_id`, or `source_spec_id` and `source_decision_id` for a revision) so parallel sessions see the writing in progress, then compose the content.
+- On a recovery that file already exists. Update its `updated_at` in place of creating it, and go on to the section below.
+
+## Taking over an abandoned draft
+
+A `draft` specification a stopped session left is continued in that same document. Never open a new ID for it.
+
+A new ID means one thing in this contract: a revision the user read and sent back. Nobody has read an abandoned draft and no decision is attached to it, so there is no decision history to preserve. Giving it a new ID would leave a document nobody ever read sitting in `specs/` for good, and that document would go on referencing the source, so the source would go on being a target.
+
+- Keep the document's ID and its source references (`source_idea_id`, or `source_spec_id` and `source_decision_id`).
+- Leave `created_at` as it is and update only `updated_at`, so when the original session started stays readable.
+- Evaluate what is already written as `.workflow/rules/workflow.md` §4 requires. Continuing that text and replacing the body outright are both open to you; the ID and the source references are the line this rule fixes.
+- Never delete the document and never merge it into another one.
+- Finish the way any other session finishes: `status: user_review`, release the lease, stop.
 
 ## Allowed
 
@@ -279,7 +362,8 @@ An expired lease covers nothing. `.workflow/rules/workflow.md` §4 defines that 
 ## Completion
 
 - Preserve source intent and identify scope, exclusions, requirements, and acceptance criteria.
-- For a revision request, create a new specification ID and reference the prior specification in `source_spec_id` and its revision request decision in `source_decision_id`.
+- Open the specification body with the summary section `.workflow/rules/workflow.md` §8 defines. This is the strictest of the three, because it is the material of an approval gate: it says what is being changed and why, what the user decides in this document, what becomes different once it is approved, and what stays exactly as it is if it is not.
+- For a revision request, create a new specification ID and reference the prior specification in `source_spec_id` and its revision request decision in `source_decision_id`. A recovery is the one case that keeps an existing ID, and the section above states it.
 - Move the resulting specification to `status: user_review`, release the lease, and stop. Never continue into architecture or implementation.
 "#;
 
@@ -287,7 +371,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 5
+rules_version: 6
 ---
 
 # Project architect role
@@ -330,6 +414,7 @@ Turn one app-approved specification into implementation-ready development tasks.
 ## Completion
 
 - Split work into reviewable tasks with dependencies, acceptance criteria, and verification steps.
+- Open every task body with the summary section `.workflow/rules/workflow.md` §8 defines. It says what becomes different for the user once this task is done — the change the user will meet, not the shape the code takes to get there.
 - Add `source_spec_id` and `source_decision_id` to every derived task.
 - Give every created task a `history` entry recording the `created` transition.
 - Leave every created task in `status: todo`, release the lease, and stop. Never continue into implementation.
@@ -339,7 +424,7 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 5
+rules_version: 7
 ---
 
 # Developer role
@@ -348,9 +433,24 @@ Implement and verify one eligible development task, then hand it to the user for
 
 ## Eligibility
 
-- The task must be `todo`, its dependencies must be satisfied, and its source decision must remain approved.
+- The task must be `todo` or `in_progress`, its dependencies must be satisfied, and its source decision must remain approved.
+- An `in_progress` task qualifies only while no unexpired lease covers it. A missing lease file and an expired one mean the same thing here, and `.workflow/rules/workflow.md` §4 is where "unexpired" is defined. Every other condition on this list holds for it exactly as it holds for a `todo` task; none of them is loosened because the task was already started.
+- A `blocked` task never qualifies, whatever its lease says. `blocked` is a state a session declared on purpose after hitting a real impediment, so it is not the trace of a session that stopped — a session that stopped leaves the state it was working in.
 - No unexpired lease may cover work that overlaps the task's `scope_files`. "Overlapping work" below is that judgement.
 - If the task returned from user QA, read the latest `workflow-labs/qa-decision@1` comment and follow its test flow.
+
+## Choose in this order
+
+- Take a resumable `in_progress` task before a `todo` task. Work that stopped has already been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it — satisfied dependencies count only `qa_waiting` and `completed`, so a task nobody resumes starves the ones behind it too.
+- When the claim fails, move on to the next target in this order. When every target is already claimed, change no files and report `NO_ELIGIBLE_WORK`.
+- One session still processes exactly one task. The condition script and the app's pending-work display answer only whether work exists, never which work comes first, so do not read either as an order.
+
+## Taking over a stopped task
+
+- The document is already `in_progress`, so do not move it there again. Append the `in_progress` entry `.workflow/rules/workflow.md` §5 asks for, and hand off at `qa_waiting` the way any other session does.
+- Evaluate the stopped session's residue as `.workflow/rules/workflow.md` §4 requires, and report the split it asks for.
+- The body of the task document — its scope and its completion conditions — belongs to the architect, and a takeover does not edit it. What the stopped session failed to finish and what the task is defined to be are different things, and this line is what keeps them apart.
+- If the stopped session damaged that body, report it as an out-of-role finding and stop. Repairing it is not this role's work.
 
 ## Satisfied dependencies
 
@@ -383,6 +483,20 @@ The judgement only reads lease files. Never create, edit, or delete one to chang
 
 If only tasks blocked by overlap remain, change no files and report `NO_ELIGIBLE_WORK`. Do not move them to `blocked` either, for the same reason as an unsatisfied dependency: another session's lease is not this task's impediment, and it goes away on its own.
 
+## The confirmation walkthrough
+
+A task you hand to user QA carries a section headed `## 확인 동선`, written in exactly those characters. `.workflow/rules/workflow.md` §8 names it; what it holds is defined here, because you are the one who writes it.
+
+Write it into the assigned task document, in the same edit that records the `qa_waiting` transition. The task body is otherwise the architect's, and this section is the one part of it that is yours.
+
+- The minimum shape is: which screen → which action → what appears when it is right.
+- A task with no screen to look at — a contract wording change, a judgement inside a script — says so in plain words: that the work was closed by automated checks, and that the confirmation stamp means trusting those numbers. Do not leave the section empty and do not write it as though a screen existed.
+- A defect fix that has reproduction conditions writes those conditions into the walkthrough.
+- Paths, commands, and identifiers are welcome here. Reproducing something may need them, and the restrictions §8 places on the summary do not reach this section.
+- A task returned by user QA is walked again, so bring this section up to what the rework actually changed.
+
+The `## 사용자 QA 제안` heading some reports carry is free writing, not this obligation. The task document is where the user reads the walkthrough, because the app opens task bodies beside the confirmation stamp and does not open reports at all.
+
 ## Allowed
 
 - Read the assigned task, linked specification and decision, relevant code, and tests.
@@ -398,9 +512,11 @@ If only tasks blocked by overlap remain, change no files and report `NO_ELIGIBLE
 
 ## Completion
 
-- Claim the task as `.workflow/rules/workflow.md` §4 describes, move it to `in_progress` immediately, and only then implement and run relevant verification.
-- Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
+- Claim the task as `.workflow/rules/workflow.md` §4 describes, move it to `in_progress` immediately, and only then implement and run relevant verification. A takeover finds the status already there and records the `history` entry alone.
+- Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
 - Record changes, checks, risks, and handoff notes in `reports/`.
+- Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done and what was verified, and what the user is being asked to do now.
+- Write the `## 확인 동선` section into the assigned task in the same edit that moves it to `qa_waiting`, as the section above describes.
 - Move the task to `qa_waiting`, release the lease, and stop.
 "#;
 
@@ -633,8 +749,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        install_project_instructions, validate_project_instructions, ProjectInstructionError,
-        MANAGED_START, ROLE_RULES_VERSION, WORKFLOW_RULES_VERSION,
+        install_project_instructions, plan_rules_file, validate_project_instructions,
+        ProjectInstructionError, MANAGED_START, ROLE_RULES, ROLE_RULES_SCHEMA, ROLE_RULES_VERSION,
+        WORKFLOW_RULES_VERSION,
     };
 
     #[test]
@@ -711,7 +828,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -733,7 +850,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -746,11 +863,11 @@ mod tests {
             assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
         }
         assert!(rules.contains("append-only"));
-        assert!(architect.contains("rules_version: 5"));
+        assert!(architect.contains("rules_version: 6"));
         assert!(architect.contains("`history`"));
-        assert!(developer.contains("rules_version: 5"));
+        assert!(developer.contains("rules_version: 7"));
         assert!(developer.contains("`history`"));
-        assert!(planner.contains("rules_version: 5"));
+        assert!(planner.contains("rules_version: 7"));
         assert!(!planner.contains("`history`"));
     }
 
@@ -769,13 +886,13 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 5"));
-        assert!(developer.contains("rules_version: 5"));
-        assert!(planner.contains("rules_version: 5"));
+        assert!(architect.contains("rules_version: 6"));
+        assert!(developer.contains("rules_version: 7"));
+        assert!(planner.contains("rules_version: 7"));
     }
 
     #[test]
@@ -793,7 +910,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -815,13 +932,13 @@ mod tests {
             assert!(contract.contains("`.workflow/rules/workflow.md` §4"));
             assert!(!contract.contains("wf-claim.sh"));
         }
-        assert!(developer.contains("rules_version: 5"));
+        assert!(developer.contains("rules_version: 7"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("`qa_waiting` or `completed`"));
-        assert!(architect.contains("rules_version: 5"));
+        assert!(architect.contains("rules_version: 6"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
-        assert!(planner.contains("rules_version: 5"));
+        assert!(planner.contains("rules_version: 7"));
     }
 
     #[test]
@@ -835,16 +952,17 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
         assert!(rules.contains("`YYYY-MM-DDTHH:MM:SSZ`"));
 
-        assert!(planner.contains("rules_version: 5"));
-        assert!(
-            planner.contains("no specification carries that decision's id in `source_decision_id`")
-        );
+        assert!(planner.contains("rules_version: 7"));
+        // 판정 키는 여전히 결정 id다. R2가 그 참조를 세는 조건만 "모두 `draft`"로 넓혔다.
+        assert!(planner.contains(
+            "every specification that carries that decision's id in `source_decision_id` is still `draft`"
+        ));
         assert!(planner.contains("Take an unanswered revision request before an unprocessed idea"));
         assert!(planner.contains("the earliest `created_at` of the source document"));
         assert!(planner.contains("`NO_ELIGIBLE_WORK`"));
@@ -868,21 +986,21 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 5"));
+        assert!(architect.contains("rules_version: 6"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
         assert!(architect.contains("the judgement follows `scope_files`"));
 
         // 개발자 계약의 겹침 조항이 선언을 근거로 지목한다.
-        assert!(developer.contains("rules_version: 5"));
+        assert!(developer.contains("rules_version: 7"));
         assert!(developer
             .contains("No unexpired lease may cover work that overlaps the task's `scope_files`"));
         assert!(developer.contains("## Overlapping work"));
@@ -895,12 +1013,241 @@ mod tests {
         assert!(developer.contains("Do not move them to `blocked` either"));
 
         // 이 기획서에 기획자 계약의 변경분이 없다.
-        assert!(planner.contains("rules_version: 5"));
+        assert!(planner.contains("rules_version: 7"));
         assert!(!planner.contains("scope_files"));
 
         // `ROLE_RULES_VERSION`은 세 계약 `rules_version`의 최댓값이다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 10);
-        assert_eq!(ROLE_RULES_VERSION, 5);
+        assert_eq!(WORKFLOW_RULES_VERSION, 12);
+        assert_eq!(ROLE_RULES_VERSION, 7);
+    }
+
+    #[test]
+    fn records_the_takeover_contract_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
+        let architect =
+            fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
+        assert!(rules.contains("rules_version: 12"));
+        assert!(rules.contains("### Taking over what a stopped session left"));
+        assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
+        assert!(rules.contains(
+            "the progress inside the documents and the code changes in the working tree"
+        ));
+        assert!(rules.contains("must be readable from that one report alone"));
+        assert!(rules.contains("When something you discard is a test"));
+        assert!(rules.contains("This obligation is the same for every role"));
+
+        // §5는 상태가 바뀌지 않는 인수도 항목을 남기게 하고, `kind`는 여섯 값 그대로다.
+        assert!(rules.contains(
+            "A session that takes a stopped task over appends an `in_progress` entry as well"
+        ));
+        assert!(rules.contains("There is no seventh `kind` for a takeover"));
+        assert!(rules.contains("The log is append-only"));
+        for kind in [
+            "created",
+            "in_progress",
+            "blocked",
+            "qa_waiting",
+            "completed",
+            "revision_requested",
+        ] {
+            assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
+        }
+
+        // 개발자 계약: R1의 자격 조건, `blocked` 제외 근거, R6의 순서.
+        assert!(developer.contains("rules_version: 7"));
+        assert!(developer.contains("The task must be `todo` or `in_progress`"));
+        assert!(developer
+            .contains("An `in_progress` task qualifies only while no unexpired lease covers it"));
+        assert!(developer.contains("A missing lease file and an expired one mean the same thing"));
+        assert!(developer.contains("A `blocked` task never qualifies"));
+        assert!(developer.contains("a state a session declared on purpose"));
+        assert!(developer.contains("Take a resumable `in_progress` task before a `todo` task"));
+        assert!(developer.contains("## Taking over a stopped task"));
+        assert!(developer.contains("do not move it there again"));
+        assert!(developer.contains("belongs to the architect, and a takeover does not edit it"));
+        // 겹침 절의 `blocked` 문장은 그대로 참이다.
+        assert!(developer.contains("Do not move them to `blocked` either"));
+
+        // 기획자 계약: R2의 자격 조건, R5의 이어쓰기, R6의 순서.
+        assert!(planner.contains("rules_version: 7"));
+        assert!(planner.contains(
+            "every specification that references it in `source_idea_id` is still `draft`"
+        ));
+        assert!(planner.contains(
+            "every specification that carries that decision's id in `source_decision_id` is still `draft`"
+        ));
+        assert!(planner.contains("Read the condition as *every* referencing specification"));
+        assert!(
+            planner.contains("A specification document never becomes a claim target of its own")
+        );
+        assert!(planner.contains("Take a recovery before a source nobody has started"));
+        assert!(planner.contains("## Taking over an abandoned draft"));
+        assert!(planner.contains("Never open a new ID for it"));
+        assert!(planner.contains("Leave `created_at` as it is and update only `updated_at`"));
+        assert!(planner.contains("Never delete the document and never merge it"));
+
+        // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
+        assert!(architect.contains("rules_version: 6"));
+        assert!(!architect.contains("Taking over"));
+    }
+
+    #[test]
+    fn records_the_decision_maker_summary_contract_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
+        let architect =
+            fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        assert!(rules.contains("rules_version: 12"));
+
+        // 새 절은 맨 뒤에 덧붙는다. 기존 일곱 절의 번호가 하나도 움직이지 않아야
+        // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
+        for heading in [
+            "## 1. Start every task from the manifests",
+            "## 2. Respect ownership boundaries",
+            "## 3. Keep one role per session",
+            "## 4. Claim work before starting it",
+            "## 5. Follow the document state machine",
+            "## 6. Preserve the file contract",
+            "## 7. Verify and hand off",
+            "## 8. Open the document with a summary for the decision-maker",
+        ] {
+            assert!(rules.contains(heading), "공통 규칙에 {heading}가 없습니다");
+        }
+        assert_eq!(rules.matches("\n## 8.").count(), 1);
+        assert_eq!(rules.matches("\n## 9.").count(), 0);
+
+        // 자리와 이름.
+        assert!(rules.contains("`## 결정권자 요약`"));
+        assert!(rules.contains("written in exactly those characters"));
+        assert!(rules.contains("immediately after the H1 title and before every other section"));
+        assert!(rules.contains("first three body lines"));
+
+        // 최소 내용과 분량 상한.
+        assert!(rules.contains("The summary is not an abridgement of the body"));
+        assert!(rules.contains("never introduces a fact the body does not carry"));
+        assert!(rules.contains("There is no exemption"));
+        assert!(rules.contains("The limit is ten lines, blank lines excluded"));
+
+        // 금지 조건 다섯과 문서 id 예외.
+        for condition in [
+            "a token wrapped in backticks",
+            "a file path",
+            "`snake_case` or `camelCase` identifier",
+            "`file:line` reference",
+            "a function, type, or field name",
+        ] {
+            assert!(
+                rules.contains(condition),
+                "공통 규칙에 금지 조건 {condition}이 없습니다"
+            );
+        }
+        assert!(rules.contains("a value beginning `SPEC-`, `TASK-`, `IDEA-`, or `DECISION-`"));
+        assert!(rules.contains("Write them as plain text without backticks"));
+        assert!(rules.contains("These conditions reach the summary section and nothing else"));
+
+        // 갱신 의무. 앱이 기록하는 두 전이는 대상이 아니다.
+        assert!(rules.contains(
+            "A session that transitions a document's status brings the summary up to the current facts in the same edit"
+        ));
+        assert!(rules.contains("The obligation is on agent sessions alone"));
+        assert!(rules.contains(
+            "The two transitions the app records — `completed` and `revision_requested` — never touch the body"
+        ));
+        assert!(rules.contains("so its summary is written anew"));
+
+        // 확인 동선 절의 이름은 공통 규칙이 부르고, 내용은 개발자 계약이 정의한다.
+        assert!(rules.contains("`## 확인 동선`"));
+        assert!(rules.contains("`.workflow/rules/roles/developer.md` defines what it holds"));
+
+        // 요약이 없는 문서는 그대로 유효하다.
+        assert!(rules.contains("A document with no summary section stays valid"));
+        assert!(rules.contains("is not part of any eligibility judgement"));
+        assert!(rules.contains("Nothing is filled in retroactively"));
+        assert!(rules.contains("Idea documents are outside this section"));
+
+        // 세 계약은 자기 문서의 의무만 적고 공통 정의는 §8을 가리킨다.
+        for contract in [&planner, &architect, &developer] {
+            assert!(contract.contains("`.workflow/rules/workflow.md` §8"));
+            assert!(!contract.contains("결정권자 요약"));
+            assert!(!contract.contains("blank lines excluded"));
+        }
+        assert!(planner.contains("rules_version: 7"));
+        assert!(planner.contains("what the user decides in this document"));
+        assert!(planner.contains("what stays exactly as it is if it is not"));
+        assert!(architect.contains("rules_version: 6"));
+        assert!(architect.contains("the change the user will meet, not the shape the code takes"));
+
+        // 개발자 계약: 보고서 요약과 작업 문서의 확인 동선.
+        assert!(developer.contains("rules_version: 7"));
+        assert!(developer.contains("what the user is being asked to do now"));
+        assert!(developer.contains("## The confirmation walkthrough"));
+        assert!(developer.contains("`## 확인 동선`"));
+        assert!(developer.contains("in the same edit that records the `qa_waiting` transition"));
+        assert!(developer.contains(
+            "The minimum shape is: which screen → which action → what appears when it is right"
+        ));
+        assert!(developer.contains("A task with no screen to look at"));
+        assert!(developer.contains("trusting those numbers"));
+        assert!(developer.contains("Do not leave the section empty"));
+        assert!(developer.contains("reproduction conditions"));
+    }
+
+    #[test]
+    fn a_role_contract_below_the_version_constant_is_not_rewritten_every_time() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        // 첫 계획이 세 계약을 설치한다.
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let roles_root = control.join("rules/roles");
+        let architect = fs::read_to_string(roles_root.join("architect.md")).expect("architect");
+        // 아키텍트 계약만 상수보다 낮은 버전으로 남는다. 그 상태가 이 검사의 전제다.
+        let architect_version = architect
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("rules_version:"))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .expect("architect rules_version");
+        assert!(
+            architect_version < ROLE_RULES_VERSION,
+            "아키텍트 계약이 상수보다 낮지 않으면 이 검사가 아무것도 확인하지 않습니다"
+        );
+
+        // 두 번째 계획은 세 계약 중 아무것도 쓰지 않는다.
+        for (file_name, contents) in ROLE_RULES {
+            let planned = plan_rules_file(
+                &roles_root.join(file_name),
+                contents,
+                ROLE_RULES_SCHEMA,
+                ROLE_RULES_VERSION,
+            )
+            .expect("plan role contract");
+            assert!(
+                planned.is_none(),
+                "{file_name}이 갱신될 때마다 다시 쓰입니다"
+            );
+        }
     }
 
     #[test]
@@ -924,7 +1271,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -955,10 +1302,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 10"));
+        assert!(rules.contains("rules_version: 12"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 5"));
-        assert!(developer.contains("rules_version: 5"));
+        assert!(architect.contains("rules_version: 6"));
+        assert!(developer.contains("rules_version: 7"));
     }
 
     #[test]

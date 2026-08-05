@@ -2111,6 +2111,7 @@ name = "llm-workflow"
 version = "0.1.8"
 dependencies = [
  "chrono",
+ "plist",
  "pretty_assertions",
  "serde",
  "serde_json",

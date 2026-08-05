@@ -44,6 +44,13 @@ pub struct WorkflowInput<'a> {
     /// 겹침 선언이 활성 lease와 충돌해 착수가 막힌 작업의 id(SPEC-032 R2). 선행 선언과 같은
     /// 이유로 여기서 다시 판정하지 않는다 — lease 파일도 작업 문서도 이 모듈은 읽지 않는다.
     pub overlap_blocked: &'a HashSet<String>,
+    /// `draft`가 아닌 기획서가 원천으로 참조하는 id의 집합(SPEC-035 R2). 아이디어 id와 결정 id가
+    /// 한 집합에 들어온다 — 두 판정이 각각 자기 id로만 조회하므로 섞이지 않는다.
+    ///
+    /// 여기서 다시 만들지 못하는 값이라 별도로 온다. 목록 payload(`WorkflowItemSummary`)에
+    /// `source_idea_id`가 없고, 판정이 보아야 하는 `status`는 파일에 적힌 원문인데 payload의 값은
+    /// 정규화와 결정 덮어쓰기를 지난 화면용 값이다. 계산은 `fs_project_repository`가 한다.
+    pub nondraft_spec_sources: &'a HashSet<String>,
 }
 
 /// `lease_ids`는 만료 전인 lease 파일 이름 집합이다. 스크립트도 만료된 lease를 선점으로 세지
@@ -73,29 +80,28 @@ pub fn pending_role_work(
 
 /// 스크립트 `planner)` 절. 둘 중 하나라도 있으면 대기 물량이 있다(SPEC-018 R1).
 ///
-/// (가) 어떤 기획서도 참조하지 않는 아이디어 중 선점되지 않은 것. 파생 상태 `inbox`가 정확히 그
-/// 경우다 — 참조 기획서가 있으면 `drafting`이거나 `adopted`이고, 스크립트도 참조가 있으면 건너뛴다.
-/// `!= "adopted"`로 두면 `draft` 기획서가 참조하는 아이디어(`drafting`)에서 스크립트와 갈라진다.
+/// 두 경우가 같은 목록 하나를 본다. 원천을 참조하는 기획서가 있더라도 그것이 모두 `draft`이면 멈춘
+/// 기획 작업이므로 그 원천은 다시 대상이다(SPEC-035 R2). "**모두** `draft`"이지 "하나라도 `draft`"가
+/// 아니다 — 그래서 아이디어 파생 상태(`inbox`/`drafting`/`adopted`)를 지름길로 쓰지 않는다. `drafting`은
+/// 참조 기획서 중 하나라도 `draft`면 성립하므로, 승인까지 간 기획서와 죽은 재작업 draft를 함께 가진
+/// 아이디어에서 스크립트와 갈라진다(SPEC-035 R7).
 ///
-/// (나) 후속 기획서가 없고 선점되지 않은 최신 `revision_requested` 결정. 후속 판정 키는 결정 id다 —
-/// 한 기획서가 여러 번 반려되면 결정마다 후속이 하나씩 생기므로 기획서 id로는 구분되지 않는다.
-/// 후속 기획서의 `status`와 그 뒤에 붙은 결정은 보지 않는다.
+/// (가) 비-`draft` 기획서가 참조하지 않는 아이디어 중 선점되지 않은 것.
+///
+/// (나) 비-`draft` 후속 기획서가 없고 선점되지 않은 최신 `revision_requested` 결정. 후속 판정 키는
+/// 결정 id다 — 한 기획서가 여러 번 반려되면 결정마다 후속이 하나씩 생기므로 기획서 id로는 구분되지
+/// 않는다. 후속 기획서 뒤에 붙은 결정은 보지 않는다.
 fn has_planner_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> bool {
-    let unprocessed_idea = workflow
-        .items
-        .ideas
+    let unprocessed_idea = workflow.items.ideas.iter().any(|idea| {
+        !workflow.nondraft_spec_sources.contains(&idea.id) && !lease_ids.contains(&idea.id)
+    });
+    let unanswered_revision = workflow
+        .revision_requested_decisions
         .iter()
-        .any(|idea| idea.status == "inbox" && !lease_ids.contains(&idea.id));
-    let unanswered_revision =
-        workflow
-            .revision_requested_decisions
-            .iter()
-            .any(|decision_id| {
-                !lease_ids.contains(decision_id)
-                    && !workflow.items.specs.iter().any(|spec| {
-                        spec.source_decision_id.as_deref() == Some(decision_id.as_str())
-                    })
-            });
+        .any(|decision_id| {
+            !lease_ids.contains(decision_id)
+                && !workflow.nondraft_spec_sources.contains(decision_id)
+        });
     unprocessed_idea || unanswered_revision
 }
 
@@ -124,17 +130,22 @@ fn has_architect_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>)
         })
 }
 
-/// 스크립트 `developer)` 절: `todo` 작업 중 그 id로 lease가 없고, 선행 선언이 충족됐고, 다른
-/// 문서를 잡은 활성 lease와 겹치지 않는 것.
+/// 스크립트 `developer)` 절: `todo`이거나 `in_progress`인 작업 중 그 id로 lease가 없고, 선행 선언이
+/// 충족됐고, 다른 문서를 잡은 활성 lease와 겹치지 않는 것.
 ///
 /// 네 조건은 개발자 계약의 자격 조건 그대로다. 선언을 보지 않던 동안에는 의존 미충족 `todo`만 남은
 /// 저장소에서 스크립트가 1을, 이 모듈이 `true`를 냈다(SPEC-013 완료 조건 8).
+///
+/// `in_progress`가 후보인 것은 죽은 세션이 남긴 작업을 다시 열기 위해서다(SPEC-035 R1). 그 작업을
+/// 덮는 미만료 lease가 없다는 것이 계약상 "그 세션은 살아 있지 않다"이므로, 살아 있는 세션의 작업은
+/// `lease_ids`가 그대로 막는다. 상태 집합만 넓어지고 나머지 세 조건은 곱해지는 그대로다.
+/// `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니므로 후보가 아니다.
 ///
 /// 마지막 조건은 잡힌 lease가 있을 때만 개입한다. 활성 lease가 하나도 없으면 `overlap_blocked`가
 /// 비어 있어 판정이 이 조건이 없던 때와 같다(SPEC-032 R9).
 fn has_developer_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> bool {
     workflow.items.tasks.iter().any(|task| {
-        task.status == "todo"
+        (task.status == "todo" || task.status == "in_progress")
             && !lease_ids.contains(&task.id)
             && !workflow.unsatisfied_dependencies.contains(&task.id)
             && !workflow.overlap_blocked.contains(&task.id)
@@ -775,9 +786,15 @@ mod tests {
     }
 
     /// 만료 lease와의 조합(TASK-055 기준 유지). 만료된 lease는 선점이 아니므로 충족된 선언을 가진
-    /// 작업은 열리고, 미충족 선언은 lease가 사라져도 그대로 미충족이다.
+    /// 작업은 열린다. 후반의 `in_progress` 선행은 미충족 그대로이고 — `dep_satisfied`는 여전히
+    /// `qa_waiting`·`completed`만 센다 — 그럼에도 판정이 열리는 것은 그 선행 자신이 회수 대상이기
+    /// 때문이다(SPEC-035 R1). 멈춘 작업 하나가 자기를 기다리는 작업까지 함께 막던 자리가 여기다.
+    ///
+    /// TASK-055가 세운 후반의 기대값을 이 작업이 뒤집었다. 미충족 선언이 lease가 사라져도 미충족인
+    /// 것은 `only_unsatisfied_dependencies_leave_no_developer_work`가 계속 따로 고정한다 — 그쪽은
+    /// 선행에 미만료 lease를 두어 선행 자신을 후보에서 뺀다.
     #[test]
-    fn an_expired_lease_does_not_change_how_a_declaration_is_judged() {
+    fn an_expired_lease_leaves_both_the_declaration_and_the_stalled_task_open() {
         let (root, workflow_root) = project();
         write_task(&workflow_root, "TASK-001", "qa_waiting", None);
         write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-001]");
@@ -788,7 +805,7 @@ mod tests {
         write_task(&workflow_root, "TASK-001", "in_progress", None);
         write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-001]");
         write_lease(root.path(), "TASK-002", &past());
-        assert!(!assert_matches_condition_script(root.path()).developer);
+        assert!(assert_matches_condition_script(root.path()).developer);
     }
 
     /// 충족된 선언을 가진 작업도 미만료 lease가 있으면 대상이 아니다. 두 조건은 서로를 대체하지
@@ -885,6 +902,67 @@ mod tests {
         assert!(assert_matches_condition_script(root.path()).developer);
     }
 
+    // ── SPEC-035 R1. 멈춘 개발 작업의 회수 ────────────────────────────────────────────────
+    //
+    // 죽은 세션의 시그니처는 `in_progress`이면서 그 작업을 덮는 미만료 lease가 없는 것이다. 다섯
+    // 시나리오가 기획서 완료 조건 1~5를 닫고, 모두 대조 헬퍼를 지나므로 앱 판정과 조건 스크립트가
+    // 같은 답을 내는 것까지 함께 고정한다(완료 조건 13).
+
+    /// 완료 조건 1. lease가 풀렸는데 상태가 `in_progress`라 아무도 집지 않던 작업이 대상이 된다.
+    #[test]
+    fn a_stalled_in_progress_task_is_developer_work() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "in_progress", None);
+
+        assert!(assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// 완료 조건 2. 만료된 lease는 파일이 없는 것과 같은 답을 낸다. 만료 뒤에 유예를 두지 않는 것이
+    /// 승인된 확인 필요 2번이고, 판별자는 `lease_blocks()`가 답하는 값 하나뿐이다.
+    #[test]
+    fn an_expired_lease_leaves_a_stalled_in_progress_task_open() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "in_progress", None);
+        write_lease(root.path(), "TASK-001", &past());
+
+        assert!(assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// 완료 조건 3. 살아 있는 세션의 작업은 그 lease가 그대로 막는다. 회수가 정상적으로 일하고 있는
+    /// 세션의 작업을 자격 목록에 올리면 두 세션이 같은 작업을 편집한다.
+    #[test]
+    fn an_unexpired_lease_still_hides_an_in_progress_task() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "in_progress", None);
+        write_lease(root.path(), "TASK-001", &future());
+
+        assert!(!assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// 완료 조건 4. 나머지 자격 조건은 `todo`와 완전히 같다. 상태 집합만 넓어지고 선행 선언 판정은
+    /// 느슨해지지 않는다.
+    #[test]
+    fn an_in_progress_task_with_an_unsatisfiable_declaration_is_not_developer_work() {
+        let (root, workflow_root) = project();
+        write_task_with_declaration(&workflow_root, "TASK-001", "in_progress", "[TASK-404]");
+
+        assert!(!assert_matches_condition_script(root.path()).developer);
+    }
+
+    /// 완료 조건 5. `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니다. lease가
+    /// 없든 만료됐든 대상이 아니다 — 이 요구가 상태 목록에 더한 것은 `in_progress` 하나뿐이다.
+    #[test]
+    fn a_blocked_task_is_not_developer_work_with_or_without_an_expired_lease() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "blocked", None);
+        assert!(!assert_matches_condition_script(root.path()).developer);
+
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "blocked", None);
+        write_lease(root.path(), "TASK-001", &past());
+        assert!(!assert_matches_condition_script(root.path()).developer);
+    }
+
     /// 세 역할이 보는 대상 각각에 만료된 lease가 있는 픽스처. 죽은 세션이 남긴 lease가 자격을
     /// 어떻게 다루는지를 보는 시나리오들이 공유한다.
     fn project_with_leases(body: impl Fn(&str) -> String) -> (TempDir, PathBuf) {
@@ -966,6 +1044,61 @@ mod tests {
 
         assert_eq!(before, read_lease_directory(&leases));
         assert_eq!(before.len(), 3);
+    }
+
+    /// 기획서 완료 조건 12. 회수 판정도 아무것도 쓰지 않는다. 죽은 세션이 남긴 것 — 만료된 lease,
+    /// `in_progress`로 멈춘 작업, 원천을 물고 있는 `draft` 기획서 — 을 모두 둔 픽스처에서, 판정 전후로
+    /// `leases/`와 워크플로우 디렉터리의 파일 개수와 내용이 같다.
+    ///
+    /// 만료 lease 파일의 청소는 기획서 제외 범위다. 판정에서 무시할 뿐 지우지 않는다(SPEC-018 R4).
+    #[test]
+    fn recovering_a_stalled_session_writes_nothing() {
+        let (root, workflow_root) = project();
+        write_idea(&workflow_root, "IDEA-001");
+        write_spec_with_status(&workflow_root, "SPEC-001", "IDEA-001", "draft");
+        write_task(&workflow_root, "TASK-001", "in_progress", None);
+        write_lease(root.path(), "TASK-001", &past());
+        let leases = root.path().join(".workflow/.runtime/leases");
+        let leases_before = read_lease_directory(&leases);
+        let documents_before = read_document_tree(&workflow_root);
+
+        let pending = assert_matches_condition_script(root.path());
+
+        assert_eq!(
+            pending,
+            PendingRoleWork {
+                planner: true,
+                architect: false,
+                developer: true,
+            }
+        );
+        assert_eq!(leases_before, read_lease_directory(&leases));
+        assert_eq!(documents_before, read_document_tree(&workflow_root));
+        assert_eq!(leases_before.len(), 1);
+    }
+
+    /// 워크플로우 디렉터리 아래 모든 파일의 `(상대 경로, 내용)` 목록. 개수와 내용을 함께 고정한다.
+    fn read_document_tree(workflow_root: &Path) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = Vec::new();
+        let mut pending = vec![workflow_root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).expect("workflow directory") {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                entries.push((
+                    path.strip_prefix(workflow_root)
+                        .expect("relative path")
+                        .to_string_lossy()
+                        .into_owned(),
+                    fs::read_to_string(&path).expect("document body"),
+                ));
+            }
+        }
+        entries.sort();
+        entries
     }
 
     /// lease 디렉터리의 `(파일 이름, 내용)` 목록. 개수와 내용을 함께 고정한다.
@@ -1127,10 +1260,15 @@ mod tests {
         assert!(assert_matches_condition_script(root.path()).planner);
     }
 
-    /// 후속 기획서가 생기면 그 결정은 처리 완료다. 후속의 상태는 결과를 바꾸지 않는다.
+    /// 기획서 완료 조건 10·11. 후속 기획서가 생기면 그 결정은 처리 완료지만, 그 후속이 아직
+    /// `draft`이면 멈춘 재작업이므로 결정이 다시 대상이 된다(SPEC-035 R2).
+    ///
+    /// TASK-081이 세운 "후속의 상태는 결과를 바꾸지 않는다"를 이 작업이 뒤집은 자리다. 두 상태를
+    /// 한 반복문에서 함께 보는 모양은 그대로 두고 기대값만 상태별로 가른다 — 갈리는 자리가 후속의
+    /// `status` 하나뿐이라는 것이 이 검사가 보이는 것이다.
     #[test]
-    fn a_follow_up_spec_answers_the_revision_request_whatever_its_status() {
-        for status in ["draft", "user_review"] {
+    fn only_a_non_draft_follow_up_spec_answers_the_revision_request() {
+        for (status, answered) in [("draft", false), ("user_review", true)] {
             let (root, workflow_root) = project();
             write_decision(
                 &workflow_root,
@@ -1141,8 +1279,9 @@ mod tests {
             );
             write_rework_spec(&workflow_root, "SPEC-002", "DECISION-001", status);
 
-            assert!(
-                !assert_matches_condition_script(root.path()).planner,
+            assert_eq!(
+                assert_matches_condition_script(root.path()).planner,
+                !answered,
                 "후속 기획서가 {status}일 때 결과가 달라졌다"
             );
         }
@@ -1330,14 +1469,62 @@ mod tests {
         assert!(assert_matches_condition_script(root.path()).planner);
     }
 
-    /// 파생 상태가 세 값이 된 뒤(SPEC-012)의 일치 복원. `draft` 기획서가 참조하는 아이디어는
-    /// `drafting`이고, 스크립트도 참조가 있으면 건너뛴다. `!= "adopted"`로 두면 여기서 갈라진다.
+    /// 기획서 완료 조건 7. `draft` 기획서 하나만 아이디어를 참조하고 그 아이디어를 덮는 미만료
+    /// lease가 없으면, 멈춘 기획 작업이므로 그 아이디어는 다시 기획자 대상이다(SPEC-035 R2).
+    ///
+    /// TASK-086이 세운 짝(`draft` 참조는 아이디어를 닫는다)을 이 작업이 뒤집은 자리다. 지우지 않고
+    /// 기대값을 뒤집는 이유는 이 픽스처가 회수 규칙이 실제로 사는 자리이기 때문이다 — 파생 상태
+    /// `drafting`을 지름길로 쓰면 여기서 스크립트와 갈라진다. 닫히는 쪽은 아래
+    /// `an_idea_claimed_by_a_reviewed_spec_is_not_planner_work`가 본다.
     #[test]
-    fn an_idea_claimed_by_a_draft_spec_is_not_planner_work() {
+    fn an_idea_claimed_only_by_a_draft_spec_is_planner_work_again() {
         let (root, workflow_root) = project();
         write_idea(&workflow_root, "IDEA-001");
         write_spec_with_status(&workflow_root, "SPEC-001", "IDEA-001", "draft");
 
+        assert!(assert_matches_condition_script(root.path()).planner);
+    }
+
+    /// 기획서 완료 조건 8. 인수 세션이 그 아이디어를 선점하면 대상에서 빠진다. 선점 대상은 지금과
+    /// 같은 아이디어 id이고, 기획서 문서가 새로운 선점 대상이 되지 않는다(SPEC-035 R2).
+    #[test]
+    fn a_leased_idea_claimed_only_by_a_draft_spec_is_not_planner_work() {
+        let (root, workflow_root) = project();
+        write_idea(&workflow_root, "IDEA-001");
+        write_spec_with_status(&workflow_root, "SPEC-001", "IDEA-001", "draft");
+        write_lease(root.path(), "IDEA-001", &future());
+
+        assert!(!assert_matches_condition_script(root.path()).planner);
+    }
+
+    /// 기획서 완료 조건 9·14. 참조 기획서 중 하나가 `user_review`이면 그 아이디어는 대상이 아니다 —
+    /// R2가 요구하는 것은 "**모두** `draft`"다. 멈춘 것은 아이디어가 아니라 재작업이고, 그 재작업의
+    /// 원천인 수정 요청 결정이 회수 대상이 된다.
+    ///
+    /// 아이디어 파생 상태는 이 픽스처에서 `drafting`이다(SPEC-012 R2의 "하나라도 `draft`"). 그런데도
+    /// 두 판정이 모두 "대상 없음"을 내는 것이 앱 이식본이 파생 상태를 지름길로 쓰지 않았다는 증거다
+    /// (완료 조건 14). 그래서 상태값을 여기서 함께 단언한다 — 상태가 `drafting`이 아니게 되면 이
+    /// 시나리오는 증명하려던 것을 더 이상 증명하지 못한다.
+    #[test]
+    fn an_idea_claimed_by_a_reviewed_spec_is_not_planner_work() {
+        let (root, workflow_root) = project();
+        write_idea(&workflow_root, "IDEA-001");
+        write_spec_with_status(&workflow_root, "SPEC-001", "IDEA-001", "user_review");
+        write_spec_with_status(&workflow_root, "SPEC-002", "IDEA-001", "draft");
+
+        let derived = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project")
+            .workflows[0]
+            .items
+            .ideas
+            .iter()
+            .find(|idea| idea.id == "IDEA-001")
+            .expect("IDEA-001")
+            .status
+            .clone();
+
+        assert_eq!(derived, "drafting");
         assert!(!assert_matches_condition_script(root.path()).planner);
     }
 
@@ -1347,12 +1534,14 @@ mod tests {
         let approved = [("DECISION-001".to_owned(), "SPEC-001".to_owned())];
         let unsatisfied = HashSet::new();
         let overlapped = HashSet::new();
+        let nondraft_sources = HashSet::new();
         let workflows = [super::WorkflowInput {
             items: &items,
             approved_decisions: &approved,
             revision_requested_decisions: &[],
             unsatisfied_dependencies: &unsatisfied,
             overlap_blocked: &overlapped,
+            nondraft_spec_sources: &nondraft_sources,
         }];
         let mut leases = HashSet::new();
         leases.insert("SPEC-001".to_owned());

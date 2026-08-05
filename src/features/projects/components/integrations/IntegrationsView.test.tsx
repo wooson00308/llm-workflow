@@ -2,16 +2,26 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  AgentLeaseSummary,
   DreamIntegration,
   HeartbeatIntegration,
   HeartbeatJobRun,
+  HeartbeatRecordedJob,
   HeartbeatRoleStatus,
   HeartbeatRunControls,
   HeartbeatRunFailure,
+  HeartbeatServiceControlResult,
+  HeartbeatServiceControls,
+  HeartbeatServiceTarget,
+  HeartbeatSetupRunControls,
   HeartbeatSetupStage,
   HeartbeatSetupState,
   HeartbeatSetupStep,
+  HeartbeatUpdateControls,
   HeartbeatUpdateGuide,
+  HeartbeatUpdateResult,
+  HeartbeatVersionControls,
+  HeartbeatVersions,
   IntegrationsSnapshot,
   IntegrationsState,
   JobDefaults,
@@ -102,6 +112,7 @@ function setupStages(): HeartbeatSetupStage[] {
       step: "package",
       state: "done",
       required: true,
+      runnable: false,
       command: "pip install claude-heartbeat",
       evidence: null,
     },
@@ -109,6 +120,7 @@ function setupStages(): HeartbeatSetupStage[] {
       step: "init",
       state: "done",
       required: true,
+      runnable: true,
       command: "heartbeat init",
       evidence: "/Users/catze/.claude/HEARTBEAT.md",
     },
@@ -116,6 +128,7 @@ function setupStages(): HeartbeatSetupStage[] {
       step: "service",
       state: "unknown",
       required: true,
+      runnable: true,
       command: "heartbeat install-service",
       evidence: "/Users/catze/Library/LaunchAgents/com.claude-heartbeat.plist",
     },
@@ -123,9 +136,31 @@ function setupStages(): HeartbeatSetupStage[] {
       step: "dream",
       state: "not_done",
       required: false,
+      runnable: false,
       command: "heartbeat install dream",
       evidence: "/Users/catze/.claude/skills/dream/SKILL.md",
     },
+  ];
+}
+
+/** 이 기기에 등록물이 정확히 하나 있고 그 이름을 읽은 판정. 조작 통로가 서는 최소 조건이다. */
+const serviceLabel = "com.catze.dream-heartbeat";
+const servicePlist = "/Users/catze/Library/LaunchAgents/com.catze.dream-heartbeat.plist";
+const resolvedTarget: HeartbeatServiceTarget = {
+  kind: "resolved",
+  label: serviceLabel,
+  plist_path: servicePlist,
+};
+
+/**
+ * 실행 기록이 있는 잡. 이 프로젝트의 것과 다른 프로젝트의 것과 dream 잡이 섞여 있다 — 데몬이 기기
+ * 하나에 하나라는 사실이 이 목록에서 드러난다.
+ */
+function recordedJobs(): HeartbeatRecordedJob[] {
+  return [
+    { name: "dream-catze", ofThisProject: false },
+    { name: "wf-developer-projects-mecha-arena", ofThisProject: false },
+    { name: "wf-developer-projects-workflow-labs", ofThisProject: true },
   ];
 }
 
@@ -137,6 +172,8 @@ function heartbeat(overrides: Partial<HeartbeatIntegration> = {}): HeartbeatInte
     conditionScriptPath: ".workflow/rules/wf-eligible.sh",
     roles: roleStatuses(),
     managedJobs: [],
+    serviceTarget: resolvedTarget,
+    recordedJobs: recordedJobs(),
     duplicateJobs: [],
     readFailures: [],
     ...overrides,
@@ -221,6 +258,65 @@ function runControls(overrides: Partial<HeartbeatRunControls> = {}): HeartbeatRu
   return { running: [], failure: null, run: vi.fn().mockResolvedValue(true), ...overrides };
 }
 
+/**
+ * 업데이트 통로의 기본값. 실행 중도 아니고 결과도 없는 상태다. 실행 상태와 같은 이유로 주인이
+ * 훅이라, 진행 중이나 결과가 있는 화면은 카드를 조작해서가 아니라 이 값을 갈아 끼워 만든다.
+ */
+function updateControls(
+  overrides: Partial<HeartbeatUpdateControls> = {},
+): HeartbeatUpdateControls {
+  return {
+    running: false,
+    result: null,
+    update: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+/**
+ * 설치 단계 실행 통로의 기본값. 도는 단계도 결과도 없는 상태다. 실행 상태의 주인이 훅이라 진행
+ * 중이나 결과가 있는 화면은 카드를 조작해서가 아니라 이 값을 갈아 끼워 만든다.
+ */
+function setupRunControls(
+  overrides: Partial<HeartbeatSetupRunControls> = {},
+): HeartbeatSetupRunControls {
+  return {
+    running: [],
+    results: {},
+    run: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+/** 버전 통로의 기본값. 아직 읽지 않은 상태라 카드에 버전 표시가 없다. */
+function versionControls(
+  overrides: Partial<HeartbeatVersionControls> = {},
+): HeartbeatVersionControls {
+  return {
+    checking: false,
+    versions: null,
+    error: null,
+    check: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+/**
+ * 데몬 조작 통로의 기본값. 도는 조작도 결과도 없는 상태다. 다른 실행 상태와 같은 이유로 주인이
+ * 훅이라, 진행 중이나 결과가 있는 화면은 카드를 조작해서가 아니라 이 값을 갈아 끼워 만든다.
+ */
+function serviceControls(
+  overrides: Partial<HeartbeatServiceControls> = {},
+): HeartbeatServiceControls {
+  return {
+    running: null,
+    outcome: null,
+    error: null,
+    control: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
 function renderIntegrations(
   integrations: IntegrationsState,
   onInstall = vi.fn().mockResolvedValue(true),
@@ -229,10 +325,20 @@ function renderIntegrations(
     /** null은 "대기 물량을 모른다"이다. 화면에는 값 없이 내려간다. */
     pendingWork = { planner: false, architect: false, developer: false },
     heartbeatRuns = runControls(),
+    heartbeatUpdate = updateControls(),
+    heartbeatSetupRuns = setupRunControls(),
+    heartbeatVersions = versionControls(),
+    heartbeatService = serviceControls(),
+    activeLeases = [],
   }: {
     expand?: boolean;
     pendingWork?: PendingRoleWork | null;
     heartbeatRuns?: HeartbeatRunControls;
+    heartbeatUpdate?: HeartbeatUpdateControls;
+    heartbeatSetupRuns?: HeartbeatSetupRunControls;
+    heartbeatVersions?: HeartbeatVersionControls;
+    heartbeatService?: HeartbeatServiceControls;
+    activeLeases?: AgentLeaseSummary[];
   } = {},
 ) {
   render(
@@ -241,8 +347,13 @@ function renderIntegrations(
         installHeartbeatJobs: onInstall,
         installDreamJob: vi.fn().mockResolvedValue(true),
       }}
+      activeLeases={activeLeases}
       error={integrations.error}
       heartbeatRuns={heartbeatRuns}
+      heartbeatService={heartbeatService}
+      heartbeatSetupRuns={heartbeatSetupRuns}
+      heartbeatUpdate={heartbeatUpdate}
+      heartbeatVersions={heartbeatVersions}
       pendingWork={pendingWork ?? undefined}
       snapshot={integrations.snapshot}
       writeError={integrations.writeError}
@@ -409,7 +520,9 @@ describe("IntegrationsView 연동 섹션", () => {
     expect(card).toHaveTextContent("미설치");
     expect(card).toHaveTextContent("pip install claude-heartbeat");
     expect(card).toHaveTextContent("github.com/wooson00308/claude-heartbeat");
-    expect(card).toHaveTextContent("앱이 하트비트를 대신 설치하지 않습니다");
+    // SPEC-037 R2가 두 단계를 실행형으로 옮긴 뒤의 문장이다. 앱이 실행하지 않는 단계가 남아 있다는
+    // 사실은 그대로 있고, 어느 단계가 그것인지는 실행 버튼의 유무가 말한다.
+    expect(card).toHaveTextContent("앱은 실행 버튼이 있는 단계만 대신 실행합니다");
     expect(card).not.toHaveTextContent("역할 잡 미설치");
   });
 
@@ -1422,6 +1535,15 @@ describe("IntegrationsView 갱신 안내", () => {
     return within(jobRow(label)).getByText(guideTitle).closest(".heartbeat-update-guide") as HTMLElement;
   }
 
+  /**
+   * 안내를 펼친다. 하트비트 카드에서는 업데이트 버튼이 주 통로라 안내가 접힌 자리에서 시작하고
+   * (SPEC-037 확인 필요 6번), 안내 자체를 읽는 검사는 먼저 펼쳐야 한다. 접힘 그 자체를 보는
+   * 검사는 이 준비 동작을 쓰지 않는다.
+   */
+  function openGuide(label: string) {
+    fireEvent.click(within(jobRow(label)).getByRole("button", { name: "갱신 안내 펼치기" }));
+  }
+
   beforeEach(() => {
     clipboard.copy.mockReset();
     clipboard.copy.mockResolvedValue(true);
@@ -1430,6 +1552,7 @@ describe("IntegrationsView 갱신 안내", () => {
   // 완료 조건 1. 다른 탭이나 외부 문서로 보내지 않는다.
   it("puts the update steps inside the very warning that asks for the update", () => {
     renderIntegrations(warned());
+    openGuide("개발자");
 
     const warning = within(jobRow("개발자")).getByText(warningTitle).closest(
       ".integration-warning",
@@ -1467,6 +1590,7 @@ describe("IntegrationsView 갱신 안내", () => {
   // 완료 조건 5·6. 갈래 판별·pip·소스·재시작 넷이 모두 있고, 원문은 payload 값 그대로다.
   it("shows every command the payload carries and assembles none of them", () => {
     renderIntegrations(warned());
+    openGuide("개발자");
 
     const guide = guideIn("개발자");
     for (const command of commands) {
@@ -1483,6 +1607,7 @@ describe("IntegrationsView 갱신 안내", () => {
   // 완료 조건 2. 걸음마다 복사 수단이 있고 원문 그대로 넘어간다.
   it("copies each command exactly as it arrived", async () => {
     renderIntegrations(warned());
+    openGuide("개발자");
 
     const guide = guideIn("개발자");
     const buttons = within(guide).getAllByRole("button", { name: /명령 복사$/ });
@@ -1500,6 +1625,7 @@ describe("IntegrationsView 갱신 안내", () => {
   it("keeps the command on screen when the copy fails", async () => {
     clipboard.copy.mockResolvedValue(false);
     renderIntegrations(warned());
+    openGuide("개발자");
 
     const guide = guideIn("개발자");
     await userEvent.click(
@@ -1537,6 +1663,8 @@ describe("IntegrationsView 갱신 안내", () => {
    */
   it("keeps one guide's copy result out of the other's", async () => {
     renderIntegrations(warned({ managedJobs: [developerJob, plannerJob] }));
+    openGuide("개발자");
+    openGuide("기획자");
 
     await userEvent.click(
       within(guideIn("개발자")).getByRole("button", { name: "pip 설치 갱신 명령 복사" }),
@@ -1549,6 +1677,7 @@ describe("IntegrationsView 갱신 안내", () => {
   // 완료 조건 8. 갱신을 실행하는 버튼이 없다.
   it("adds copy buttons and nothing else", () => {
     renderIntegrations(warned());
+    openGuide("개발자");
 
     const guide = guideIn("개발자");
     const buttons = within(guide).getAllByRole("button");
@@ -2003,8 +2132,10 @@ describe("IntegrationsView 관리 블록 변화", () => {
           installHeartbeatJobs: onInstall,
           installDreamJob: vi.fn().mockResolvedValue(true),
         }}
+        activeLeases={[]}
         error={state.error}
         heartbeatRuns={runControls()}
+        heartbeatUpdate={updateControls()}
         snapshot={state.snapshot}
         writeError={state.writeError}
       />
@@ -2919,8 +3050,10 @@ describe("IntegrationsView 하트비트 설치 마법사", () => {
           installHeartbeatJobs: vi.fn().mockResolvedValue(true),
           installDreamJob: vi.fn().mockResolvedValue(true),
         }}
+        activeLeases={[]}
         error={null}
         heartbeatRuns={runControls()}
+        heartbeatUpdate={updateControls()}
         snapshot={snapshot({ heartbeat: heartbeat({ setupStages: stages }) })}
         writeError={null}
       />
@@ -2940,8 +3073,12 @@ describe("IntegrationsView 하트비트 설치 마법사", () => {
     expect(steps()).toHaveLength(4);
   });
 
-  // R11·완료 조건 7. 체크리스트가 되면서 "앱이 알아서 해 줄 것 같은" 인상이 생긴다.
-  it("offers no button but the copy one and keeps saying the app does not install for you", () => {
+  /**
+   * SPEC-016 R11은 "실행은 사용자 터미널의 몫"이었고, 승인된 SPEC-037 R2가 그 선을 두 단계에 한해
+   * 옮겼다(DECISION-6C2F2639). 그래서 이 검사가 지키는 것이 바뀌었다 — "실행 버튼이 하나도 없다"가
+   * 아니라 "복사 통로가 그대로 남고 실행 버튼은 백엔드가 허락한 자리에만 있다"이다.
+   */
+  it("keeps the copy path on every step while the app runs only what the backend allows", () => {
     renderIntegrations(withStages(stagesWith({ package: "unknown", init: "not_done" })));
 
     const wizard = screen
@@ -2949,27 +3086,32 @@ describe("IntegrationsView 하트비트 설치 마법사", () => {
       .querySelector(".heartbeat-setup") as HTMLElement;
     const buttons = within(wizard).queryAllByRole("button");
     // 첫 버튼은 가이드를 접는 토글이다. 표시를 바꿀 뿐이라는 것이 이름에 있다.
-    const [foldToggle, ...copyButtons] = buttons;
+    const [foldToggle] = buttons;
     expect(foldToggle).toHaveTextContent("설치 가이드 접기");
-    // 나머지는 단계마다 하나씩인 명령 복사 버튼이 전부다. 그 밖의 버튼은 없다.
+    // 단계마다 하나씩인 명령 복사 버튼은 그대로다. 실행형이 들어왔다고 복사 통로가 사라지지 않는다.
+    const copyButtons = buttons.filter((button) =>
+      button.getAttribute("aria-label")?.endsWith("명령 복사"),
+    );
     expect(copyButtons.map((button) => button.getAttribute("aria-label"))).toEqual([
       "패키지 설치 명령 복사",
       "heartbeat init 명령 복사",
       "heartbeat install-service 명령 복사",
       "dream 스킬 명령 복사",
     ]);
-    // 복사 버튼이 실행처럼 읽히지 않는다. 단계의 조작은 명령 복사까지다.
     for (const button of copyButtons) {
       expect(button.textContent).toBe("명령 복사");
       expect(button.getAttribute("aria-label")).toContain("복사");
-      expect(button.getAttribute("aria-label")).not.toContain("실행");
     }
-    // 마법사의 어느 버튼도 단계를 실행해 주는 것처럼 읽히지 않는다.
-    for (const button of buttons) {
-      expect(button.textContent).not.toContain("실행");
-      expect(button.getAttribute("aria-label") ?? "").not.toContain("실행");
-    }
-    expect(wizard).toHaveTextContent("앱이 하트비트를 대신 설치하지 않습니다");
+    // 나머지 버튼은 실행 버튼 둘뿐이다. 그 밖의 버튼은 없다.
+    const others = buttons.filter(
+      (button) => button !== foldToggle && !copyButtons.includes(button),
+    );
+    expect(others.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "heartbeat init 실행",
+      "heartbeat install-service 실행",
+    ]);
+    expect(wizard).toHaveTextContent("앱은 실행 버튼이 있는 단계만 대신 실행합니다");
+    expect(wizard).toHaveTextContent("나머지 단계는 사용자가 자기 터미널에서 직접 실행합니다");
     // R7. 자동으로 다시 확인한다는 사실은 있고, 재확인 버튼과 주기의 숫자는 없다.
     expect(wizard).toHaveTextContent("자동으로 다시 확인해 이 목록을 채웁니다");
     expect(wizard).not.toHaveTextContent("다시 확인하세요");
@@ -3035,8 +3177,10 @@ describe("IntegrationsView 하트비트 설치 마법사", () => {
             installHeartbeatJobs: vi.fn().mockResolvedValue(true),
             installDreamJob: vi.fn().mockResolvedValue(true),
           }}
+          activeLeases={[]}
           error={null}
           heartbeatRuns={runControls()}
+          heartbeatUpdate={updateControls()}
           snapshot={snapshot({ heartbeat: heartbeat({ setupStages: stages }) })}
           writeError={null}
         />
@@ -3384,8 +3528,10 @@ describe("IntegrationsView 하트비트 잡 지금 실행", () => {
     const view = (next: IntegrationsState, runs: HeartbeatRunControls) => (
       <IntegrationsView
         actions={{ installHeartbeatJobs: install, installDreamJob: dream }}
+        activeLeases={[]}
         error={next.error}
         heartbeatRuns={runs}
+        heartbeatUpdate={updateControls()}
         snapshot={next.snapshot}
         writeError={next.writeError}
       />
@@ -3882,5 +4028,1334 @@ describe("IntegrationsView 하트비트 잡 지금 실행", () => {
       finishSecondRun(true);
       expect(await within(jobRow("개발자")).findByText(/실행 요청이 끝났습니다/)).toBeVisible();
     });
+  });
+});
+
+/** SPEC-037 R1·R3·R4·R5·R6의 화면 몫. TASK-116이 닫는 자리다. */
+describe("IntegrationsView 하트비트 업데이트", () => {
+  /** 결과 픽스처 다섯. 백엔드(`heartbeat_update_service.rs`)가 내는 세 모양을 전부 덮는다. */
+  const ok: HeartbeatUpdateResult = {
+    kind: "contract",
+    steps: [
+      { step: "repo", status: "ok", detail: "updated" },
+      { step: "deps", status: "ok", detail: "reinstalled" },
+      { step: "service", status: "ok", detail: "restarted" },
+    ],
+    result: "ok",
+    version: "0.8.1",
+    code: 0,
+    stdout: "result=ok version=0.8.1 exit=0\n",
+    stderr: "",
+  };
+
+  /** 저장소 단계에서 멈춰 뒤 단계 줄이 나오지 않은 모양. */
+  const failed: HeartbeatUpdateResult = {
+    kind: "contract",
+    steps: [{ step: "repo", status: "failed", detail: "dirty-tree" }],
+    result: "failed",
+    version: "0.8.0",
+    code: 11,
+    stdout: "step=repo status=failed detail=dirty-tree\nresult=failed version=0.8.0 exit=11\n",
+    stderr: "미커밋 변경이 있습니다\n두 번째 줄\n",
+  };
+
+  /** 코드는 갱신됐는데 재기동이 못 따라온 모양. 08-05 사고의 모양이 이것이다. */
+  const partial: HeartbeatUpdateResult = {
+    kind: "contract",
+    steps: [
+      { step: "repo", status: "ok", detail: "updated" },
+      { step: "deps", status: "ok", detail: "reinstalled" },
+      { step: "service", status: "skipped", detail: "not-registered" },
+    ],
+    result: "partial",
+    version: "0.8.1",
+    code: 31,
+    stdout: "result=partial version=0.8.1 exit=31\n",
+    stderr: "서비스 등록물을 찾지 못했습니다\n",
+  };
+
+  /** update 서브커맨드를 모르는 옛 설치본이 낼 법한 모양. */
+  const offContract: HeartbeatUpdateResult = {
+    kind: "offContract",
+    code: 2,
+    stdout: "usage: heartbeat [-h] {once,status,install} ...\n",
+    stderr: "unrecognized arguments: update\n",
+  };
+
+  /**
+   * 이 기기의 흔한 결말. 앱의 실행 파일 후보 둘이 비어 있는 상태다(기획서 확인 사실 11).
+   *
+   * 좁은 타입으로 둔다. 이 픽스처의 `message`를 단언에서 그대로 읽으려면 합집합이 아니어야 한다.
+   */
+  const notRun = {
+    kind: "notRun",
+    message: "하트비트 실행 파일을 찾지 못해 업데이트를 실행하지 못했습니다.",
+    command: "heartbeat update",
+    looked: ["heartbeat", "/home/tester/.local/bin/heartbeat"],
+  } satisfies HeartbeatUpdateResult;
+
+  const leases: AgentLeaseSummary[] = [
+    {
+      leaseId: "lease-1",
+      agent: "developer-claude",
+      role: "developer",
+      taskId: "TASK-104",
+      heartbeatAt: "2026-08-05T06:00:00Z",
+      expiresAt: "2026-08-05T07:00:00Z",
+    },
+    {
+      leaseId: "lease-2",
+      agent: "planner-claude",
+      role: null,
+      taskId: null,
+      heartbeatAt: "2026-08-05T06:10:00Z",
+      expiresAt: "2026-08-05T07:10:00Z",
+    },
+  ];
+
+  const updateAction = () => screen.getByRole("button", { name: "하트비트 업데이트" });
+  const confirmUpdate = () => screen.getByRole("button", { name: "확인하고 업데이트" });
+  const resultBox = () => screen.getByRole("group", { name: "하트비트 업데이트 결과" });
+
+  function renderUpdate(
+    controls: Partial<HeartbeatUpdateControls> = {},
+    activeLeases: AgentLeaseSummary[] = [],
+  ) {
+    const update = vi.fn().mockResolvedValue(undefined);
+    const heartbeatUpdate = updateControls({ update, ...controls });
+    renderIntegrations(installed([developerJob]), vi.fn().mockResolvedValue(true), {
+      activeLeases,
+      heartbeatUpdate,
+    });
+    return update;
+  }
+
+  beforeEach(() => {
+    clipboard.copy.mockReset();
+    clipboard.copy.mockResolvedValue(true);
+  });
+
+  // 완료 조건 1. 카드의 버튼 하나로 업데이트가 실행된다. 자리는 잡 폼 밖의 공통 자리다.
+  it("puts one update action outside the per-role job rows", () => {
+    renderUpdate();
+
+    expect(updateAction()).toBeVisible();
+    // 역할별 조작이 아니다. 어느 잡 행에도 이 버튼이 들어 있지 않다.
+    for (const label of ["기획자", "프로젝트 아키텍트", "개발자"]) {
+      expect(
+        within(jobRow(label)).queryByRole("button", { name: "하트비트 업데이트" }),
+      ).toBeNull();
+    }
+  });
+
+  // 완료 조건 2·3. 누르는 즉시 실행하지 않는다.
+  it("does not run before the confirmation step", () => {
+    const update = renderUpdate();
+
+    fireEvent.click(updateAction());
+
+    expect(update).not.toHaveBeenCalled();
+    expect(screen.getByRole("group", { name: "하트비트 업데이트 확인" })).toBeVisible();
+  });
+
+  // 완료 조건 2. 무엇이 바뀌는지 세 줄과 되돌릴 수 없다는 것이 확인 전에 실린다.
+  it("names the three things that change and says it cannot be undone", () => {
+    renderUpdate();
+    fireEvent.click(updateAction());
+
+    const confirm = screen.getByRole("group", { name: "하트비트 업데이트 확인" });
+    expect(confirm).toHaveTextContent("저장소를 원격의 최신 커밋으로 갱신합니다");
+    expect(confirm).toHaveTextContent("의존성을 다시 설치합니다");
+    expect(confirm).toHaveTextContent("데몬을 재기동합니다");
+    expect(confirm).toHaveTextContent("되돌릴 수 없습니다");
+    // 같은 자리의 "지금 실행" 확인 화면과 첫 줄에서 갈린다. 그쪽 문장이 여기 오면 안 된다.
+    expect(confirm).not.toHaveTextContent("이 조작은 어떤 파일도 쓰지 않습니다");
+  });
+
+  // 완료 조건 2. 세션이 0개일 때와 하나 이상일 때 문구가 다르다.
+  it("words an empty session list differently from one with sessions", () => {
+    renderUpdate({}, []);
+    fireEvent.click(updateAction());
+
+    expect(screen.getByRole("group", { name: "하트비트 업데이트 확인" })).toHaveTextContent(
+      "지금 끊길 세션이 없습니다",
+    );
+    cleanup();
+
+    renderUpdate({}, leases);
+    fireEvent.click(updateAction());
+
+    const confirm = screen.getByRole("group", { name: "하트비트 업데이트 확인" });
+    expect(confirm).toHaveTextContent("지금 끊기는 세션 2개");
+    expect(confirm).not.toHaveTextContent("지금 끊길 세션이 없습니다");
+    // 목록은 활성 lease 그대로다. 에이전트 이름과 대상 문서가 확인 전에 보인다.
+    expect(within(confirm).getByText("developer-claude · TASK-104")).toBeVisible();
+    expect(within(confirm).getByText("planner-claude · 워크플로우 작업")).toBeVisible();
+    // 앱이 세션을 정리하지 않는다는 사실을 감추지 않는다.
+    expect(confirm).toHaveTextContent("앱은 그 세션을 정리하지 않고 lease에도 손대지 않으므로");
+  });
+
+  // 완료 조건 3. 취소하면 아무것도 실행되지 않는다.
+  it("cancels without running anything", () => {
+    const update = renderUpdate();
+
+    fireEvent.click(updateAction());
+    fireEvent.click(screen.getByRole("button", { name: "취소" }));
+
+    expect(update).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "하트비트 업데이트 확인" })).toBeNull();
+  });
+
+  // 완료 조건 3. 확인을 누르면 화면이 닫히고 같은 조작이 두 번 실행되지 않는다.
+  it("runs once when the confirm button is pressed twice", () => {
+    const update = renderUpdate();
+
+    fireEvent.click(updateAction());
+    const confirm = confirmUpdate();
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("group", { name: "하트비트 업데이트 확인" })).toBeNull();
+  });
+
+  // 완료 조건 4. 실행 중에는 버튼이 눌리지 않고 진행 표시가 보인다.
+  it("blocks the button and shows the progress while it runs", () => {
+    renderUpdate({ running: true });
+
+    expect(updateAction()).toBeDisabled();
+    expect(screen.getByText(/하트비트를 갱신하고 있습니다/)).toBeVisible();
+  });
+
+  // 완료 조건 5. 단계 줄이 데몬이 낸 순서 그대로 나온다.
+  it("draws every step the daemon emitted in the order it emitted them", () => {
+    renderUpdate({ result: ok });
+
+    const steps = within(resultBox()).getAllByRole("listitem");
+    expect(steps.map((step) => step.textContent)).toEqual([
+      "저장소 갱신완료updated",
+      "의존성 설치완료reinstalled",
+      "데몬 재기동완료restarted",
+    ]);
+    expect(resultBox()).toHaveTextContent("갱신이 끝났습니다");
+    expect(resultBox()).toHaveTextContent("갱신 뒤 디스크의 하트비트 버전: 0.8.1");
+  });
+
+  // 완료 조건 5. 데몬이 내지 않은 단계를 앱이 "건너뜀"으로 지어내지 않는다.
+  it("invents no step the daemon never emitted", () => {
+    renderUpdate({ result: failed });
+
+    const steps = within(resultBox()).getAllByRole("listitem");
+    expect(steps).toHaveLength(1);
+    expect(steps[0].textContent).toBe("저장소 갱신실패dirty-tree");
+    expect(resultBox()).not.toHaveTextContent("의존성 설치");
+    expect(resultBox()).not.toHaveTextContent("데몬 재기동");
+  });
+
+  // 완료 조건 5. `partial`이 성공으로도 실패로도 읽히지 않는다.
+  it("reads partial as neither a success nor a failure", () => {
+    renderUpdate({ result: partial });
+
+    const box = resultBox();
+    expect(box).toHaveClass("result-partial");
+    expect(box).toHaveTextContent("코드는 갱신됐지만 뒤가 따라오지 못했습니다");
+    // 성공·실패의 낱말이 이 상태에 붙지 않는다.
+    expect(box).not.toHaveTextContent("갱신이 끝났습니다");
+    expect(box).not.toHaveTextContent("갱신하지 못했습니다");
+    // 그 상태의 뜻이 화면에 있다. 08-05 사고의 모양이 문장으로 남는다.
+    expect(box).toHaveTextContent("지금 도는 프로세스는 갱신 전 코드를 그대로 들고 있을 수 있습니다");
+  });
+
+  // 완료 조건 6. 원인별로 다음 행동이 다르다. 하나의 문구로 뭉뚱그리지 않는다.
+  it("says a different next step for each exit code", () => {
+    const cases: [number, string][] = [
+      [10, "pip 갈래로 갱신하세요"],
+      [11, "변경을 커밋하거나 되돌린 뒤"],
+      [12, "직접 병합하거나 브랜치를 정리한 뒤"],
+      [13, "네트워크와 원격 접근 권한을 확인한 뒤"],
+      [14, "upstream을 지정한 뒤"],
+      [20, "의존성 설치가 실패했습니다"],
+      [30, "재기동 명령이 실패했습니다"],
+      [31, "OS 스케줄러 밖에서 돌고 있어"],
+    ];
+
+    const sentences = new Set<string>();
+    for (const [code, expected] of cases) {
+      renderUpdate({ result: { ...failed, code } });
+      const text = resultBox().textContent ?? "";
+      expect(text, `exit ${code}`).toContain(`종료 코드 ${code}`);
+      expect(text, `exit ${code}`).toContain(expected);
+      sentences.add(expected);
+      cleanup();
+    }
+    expect(sentences.size).toBe(cases.length);
+  });
+
+  // 완료 조건 6. 인용 절에 없는 코드는 숫자 그대로 나오고 앱이 뜻을 지어내지 않는다.
+  it("carries an exit code the contract does not list as the number it is", () => {
+    renderUpdate({ result: { ...failed, code: 15 } });
+
+    expect(resultBox()).toHaveTextContent("종료 코드 15 — 앱이 아는 코드가 아닙니다");
+  });
+
+  // 완료 조건 7. stderr 원문이 요약 없이 화면에 남는다.
+  it("keeps the stderr on screen exactly as it arrived", () => {
+    renderUpdate({ result: failed });
+
+    const output = resultBox().querySelector(".heartbeat-update-output pre") as HTMLElement;
+    expect(output.textContent).toBe(failed.stderr);
+  });
+
+  // 완료 조건 5. 계약 밖 출력은 성공으로도 실패로도 부르지 않는다.
+  it("calls an off-contract answer neither a success nor a failure", () => {
+    renderUpdate({ result: offContract });
+
+    const warning = screen
+      .getByText("이 설치본이 계약대로 답하지 않았습니다")
+      .closest(".integration-warning") as HTMLElement;
+    expect(warning).toHaveTextContent("성공으로도 실패로도 부르지 않습니다");
+    expect(warning).toHaveTextContent("종료 코드 2.");
+    // 계약 밖 출력에는 종료 코드의 뜻도 계약 밖이다. 코드 표의 문장을 끌어다 쓰지 않는다.
+    expect(warning).not.toHaveTextContent("앱이 아는 코드가 아닙니다");
+    // 원문 둘이 그대로 남는다. 계약 밖에서는 그것이 유일한 단서다.
+    const outputs = warning.querySelectorAll(".heartbeat-update-output pre");
+    expect(Array.from(outputs).map((output) => output.textContent)).toEqual([
+      offContract.stderr,
+      offContract.stdout,
+    ]);
+  });
+
+  // 완료 조건 8. 실행 수단을 찾지 못하면 그 사실과 본 후보, 명령 원문이 나온다.
+  it("names the paths it looked at and the command to type when it cannot run", () => {
+    renderUpdate({ result: notRun });
+
+    const warning = screen
+      .getByText("앱이 하트비트 업데이트를 실행하지 못했습니다")
+      .closest(".integration-warning") as HTMLElement;
+    expect(warning).toHaveTextContent(notRun.message);
+    for (const path of ["heartbeat", "/home/tester/.local/bin/heartbeat"]) {
+      expect(within(warning).getByText(path)).toBeVisible();
+    }
+    expect(within(warning).getByText("heartbeat update")).toBeVisible();
+  });
+
+  // 완료 조건 8. 명령 원문을 복사할 수 있고, 실패해도 원문은 화면에 남는다.
+  it("copies the command as it arrived and keeps it on screen when the copy fails", async () => {
+    clipboard.copy.mockResolvedValue(false);
+    renderUpdate({ result: notRun });
+
+    await userEvent.click(screen.getByRole("button", { name: "하트비트 업데이트 명령 복사" }));
+
+    expect(clipboard.copy).toHaveBeenCalledWith("heartbeat update");
+    expect(
+      screen.getByText("복사하지 못했습니다 — 위 명령을 직접 선택해 복사하세요."),
+    ).toBeVisible();
+    expect(screen.getByText("heartbeat update")).toBeVisible();
+  });
+
+  // 완료 조건 9. 실행 가능한 상태에서는 안내가 접힌 자리에 있고 버튼이 주 통로다.
+  it("folds the update guide away while the button is the main path", () => {
+    renderIntegrations(warnedForUpdate(), vi.fn().mockResolvedValue(true), {
+      heartbeatUpdate: updateControls({ result: ok }),
+    });
+
+    const row = jobRow("개발자");
+    expect(within(row).getByRole("button", { name: "갱신 안내 펼치기" })).toBeVisible();
+    // 안내는 DOM에 남아 있으나 접혀 있다. 접기는 언마운트가 아니다.
+    expect(within(row).getByText("하트비트를 갱신하는 방법")).not.toBeVisible();
+    // 084 경고의 문구 자체는 그대로다.
+    expect(row).toHaveTextContent("하트비트가 이 잡을 실행한 기록이 없습니다");
+  });
+
+  // 완료 조건 8. 실행 수단 없음으로 끝난 뒤에는 안내가 펼쳐진 주 통로가 된다.
+  it("opens the guide as the main path once the run found nothing to execute", () => {
+    renderIntegrations(warnedForUpdate(), vi.fn().mockResolvedValue(true), {
+      heartbeatUpdate: updateControls({ result: notRun }),
+    });
+
+    const row = jobRow("개발자");
+    expect(within(row).getByText("하트비트를 갱신하는 방법")).toBeVisible();
+    expect(within(row).getByRole("button", { name: "갱신 안내 접기" })).toBeVisible();
+    expect(within(row).getByText(updateGuide.packageCommand)).toBeVisible();
+  });
+
+  /**
+   * 승인안이 "직전 실행이 무엇으로 끝났는가" 하나로 접힘을 가른다고 적었다. 앱이 사전 탐색으로
+   * 실행 가능 여부를 판정하지 않으므로 실행 전에는 접혀 있어야 한다.
+   */
+  it("keeps the guide folded while nothing has been run yet", () => {
+    renderIntegrations(warnedForUpdate(), vi.fn().mockResolvedValue(true), {
+      heartbeatUpdate: updateControls(),
+    });
+
+    expect(
+      within(jobRow("개발자")).getByRole("button", { name: "갱신 안내 펼치기" }),
+    ).toBeVisible();
+  });
+
+  // 완료 조건 11. 업데이트가 실패해도 카드의 다른 동작이 막히지 않는다(R9).
+  it("blocks none of the other card actions when the update fails", () => {
+    renderIntegrations(warnedForUpdate(), vi.fn().mockResolvedValue(true), {
+      heartbeatUpdate: updateControls({ result: notRun }),
+    });
+
+    expect(screen.getByRole("button", { name: "역할 잡 변경 사항 저장" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "개발자 기본값으로 재설정" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "개발자 잡 지금 실행" })).toBeEnabled();
+    // 실패한 실행이 다시 눌릴 수 있어야 한다. 실행이 끝난 상태이므로 버튼도 돌아와 있다.
+    expect(updateAction()).toBeEnabled();
+  });
+
+  /** 관리 블록을 읽지 못해도 설치본을 갱신하는 길은 남는다. 두 가지는 서로를 막지 않는다. */
+  it("stays available while the managed block cannot be read", () => {
+    const unreadable: IntegrationsState = {
+      snapshot: snapshot({
+        managedBlockFailure: { path: jobsFilePath, message: "Permission denied" },
+      }),
+      error: null,
+      writeError: null,
+    };
+    renderIntegrations(unreadable, vi.fn().mockResolvedValue(true), {
+      heartbeatUpdate: updateControls(),
+    });
+
+    expect(updateAction()).toBeEnabled();
+  });
+
+  /** 미설치 상태에는 갱신할 설치본이 없다. 마법사가 그 자리의 안내다. */
+  it("offers no update while heartbeat itself is missing", () => {
+    renderIntegrations(
+      {
+        snapshot: snapshot({ heartbeat: heartbeat({ installation: "not_installed" }) }),
+        error: null,
+        writeError: null,
+      },
+      vi.fn().mockResolvedValue(true),
+      { heartbeatUpdate: updateControls() },
+    );
+
+    expect(screen.queryByRole("button", { name: "하트비트 업데이트" })).toBeNull();
+  });
+});
+
+/** 084 경고가 뜬 상태의 스냅샷. 개발자 잡만 파일에 있고 실행 기록이 없다. */
+function warnedForUpdate(): IntegrationsState {
+  return {
+    snapshot: snapshot({ heartbeat: heartbeat({ managedJobs: [developerJob] }) }),
+    error: null,
+    writeError: null,
+  };
+}
+
+describe("IntegrationsView 설치 단계 실행", () => {
+  /** 실행 가능 표식만 갈아 끼운 단계 목록. 나머지 값은 픽스처 그대로다. */
+  function stagesRunnable(
+    runnable: Partial<Record<HeartbeatSetupStep, boolean>>,
+  ): IntegrationsState {
+    return {
+      snapshot: snapshot({
+        heartbeat: heartbeat({
+          setupStages: setupStages().map((stage) => ({
+            ...stage,
+            state: stage.step === "service" ? "unknown" : stage.state,
+            runnable: runnable[stage.step] ?? stage.runnable,
+          })),
+        }),
+      }),
+      error: null,
+      writeError: null,
+    };
+  }
+
+  /** 마법사가 보이는 기본 상태. 3단계가 확인 불가라 접히지 않는다. */
+  function wizardShown(): IntegrationsState {
+    return stagesRunnable({});
+  }
+
+  const runAction = (title: string) => screen.getByRole("button", { name: `${title} 실행` });
+  const confirmOf = (title: string) =>
+    screen.getByRole("group", { name: `${title} 실행 확인` });
+  const resultOf = (title: string) =>
+    screen.getByRole("group", { name: `${title} 실행 결과` });
+
+  function renderSteps(controls: Partial<HeartbeatSetupRunControls> = {}) {
+    const run = vi.fn().mockResolvedValue(undefined);
+    renderIntegrations(wizardShown(), vi.fn().mockResolvedValue(true), {
+      heartbeatSetupRuns: setupRunControls({ run, ...controls }),
+    });
+    return run;
+  }
+
+  beforeEach(() => {
+    clipboard.copy.mockReset();
+    clipboard.copy.mockResolvedValue(true);
+  });
+
+  /**
+   * 완료 조건 2. 버튼이 붙는 자리를 정하는 값은 백엔드가 실은 표식 하나다. 픽스처가 1단계를
+   * 실행형으로, 2단계를 비실행형으로 뒤집어도 화면이 단계 종류로 다시 가르지 않는다.
+   */
+  it("puts the run button where the backend says, not where the step kind says", () => {
+    renderIntegrations(stagesRunnable({ package: true, init: false }), vi.fn(), {
+      heartbeatSetupRuns: setupRunControls(),
+    });
+
+    expect(screen.getByRole("button", { name: "패키지 설치 실행" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "heartbeat install-service 실행" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "heartbeat init 실행" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "dream 스킬 실행" })).toBeNull();
+  });
+
+  // 완료 조건 1. 실행 대상이 아닌 단계의 명령 원문과 복사 버튼은 그대로다.
+  it("leaves the command and the copy button of a non-runnable step untouched", () => {
+    renderSteps();
+
+    const rows = Array.from(
+      screen
+        .getByRole("article", { name: "claude-heartbeat" })
+        .querySelectorAll<HTMLElement>(".heartbeat-setup-step"),
+    );
+    for (const [index, command] of [
+      "pip install claude-heartbeat",
+      "heartbeat install dream",
+    ].entries()) {
+      const row = index === 0 ? rows[0] : rows[3];
+      expect(row.querySelector("pre code")?.textContent).toBe(command);
+      expect(within(row).getByRole("button", { name: /명령 복사$/ })).toBeVisible();
+      expect(within(row).queryByRole("button", { name: /실행$/ })).toBeNull();
+    }
+  });
+
+  // 완료 조건 3. 누르는 즉시 실행하지 않는다.
+  it("does not run before the confirmation step", () => {
+    const run = renderSteps();
+
+    fireEvent.click(runAction("heartbeat init"));
+
+    expect(run).not.toHaveBeenCalled();
+    expect(confirmOf("heartbeat init")).toBeVisible();
+  });
+
+  /**
+   * 완료 조건 3. 무엇이 만들어지는지 알린 뒤 실행한다. 판정 근거 경로가 그 고지의 재료다.
+   *
+   * 같은 자리의 "지금 실행" 확인 화면("어떤 파일도 쓰지 않습니다")과 갈리는 지점이기도 하다 —
+   * 이쪽은 파일을 만드는 조작이고, 만드는 주체는 앱이 아니라 하트비트다.
+   */
+  it("names what gets created before running it", () => {
+    renderSteps();
+
+    fireEvent.click(runAction("heartbeat install-service"));
+
+    const confirm = confirmOf("heartbeat install-service");
+    expect(confirm).toHaveTextContent("서비스 등록물을 만듭니다");
+    expect(confirm).toHaveTextContent("등록한 서비스로 데몬을 띄웁니다");
+    expect(confirm).toHaveTextContent(
+      "만들어지는 자리: /Users/catze/Library/LaunchAgents/com.claude-heartbeat.plist",
+    );
+    expect(confirm).toHaveTextContent("앱은 이 경로에서 어떤 파일도 쓰지 않습니다");
+    expect(within(confirm).getByText("heartbeat install-service")).toBeVisible();
+  });
+
+  // 완료 조건 3. 취소하면 아무것도 실행되지 않는다.
+  it("cancels without running anything", () => {
+    const run = renderSteps();
+
+    fireEvent.click(runAction("heartbeat init"));
+    fireEvent.click(within(confirmOf("heartbeat init")).getByRole("button", { name: "취소" }));
+
+    expect(run).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "heartbeat init 실행 확인" })).toBeNull();
+  });
+
+  /**
+   * 화면이 보내는 것은 단계 식별자다. 명령 원문도 함께 넘기지만 그것은 커맨드가 답하지 못했을 때의
+   * 폴백일 뿐이고, 실행 인자는 백엔드 상수에서만 나온다.
+   */
+  it("sends the step id and runs once even when confirmed twice", () => {
+    const run = renderSteps();
+
+    fireEvent.click(runAction("heartbeat init"));
+    const confirm = within(confirmOf("heartbeat init")).getByRole("button", {
+      name: "확인하고 실행",
+    });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith("init", "heartbeat init");
+    expect(screen.queryByRole("group", { name: "heartbeat init 실행 확인" })).toBeNull();
+  });
+
+  // 완료 조건 4. 실행 중에는 그 단계의 버튼이 눌리지 않고 진행 표시가 보인다.
+  it("blocks only the running step and shows its progress", () => {
+    renderSteps({ running: ["init"] });
+
+    expect(runAction("heartbeat init")).toBeDisabled();
+    // 한 단계의 실행이 다른 단계를 막지 않는다.
+    expect(runAction("heartbeat install-service")).toBeEnabled();
+    expect(screen.getByText(/실행하고 있습니다/)).toBeVisible();
+  });
+
+  // 완료 조건 5. 종료 코드와 원문이 남는다.
+  it("keeps the exit code and the raw output of a finished run", () => {
+    renderSteps({
+      results: {
+        init: {
+          kind: "ran",
+          succeeded: true,
+          code: 0,
+          stdout: "initialized /Users/catze/.claude/HEARTBEAT.md\n",
+          stderr: "",
+        },
+      },
+    });
+
+    const result = resultOf("heartbeat init");
+    expect(result).toHaveTextContent("명령이 끝났습니다");
+    expect(result).toHaveTextContent("종료 코드 0.");
+    expect(within(result).getByText(/initialized/)).toBeInTheDocument();
+  });
+
+  /**
+   * 완료 조건 5. 앱이 실패 사유를 지어내지 않는다. 이 두 명령은 원인별 종료 코드가 계약에 없으므로
+   * 숫자와 원문까지가 화면의 몫이다 — 업데이트 결과가 코드마다 다음 행동을 적는 것과 갈린다.
+   */
+  it("never invents a reason for a failed run", () => {
+    renderSteps({
+      results: {
+        service: {
+          kind: "ran",
+          succeeded: false,
+          code: 11,
+          stdout: "",
+          stderr: "permission denied\n",
+        },
+      },
+    });
+
+    const result = resultOf("heartbeat install-service");
+    expect(result).toHaveTextContent("명령이 실패했습니다");
+    expect(result).toHaveTextContent("종료 코드 11.");
+    expect(result).toHaveTextContent("종료 코드를 사유로 옮기지 않습니다");
+    expect(within(result).getByText(/permission denied/)).toBeInTheDocument();
+    // 업데이트 결과가 같은 숫자에 붙이는 문장이 이 자리에 오면 앱이 없는 계약을 지어낸 것이다.
+    expect(result).not.toHaveTextContent("미커밋 변경");
+  });
+
+  // 완료 조건 5. 시그널로 끝난 것은 성공이 아니고, 숫자가 없다는 사실이 문장으로 남는다.
+  it("says a run ended without an exit code", () => {
+    renderSteps({
+      results: {
+        init: { kind: "ran", succeeded: false, code: null, stdout: "", stderr: "" },
+      },
+    });
+
+    expect(resultOf("heartbeat init")).toHaveTextContent("종료 코드 없이 끝났습니다");
+  });
+
+  // 완료 조건 7. 실행 수단을 찾지 못하면 그 사실과 본 후보, 명령 원문이 나온다(R5).
+  it("shows what it looked at and the command to type when it cannot run", async () => {
+    const looked = ["heartbeat", "/home/tester/.local/bin/heartbeat"];
+    renderSteps({
+      results: {
+        init: {
+          kind: "notRun",
+          message: "하트비트 실행 파일을 찾지 못했습니다.",
+          command: "heartbeat init",
+          looked,
+        },
+      },
+    });
+
+    const warning = screen
+      .getByRole("article", { name: "claude-heartbeat" })
+      .querySelector(".heartbeat-setup-run .integration-warning") as HTMLElement;
+    expect(warning).toHaveTextContent("하트비트 실행 파일을 찾지 못했습니다.");
+    for (const path of looked) {
+      expect(within(warning).getByText(path)).toBeVisible();
+    }
+    expect(warning).toHaveTextContent("터미널에서 직접 실행하면 같은 걸음을 끝낼 수 있습니다");
+
+    // 원문은 단계 안에 그대로 남아 있고, 복사 버튼이 그 값을 그대로 넘긴다.
+    await userEvent.click(
+      screen.getByRole("button", { name: "heartbeat init 실행 실패 명령 복사" }),
+    );
+    expect(clipboard.copy).toHaveBeenCalledWith("heartbeat init");
+  });
+
+  /**
+   * 화면은 실행 가능 표식만 보고 버튼을 세우므로 정상 경로에서는 나오지 않는 값이다. 나왔다는 것은
+   * 화면과 백엔드의 답이 갈라졌다는 뜻이라, 조용히 성공처럼 보이지 않아야 한다.
+   */
+  it("shows a refused step as a refusal, not as a finished run", () => {
+    renderSteps({
+      results: {
+        init: { kind: "notRunnable", message: "앱이 대신 실행하지 않는 단계입니다: init" },
+      },
+    });
+
+    expect(screen.queryByRole("group", { name: "heartbeat init 실행 결과" })).toBeNull();
+    expect(
+      screen.getByRole("article", { name: "claude-heartbeat" }),
+    ).toHaveTextContent("앱이 대신 실행하지 않는 단계입니다: init");
+  });
+});
+
+describe("IntegrationsView 하트비트 버전", () => {
+  const known = (running: string, disk: string): HeartbeatVersions => ({
+    running: { kind: "known", version: running },
+    disk: { kind: "known", version: disk },
+    verdict: running === disk ? { kind: "match" } : { kind: "mismatch" },
+  });
+
+  const versionBox = () => screen.getByRole("group", { name: "하트비트 버전" });
+
+  function renderVersions(controls: Partial<HeartbeatVersionControls>) {
+    const check = vi.fn().mockResolvedValue(undefined);
+    renderIntegrations(installed([developerJob]), vi.fn().mockResolvedValue(true), {
+      heartbeatVersions: versionControls({ check, ...controls }),
+    });
+    return check;
+  }
+
+  // 완료 조건 8. 두 값과 경고가 함께 보이고, 다음 행동이 그 자리에 있다.
+  it("shows both versions and warns when they differ", () => {
+    renderVersions({ versions: known("0.8.0", "0.8.1") });
+
+    const box = versionBox();
+    expect(box).toHaveTextContent("도는 데몬");
+    expect(box).toHaveTextContent("0.8.0");
+    expect(box).toHaveTextContent("디스크");
+    expect(box).toHaveTextContent("0.8.1");
+    expect(box).toHaveTextContent("도는 데몬과 디스크의 버전이 다릅니다");
+    expect(box).toHaveTextContent("지금 도는 프로세스는 옛 코드입니다");
+    expect(box).toHaveTextContent("하트비트 업데이트가 그 상태를 푸는 다음 행동입니다");
+    // 084 경고의 판정 자리는 그대로다. 버전 표시가 그 경고를 대체하지 않는다(제외 범위).
+    expect(screen.getByRole("button", { name: "하트비트 업데이트" })).toBeVisible();
+  });
+
+  it("says nothing is off when the two versions match", () => {
+    renderVersions({ versions: known("0.8.1", "0.8.1") });
+
+    const box = versionBox();
+    expect(box).toHaveTextContent("도는 데몬과 디스크가 같은 버전입니다");
+    expect(box).not.toHaveTextContent("버전이 다릅니다");
+    expect(box).not.toHaveTextContent("판정하지 못했습니다");
+  });
+
+  /**
+   * 완료 조건 9. 이 기기의 현재 상태다(기획서 확인 사실 11). 한쪽만 아는 상태를 "같다"로도
+   * "다르다"로도 접지 않고, 본 후보를 지어내지 않는다.
+   */
+  it("tells a missing executable apart and lists what it looked at", () => {
+    const looked = ["heartbeat", "/home/tester/.local/bin/heartbeat"];
+    renderVersions({
+      versions: {
+        running: { kind: "known", version: "0.8.0" },
+        disk: { kind: "notFound", looked },
+        verdict: { kind: "undetermined", reasons: ["executableNotFound"] },
+      },
+    });
+
+    const box = versionBox();
+    expect(box).toHaveTextContent("0.8.0");
+    expect(box).toHaveTextContent("확인 불가");
+    expect(box).toHaveTextContent("어긋났는지 판정하지 못했습니다");
+    expect(box).toHaveTextContent("실행 파일을 찾지 못해 디스크의 버전을 읽지 못했습니다");
+    for (const path of looked) {
+      expect(within(box).getByText(path)).toBeVisible();
+    }
+    expect(box).not.toHaveTextContent("같은 버전입니다");
+    expect(box).not.toHaveTextContent("버전이 다릅니다");
+  });
+
+  // 완료 조건 9. 사유마다 다음 행동이 다르므로 문장이 갈린다.
+  it("words a missing daemon record differently from a missing executable", () => {
+    renderVersions({
+      versions: {
+        running: { kind: "unknown" },
+        disk: { kind: "known", version: "0.8.1" },
+        verdict: { kind: "undetermined", reasons: ["runningVersionUnknown"] },
+      },
+    });
+
+    const box = versionBox();
+    expect(box).toHaveTextContent("상태 파일에 도는 데몬의 버전이 없어 읽지 못했습니다");
+    expect(box).not.toHaveTextContent("실행 파일을 찾지 못해");
+  });
+
+  // 둘 다 모르면 사유도 둘이다. 하나만 실으면 나머지가 사라진다.
+  it("keeps every reason when neither version is known", () => {
+    renderVersions({
+      versions: {
+        running: { kind: "unknown" },
+        disk: { kind: "offContract", code: 2, stdout: "usage: heartbeat\n", stderr: "" },
+        verdict: {
+          kind: "undetermined",
+          reasons: ["diskVersionOffContract", "runningVersionUnknown"],
+        },
+      },
+    });
+
+    const box = versionBox();
+    expect(box).toHaveTextContent("출력이 계약의 모양이 아니라");
+    expect(box).toHaveTextContent("상태 파일에 도는 데몬의 버전이 없어");
+    // 계약 밖 출력은 원문이 유일한 단서다.
+    expect(within(box).getByText(/usage: heartbeat/)).toBeInTheDocument();
+  });
+
+  // 커맨드 자체가 거절한 것은 판정과 다른 값이다. 조용히 빈 자리로 두지 않는다.
+  it("reports a refused command instead of drawing an empty verdict", () => {
+    renderVersions({ error: "홈 디렉터리를 찾지 못했습니다" });
+
+    expect(screen.queryByRole("group", { name: "하트비트 버전" })).toBeNull();
+    expect(
+      screen.getByRole("article", { name: "claude-heartbeat" }),
+    ).toHaveTextContent("홈 디렉터리를 찾지 못했습니다");
+  });
+
+  /**
+   * 완료 조건 10. 이 조회는 프로세스를 하나 띄운다. 카드가 펼쳐지는 순간 한 번 부르고, 조회 주기가
+   * 넣는 새 스냅샷으로 다시 렌더돼도 호출 수가 늘지 않는다.
+   */
+  it("checks once when the card opens and never again on a refresh", () => {
+    const check = vi.fn().mockResolvedValue(undefined);
+    const controls = versionControls({ check });
+    const view = (state: IntegrationsState) => (
+      <IntegrationsView
+        actions={{
+          installHeartbeatJobs: vi.fn().mockResolvedValue(true),
+          installDreamJob: vi.fn().mockResolvedValue(true),
+        }}
+        activeLeases={[]}
+        error={null}
+        heartbeatRuns={runControls()}
+        heartbeatSetupRuns={setupRunControls()}
+        heartbeatUpdate={updateControls()}
+        heartbeatVersions={controls}
+        snapshot={state.snapshot}
+        writeError={null}
+      />
+    );
+
+    const { rerender } = render(view(installed([developerJob])));
+    // 접혀 있는 동안에는 부르지 않는다. 사용자가 보지 않는 값을 위해 프로세스를 띄우지 않는다.
+    expect(check).not.toHaveBeenCalled();
+
+    fireEvent.click(toggleOf("claude-heartbeat"));
+    expect(check).toHaveBeenCalledTimes(1);
+
+    // 2.5초 주기가 넣는 새 스냅샷. 값이 달라도 조회는 늘지 않는다.
+    rerender(view(installed()));
+    rerender(view(installed([developerJob])));
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  // 설치본이 없는 기기에서는 두 값이 모두 "확인 불가"일 뿐이라 부를 이유가 없다.
+  it("checks nothing while heartbeat is not installed", () => {
+    const check = vi.fn().mockResolvedValue(undefined);
+    renderIntegrations(
+      {
+        snapshot: snapshot({
+          heartbeat: heartbeat({ installation: "not_installed", daemonRunning: false }),
+        }),
+        error: null,
+        writeError: null,
+      },
+      vi.fn().mockResolvedValue(true),
+      { heartbeatVersions: versionControls({ check, versions: known("0.8.0", "0.8.1") }) },
+    );
+
+    expect(check).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "하트비트 버전" })).toBeNull();
+  });
+});
+
+/**
+ * SPEC-036의 화면. 데몬은 기기 하나에 하나이므로 이 통로는 역할 잡 폼 밖 공통 자리에 서고, 끄기는
+ * 누르기 전에 무엇이 멈추는지를 말한다.
+ *
+ * 결과 픽스처는 백엔드(`heartbeat_service_control.rs`)가 내는 여섯 갈래를 그대로 쓴다. 화면은 그
+ * 값을 문장으로 옮기기만 하고 판정을 다시 하지 않는다.
+ */
+describe("IntegrationsView 데몬 끄기·켜기", () => {
+  const ran: HeartbeatServiceControlResult = {
+    kind: "ran",
+    code: 0,
+    stdout: "",
+    stderr: "",
+    label: serviceLabel,
+    plistPath: servicePlist,
+  };
+
+  /** 이미 올라가 있는 서비스에 `bootstrap`을 친 실측 결과다. 앱은 이것을 실패로 접지 않는다. */
+  const ranNonzero: HeartbeatServiceControlResult = {
+    kind: "ran",
+    code: 5,
+    stdout: "",
+    stderr: "Bootstrap failed: 5: Input/output error\n",
+    label: serviceLabel,
+    plistPath: servicePlist,
+  };
+
+  /** 이 기기의 흔한 결말. `launchctl`을 띄우지 못한 상태다. */
+  const notRun = {
+    kind: "notRun",
+    message: "`/usr/bin/launchctl`을(를) 띄우지 못해 데몬을 조작하지 못했습니다: No such file",
+    command: `launchctl bootout gui/501/${serviceLabel}`,
+  } satisfies HeartbeatServiceControlResult;
+
+  const leases: AgentLeaseSummary[] = [
+    {
+      leaseId: "lease-1",
+      agent: "developer-claude",
+      role: "developer",
+      taskId: "TASK-104",
+      heartbeatAt: "2026-08-05T06:00:00Z",
+      expiresAt: "2026-08-05T07:00:00Z",
+    },
+    {
+      leaseId: "lease-2",
+      agent: "planner-claude",
+      role: null,
+      taskId: null,
+      heartbeatAt: "2026-08-05T06:10:00Z",
+      expiresAt: "2026-08-05T07:10:00Z",
+    },
+  ];
+
+  const stopAction = () => screen.getByRole("button", { name: "데몬 끄기" });
+  const startAction = () => screen.getByRole("button", { name: "데몬 켜기" });
+  const confirmStop = () => screen.getByRole("button", { name: "확인하고 데몬 끄기" });
+  const confirmBox = () => screen.getByRole("group", { name: "하트비트 데몬 끄기 확인" });
+  const resultBox = () => screen.getByRole("group", { name: "데몬 조작 결과" });
+
+  /** 카드 하나만 보는 헬퍼. 다른 연동의 문구가 단언에 섞이지 않게 한다. */
+  const card = () => screen.getByRole("article", { name: "claude-heartbeat" });
+
+  function renderService(
+    controls: Partial<HeartbeatServiceControls> = {},
+    {
+      activeLeases = [],
+      state = installed([developerJob]),
+    }: { activeLeases?: AgentLeaseSummary[]; state?: IntegrationsState } = {},
+  ) {
+    const control = vi.fn().mockResolvedValue(undefined);
+    renderIntegrations(state, vi.fn().mockResolvedValue(true), {
+      activeLeases,
+      heartbeatService: serviceControls({ control, ...controls }),
+    });
+    return control;
+  }
+
+  /** 스냅샷의 판정만 갈아 끼운 상태. 나머지 값은 픽스처 그대로다. */
+  function withTarget(target: HeartbeatServiceTarget): IntegrationsState {
+    return {
+      snapshot: snapshot({ heartbeat: heartbeat({ serviceTarget: target }) }),
+      error: null,
+      writeError: null,
+    };
+  }
+
+  beforeEach(() => {
+    clipboard.copy.mockReset();
+    clipboard.copy.mockResolvedValue(true);
+  });
+
+  // 완료 조건 1. 두 조작이 각각 버튼이고, 역할별 조작이 아니라 데몬 전체의 일이라 잡 폼 밖에 선다.
+  it("puts both daemon actions outside the per-role job rows", () => {
+    renderService();
+
+    expect(stopAction()).toBeVisible();
+    expect(startAction()).toBeVisible();
+    for (const label of ["기획자", "프로젝트 아키텍트", "개발자"]) {
+      expect(within(jobRow(label)).queryByRole("button", { name: "데몬 끄기" })).toBeNull();
+      expect(within(jobRow(label)).queryByRole("button", { name: "데몬 켜기" })).toBeNull();
+    }
+  });
+
+  // 완료 조건 1. 켜기는 확인 화면 없이 그대로 나간다. 넘기는 것은 식별자 하나다.
+  it("starts the daemon with the operation identifier alone", () => {
+    const control = renderService();
+
+    fireEvent.click(startAction());
+
+    expect(control).toHaveBeenCalledWith("start");
+  });
+
+  // 완료 조건 2. 끄기는 누르는 즉시 실행하지 않는다.
+  it("does not stop before the confirmation step", () => {
+    const control = renderService();
+
+    fireEvent.click(stopAction());
+
+    expect(control).not.toHaveBeenCalled();
+    expect(confirmBox()).toBeVisible();
+  });
+
+  // 완료 조건 2. 취소하면 아무것도 실행되지 않는다.
+  it("runs nothing when the confirmation is cancelled", () => {
+    const control = renderService();
+    fireEvent.click(stopAction());
+
+    fireEvent.click(screen.getByRole("button", { name: "취소" }));
+
+    expect(control).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "하트비트 데몬 끄기 확인" })).toBeNull();
+  });
+
+  // 완료 조건 2. 확인하면 화면이 닫히고 같은 조작이 두 번 실행되지 않는다.
+  it("closes the confirmation and stops exactly once", () => {
+    const control = renderService();
+    fireEvent.click(stopAction());
+
+    fireEvent.click(confirmStop());
+
+    expect(control).toHaveBeenCalledTimes(1);
+    expect(control).toHaveBeenCalledWith("stop");
+    expect(screen.queryByRole("group", { name: "하트비트 데몬 끄기 확인" })).toBeNull();
+  });
+
+  // 완료 조건 3. 진행 중에는 두 버튼이 눌리지 않고 무엇이 도는지가 보인다.
+  it("locks both buttons and shows progress while an operation runs", () => {
+    renderService({ running: "stop" });
+
+    expect(stopAction()).toBeDisabled();
+    expect(startAction()).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("데몬을 내리고 있습니다");
+  });
+
+  it("words the progress line for starting differently", () => {
+    renderService({ running: "start" });
+
+    expect(screen.getByRole("status")).toHaveTextContent("데몬을 올리고 있습니다");
+  });
+
+  // 완료 조건 4. 사정거리가 이 기기 전체라는 것과 dream 잡이 함께 멈춘다는 것이 확인 전에 실린다.
+  it("says the stop reaches every job on this machine and dream too", () => {
+    renderService();
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("이 프로젝트의 잡만이 아닙니다");
+    expect(confirmBox()).toHaveTextContent("데몬은 이 기기에 하나뿐이라");
+    expect(confirmBox()).toHaveTextContent("dream 잡도 같은 데몬이 깨웁니다");
+    // 업데이트 확인 화면과 첫 줄에서 갈린다. 그쪽은 데몬을 다시 띄우고 이쪽은 내리고 둔다.
+    expect(confirmBox()).not.toHaveTextContent("자기 저장소를 갱신하고");
+  });
+
+  /**
+   * 완료 조건 5. 멈추는 잡의 수와 이름이 스냅샷 값에서만 온다. 앱이 이름을 해석하지 않으므로
+   * 문자열이 그대로 나오고, 앱이 더한 것은 "이 프로젝트의 것인가" 하나다.
+   */
+  it("lists the stopping jobs from the snapshot and splits ours from the rest", () => {
+    renderService();
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("실행 기록이 있는 잡 3개가 모두 멈춥니다");
+    expect(confirmBox()).toHaveTextContent("이 프로젝트의 잡 1개");
+    expect(confirmBox()).toHaveTextContent("그 밖의 잡 2개");
+    expect(confirmBox()).toHaveTextContent("wf-developer-projects-workflow-labs");
+    expect(confirmBox()).toHaveTextContent("wf-developer-projects-mecha-arena");
+    expect(confirmBox()).toHaveTextContent("dream-catze");
+  });
+
+  // 완료 조건 5. 잡 구성이 다른 스냅샷에서는 표시가 그 값을 따른다.
+  it("follows a snapshot whose job list is different", () => {
+    renderService(
+      {},
+      {
+        state: {
+          snapshot: snapshot({
+            heartbeat: heartbeat({
+              recordedJobs: [{ name: "wf-planner-projects-workflow-labs", ofThisProject: true }],
+            }),
+          }),
+          error: null,
+          writeError: null,
+        },
+      },
+    );
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("실행 기록이 있는 잡 1개가 모두 멈춥니다");
+    expect(confirmBox()).toHaveTextContent("이 프로젝트의 잡 1개");
+    expect(confirmBox()).toHaveTextContent("그 밖의 잡 0개");
+    expect(confirmBox()).not.toHaveTextContent("dream-catze");
+  });
+
+  // 앱이 지어내지 않는다. 상태 파일에 기록이 없으면 그 사실만 말한다.
+  it("says so plainly when the state file records no job", () => {
+    renderService(
+      {},
+      {
+        state: {
+          snapshot: snapshot({ heartbeat: heartbeat({ recordedJobs: [] }) }),
+          error: null,
+          writeError: null,
+        },
+      },
+    );
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("실행 기록이 있는 잡이 없습니다");
+  });
+
+  // 완료 조건 6. 세션이 0개일 때와 하나 이상일 때 문구가 다르다.
+  it("words an empty session list differently from one with sessions", () => {
+    renderService({}, { activeLeases: [] });
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("지금 끊길 세션이 없습니다");
+    cleanup();
+
+    renderService({}, { activeLeases: leases });
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("지금 끊기는 세션 2개");
+    expect(confirmBox()).toHaveTextContent("developer-claude · TASK-104");
+    expect(confirmBox()).toHaveTextContent("planner-claude · 워크플로우 작업");
+  });
+
+  /**
+   * 완료 조건 6. 그 수가 이 프로젝트의 것뿐이라는 사실이 두 문구 모두에 있다. 앱은 다른 프로젝트의
+   * lease를 읽지 않으므로 0개를 "끊길 세션이 없습니다"로만 말하면 모르는 것을 아는 척하게 된다.
+   */
+  it("says the session count covers this project only, in both wordings", () => {
+    renderService({}, { activeLeases: [] });
+    fireEvent.click(stopAction());
+    expect(confirmBox()).toHaveTextContent("앱은 그 수를 알지 못합니다");
+    cleanup();
+
+    renderService({}, { activeLeases: leases });
+    fireEvent.click(stopAction());
+    expect(confirmBox()).toHaveTextContent("이 프로젝트의 lease만 센 것이고");
+  });
+
+  // 완료 조건 7. 켜기는 끊을 세션이 없는 조작이라 세션 고지가 붙지 않는다.
+  it("attaches no session notice to starting the daemon", () => {
+    const control = renderService({}, { activeLeases: leases });
+
+    fireEvent.click(startAction());
+
+    expect(control).toHaveBeenCalledWith("start");
+    expect(screen.queryByRole("group", { name: "하트비트 데몬 끄기 확인" })).toBeNull();
+    expect(card()).not.toHaveTextContent("지금 끊기는 세션");
+  });
+
+  // 완료 조건 8. 잠깐 내리는 것과 등록 해제가 다르다는 것이 누르기 전에 읽힌다.
+  it("says the stop is temporary and is not an unregistration", () => {
+    renderService();
+    fireEvent.click(stopAction());
+
+    expect(confirmBox()).toHaveTextContent("재부팅하거나 다시 로그인하면 데몬이 자동으로 다시 켜집니다");
+    expect(confirmBox()).toHaveTextContent("등록물을 지우는 것이 아니라");
+    expect(confirmBox()).toHaveTextContent("이 버튼은 그것을 하지 않습니다");
+  });
+
+  /**
+   * 완료 조건 9. 대상이 확정되지 않은 넷에서 조작이 나가지 않고, 넷이 서로 다른 문구로 구분된다.
+   * 하나의 실패 문구로 뭉뚱그리면 사용자가 할 다음 행동을 찾을 수 없다.
+   */
+  it("offers no action and words each unresolved judgement differently", () => {
+    const notes: [HeartbeatServiceTarget, string][] = [
+      [{ kind: "not_registered" }, "이 기기에 등록된 하트비트 서비스가 없습니다"],
+      [
+        { kind: "ambiguous", plist_paths: [servicePlist, "/Users/catze/Library/LaunchAgents/com.other-heartbeat.plist"] },
+        "등록물이 여럿이라 앱이 대상을 고르지 않습니다",
+      ],
+      [{ kind: "unsupported_platform" }, "이 플랫폼에서는 앱이 데몬을 끄고 켤 수 없습니다"],
+      [{ kind: "unreadable", path: servicePlist }, "등록물을 읽지 못해 대상을 확정하지 못했습니다"],
+    ];
+
+    for (const [target, title] of notes) {
+      renderService({}, { state: withTarget(target) });
+
+      expect(screen.queryByRole("button", { name: "데몬 끄기" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "데몬 켜기" })).toBeNull();
+      expect(card()).toHaveTextContent(title);
+      // 다른 셋의 문구가 함께 서지 않는다.
+      for (const [, other] of notes) {
+        if (other !== title) expect(card()).not.toHaveTextContent(other);
+      }
+      cleanup();
+    }
+  });
+
+  // 대상 모호에서는 찾은 등록물이 전부 보인다. 사용자가 무엇을 정리해야 하는지가 그 목록이다.
+  it("shows every registered agent it found when the target is ambiguous", () => {
+    renderService(
+      {},
+      {
+        state: withTarget({
+          kind: "ambiguous",
+          plist_paths: [servicePlist, "/Users/catze/Library/LaunchAgents/com.other-heartbeat.plist"],
+        }),
+      },
+    );
+
+    expect(card()).toHaveTextContent(servicePlist);
+    expect(card()).toHaveTextContent("com.other-heartbeat.plist");
+  });
+
+  // 읽지 못한 경로가 함께 보인다. 어느 파일을 봐야 하는지가 그 값이다.
+  it("shows the path it could not read", () => {
+    renderService({}, { state: withTarget({ kind: "unreadable", path: servicePlist }) });
+
+    expect(card()).toHaveTextContent(`읽지 못한 경로: ${servicePlist}`);
+  });
+
+  /**
+   * 완료 조건 10. 실행 수단을 찾지 못한 결과에 사유와 명령 원문이 실리고 복사할 수 있다. 원문에
+   * 빈칸이 없다 — 지금 갱신 안내가 `<라벨>`을 글자 그대로 내미는 것이 이 요구가 막는 상태다.
+   */
+  it("carries the reason and a command with no placeholder when launchctl could not be spawned", async () => {
+    renderService({ outcome: { operation: "stop", result: notRun } });
+
+    expect(card()).toHaveTextContent(notRun.message);
+    expect(card()).toHaveTextContent(notRun.command);
+    expect(notRun.command).not.toContain("<");
+
+    await userEvent.click(screen.getByRole("button", { name: "데몬 조작 명령 복사" }));
+
+    expect(clipboard.copy).toHaveBeenCalledWith(notRun.command);
+    expect(await screen.findByText("복사됨")).toBeVisible();
+  });
+
+  /**
+   * 완료 조건 13. 결과가 "꺼졌습니다"로 끝나지 않는다. 명령이 끝난 것과 데몬이 내려간 것은 다른
+   * 사실이고, 판정이 아직 따라오지 않은 순간에 모순된 두 상태가 함께 서지 않는다.
+   */
+  it("never folds the command ending and the daemon state into one sentence", () => {
+    renderService({ outcome: { operation: "stop", result: ran } });
+
+    expect(resultBox()).toHaveTextContent("데몬 끄기 명령이 끝났습니다");
+    expect(resultBox()).toHaveTextContent("종료 코드 0");
+    // 스냅샷은 아직 실행 중으로 본다. 그 순간을 그대로 말한다.
+    expect(resultBox()).toHaveTextContent("상태 갱신을 기다리는 중입니다");
+    expect(resultBox()).not.toHaveTextContent("꺼졌습니다");
+  });
+
+  // 판정이 따라온 뒤에는 기다린다는 말이 사라진다. 두 상태가 함께 서지 않는 것이 그 확인이다.
+  it("stops saying it is waiting once the snapshot has caught up", () => {
+    renderService(
+      { outcome: { operation: "stop", result: ran } },
+      {
+        state: {
+          snapshot: snapshot({ heartbeat: heartbeat({ daemonRunning: false }) }),
+          error: null,
+          writeError: null,
+        },
+      },
+    );
+
+    expect(resultBox()).toHaveTextContent("앱이 보는 데몬 상태가 이 조작의 방향과 같아졌습니다");
+    expect(resultBox()).not.toHaveTextContent("상태 갱신을 기다리는 중입니다");
+  });
+
+  // 0이 아닌 종료 코드는 실패가 아니라 결과다. 숫자와 원문이 그대로 실리고 뜻은 붙지 않는다.
+  it("carries a nonzero exit code and the stderr verbatim without translating it", () => {
+    renderService({ outcome: { operation: "start", result: ranNonzero } });
+
+    expect(resultBox()).toHaveTextContent("데몬 켜기 명령이 끝났습니다");
+    expect(resultBox()).toHaveTextContent("종료 코드 5");
+    expect(resultBox()).toHaveTextContent("앱은 이 숫자의 뜻을 옮기지 않습니다");
+    expect(resultBox().querySelector("pre")).toHaveTextContent(
+      "Bootstrap failed: 5: Input/output error",
+    );
+  });
+
+  // 앱이 무엇을 건드렸는지가 결과의 일부다. 라벨은 상수가 아니라 백엔드가 읽어 낸 값이다.
+  it("names the target it actually operated on", () => {
+    renderService({ outcome: { operation: "stop", result: ran } });
+
+    expect(resultBox()).toHaveTextContent(serviceLabel);
+    expect(resultBox()).toHaveTextContent(servicePlist);
+  });
+
+  // 커맨드 자체가 거절한 것은 결과가 아니다. 사유만 남고 명령 원문을 화면이 지어내지 않는다.
+  it("shows a command-level rejection as its own reason", () => {
+    renderService({ error: "홈 디렉터리를 찾지 못했습니다" });
+
+    expect(card()).toHaveTextContent("앱이 데몬 조작을 시작하지 못했습니다");
+    expect(card()).toHaveTextContent("홈 디렉터리를 찾지 못했습니다");
+    expect(screen.queryByRole("group", { name: "데몬 조작 결과" })).toBeNull();
+  });
+
+  /**
+   * 완료 조건 11. 조작의 실패가 설치 마법사의 단계 상태를 바꾸지 않는다. 커맨드가 스냅샷을
+   * 돌려주지 않는 것이 그 구조적 근거이고, 같은 스냅샷에 결과만 얹어 확인한다.
+   */
+  it("leaves the setup wizard stages untouched when an operation fails", () => {
+    renderService();
+    const before = screen
+      .getByRole("article", { name: "claude-heartbeat" })
+      .querySelector(".heartbeat-setup")?.textContent;
+    cleanup();
+
+    renderService({ outcome: { operation: "stop", result: notRun } });
+    const after = screen
+      .getByRole("article", { name: "claude-heartbeat" })
+      .querySelector(".heartbeat-setup")?.textContent;
+
+    expect(before).toBeTruthy();
+    expect(after).toBe(before);
+  });
+
+  // 완료 조건 15. 토글이 실패해도 카드의 다른 동작이 막히지 않는다.
+  it("keeps the other card actions working after a failed operation", () => {
+    renderService({ outcome: { operation: "stop", result: notRun } });
+
+    expect(screen.getByRole("button", { name: "하트비트 업데이트" })).toBeEnabled();
+    expect(stopAction()).toBeEnabled();
+    expect(startAction()).toBeEnabled();
+    expect(
+      within(jobRow("개발자")).getByRole("button", { name: "개발자 잡 지금 실행" }),
+    ).toBeEnabled();
+  });
+
+  /**
+   * 완료 조건 12. 꺼진 상태가 카드에서 계속 보인다. 표시 통로는 084가 세운 본문 경고 통로 그대로라
+   * 접힌 카드에서도 확인할 경고가 있다는 사실이 드러난다.
+   */
+  it("keeps a stopped daemon visible in the card and in the collapsed summary", () => {
+    const stopped: IntegrationsState = {
+      snapshot: snapshot({ heartbeat: heartbeat({ daemonRunning: false }) }),
+      error: null,
+      writeError: null,
+    };
+    renderService({}, { state: stopped });
+
+    expect(card()).toHaveTextContent("하트비트 데몬이 멈춰 있습니다");
+    // 문구가 원인을 단정하지 않는다. 앱은 셋을 구분하지 못한다.
+    expect(card()).toHaveTextContent("앱은 셋을 구분하지 못합니다");
+    expect(within(card()).getByText("확인할 경고가 있습니다")).toBeVisible();
+
+    toggleCard("claude-heartbeat");
+    expect(within(card()).getByText("확인할 경고가 있습니다")).toBeVisible();
+  });
+
+  // 데몬이 도는 동안에는 그 경고가 없다. 084 경고의 기존 동작이 이 기능 때문에 달라지지 않는다.
+  it("shows no stopped-daemon warning while the daemon runs", () => {
+    renderService();
+
+    expect(card()).not.toHaveTextContent("하트비트 데몬이 멈춰 있습니다");
+  });
+
+  // 판정이 아직 도착하지 않았으면 통로를 세우지 않는다. 대상을 모르는 채로 버튼을 내밀지 않는다.
+  it("draws no daemon controls while the snapshot carries no judgement", () => {
+    renderService(
+      {},
+      {
+        state: {
+          snapshot: snapshot({ heartbeat: heartbeat({ serviceTarget: undefined }) }),
+          error: null,
+          writeError: null,
+        },
+      },
+    );
+
+    expect(screen.queryByRole("button", { name: "데몬 끄기" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "데몬 켜기" })).toBeNull();
   });
 });

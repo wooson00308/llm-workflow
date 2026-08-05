@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-101
 title: 겹침 선언 필드를 만들고 두 자격 판정이 그것을 보게 한다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-032
 source_decision_id: DECISION-0D79A7F0
 depends_on: [TASK-097, TASK-098, TASK-099]
-updated_at: 2026-08-04T17:00:10Z
+updated_at: 2026-08-05T03:08:54.593130+00:00
 history:
   - { at: 2026-08-04T15:46:00Z, kind: created }
   - { at: 2026-08-04T16:38:30Z, kind: in_progress }
   - { at: 2026-08-04T17:00:10Z, kind: qa_waiting }
+  - { at: 2026-08-05T03:08:54.593130+00:00, kind: completed }
 ---
 
 # 겹침 선언 필드를 만들고 두 자격 판정이 그것을 보게 한다

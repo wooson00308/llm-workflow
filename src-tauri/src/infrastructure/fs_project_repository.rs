@@ -58,7 +58,7 @@ pub enum ProjectError {
     UnsafeDocumentFile(String),
     #[error("기획서 파일을 찾을 수 없습니다: {0}")]
     DocumentNotFound(String),
-    #[error("사용자 선택 대기 상태인 기획서만 승인·수정 요청·폐기할 수 있습니다.")]
+    #[error("사용자 선택 대기 상태인 기획서에는 승인·수정 요청·폐기를, 승인된 기획서에는 수정 요청만 보낼 수 있습니다. 그 밖의 조합은 기록하지 않습니다.")]
     SpecNotAwaitingDecision,
     #[error("수정 요청이나 폐기에는 코멘트를 입력해 주세요.")]
     DecisionCommentRequired,
@@ -344,7 +344,7 @@ impl FileSystemProjectRepository {
         let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
         normalize_spec_status(&mut spec);
         apply_latest_decision(&workflow_root, &mut spec);
-        if spec.status != "user_review" {
+        if !spec_decision_is_allowed(&spec.status, &outcome) {
             return Err(ProjectError::SpecNotAwaitingDecision);
         }
 
@@ -755,6 +755,7 @@ fn summary_from_manifest(
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
                 overlap_blocked: &workflow.overlap_blocked,
+                nondraft_spec_sources: &workflow.nondraft_spec_sources,
             })
             .collect();
         let migration_locked = control_root
@@ -799,6 +800,8 @@ struct PreparedWorkflow {
     unsatisfied_dependencies: HashSet<String>,
     /// 겹침 선언이 활성 lease와 충돌해 착수가 막힌 작업의 id(SPEC-032 R2).
     overlap_blocked: HashSet<String>,
+    /// `draft`가 아닌 기획서가 원천으로 참조하는 id(SPEC-035 R2). 기획서 훑기가 함께 낸다.
+    nondraft_spec_sources: HashSet<String>,
 }
 
 impl PreparedWorkflow {
@@ -812,7 +815,8 @@ impl PreparedWorkflow {
         // 쓰지만(`WorkflowItemSummary`에 필드를 더하지 않는다 — TASK-037) 같은 읽기에서 나온다.
         let (decisions, qa_events) = read_decision_documents(&root);
         let (tasks, graph) = read_task_documents(&root.join("tasks"));
-        let items = workflow_items(&root, &decisions, &qa_events, tasks, leases);
+        let (items, nondraft_spec_sources) =
+            workflow_items(&root, &decisions, &qa_events, tasks, leases);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
         let unsatisfied_dependencies = unsatisfied_dependency_task_ids(&graph);
@@ -824,6 +828,7 @@ impl PreparedWorkflow {
             revision_requested_decisions,
             unsatisfied_dependencies,
             overlap_blocked,
+            nondraft_spec_sources,
         }
     }
 }
@@ -872,6 +877,24 @@ fn validate_idea(content: &str) -> Result<(), ProjectError> {
         return Err(ProjectError::IdeaTooLong);
     }
     Ok(())
+}
+
+/// 기획서의 지금 상태와 보내려는 결정의 조합이 허용되는가(SPEC-042 R2).
+///
+/// 행은 `apply_latest_decision`이 정한 지금 상태, 열은 보내려는 결정이다. 허용은 두 칸뿐이다 —
+/// `user_review`의 세 결정과 `approved`의 수정 요청. 나머지 열둘도, 표에 없는 상태값도 막는다.
+///
+/// 재승인을 열지 않는 이유는 아키텍트 후보 판정의 열쇠가 결정 id이기 때문이다. 승인을 하나 더 쓰면
+/// 그 id를 원천으로 적은 작업이 하나도 없어, 이미 분해가 끝난 기획서에서 두 번째 작업 세트가 나온다.
+/// 수정 요청 상태에 후속 결정을 얹지 않는 것도 같은 종류의 이유다 — 그 수정 요청은 기획자 대기
+/// 물량이고, 위에 결정을 얹으면 대기 물량이 조용히 사라진다.
+///
+/// 판정이 한 자리에 있어야 화면이 여는 조작과 대조할 기준이 하나가 된다.
+fn spec_decision_is_allowed(status: &str, outcome: &SpecDecisionOutcome) -> bool {
+    matches!(
+        (status, outcome),
+        ("user_review", _) | ("approved", SpecDecisionOutcome::RevisionRequested)
+    )
 }
 
 fn validate_decision(outcome: &SpecDecisionOutcome, comment: &str) -> Result<(), ProjectError> {
@@ -1078,9 +1101,10 @@ fn workflow_items(
     qa_events: &HashMap<String, Vec<TaskEvent>>,
     mut tasks: Vec<WorkflowItemSummary>,
     leases: &[AgentLeaseSummary],
-) -> WorkflowItems {
+) -> (WorkflowItems, HashSet<String>) {
     let latest = latest_spec_decisions(decisions);
-    let (mut specs, references) = read_spec_documents(&workflow_root.join("specs"), &latest);
+    let (mut specs, references, nondraft_sources) =
+        read_spec_documents(&workflow_root.join("specs"), &latest);
     let mut decision_events = spec_decision_events(decisions);
     for spec in &mut specs {
         normalize_spec_status(spec);
@@ -1096,11 +1120,14 @@ fn workflow_items(
     let mut ideas = read_markdown_summaries(&workflow_root.join("ideas"), "inbox");
     derive_idea_states(&mut ideas, &references, leases);
     merge_qa_decision_events(qa_events, &mut tasks);
-    WorkflowItems {
-        ideas,
-        specs,
-        tasks,
-    }
+    (
+        WorkflowItems {
+            ideas,
+            specs,
+            tasks,
+        },
+        nondraft_sources,
+    )
 }
 
 /// 아이디어를 참조하는 기획서 하나. 판정에 필요한 값만 담는다.
@@ -1147,18 +1174,29 @@ fn spec_reference(
     })
 }
 
-/// `specs/`를 한 번 훑어 목록 요약과 아이디어 판정용 참조를 함께 낸다(SPEC-033 R7).
+/// `specs/`를 한 번 훑어 목록 요약과 아이디어 판정용 참조, 그리고 회수 판정용 원천 집합을 함께
+/// 낸다(SPEC-033 R7).
 ///
-/// 두 값이 세는 문서가 서로 다르다. 요약은 일반 파일만 담고(`read_markdown_summaries`의 규칙),
+/// 앞의 두 값이 세는 문서가 서로 다르다. 요약은 일반 파일만 담고(`read_markdown_summaries`의 규칙),
 /// 참조는 읽히는 `.md`를 전부 담는다 — 심링크로 걸린 기획서가 목록에는 없어도 아이디어 판정에는
 /// 든다. 그 차이가 판정을 갈라 온 자리이므로 합치면서도 각자의 규칙을 그대로 지킨다.
 /// 참조 순서는 디렉터리 순회 순서 그대로이고, 요약만 목록 정렬을 거친다.
+///
+/// 세 번째 값은 [`nondraft_spec_sources`]가 만든다. 참조와 달리 `source_decision_id`까지 담고
+/// 파일에 적힌 `status` 원문을 본다.
+///
+/// [`nondraft_spec_sources`]: crate::infrastructure::role_eligibility::WorkflowInput::nondraft_spec_sources
 fn read_spec_documents(
     specs_root: &Path,
     decided: &HashMap<String, (String, String)>,
-) -> (Vec<WorkflowItemSummary>, Vec<SpecReference>) {
+) -> (
+    Vec<WorkflowItemSummary>,
+    Vec<SpecReference>,
+    HashSet<String>,
+) {
     let mut summaries = Vec::new();
     let mut references = Vec::new();
+    let mut nondraft_sources = HashSet::new();
     for entry in fs::read_dir(specs_root)
         .into_iter()
         .flatten()
@@ -1177,9 +1215,31 @@ fn read_spec_documents(
             summaries.push(markdown_summary(&path, metadata.as_ref(), &body, "draft"));
         }
         references.extend(spec_reference(&path, metadata.as_ref(), decided));
+        collect_nondraft_sources(metadata.as_ref(), &mut nondraft_sources);
     }
     sort_markdown_summaries(&mut summaries);
-    (summaries, references)
+    (summaries, references, nondraft_sources)
+}
+
+/// 이 기획서가 `draft`가 아니면 그 원천 id를 집합에 넣는다(SPEC-035 R2).
+///
+/// 판별은 프론트매터에 적힌 `status` 원문이 문자열 `draft`와 같은지 하나다. 조건 스크립트가
+/// `status:`로 시작하는 첫 줄의 값을 같은 값과 비교하므로 어법을 거기에 맞춘다. 화면용
+/// 정규화(`normalize_spec_status`)를 쓰면 계약 밖 상태가 전부 `draft`로 접혀 정확히 반대로 답하고,
+/// 아이디어 파생 상태를 쓰면 "모두 `draft`"가 아니라 "하나라도 `draft`"가 되어 갈라진다(SPEC-035 R7).
+/// 결정이 덮어쓴 상태도 보지 않는다 — 스크립트는 결정 문서를 읽지 않는다.
+///
+/// 두 원천이 한 집합에 들어간다. 아이디어 판정과 수정 요청 판정이 각각 자기 id로만 조회하므로
+/// 섞이지 않는다.
+fn collect_nondraft_sources(metadata: Option<&serde_yaml::Value>, sources: &mut HashSet<String>) {
+    if yaml_text(metadata, "status").as_deref() == Some("draft") {
+        return;
+    }
+    for key in ["source_idea_id", "source_decision_id"] {
+        if let Some(value) = yaml_text(metadata, key) {
+            sources.insert(value);
+        }
+    }
 }
 
 fn spec_references(workflow_root: &Path, decisions: &[SpecDecisionRecord]) -> Vec<SpecReference> {
@@ -2128,8 +2188,8 @@ mod tests {
         ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
-        SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
-        WorkflowItemSummary,
+        PendingRoleWork, SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState,
+        TaskDocument, TaskQaOutcome, WorkflowItemSummary,
     };
     // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
     use crate::infrastructure::claim_helper::claim_helper_path;
@@ -3447,13 +3507,17 @@ mod tests {
     }
 
     fn write_spec(root: &Path, directory: &str, id: &str) {
+        write_spec_with_status(root, directory, id, "user_review");
+    }
+
+    fn write_spec_with_status(root: &Path, directory: &str, id: &str, status: &str) {
         fs::write(
             root.join(".workflow")
                 .join(directory)
                 .join("specs")
                 .join(format!("{id}.md")),
             format!(
-                "---\nschema: workflow-labs/spec@1\nid: {id}\ntitle: {id} 기획서\nstatus: user_review\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n본문\n"
+                "---\nschema: workflow-labs/spec@1\nid: {id}\ntitle: {id} 기획서\nstatus: {status}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n본문\n"
             ),
         )
         .expect("write spec");
@@ -4512,9 +4576,8 @@ mod tests {
         spec.status
     }
 
-    /// 앱이 방금 쓴 결정 문서의 `id`와 `created_at`. 미리 놓아 둔 픽스처 하나를 빼면 남는 것이
-    /// 그 문서다.
-    fn app_recorded_decision(workflow_root: &Path, fixture_file_name: &str) -> (String, String) {
+    /// 앱이 방금 쓴 결정 문서의 전문. 미리 놓아 둔 픽스처 하나를 빼면 남는 것이 그 문서다.
+    fn app_recorded_decision_text(workflow_root: &Path, fixture_file_name: &str) -> String {
         let mut recorded: Vec<String> = fs::read_dir(workflow_root.join("decisions"))
             .expect("decisions")
             .filter_map(Result::ok)
@@ -4522,7 +4585,12 @@ mod tests {
             .filter_map(|entry| fs::read_to_string(entry.path()).ok())
             .collect();
         assert_eq!(recorded.len(), 1, "앱이 쓴 결정 문서는 하나여야 한다");
-        let text = recorded.remove(0);
+        recorded.remove(0)
+    }
+
+    /// 앱이 방금 쓴 결정 문서의 `id`와 `created_at`.
+    fn app_recorded_decision(workflow_root: &Path, fixture_file_name: &str) -> (String, String) {
+        let text = app_recorded_decision_text(workflow_root, fixture_file_name);
         let field = |key: &str| {
             let prefix = format!("{key}: ");
             text.lines()
@@ -4648,6 +4716,287 @@ mod tests {
                 .expect("decisions")
                 .count(),
             1
+        );
+    }
+
+    /// 기획서 하나를 그 상태로 만들어 둔 픽스처(SPEC-042 R2의 표에서 한 행). `draft`와 `user_review`는
+    /// 결정이 하나도 없는 상태이고, 나머지 셋은 그 값의 결정 하나가 최신인 상태다 — 화면과 쓰기
+    /// 경로가 보는 상태가 파일의 `status`가 아니라 최신 결정의 `outcome`이기 때문이다.
+    fn spec_in_state(status: &str) -> (TempDir, String, PathBuf) {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        match status {
+            "draft" => write_spec_with_status(root.path(), &directory, "SPEC-001", "draft"),
+            "user_review" => write_spec(root.path(), &directory, "SPEC-001"),
+            outcome => {
+                write_spec(root.path(), &directory, "SPEC-001");
+                write_decision(
+                    root.path(),
+                    &directory,
+                    "DECISION-APP.md",
+                    &spec_decision(
+                        "DECISION-APP",
+                        "SPEC-001",
+                        outcome,
+                        "2026-08-04T07:34:27.458543+00:00",
+                    ),
+                );
+            }
+        }
+        assert_eq!(
+            spec_status_after_latest_decision(&workflow_root, "SPEC-001.md"),
+            status,
+            "픽스처가 만들려던 상태가 아니다"
+        );
+        (root, directory, workflow_root)
+    }
+
+    fn decision_count(workflow_root: &Path) -> usize {
+        fs::read_dir(workflow_root.join("decisions"))
+            .expect("decisions")
+            .count()
+    }
+
+    /// 앱의 대기 물량 판정과 조건 스크립트의 종료 코드를 세 역할에서 대조하고 앱의 판정을 낸다.
+    /// 대조 어법은 `a_closed_idea_is_not_planner_work_in_either_judgement`과 같다 —
+    /// `role_eligibility.rs`의 대조 헬퍼는 자기 테스트 모듈 안에 있어 다른 모듈에서 부를 수 없다.
+    fn pending_work_matching_condition_script(project_root: &Path) -> PendingRoleWork {
+        use std::process::Command;
+
+        let pending = FileSystemProjectRepository
+            .inspect(project_root)
+            .expect("inspect project")
+            .pending_work;
+        for (role, app_flag) in [
+            ("planner", pending.planner),
+            ("architect", pending.architect),
+            ("developer", pending.developer),
+        ] {
+            let code = Command::new("sh")
+                .arg(".workflow/rules/wf-eligible.sh")
+                .arg(role)
+                .current_dir(project_root)
+                .status()
+                .expect("run condition script")
+                .code()
+                .expect("exit code");
+            assert_eq!(app_flag, code == 0, "{role} 판정이 조건 스크립트와 다르다");
+        }
+        pending
+    }
+
+    // SPEC-042 R1(TASK-127). 승인이 최신인 기획서에 후속 수정 요청 하나가 더 기록된다. 표에서
+    // 이번에 열리는 칸은 이 하나뿐이다.
+    #[test]
+    fn records_a_follow_up_revision_request_on_an_approved_spec() {
+        let (root, directory, workflow_root) = spec_in_state("approved");
+
+        let decided = FileSystemProjectRepository
+            .record_spec_decision(
+                root.path(),
+                &directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::RevisionRequested,
+                "승인된 기획에 범위를 넓혀 달라",
+            )
+            .expect("승인된 기획서도 후속 수정 요청은 받아야 한다");
+
+        assert_eq!(decision_count(&workflow_root), 2);
+        assert_eq!(
+            decided.workflows[0].items.specs[0].status,
+            "revision_requested"
+        );
+        assert_eq!(
+            spec_status_after_latest_decision(&workflow_root, "SPEC-001.md"),
+            "revision_requested"
+        );
+        // 기존 승인 결정은 지워지지 않는다. 감사 로그는 덧쓰기만 한다.
+        assert!(workflow_root
+            .join("decisions")
+            .join("DECISION-APP.md")
+            .is_file());
+    }
+
+    // SPEC-042 R1·R8(TASK-127). 새로 열린 칸이 쓰는 결정 문서의 모양이 지금과 같다. 프론트매터는
+    // 여섯 값 그대로이고 새 필드가 붙지 않는다.
+    #[test]
+    fn a_follow_up_revision_request_writes_the_same_decision_frontmatter() {
+        let (root, directory, workflow_root) = spec_in_state("approved");
+
+        FileSystemProjectRepository
+            .record_spec_decision(
+                root.path(),
+                &directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::RevisionRequested,
+                "승인된 기획에 범위를 넓혀 달라",
+            )
+            .expect("record follow-up revision request");
+
+        let text = app_recorded_decision_text(&workflow_root, "DECISION-APP.md");
+        let frontmatter: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .take_while(|line| *line != "---")
+            .collect();
+        let keys: Vec<&str> = frontmatter
+            .iter()
+            .map(|line| line.split(':').next().expect("frontmatter key"))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "schema",
+                "id",
+                "spec_id",
+                "outcome",
+                "created_by",
+                "created_at"
+            ]
+        );
+        assert!(frontmatter.contains(&"schema: workflow-labs/decision@1"));
+        assert!(frontmatter.contains(&"spec_id: SPEC-001"));
+        assert!(frontmatter.contains(&"outcome: revision_requested"));
+        assert!(frontmatter.contains(&"created_by: user"));
+    }
+
+    // SPEC-042 R2(TASK-127). 표에서 막힌 칸이 전부 거절되고, 거절될 때 결정 문서가 늘지 않는다.
+    // `user_review` 행 셋과 `approved` 행의 수정 요청만 표를 통과한다.
+    #[test]
+    fn refuses_every_spec_decision_the_table_blocks() {
+        for (status, outcome) in [
+            ("draft", SpecDecisionOutcome::Approved),
+            ("draft", SpecDecisionOutcome::RevisionRequested),
+            ("draft", SpecDecisionOutcome::Rejected),
+            ("approved", SpecDecisionOutcome::Approved),
+            ("approved", SpecDecisionOutcome::Rejected),
+            ("revision_requested", SpecDecisionOutcome::Approved),
+            ("revision_requested", SpecDecisionOutcome::RevisionRequested),
+            ("revision_requested", SpecDecisionOutcome::Rejected),
+            ("rejected", SpecDecisionOutcome::Approved),
+            ("rejected", SpecDecisionOutcome::RevisionRequested),
+            ("rejected", SpecDecisionOutcome::Rejected),
+        ] {
+            let (root, directory, workflow_root) = spec_in_state(status);
+            let before = decision_count(&workflow_root);
+
+            let error = FileSystemProjectRepository
+                .record_spec_decision(
+                    root.path(),
+                    &directory,
+                    "SPEC-001.md",
+                    outcome.clone(),
+                    "막혀야 하는 조합이다",
+                )
+                .expect_err(&format!("{status} 행의 {outcome:?} 칸이 막히지 않았다"));
+
+            let message = error.to_string();
+            assert!(
+                matches!(error, ProjectError::SpecNotAwaitingDecision),
+                "{status} 행의 {outcome:?} 칸이 다른 이유로 막혔다"
+            );
+            // R6. 거절 문구가 새 규칙과 어긋나지 않는다 — 승인된 기획서도 수정 요청은 받는다.
+            assert!(
+                message.contains("승인된 기획서에는 수정 요청만"),
+                "거절 문구가 무엇이 허용되는지 말하지 않는다: {message}"
+            );
+            assert_eq!(
+                decision_count(&workflow_root),
+                before,
+                "{status} 행의 {outcome:?} 칸이 거절되면서 결정 문서를 남겼다"
+            );
+        }
+    }
+
+    // SPEC-042 R8(TASK-127). 승인 뒤에 수정 요청이 붙은 기획서는 이 프로젝트에 아직 한 건도 없어
+    // 그 상태에서 판정이 돌아본 적이 없다. 파생 작업이 없는 승인에서 (나)를 본다 — 그 승인이
+    // 아키텍트 대기 물량이었다가 후속 수정 요청 뒤에 빠지고, 그 수정 요청이 기획자 대기 물량이 된다.
+    #[test]
+    fn a_follow_up_revision_request_moves_the_approval_out_of_architect_work() {
+        let (root, directory, _) = spec_in_state("approved");
+        install_condition_script(&root.path().join(".workflow")).expect("install condition script");
+
+        assert_eq!(
+            pending_work_matching_condition_script(root.path()),
+            PendingRoleWork {
+                planner: false,
+                architect: true,
+                developer: false,
+            }
+        );
+
+        FileSystemProjectRepository
+            .record_spec_decision(
+                root.path(),
+                &directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::RevisionRequested,
+                "승인된 기획에 범위를 넓혀 달라",
+            )
+            .expect("record follow-up revision request");
+
+        assert_eq!(
+            pending_work_matching_condition_script(root.path()),
+            PendingRoleWork {
+                planner: true,
+                architect: false,
+                developer: false,
+            }
+        );
+    }
+
+    // SPEC-042 R8(TASK-127)의 나머지 몫. 그 승인에서 이미 파생된 작업은 후속 수정 요청이 붙어도
+    // 그대로 개발자 후보로 남는다. 개발자 판정이 결정을 아예 읽지 않는 것이 근거이고, 이것이
+    // 부작용이 아니라 기획서가 올린 약속이다.
+    #[test]
+    fn a_follow_up_revision_request_leaves_the_derived_task_to_the_developer() {
+        let (root, directory, _) = spec_in_state("approved");
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "source_spec_id: SPEC-001\nsource_decision_id: DECISION-APP\nscope_files: []\n",
+        );
+        install_condition_script(&root.path().join(".workflow")).expect("install condition script");
+
+        assert_eq!(
+            pending_work_matching_condition_script(root.path()),
+            PendingRoleWork {
+                planner: false,
+                architect: false,
+                developer: true,
+            }
+        );
+
+        FileSystemProjectRepository
+            .record_spec_decision(
+                root.path(),
+                &directory,
+                "SPEC-001.md",
+                SpecDecisionOutcome::RevisionRequested,
+                "승인된 기획에 범위를 넓혀 달라",
+            )
+            .expect("record follow-up revision request");
+
+        assert_eq!(
+            pending_work_matching_condition_script(root.path()),
+            PendingRoleWork {
+                planner: true,
+                architect: false,
+                developer: true,
+            }
+        );
+        // 파생 작업은 그대로다. 앱이 되돌리거나 닫지 않는다.
+        assert_eq!(
+            read_task_document(root.path(), &directory, "TASK-001.md")
+                .summary
+                .status,
+            "todo"
         );
     }
 

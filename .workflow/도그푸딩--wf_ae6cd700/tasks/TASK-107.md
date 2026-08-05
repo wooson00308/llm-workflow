@@ -2,14 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-107
 title: 갱신 안내의 명령 원문을 백엔드가 완성해 싣는다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-034
 source_decision_id: DECISION-3ECEDCA1
-updated_at: 2026-08-04T19:47:30Z
+updated_at: 2026-08-05T03:08:51.333746+00:00
 history:
   - { at: 2026-08-04T17:35:00Z, kind: created }
   - { at: 2026-08-04T19:41:20Z, kind: in_progress }
   - { at: 2026-08-04T19:47:30Z, kind: qa_waiting }
+  - { at: 2026-08-05T03:08:51.333746+00:00, kind: completed }
 ---
 
 # 갱신 안내의 명령 원문을 백엔드가 완성해 싣는다

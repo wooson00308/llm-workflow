@@ -142,3 +142,117 @@ migrate는 앱의 관리 마커를 치우지 않는다. 마커는 HTML 주석 �
 - 만료되지 않은 다른 세션의 lease를 지우거나 갱신하는 것. 만료된 lease만 교체 대상이며, 그 판단과 교체도 세션의 몫이다.
 
 여러 역할 잡을 동시에 돌려도 된다. 역할별 대상 문서가 다르고, 클레임이 파일시스템의 배타적 생성으로 보호되기 때문이다. 두 세션이 같은 문서를 동시에 선점하려 하면 한쪽은 반드시 실패하고 `NO_ELIGIBLE_WORK`로 끝난다. 같은 역할의 잡을 여러 개 돌리는 것도 같은 이유로 안전하지만, 서로 파일이 겹치는 작업을 병렬로 진행하지 않도록 작업 문서의 의존성 기술을 지켜야 한다.
+
+## 앱이 의존하는 데몬 표면
+
+앱이 하트비트 데몬에 기대는 표면은 데몬 저장소가 소유한 계약 문서 `docs/config-contract.md`가 정한다. 앱은 그 문서가 계약으로 적은 것만 쓰고, 소스를 읽어 알아낸 동작에는 기대지 않는다. 계약에 없는 것에 기대면 데몬이 그것을 바꿔도 앱이 깨지는 것을 아무도 모른다.
+
+이 절이 인용한 것은 claude-heartbeat 저장소의 커밋 `611604f`(`docs: 설정 계약에 버전 표면·heartbeat update 절 추가`)이고, 확인 일자는 2026-08-05다. 아래 줄 번호는 전부 그 커밋의 `docs/config-contract.md` 기준이다.
+
+**그 커밋은 브랜치 `claude/app-update-surface`에만 있고 `main`에 병합되지 않았다.** 확인 시점의 `main`은 `b1486ac`이고 이 계약을 담고 있지 않다. 병합 과정에서 계약이 달라질 수 있으므로, 아래 값에 기대는 작업은 착수 시점의 계약 문서를 다시 읽어 이 절과 대조해야 한다.
+
+### 1. `heartbeat update` (계약 125~231줄)
+
+editable(git) 설치본을 갱신하고 필요하면 데몬을 새 코드로 재기동한다. 사람이 아니라 앱이 부르는 명령이라 출력 자체가 계약이다.
+
+출력 규격(130~141줄)은 이렇다.
+
+- stdout에는 계약 줄만 나간다. 사람이 읽을 진단·가이드는 전부 stderr로 간다. 앱은 stdout만 파싱하고, stderr는 그대로 사용자에게 보여주면 된다.
+- 계약 줄은 공백으로 나뉜 `key=value` 목록이다. 값에는 공백이 없다(값 안의 공백은 `_`로 치환된다). 키는 낸 순서 그대로다.
+- 줄 구성은 단계 줄 0~3개 다음에 `result=` 줄 정확히 하나다. `result=` 줄은 항상 마지막이므로 앱은 마지막 줄만으로 판정할 수 있고, 단계 줄은 진행 표시용이다.
+- 단계 줄은 `step=repo` → `step=deps` → `step=service` 순서로만 나온다. 앞 단계가 실패하면 뒤 단계 줄은 나오지 않는다.
+- 모르는 key는 무시한다. 키 추가는 하위호환 변경이다. `detail=updated` 줄에는 `from=`·`to=`가 더 붙고, service 줄에는 `label=`이 붙을 수 있다.
+
+`step=repo`(143~159줄)는 `git fetch` 후 upstream으로 fast-forward만 한다. merge도 rebase도 하지 않는다.
+
+| status | detail | 뜻 |
+| --- | --- | --- |
+| `ok` | `up-to-date` | HEAD가 이미 upstream과 같다. 갱신 없음 |
+| `ok` | `updated` | fast-forward 완료. `from=`·`to=`에 짧은 커밋 해시가 붙는다 |
+| `failed` | `not-a-git-repo` | git 설치본이 아니거나(wheel 설치) git 명령이 없다 |
+| `failed` | `dirty-tree` | 추적 중인 파일에 미커밋 변경이 있다 |
+| `failed` | `no-upstream` | 현재 브랜치에 upstream이 없다 |
+| `failed` | `fetch-failed` | fetch 실패 또는 git 명령 타임아웃(120초) |
+| `failed` | `non-fast-forward` | 로컬 커밋이 갈라져 ff가 불가능하다 |
+| `failed` | `merge-failed` | ff 판정은 통과했는데 병합이 실패했다 |
+
+`step=deps`(161~171줄)는 HEAD가 움직였을 때만 `pip install -e <root>`를 돈다.
+
+| status | detail | 뜻 |
+| --- | --- | --- |
+| `ok` | `reinstalled` | editable 재설치 완료 |
+| `skipped` | `not-needed` | HEAD가 안 움직여 돌 이유가 없다 |
+| `failed` | `pip-timeout` | pip이 600초 안에 안 끝났다 |
+| `failed` | `pip-failed` | pip이 non-zero로 끝났다 |
+
+`step=service`(173~200줄)는 두 경우에 재기동이 필요하다고 본다. HEAD가 움직였거나, HEAD는 그대로인데 도는 데몬의 `_daemon.version`이 디스크 버전과 다를 때다.
+
+| status | detail | 뜻 |
+| --- | --- | --- |
+| `ok` | `restarted` | 재기동 성공 |
+| `skipped` | `not-needed` | 코드도 그대로, 도는 데몬 버전도 일치 |
+| `skipped` | `not-registered` | OS 스케줄러에 등록된 서비스가 없다 |
+| `skipped` | `not-loaded` | 등록은 됐는데 로드/기동 상태가 아니다. 다음 기동 때 새 코드로 뜬다 |
+| `skipped` | `self-restart-blocked` | 데몬 자신의 프로세스 트리 안에서 불렸다 |
+| `failed` | `restart-failed` | 재기동 명령이 non-zero로 끝났다 |
+| `failed` | `launchctl-missing` / `systemctl-missing` / `schtasks-missing` | OS 스케줄러 명령을 찾을 수 없다 |
+| `failed` | `unsupported-platform` | 이 OS용 어댑터가 없다 |
+
+앱은 데몬 밖 프로세스이므로 `self-restart-blocked`에 걸리지 않는다. 계약은 그 경로를 "데몬이 돌린 잡 안에서 update를 부른 경우"로 한정한다. Windows(Task Scheduler)는 `not-loaded`를 구분하지 않는다 — schtasks의 실행 상태 문자열이 로케일 의존이라 파싱을 계약에 넣지 않았다(199~200줄).
+
+마지막 줄은 항상 `result=<값> version=<X.Y.Z> exit=<코드>` 세 키다(202~209줄). `version`은 갱신이 끝난 뒤 **디스크에 있는** 버전이고, git 설치본이 아닌 경우에만 도는 프로세스의 버전이 실린다. `exit`은 프로세스 종료 코드와 같은 값이며, 파이프가 끊긴 상황을 대비해 줄에도 싣는다.
+
+`result`의 값은 셋이다(211~215줄).
+
+| result | 뜻 |
+| --- | --- |
+| `ok` | 갱신·재기동이 필요한 만큼 다 끝났다 |
+| `partial` | 코드는 갱신됐는데 뒤가 못 따라왔다. 사람 손이 필요하다 |
+| `failed` | 저장소 단계에서 멈췄다. 바뀐 것이 없다 |
+
+종료 코드는 열 가지다(217~231줄). 10번대는 저장소, 20번대는 의존성, 30번대는 프로세스이고, 새 원인이 생기면 같은 자리수 안에서 번호가 는다.
+
+| exit | result | 원인 |
+| --- | --- | --- |
+| `0` | `ok` | 성공 |
+| `10` | `failed` | git 저장소가 아님 / git 명령 없음 |
+| `11` | `failed` | 미커밋 변경 |
+| `12` | `failed` | fast-forward 불가 (`non-fast-forward`, `merge-failed`) |
+| `13` | `failed` | fetch 실패·타임아웃 |
+| `14` | `failed` | upstream 없음 |
+| `20` | `partial` | 의존성 설치 실패 |
+| `30` | `partial` | 서비스 재기동 실패 |
+| `31` | `partial` | 데몬이 OS 스케줄러 밖에서 돌아 재기동 못 함 |
+| `32` | `partial` | 데몬 자신의 트리 안에서 불려 재기동 안 함 |
+
+### 2. `heartbeat --version` (계약 80~101줄)
+
+출력은 `heartbeat <X.Y.Z>` 한 줄, stdout, 종료 코드 0이다. `heartbeat version` 서브커맨드가 같은 줄을 낸다. 파싱하는 쪽은 마지막 공백 뒤를 버전으로 읽으면 된다.
+
+버전의 단일 원천은 데몬의 `src/heartbeat/__init__.py`에 있는 `__version__`이다. 계약이 `importlib.metadata.version("claude-heartbeat")`는 원천이 아니라고 명시한다(95~101줄) — editable 설치의 메타데이터는 마지막 `pip install -e` 시점에 굳고 그 뒤 git pull로 코드가 올라가도 따라오지 않기 때문이다.
+
+### 3. `state.json`의 `_daemon.version` (계약 103~123줄)
+
+`state.json` 최상위에서 밑줄로 시작하는 키는 데몬 예약 영역이고 잡 이름이 아니다. 잡 목록을 훑는 도구는 이 키들을 건너뛰어야 한다. 지금 있는 예약 키는 `_daemon` 하나이며, 예약 키가 느는 것은 하위호환 변경이다.
+
+`_daemon`은 데몬이 기동할 때마다 덮어쓰이고, `version`(그 프로세스가 물고 있는 `__version__`)·`pid`·`started_at`(ISO 8601, 로컬 시간) 셋을 담는다.
+
+데몬이 한 번도 뜬 적 없으면 키 자체가 없다. 종료 시 지워지지 않으므로 `_daemon`의 존재는 "지금 돌고 있다"가 아니라 "마지막으로 뜬 데몬이 이랬다"는 뜻이다. 살아 있는지는 `heartbeat status`로 확인한다.
+
+계약이 읽는 쪽의 용도를 하나로 적었다(121~123줄). `_daemon.version`이 `heartbeat --version`과 다르면 디스크의 코드는 갱신됐는데 메모리의 프로세스는 옛 코드라는 뜻이고, 그 상태를 푸는 것이 `heartbeat update`다.
+
+### 4. `heartbeat init` — 종료 코드의 의미가 계약에 없다
+
+설치 2단계다. 계약 문서에서 `heartbeat init`이 나오는 자리는 19줄 하나뿐이고, 그 문장은 "`jobs.d` 디렉토리는 쓰는 쪽이 만든다. `heartbeat init`도 만들어 둔다"는 서술이다. 이 명령의 출력 형식도, 종료 코드의 의미도 계약에 없다. 데몬 저장소의 `docs/setup.md`(131줄)와 `docs/ko.md`(166줄)에 명령이 나오지만 그 두 문서는 사용 안내이지 계약이 아니고, 거기에도 종료 코드의 의미는 없다.
+
+**따라서 앱은 이 명령에 대해 0과 비0만 쓴다.** 0이면 성공, 비0이면 실패다. 그보다 잘게 원인을 가르는 문구를 앱이 만들면 계약에 없는 것을 지어내는 것이 된다. 원인을 사용자에게 보이려면 프로세스가 낸 출력을 그대로 싣는 수밖에 없다.
+
+### 5. `heartbeat install-service` — 종료 코드의 의미가 계약에 없다
+
+설치 3단계다. 계약 문서에는 `install-service`라는 문자열 자체가 없다. 명령은 `docs/setup.md`(133줄)와 `docs/ko.md`(106·168줄)에 나오지만, 4번과 같은 이유로 그것은 계약이 아니다.
+
+**앱은 이 명령에 대해서도 0과 비0만 쓴다.** 규칙은 4번과 같다.
+
+### 4번·5번이 거는 제한
+
+`heartbeat update`는 종료 코드가 원인별로 갈리므로 앱이 "미커밋 변경이 있습니다", "fetch가 실패했습니다"처럼 원인별 문구로 번역할 근거가 있다. `init`과 `install-service`에는 그 근거가 없다. 설치 실행형이 두 명령을 부를 때 결과를 원인별로 나눠 보이려면 계약 문서가 먼저 그 의미를 적어야 하고, 그 전까지 앱이 할 수 있는 것은 성공·실패 두 갈래와 명령이 낸 출력의 전달뿐이다.
