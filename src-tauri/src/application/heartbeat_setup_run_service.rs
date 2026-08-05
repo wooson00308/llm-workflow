@@ -177,6 +177,7 @@ mod tests {
     use crate::infrastructure::heartbeat_status::TextSource;
 
     /// 실행 대상이 아닌 식별자. 앞의 둘은 마법사의 1·4단계이고 마지막은 단계 이름조차 아니다.
+    #[cfg(unix)]
     const REJECTED: [&str; 3] = ["package", "dream", "정체불명"];
 
     fn missing(home: &TempDir) -> Vec<PathBuf> {

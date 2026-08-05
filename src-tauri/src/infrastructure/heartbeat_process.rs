@@ -182,9 +182,10 @@ mod tests {
     #[cfg(unix)]
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    use super::Captured;
     use super::{
-        candidates_for, manual_command, manual_command_for, run_capturing, run_once, Captured,
-        RunFailure,
+        candidates_for, manual_command, manual_command_for, run_capturing, run_once, RunFailure,
     };
 
     const JOB: &str = "wf-planner-Users-catze-project-workflow-labs";

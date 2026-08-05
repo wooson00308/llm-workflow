@@ -600,6 +600,16 @@ describe("WorkspaceShell 아이디어 초안", () => {
  * 프로젝트 요약이고 앱이 새로 계산하지 않는다 — 활동 뷰가 쓰는 값 그대로다.
  */
 describe("WorkspaceShell 연동 배선", () => {
+  // 카드 펼침 상태는 저장소에 남는다(SPEC-006 R6). 매 테스트가 빈 저장소에서 시작해야 앞 테스트가
+  // 펼쳐 둔 값이 다음 테스트의 시작 상태를 바꾸지 않는다.
+  beforeEach(() => {
+    stubStorage();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   const lease = {
     leaseId: "lease-1",
     agent: "developer-claude",

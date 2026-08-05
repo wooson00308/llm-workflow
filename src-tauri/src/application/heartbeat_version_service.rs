@@ -291,12 +291,14 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::{tempdir, TempDir};
 
+    #[cfg(unix)]
+    use super::HeartbeatVersions;
     use super::{
-        DiskVersion, HeartbeatVersionService, HeartbeatVersions, RunningVersion,
-        UndeterminedReason, VersionVerdict,
+        DiskVersion, HeartbeatVersionService, RunningVersion, UndeterminedReason, VersionVerdict,
     };
 
     /// 계약이 적은 출력 한 줄.
+    #[cfg(unix)]
     const VERSION_LINE: &str = "heartbeat 0.8.1";
 
     fn home() -> TempDir {
