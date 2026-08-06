@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -9,18 +9,22 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::project::{
-    AgentLease, AgentLeaseSummary, IdeaDocument, PendingRoleWork, ProjectManifest, ProjectSummary,
-    SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
-    TaskDocument, TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
+    AgentLease, AgentLeaseSummary, CustomRulesDocument, CustomRulesDraft, CustomRulesPreview,
+    IdeaDocument, ManagedAssetSyncResult, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
+    ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult, SchemaCompatibility,
+    SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState, TaskDocument,
+    TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
     WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
     WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
-use crate::infrastructure::claim_helper::{
-    install_claim_helper, validate_claim_helper, ClaimHelperError,
+use crate::infrastructure::custom_rules::{
+    prepare_custom_rules_preview, read_custom_rules, save_custom_rules, CustomRulesError,
 };
-use crate::infrastructure::project_instructions::{
-    install_project_instructions, validate_project_instructions, ProjectInstructionError,
+use crate::infrastructure::managed_project_assets::{
+    install_managed_project_assets, synchronize_managed_project_assets,
+    validate_managed_project_assets, ManagedProjectAssetsError,
 };
+use crate::infrastructure::project_write_lock::{ProjectWriteLock, ProjectWriteLockError};
 use crate::infrastructure::role_eligibility::{pending_role_work, WorkflowInput};
 
 const CONTROL_DIRECTORY: &str = ".workflow";
@@ -78,6 +82,8 @@ pub enum ProjectError {
     MigrationRequired,
     #[error("현재 앱보다 새로운 문서 규격입니다. 프로젝트를 읽기 전용으로 열어야 합니다.")]
     FutureSchema,
+    #[error("아직 LLM Workflow 프로젝트로 초기화되지 않았습니다.")]
+    NotInitialized,
     #[error("외부 LLM이 문서를 작업 중입니다. 작업이 끝난 뒤 다시 시도해 주세요.")]
     ActiveLeases,
     #[error("지원하는 마이그레이션 경로가 없습니다: {0} → {1}")]
@@ -89,9 +95,11 @@ pub enum ProjectError {
     #[error("프로젝트 메타데이터를 안전하게 저장하지 못했습니다: {0}")]
     Persist(String),
     #[error(transparent)]
-    ProjectInstructions(#[from] ProjectInstructionError),
+    ManagedProjectAssets(#[from] ManagedProjectAssetsError),
     #[error(transparent)]
-    ClaimHelper(#[from] ClaimHelperError),
+    CustomRules(#[from] CustomRulesError),
+    #[error(transparent)]
+    ProjectWriteLock(#[from] ProjectWriteLockError),
 }
 
 #[derive(Debug, Default)]
@@ -128,8 +136,7 @@ impl FileSystemProjectRepository {
         validate_workflow_name(workflow_name)?;
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
-        validate_project_instructions(&root, &control_root)?;
-        validate_claim_helper(&control_root)?;
+        validate_managed_project_assets(&root, &control_root)?;
         ensure_managed_control_root(&control_root)?;
 
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -154,8 +161,7 @@ impl FileSystemProjectRepository {
             }
         };
 
-        install_project_instructions(&root, &control_root)?;
-        install_claim_helper(&control_root)?;
+        install_managed_project_assets(&root, &control_root)?;
 
         let id = format!("wf_{}", &compact_uuid()[..8]);
         let directory = format!("{}--{}", slugify(workflow_name), id);
@@ -251,6 +257,45 @@ impl FileSystemProjectRepository {
         ))
     }
 
+    pub fn synchronize_managed_assets(
+        &self,
+        root: &Path,
+    ) -> Result<ManagedAssetSyncResult, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let manifest_path = control_root.join(PROJECT_MANIFEST);
+        if !manifest_path.exists() {
+            return Err(ProjectError::NotInitialized);
+        }
+        let project = read_manifest(&manifest_path)?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        Ok(synchronize_managed_project_assets(&root, &control_root)?)
+    }
+
+    pub fn read_custom_rules(&self, root: &Path) -> Result<CustomRulesDocument, ProjectError> {
+        let control_root = current_project_control_root(root)?;
+        Ok(read_custom_rules(&control_root)?)
+    }
+
+    pub fn prepare_custom_rules_preview(
+        &self,
+        root: &Path,
+        draft: CustomRulesDraft,
+    ) -> Result<CustomRulesPreview, ProjectError> {
+        let control_root = current_project_control_root(root)?;
+        Ok(prepare_custom_rules_preview(&control_root, draft)?)
+    }
+
+    pub fn save_custom_rules(
+        &self,
+        root: &Path,
+        request: SaveCustomRulesRequest,
+    ) -> Result<SaveCustomRulesResult, ProjectError> {
+        let control_root = current_project_control_root(root)?;
+        Ok(save_custom_rules(&control_root, request)?)
+    }
+
     pub fn read_spec(
         &self,
         root: &Path,
@@ -337,8 +382,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_project_instructions(&root, &control_root)?;
-        install_claim_helper(&control_root)?;
+        install_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
         let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
@@ -389,8 +433,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_project_instructions(&root, &control_root)?;
-        install_claim_helper(&control_root)?;
+        install_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         record_one_task_qa(&workflow_root, file_name, &outcome, comment)?;
 
@@ -418,8 +461,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_project_instructions(&root, &control_root)?;
-        install_claim_helper(&control_root)?;
+        install_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
 
         let results = file_names
@@ -472,11 +514,10 @@ impl FileSystemProjectRepository {
             SchemaCompatibility::MigrationRequired => {}
         }
 
+        let _lock = ProjectWriteLock::acquire(&control_root)?;
         if !read_active_leases(&control_root)?.is_empty() {
             return Err(ProjectError::ActiveLeases);
         }
-
-        let _lock = MigrationLock::acquire(&control_root)?;
         backup_manifests(&control_root, &project)?;
 
         while project.schema_version < PROJECT_SCHEMA_VERSION {
@@ -490,31 +531,6 @@ impl FileSystemProjectRepository {
             SchemaCompatibility::Current,
             Vec::new(),
         ))
-    }
-}
-
-struct MigrationLock {
-    path: PathBuf,
-}
-
-impl MigrationLock {
-    fn acquire(control_root: &Path) -> Result<Self, ProjectError> {
-        let runtime = control_root.join(RUNTIME_DIRECTORY);
-        fs::create_dir_all(&runtime)?;
-        let path = runtime.join(MIGRATION_LOCK_FILE);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        writeln!(file, "created_at: {}", Utc::now().to_rfc3339())?;
-        file.sync_all()?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for MigrationLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -563,6 +579,19 @@ fn canonical_project_root(root: &Path) -> Result<PathBuf, ProjectError> {
         return Err(ProjectError::RootNotFound(root.display().to_string()));
     }
     Ok(root.canonicalize()?)
+}
+
+fn current_project_control_root(root: &Path) -> Result<PathBuf, ProjectError> {
+    let root = canonical_project_root(root)?;
+    let control_root = root.join(CONTROL_DIRECTORY);
+    let manifest_path = control_root.join(PROJECT_MANIFEST);
+    if !manifest_path.exists() {
+        return Err(ProjectError::NotInitialized);
+    }
+    let project = read_manifest(&manifest_path)?;
+    validate_workflow_directories(&control_root, &project)?;
+    require_current_schema(project.schema_version)?;
+    Ok(control_root)
 }
 
 fn ensure_managed_control_root(control_root: &Path) -> Result<(), ProjectError> {
@@ -746,10 +775,13 @@ fn summary_from_manifest(
             )
         })
         .collect();
-    let pending_work = {
-        let inputs: Vec<WorkflowInput<'_>> = prepared
+    let pending_detail = {
+        let inputs: Vec<WorkflowInput<'_>> = manifest
+            .workflows
             .iter()
-            .map(|workflow| WorkflowInput {
+            .zip(prepared.iter())
+            .map(|(entry, workflow)| WorkflowInput {
+                directory: &entry.directory,
                 items: &workflow.items,
                 approved_decisions: &workflow.approved_decisions,
                 revision_requested_decisions: &workflow.revision_requested_decisions,
@@ -783,7 +815,8 @@ fn summary_from_manifest(
                 )
             })
             .collect(),
-        pending_work,
+        pending_work: pending_detail.flags(),
+        pending_detail,
     }
 }
 
@@ -843,6 +876,7 @@ fn uninitialized_summary(root: &Path) -> ProjectSummary {
         active_leases: Vec::new(),
         workflows: Vec::new(),
         pending_work: PendingRoleWork::default(),
+        pending_detail: PendingRoleWorkDetail::default(),
     }
 }
 
@@ -1931,11 +1965,17 @@ fn read_decision_documents(
     let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
         return (records, events);
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
-            continue;
-        }
+    // 파일 이름 오름차순으로 읽는다. 조건 스크립트가 결정을 글롭 순서로 훑고, 어느 결정이 대상이
+    // 되는지가 그 차례로 갈린다(SPEC-049 R1). `read_task_documents`가 같은 이유로 이미 정렬한다.
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("md")
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
         let Ok(contents) = fs::read_to_string(path) else {
             continue;
         };
@@ -2188,13 +2228,16 @@ mod tests {
         ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
-        PendingRoleWork, SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState,
-        TaskDocument, TaskQaOutcome, WorkflowItemSummary,
+        CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
+        ManagedAssetSyncStatus, PendingRoleWork, SaveCustomRulesRequest, SaveCustomRulesStatus,
+        SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
+        WorkflowItemSummary,
     };
     // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
     use crate::infrastructure::claim_helper::claim_helper_path;
     use crate::infrastructure::heartbeat_condition::install_condition_script;
     use crate::infrastructure::heartbeat_condition::test_support::run_condition;
+    use crate::infrastructure::project_write_lock::ProjectWriteLock;
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -2244,6 +2287,206 @@ mod tests {
             fs::read_to_string(root.path().join(".workflow/.gitignore")).expect("nested gitignore"),
             ".runtime/\n"
         );
+    }
+
+    #[test]
+    fn inspect_stays_read_only_when_managed_rules_need_an_update() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let rules = root.path().join(".workflow/rules/workflow.md");
+        let old = fs::read_to_string(&rules)
+            .expect("rules")
+            .replace("rules_version: 14", "rules_version: 13");
+        fs::write(&rules, &old).expect("old rules");
+        let modified = fs::metadata(&rules)
+            .and_then(|metadata| metadata.modified())
+            .expect("rules mtime");
+
+        repository.inspect(root.path()).expect("first inspect");
+        repository.inspect(root.path()).expect("second inspect");
+
+        assert_eq!(fs::read_to_string(&rules).expect("unchanged rules"), old);
+        assert_eq!(
+            fs::metadata(&rules)
+                .and_then(|metadata| metadata.modified())
+                .expect("unchanged mtime"),
+            modified
+        );
+    }
+
+    #[test]
+    fn the_separate_sync_entrypoint_updates_assets() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let rules = root.path().join(".workflow/rules/workflow.md");
+        let old = fs::read_to_string(&rules)
+            .expect("rules")
+            .replace("rules_version: 14", "rules_version: 13");
+        fs::write(&rules, old).expect("old rules");
+
+        let result = repository
+            .synchronize_managed_assets(root.path())
+            .expect("sync");
+
+        assert_eq!(result.status, ManagedAssetSyncStatus::Updated);
+        assert!(result.updated_assets.contains(&"workflow_rules".to_owned()));
+        assert!(fs::read_to_string(rules)
+            .expect("updated rules")
+            .contains("rules_version: 14"));
+    }
+
+    #[test]
+    fn custom_rules_round_trip_through_the_repository_contract() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+
+        let initial = repository
+            .read_custom_rules(root.path())
+            .expect("read absent custom rules");
+        assert_eq!(initial.status, CustomRulesFileStatus::Absent);
+
+        let preview = repository
+            .prepare_custom_rules_preview(
+                root.path(),
+                CustomRulesDraft {
+                    enabled: true,
+                    applies_to: vec![CustomRuleRole::Developer],
+                    body: "개발 보고서에 검증 결과를 적는다.".to_owned(),
+                },
+            )
+            .expect("prepare preview");
+        let saved = repository
+            .save_custom_rules(
+                root.path(),
+                SaveCustomRulesRequest {
+                    expected_content_hash: initial.content_hash,
+                    draft: preview.draft.clone(),
+                    updated_at: preview.updated_at.clone(),
+                    preview_hash: preview.preview_hash.clone(),
+                },
+            )
+            .expect("save custom rules");
+
+        assert_eq!(saved.status, SaveCustomRulesStatus::Saved);
+        assert_eq!(saved.document.status, CustomRulesFileStatus::Valid);
+        assert_eq!(
+            saved.document.raw.as_deref(),
+            Some(preview.serialized.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join(".workflow/rules/custom.md"))
+                .expect("saved custom rules"),
+            preview.serialized
+        );
+        assert_eq!(
+            repository
+                .read_custom_rules(root.path())
+                .expect("read saved custom rules"),
+            saved.document
+        );
+    }
+
+    #[test]
+    fn malformed_custom_rules_do_not_block_inspection_or_managed_asset_sync() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let custom = root.path().join(".workflow/rules/custom.md");
+        let invalid = b"---\nschema: workflow-labs/custom-rules@1\nenabled: true\napplies_to: [unknown]\nupdated_at: nope\n---\n\nkeep exactly\n";
+        fs::write(&custom, invalid).expect("write malformed custom rules");
+        let modified = fs::metadata(&custom)
+            .and_then(|metadata| metadata.modified())
+            .expect("custom rules mtime");
+        let rules = root.path().join(".workflow/rules/workflow.md");
+        let old_rules = fs::read_to_string(&rules)
+            .expect("rules")
+            .replace("rules_version: 14", "rules_version: 13");
+        fs::write(&rules, old_rules).expect("old managed rules");
+
+        repository.inspect(root.path()).expect("inspect project");
+        let result = repository
+            .synchronize_managed_assets(root.path())
+            .expect("sync managed rules");
+
+        assert_eq!(result.status, ManagedAssetSyncStatus::Updated);
+        assert!(!result.updated_assets.iter().any(|id| id == "custom_rules"));
+        assert_eq!(fs::read(&custom).expect("custom rules unchanged"), invalid);
+        assert_eq!(
+            fs::metadata(&custom)
+                .and_then(|metadata| metadata.modified())
+                .expect("custom rules mtime unchanged"),
+            modified
+        );
+        assert_eq!(
+            repository
+                .read_custom_rules(root.path())
+                .expect("read malformed custom rules")
+                .status,
+            CustomRulesFileStatus::Invalid
+        );
+    }
+
+    #[test]
+    fn the_sync_entrypoint_returns_non_utf8_as_a_structured_conflict() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let rules = root.path().join(".workflow/rules/workflow.md");
+        fs::write(&rules, [0xff, 0xfe, 0xfd]).expect("non UTF-8 rules");
+
+        let result = repository
+            .synchronize_managed_assets(root.path())
+            .expect("non UTF-8 must be a structured result");
+
+        assert_eq!(result.status, ManagedAssetSyncStatus::Conflict);
+        assert_eq!(result.affected_asset.as_deref(), Some("workflow_rules"));
+        assert!(result
+            .assets
+            .iter()
+            .any(|asset| asset.id == "workflow_rules"
+                && asset.status == ManagedAssetStatus::Conflict
+                && asset
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("UTF-8"))));
+        assert_eq!(
+            fs::read(rules).expect("damaged bytes kept"),
+            [0xff, 0xfe, 0xfd]
+        );
+    }
+
+    #[test]
+    fn a_sync_lock_conflict_is_retryable_and_does_not_block_inspection() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let control = root.path().join(".workflow");
+        let _lock = ProjectWriteLock::acquire(&control).expect("shared write lock");
+
+        let result = repository
+            .synchronize_managed_assets(root.path())
+            .expect("retry result");
+        let inspected = repository
+            .inspect(root.path())
+            .expect("inspection remains available");
+
+        assert_eq!(result.status, ManagedAssetSyncStatus::RetryRequired);
+        assert!(inspected.initialized);
     }
 
     #[test]
@@ -3376,6 +3619,11 @@ mod tests {
             .read_task(root.path(), &workflow.directory, "TASK-CONFIRMED.md")
             .expect("read task");
         assert!(detail.body.contains("실제 동작을 확인한다."));
+        let architect = root.path().join(".workflow/rules/roles/architect.md");
+        let old_architect = fs::read_to_string(&architect)
+            .expect("architect")
+            .replace("rules_version: 9", "rules_version: 8");
+        fs::write(&architect, old_architect).expect("old architect");
 
         let confirmed = repository
             .record_task_qa(
@@ -3396,6 +3644,9 @@ mod tests {
                 .status,
             "completed"
         );
+        assert!(fs::read_to_string(architect)
+            .expect("architect updated on QA")
+            .contains("rules_version: 9"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
@@ -3951,6 +4202,11 @@ mod tests {
             .iter()
             .map(|id| batch_qa_task(root.path(), &directory, id, "qa_waiting"))
             .collect();
+        let developer = root.path().join(".workflow/rules/roles/developer.md");
+        let old_developer = fs::read_to_string(&developer)
+            .expect("developer")
+            .replace("rules_version: 10", "rules_version: 9");
+        fs::write(&developer, old_developer).expect("old developer");
 
         let result = repository
             .confirm_task_qa_batch(
@@ -3966,6 +4222,9 @@ mod tests {
             .expect("confirm batch");
 
         assert!(result.results.iter().all(|entry| entry.recorded));
+        assert!(fs::read_to_string(developer)
+            .expect("developer updated on batch QA")
+            .contains("rules_version: 10"));
         assert_eq!(
             result
                 .results
@@ -4443,6 +4702,11 @@ mod tests {
             .read_spec(root.path(), &workflow.directory, "SPEC-001.md")
             .expect("read spec");
         assert!(document.body.contains("## 기획 내용"));
+        let rules = root.path().join(".workflow/rules/workflow.md");
+        let old_rules = fs::read_to_string(&rules)
+            .expect("rules")
+            .replace("rules_version: 14", "rules_version: 13");
+        fs::write(&rules, old_rules).expect("old rules");
 
         let decided = repository
             .record_spec_decision(
@@ -4456,6 +4720,9 @@ mod tests {
 
         assert_eq!(decided.workflows[0].counts.decisions, 0);
         assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
+        assert!(fs::read_to_string(rules)
+            .expect("rules updated on decision")
+            .contains("rules_version: 14"));
         assert_eq!(
             fs::read_to_string(spec_path).expect("original spec"),
             source
@@ -4762,24 +5029,48 @@ mod tests {
             .count()
     }
 
-    /// 앱의 대기 물량 판정과 조건 스크립트의 종료 코드를 세 역할에서 대조하고 앱의 판정을 낸다.
+    /// 앱의 대기 물량 판정과 조건 스크립트의 답을 세 역할에서 대조하고 앱의 판정을 낸다.
     /// 대조 어법은 `a_closed_idea_is_not_planner_work_in_either_judgement`과 같다 —
     /// 스크립트를 부르는 일은 `heartbeat_condition`의 공용 헬퍼가 한다. 셸 이름과 파일 이름을 여기
     /// 다시 적으면 그것이 세 번째 사본이 되고, 플랫폼마다 다른 자산이 깔리므로 그 사본은 곧 틀린다.
+    ///
+    /// 대조 대상은 종료 코드만이 아니라 대상 문서와 후보별 제외 사유까지다(SPEC-049 완료 조건 4).
+    /// `role_eligibility`의 대조 헬퍼와 같은 값을 본다 — 두 검사가 서로 다른 것을 대조하면 넓어진
+    /// 답이 갈라지는 자리가 한쪽에서만 걸린다.
     fn pending_work_matching_condition_script(project_root: &Path) -> PendingRoleWork {
-        let pending = FileSystemProjectRepository
+        let detail = FileSystemProjectRepository
             .inspect(project_root)
             .expect("inspect project")
-            .pending_work;
-        for (role, app_flag) in [
-            ("planner", pending.planner),
-            ("architect", pending.architect),
-            ("developer", pending.developer),
+            .pending_detail;
+        for (role, verdict) in [
+            ("planner", &detail.planner),
+            ("architect", &detail.architect),
+            ("developer", &detail.developer),
         ] {
-            let code = run_condition(project_root, role).code;
-            assert_eq!(app_flag, code == 0, "{role} 판정이 조건 스크립트와 다르다");
+            let run = run_condition(project_root, role);
+            let candidates: Vec<String> = verdict
+                .candidates
+                .iter()
+                .map(|candidate| format!("{} {}", candidate.verdict, candidate.id))
+                .collect();
+
+            assert_eq!(
+                verdict.target.is_some(),
+                run.code == 0,
+                "{role} 판정이 조건 스크립트와 다르다"
+            );
+            assert_eq!(
+                verdict.target,
+                run.target(),
+                "{role} 대상이 조건 스크립트와 다르다"
+            );
+            assert_eq!(
+                candidates,
+                run.candidates(),
+                "{role} 후보 목록이 조건 스크립트와 다르다"
+            );
         }
-        pending
+        detail.flags()
     }
 
     // SPEC-042 R1(TASK-127). 승인이 최신인 기획서에 후속 수정 요청 하나가 더 기록된다. 표에서
@@ -5123,6 +5414,28 @@ mod tests {
     }
 
     #[test]
+    fn migration_uses_the_same_exclusive_project_write_lock() {
+        let root = tempdir().expect("temp project");
+        let control = root.path().join(".workflow");
+        fs::create_dir_all(control.join(".runtime/migrations")).expect("runtime");
+        fs::write(
+            control.join("project.yml"),
+            "schema_version: 0\nproject_id: legacy\nname: Legacy\nworkflows: []\n",
+        )
+        .expect("legacy manifest");
+        let _lock = ProjectWriteLock::acquire(&control).expect("shared write lock");
+
+        let error = FileSystemProjectRepository
+            .migrate(root.path())
+            .expect_err("shared lock must block migration");
+
+        assert!(matches!(error, ProjectError::ProjectWriteLock(_)));
+        assert!(fs::read_to_string(control.join("project.yml"))
+            .expect("manifest unchanged")
+            .contains("schema_version: 0"));
+    }
+
+    #[test]
     fn blocks_migration_while_agent_lease_is_active() {
         let root = tempdir().expect("temp project");
         let control = root.path().join(".workflow");
@@ -5174,7 +5487,7 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect_err("instruction conflict must fail before initialization");
 
-        assert!(matches!(error, ProjectError::ProjectInstructions(_)));
+        assert!(matches!(error, ProjectError::ManagedProjectAssets(_)));
         assert!(!root.path().join(".workflow").exists());
     }
 
@@ -5220,7 +5533,7 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect_err("an unmanaged helper must stop workflow creation");
 
-        assert!(matches!(error, ProjectError::ClaimHelper(_)));
+        assert!(matches!(error, ProjectError::ManagedProjectAssets(_)));
         assert_eq!(fs::read_to_string(&helper).expect("helper"), foreign);
         assert!(!root.path().join(".workflow/project.yml").exists());
     }

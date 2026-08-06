@@ -1473,15 +1473,15 @@ describe("DevelopmentBoard", () => {
     expect(failures).toHaveTextContent("QA 대기 상태가 아닙니다.");
   });
 
-  it("still says how many were recorded when nothing failed", async () => {
+  it("closes the dialog when every selected task is recorded", async () => {
     const onTaskQaBatch = vi.fn().mockResolvedValue([recordedEntry("TASK-201"), recordedEntry("TASK-202")]);
     const items = [laneTask("TASK-201", "qa_waiting", "SPEC-001"), laneTask("TASK-202", "qa_waiting", "SPEC-001")];
     renderBatchLanes(workflowWith(items), onTaskQaBatch);
     const dialog = openBatchDialog(2);
     fireBatch(dialog, 2);
 
-    await waitFor(() => expect(within(dialog).getByText("2건을 기록했습니다.")).toBeInTheDocument());
-    expect(dialog.querySelector(".lane-qa-failures")).toBeNull();
+    // 전 건 성공은 읽을 실패가 없다. 결과 화면을 붙들지 않고 닫힌다.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("says the call itself failed inside the dialog instead of leaving it to a global message", async () => {
@@ -1528,7 +1528,7 @@ describe("DevelopmentBoard", () => {
     await act(async () => {
       finish([recordedEntry("TASK-201"), recordedEntry("TASK-202")]);
     });
-    expect(within(dialog).getByText("2건을 기록했습니다.")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("keeps the batch action on a collapsed lane", () => {

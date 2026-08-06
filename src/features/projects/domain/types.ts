@@ -158,6 +158,153 @@ export interface ProjectSummary {
   pendingWork?: PendingRoleWork;
 }
 
+export type ManagedAssetSyncStatus =
+  | "current"
+  | "updated"
+  | "retry_required"
+  | "conflict";
+
+export type ManagedAssetStatus =
+  | "current"
+  | "update_required"
+  | "updated"
+  | "retry_required"
+  | "conflict";
+
+export interface ManagedAssetState {
+  id: string;
+  label: string;
+  status: ManagedAssetStatus;
+  installedVersion: number | null;
+  providedVersion: number | null;
+  reason: string | null;
+}
+
+export interface ManagedAssetRollbackFailure {
+  assetId: string;
+  label: string;
+  reason: string;
+  recoveryPath: string | null;
+}
+
+export interface ManagedAssetRollbackRecovery {
+  assetId: string;
+  label: string;
+  recoveryPath: string;
+}
+
+export interface ManagedAssetSyncResult {
+  status: ManagedAssetSyncStatus;
+  assets: ManagedAssetState[];
+  updatedAssets: string[];
+  reason: string | null;
+  affectedAsset: string | null;
+  rollbackFailures: ManagedAssetRollbackFailure[];
+  rollbackRecoveries: ManagedAssetRollbackRecovery[];
+}
+
+export type ManagedAssetSyncTrigger = "project_open" | "manual_refresh";
+
+/** 명시적 관리 자산 동기화의 수명. 자동 조회는 이 값을 바꾸지 않는다. */
+export interface ManagedAssetsState {
+  syncing: boolean;
+  result: ManagedAssetSyncResult | null;
+  error: string | null;
+  trigger: ManagedAssetSyncTrigger | null;
+}
+
+export type CustomRuleRole = "planner" | "architect" | "developer";
+
+export type CustomRulesFileStatus =
+  | "absent"
+  | "valid"
+  | "invalid"
+  | "future_schema"
+  | "unsafe_file";
+
+export interface CustomRulesDocument {
+  status: CustomRulesFileStatus;
+  enabled: boolean;
+  appliesTo: CustomRuleRole[];
+  body: string;
+  updatedAt: string | null;
+  modifiedAt: string | null;
+  raw: string | null;
+  contentHash: string | null;
+  error: string | null;
+}
+
+export interface CustomRulesDraft {
+  enabled: boolean;
+  appliesTo: CustomRuleRole[];
+  body: string;
+}
+
+export type CustomRulesSourceKind =
+  | "workflow_rules"
+  | "role_contract"
+  | "user_rules";
+
+export interface CustomRulesSourcePreview {
+  kind: CustomRulesSourceKind;
+  label: string;
+  order: number;
+  content: string;
+  applied: boolean;
+  reason: string | null;
+}
+
+export interface CustomRulesRolePreview {
+  role: CustomRuleRole;
+  sources: CustomRulesSourcePreview[];
+}
+
+export interface CustomRulesPreview {
+  draft: CustomRulesDraft;
+  serialized: string;
+  updatedAt: string;
+  previewHash: string;
+  priorityNotice: string;
+  roles: CustomRulesRolePreview[];
+}
+
+export interface SaveCustomRulesRequest {
+  expectedContentHash: string | null;
+  draft: CustomRulesDraft;
+  updatedAt: string;
+  previewHash: string;
+}
+
+export type SaveCustomRulesStatus = "saved" | "conflict" | "retry_required";
+
+export interface SaveCustomRulesResult {
+  status: SaveCustomRulesStatus;
+  document: CustomRulesDocument;
+  reason: string | null;
+}
+
+/** 사용자 정의 규칙 파일과 명시적 미리보기·저장 요청의 작업 공간 수명. */
+export interface CustomRulesState {
+  document: CustomRulesDocument | null;
+  reading: boolean;
+  previewing: boolean;
+  saving: boolean;
+  preview: CustomRulesPreview | null;
+  /** 미리보기를 준비할 때 읽었던 파일 식별값. 자동 조회가 새 값을 읽어도 저장 기준은 바뀌지 않는다. */
+  previewBaselineContentHash: string | null;
+  saveResult: SaveCustomRulesResult | null;
+  readError: string | null;
+  previewError: string | null;
+  saveError: string | null;
+}
+
+export interface CustomRulesActions {
+  preparePreview(draft: CustomRulesDraft): Promise<CustomRulesPreview | null>;
+  save(): Promise<SaveCustomRulesResult | null>;
+  reload(): Promise<boolean>;
+  clearFeedback(): void;
+}
+
 /**
  * 연동 공통 설치 상태. 값은 미설치·설치됨 두 개뿐이다.
  *
@@ -762,6 +909,16 @@ export interface RecentProject {
 export interface ProjectGateway {
   chooseDirectory(): Promise<string | null>;
   inspect(path: string): Promise<ProjectSummary>;
+  synchronizeManagedAssets(path: string): Promise<ManagedAssetSyncResult>;
+  readCustomRules(path: string): Promise<CustomRulesDocument>;
+  prepareCustomRulesPreview(
+    path: string,
+    draft: CustomRulesDraft,
+  ): Promise<CustomRulesPreview>;
+  saveCustomRules(
+    path: string,
+    request: SaveCustomRulesRequest,
+  ): Promise<SaveCustomRulesResult>;
   createWorkflow(path: string, name: string): Promise<ProjectSummary>;
   createIdea(
     path: string,

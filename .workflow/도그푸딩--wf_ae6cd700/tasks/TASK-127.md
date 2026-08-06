@@ -2,15 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-127
 title: 승인된 기획서에 후속 수정 요청을 기록하는 길이 쓰기 경로에 난다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-042
 source_decision_id: DECISION-FB4A8439
 scope_files: [src-tauri/src/infrastructure/fs_project_repository.rs]
-updated_at: 2026-08-05T11:07:10Z
+updated_at: 2026-08-06T07:12:09.249551+00:00
 history:
   - { at: 2026-08-05T10:10:00Z, kind: created }
   - { at: 2026-08-05T10:52:14Z, kind: in_progress }
   - { at: 2026-08-05T11:07:10Z, kind: qa_waiting }
+  - { at: 2026-08-06T07:12:09.249551+00:00, kind: completed }
 ---
 
 # 승인된 기획서에 후속 수정 요청을 기록하는 길이 쓰기 경로에 난다

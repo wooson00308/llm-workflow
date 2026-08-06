@@ -40,6 +40,17 @@ describe("MarkdownBody", () => {
     expect(screen.getByRole("link", { name: "파일 계약" })).toHaveAttribute("target", "_blank");
   });
 
+  it("keeps a single tilde literal instead of pairing it into strikethrough", () => {
+    const { container } = render(
+      <MarkdownBody body={"세션당 3만~4만 토큰을 쓰고, 대조는 2천~5천이다."} />,
+    );
+
+    expect(container.querySelectorAll("del")).toHaveLength(0);
+    expect(container.querySelector("p")).toHaveTextContent(
+      "세션당 3만~4만 토큰을 쓰고, 대조는 2천~5천이다.",
+    );
+  });
+
   it("renders a single newline as a line break when preserveLineBreaks is on", () => {
     const { container } = render(
       <MarkdownBody body={"첫 줄\n둘째 줄\n셋째 줄"} preserveLineBreaks />,

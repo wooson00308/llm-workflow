@@ -2,6 +2,9 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useProjectWorkspace } from "./useProjectWorkspace";
 import type {
+  CustomRulesDocument,
+  CustomRulesDraft,
+  CustomRulesPreview,
   HeartbeatRunControls,
   HeartbeatServiceControlResult,
   HeartbeatServiceControls,
@@ -13,9 +16,11 @@ import type {
   HeartbeatVersions,
   IntegrationsSnapshot,
   IntegrationsState,
+  ManagedAssetSyncResult,
   ProjectGateway,
   ProjectSummary,
   RecentProjectStore,
+  SaveCustomRulesResult,
   TaskQaBatchEntry,
 } from "../domain/types";
 
@@ -37,6 +42,104 @@ const project: ProjectSummary = {
       items: { ideas: [], specs: [], tasks: [] },
     },
   ],
+};
+
+const managedAssetsResult: ManagedAssetSyncResult = {
+  status: "updated",
+  assets: [
+    {
+      id: "workflow_rules",
+      label: "공통 규칙",
+      status: "updated",
+      installedVersion: 12,
+      providedVersion: 13,
+      reason: null,
+    },
+  ],
+  updatedAssets: ["workflow_rules"],
+  reason: null,
+  affectedAsset: null,
+  rollbackFailures: [],
+  rollbackRecoveries: [],
+};
+
+const absentCustomRules: CustomRulesDocument = {
+  status: "absent",
+  enabled: false,
+  appliesTo: [],
+  body: "",
+  updatedAt: null,
+  modifiedAt: null,
+  raw: null,
+  contentHash: null,
+  error: null,
+};
+
+const customRulesDocument: CustomRulesDocument = {
+  status: "valid",
+  enabled: true,
+  appliesTo: ["developer"],
+  body: "검증 결과를 보고서에 적는다.",
+  updatedAt: "2026-08-06T12:00:00Z",
+  modifiedAt: "2026-08-06T12:00:01Z",
+  raw: "saved custom rules\n",
+  contentHash: "sha256:old",
+  error: null,
+};
+
+const customRulesDraft: CustomRulesDraft = {
+  enabled: true,
+  appliesTo: ["developer"],
+  body: "검증 결과를 보고서에 적는다.",
+};
+
+const customRulesPreview: CustomRulesPreview = {
+  draft: customRulesDraft,
+  serialized: "preview custom rules\n",
+  updatedAt: "2026-08-06T12:05:00Z",
+  previewHash: "sha256:preview",
+  priorityNotice: "앱 규칙이 우선합니다.",
+  roles: [
+    {
+      role: "developer",
+      sources: [
+        {
+          kind: "workflow_rules",
+          label: "공통 규칙",
+          order: 1,
+          content: "workflow",
+          applied: true,
+          reason: null,
+        },
+        {
+          kind: "role_contract",
+          label: "개발자 역할 계약",
+          order: 2,
+          content: "developer",
+          applied: true,
+          reason: null,
+        },
+        {
+          kind: "user_rules",
+          label: "사용자 정의 규칙",
+          order: 3,
+          content: customRulesDraft.body,
+          applied: true,
+          reason: null,
+        },
+      ],
+    },
+  ],
+};
+
+const savedCustomRules: SaveCustomRulesResult = {
+  status: "saved",
+  document: {
+    ...customRulesDocument,
+    raw: customRulesPreview.serialized,
+    contentHash: "sha256:saved",
+  },
+  reason: null,
 };
 
 const snapshot: IntegrationsSnapshot = {
@@ -135,6 +238,10 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
   return {
     chooseDirectory: vi.fn().mockResolvedValue(project.rootPath),
     inspect: vi.fn().mockResolvedValue(project),
+    synchronizeManagedAssets: vi.fn().mockResolvedValue(managedAssetsResult),
+    readCustomRules: vi.fn().mockResolvedValue(absentCustomRules),
+    prepareCustomRulesPreview: vi.fn().mockResolvedValue(customRulesPreview),
+    saveCustomRules: vi.fn().mockResolvedValue(savedCustomRules),
     createWorkflow: vi.fn().mockResolvedValue(project),
     createIdea: vi.fn().mockResolvedValue({
       ...project,
@@ -166,7 +273,484 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("useProjectWorkspace", () => {
+  it("명시적 열기와 수동 새로 고침에서 조회 뒤 관리 자산을 동기화한다", async () => {
+    const calls: string[] = [];
+    const gateway = gatewayFor({
+      inspect: vi.fn().mockImplementation(async () => {
+        calls.push("inspect");
+        return project;
+      }),
+      synchronizeManagedAssets: vi.fn().mockImplementation(async () => {
+        calls.push("sync");
+        return managedAssetsResult;
+      }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    expect(calls).toEqual(["inspect", "sync"]);
+    expect(result.current.managedAssets).toEqual({
+      syncing: false,
+      result: managedAssetsResult,
+      error: null,
+      trigger: "project_open",
+    });
+
+    calls.length = 0;
+    await act(() => result.current.refresh());
+    expect(calls).toEqual(["inspect", "sync"]);
+    expect(result.current.managedAssets.trigger).toBe("manual_refresh");
+    expect(gateway.synchronizeManagedAssets).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it("최근 프로젝트도 열기 동기화를 한 번 실행한다", async () => {
+    const gateway = gatewayFor();
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+
+    expect(gateway.inspect).toHaveBeenCalledWith(project.rootPath);
+    expect(gateway.synchronizeManagedAssets).toHaveBeenCalledTimes(1);
+    expect(result.current.managedAssets.trigger).toBe("project_open");
+    unmount();
+  });
+
+  it("호환되지 않는 프로젝트와 조회 실패에서는 동기화하지 않는다", async () => {
+    const incompatible = {
+      ...project,
+      compatibility: "migration_required" as const,
+    };
+    const gateway = gatewayFor({
+      inspect: vi
+        .fn()
+        .mockResolvedValueOnce(incompatible)
+        .mockRejectedValueOnce(new Error("조회 실패")),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+    await act(() => result.current.openRecent(project.rootPath));
+
+    expect(gateway.synchronizeManagedAssets).not.toHaveBeenCalled();
+    expect(result.current.error).toBe("조회 실패");
+    unmount();
+  });
+
+  it("동기화 명령 실패를 프로젝트와 최근 기록에서 분리한다", async () => {
+    const gateway = gatewayFor({
+      synchronizeManagedAssets: vi
+        .fn()
+        .mockRejectedValue(new Error("관리 규칙 충돌")),
+    });
+    const recentStore: RecentProjectStore = {
+      load: vi.fn().mockReturnValue([]),
+      remember: vi.fn().mockReturnValue([
+        { name: project.name, path: project.rootPath, lastOpenedAt: "now" },
+      ]),
+    };
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+
+    expect(result.current.project).toEqual(project);
+    expect(result.current.recentProjects).toHaveLength(1);
+    expect(result.current.error).toBeNull();
+    expect(result.current.managedAssets).toEqual({
+      syncing: false,
+      result: null,
+      error: "관리 규칙 충돌",
+      trigger: "project_open",
+    });
+    unmount();
+  });
+
+  it("2.5초 자동 조회는 동기화 상태와 호출 횟수를 바꾸지 않는다", async () => {
+    vi.useFakeTimers();
+    try {
+      const gateway = gatewayFor();
+      const recentStore = storeStub();
+      const { result, unmount } = renderHook(() =>
+        useProjectWorkspace({ gateway, recentStore }),
+      );
+
+      await act(() => result.current.openFolder());
+      const before = result.current.managedAssets;
+      expect(gateway.synchronizeManagedAssets).toHaveBeenCalledTimes(1);
+
+      await act(() => vi.advanceTimersByTimeAsync(7_500));
+
+      expect(gateway.inspect).toHaveBeenCalledTimes(4);
+      expect(gateway.synchronizeManagedAssets).toHaveBeenCalledTimes(1);
+      expect(result.current.managedAssets).toEqual(before);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("프로젝트 열기와 수동 새로 고침은 관리 규칙 동기화 뒤 사용자 규칙을 읽는다", async () => {
+    const calls: string[] = [];
+    const gateway = gatewayFor({
+      inspect: vi.fn().mockImplementation(async () => {
+        calls.push("inspect");
+        return project;
+      }),
+      synchronizeManagedAssets: vi.fn().mockImplementation(async () => {
+        calls.push("sync");
+        return managedAssetsResult;
+      }),
+      readCustomRules: vi.fn().mockImplementation(async () => {
+        calls.push("custom");
+        return customRulesDocument;
+      }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+    expect(calls).toEqual(["inspect", "sync", "custom"]);
+    expect(result.current.customRules.document).toEqual(customRulesDocument);
+
+    calls.length = 0;
+    await act(() => result.current.refresh());
+    expect(calls).toEqual(["inspect", "sync", "custom"]);
+    unmount();
+  });
+
+  it("관리 규칙 동기화가 실패해도 사용자 규칙 조회와 프로젝트를 유지한다", async () => {
+    const gateway = gatewayFor({
+      synchronizeManagedAssets: vi.fn().mockRejectedValue(new Error("동기화 실패")),
+      readCustomRules: vi.fn().mockResolvedValue({
+        ...customRulesDocument,
+        status: "future_schema",
+        enabled: false,
+        appliesTo: [],
+        body: "",
+        error: "새로운 형식입니다.",
+      }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+
+    expect(result.current.project).toEqual(project);
+    expect(result.current.error).toBeNull();
+    expect(result.current.managedAssets.error).toBe("동기화 실패");
+    expect(result.current.customRules.document?.status).toBe("future_schema");
+    unmount();
+  });
+
+  it.each(["absent", "invalid", "future_schema", "unsafe_file"] as const)(
+    "사용자 규칙 파일 상태가 %s여도 프로젝트를 유지한다",
+    async (status) => {
+      const document: CustomRulesDocument = {
+        ...absentCustomRules,
+        status,
+        error: status === "absent" ? null : `사용자 규칙 상태: ${status}`,
+      };
+      const gateway = gatewayFor({
+        readCustomRules: vi.fn().mockResolvedValue(document),
+      });
+      const recentStore = storeStub();
+      const { result, unmount } = renderHook(() =>
+        useProjectWorkspace({ gateway, recentStore }),
+      );
+
+      await act(() => result.current.openRecent(project.rootPath));
+
+      expect(result.current.project).toEqual(project);
+      expect(result.current.error).toBeNull();
+      expect(result.current.customRules.document).toEqual(document);
+      unmount();
+    },
+  );
+
+  it("2.5초 자동 조회는 사용자 규칙만 다시 읽고 미리보기와 저장을 호출하지 않는다", async () => {
+    vi.useFakeTimers();
+    try {
+      const gateway = gatewayFor({
+        readCustomRules: vi.fn().mockResolvedValue(customRulesDocument),
+      });
+      const recentStore = storeStub();
+      const { result, unmount } = renderHook(() =>
+        useProjectWorkspace({ gateway, recentStore }),
+      );
+
+      await act(() => result.current.openRecent(project.rootPath));
+      await act(() => vi.advanceTimersByTimeAsync(7_500));
+
+      expect(gateway.readCustomRules).toHaveBeenCalledTimes(4);
+      expect(gateway.prepareCustomRulesPreview).not.toHaveBeenCalled();
+      expect(gateway.saveCustomRules).not.toHaveBeenCalled();
+      expect(result.current.customRules.document).toEqual(customRulesDocument);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("같은 내용 식별값의 자동 조회는 미리보기와 재시도 결과를 유지한다", async () => {
+    vi.useFakeTimers();
+    try {
+      const retry: SaveCustomRulesResult = {
+        status: "retry_required",
+        document: customRulesDocument,
+        reason: "잠금 사용 중",
+      };
+      const gateway = gatewayFor({
+        readCustomRules: vi.fn().mockResolvedValue(customRulesDocument),
+        saveCustomRules: vi.fn().mockResolvedValue(retry),
+      });
+      const recentStore = storeStub();
+      const { result, unmount } = renderHook(() =>
+        useProjectWorkspace({ gateway, recentStore }),
+      );
+
+      await act(() => result.current.openRecent(project.rootPath));
+      await act(() =>
+        result.current.customRulesActions.preparePreview(customRulesDraft),
+      );
+      await act(() => result.current.customRulesActions.save());
+      const previewBefore = result.current.customRules.preview;
+      const resultBefore = result.current.customRules.saveResult;
+
+      await act(() => vi.advanceTimersByTimeAsync(2_500));
+
+      expect(result.current.customRules.preview).toBe(previewBefore);
+      expect(result.current.customRules.saveResult).toBe(resultBefore);
+      expect(result.current.customRules.previewBaselineContentHash).toBe("sha256:old");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("외부 변경을 읽어도 저장은 미리보기 준비 당시의 식별값을 사용한다", async () => {
+    vi.useFakeTimers();
+    try {
+      const changed = {
+        ...customRulesDocument,
+        body: "외부에서 바뀐 본문",
+        contentHash: "sha256:external",
+      };
+      const readCustomRules = vi
+        .fn()
+        .mockResolvedValueOnce(customRulesDocument)
+        .mockResolvedValue(changed);
+      const saveCustomRules = vi.fn().mockResolvedValue({
+        status: "conflict",
+        document: changed,
+        reason: "외부 변경",
+      } satisfies SaveCustomRulesResult);
+      const gateway = gatewayFor({ readCustomRules, saveCustomRules });
+      const recentStore = storeStub();
+      const { result, unmount } = renderHook(() =>
+        useProjectWorkspace({ gateway, recentStore }),
+      );
+
+      await act(() => result.current.openRecent(project.rootPath));
+      await act(() =>
+        result.current.customRulesActions.preparePreview(customRulesDraft),
+      );
+      await act(() => vi.advanceTimersByTimeAsync(2_500));
+      expect(result.current.customRules.document).toEqual(changed);
+
+      await act(() => result.current.customRulesActions.save());
+
+      expect(saveCustomRules).toHaveBeenCalledWith(project.rootPath, {
+        expectedContentHash: "sha256:old",
+        draft: customRulesPreview.draft,
+        updatedAt: customRulesPreview.updatedAt,
+        previewHash: customRulesPreview.previewHash,
+      });
+      expect(result.current.customRules.document).toEqual(changed);
+      expect(result.current.customRules.preview).toEqual(customRulesPreview);
+      expect(result.current.customRules.saveResult?.status).toBe("conflict");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("저장 성공은 최신 문서를 반영하고 사용한 미리보기만 비운다", async () => {
+    const gateway = gatewayFor({
+      readCustomRules: vi.fn().mockResolvedValue(customRulesDocument),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+    await act(() =>
+      result.current.customRulesActions.preparePreview(customRulesDraft),
+    );
+    await act(() => result.current.customRulesActions.save());
+
+    expect(result.current.customRules.document).toEqual(savedCustomRules.document);
+    expect(result.current.customRules.preview).toBeNull();
+    expect(result.current.customRules.previewBaselineContentHash).toBeNull();
+    expect(result.current.customRules.saveResult).toEqual(savedCustomRules);
+    unmount();
+  });
+
+  it("명령 오류는 사용자 규칙 상태에만 남고 다시 불러오기는 임시 상태를 비운다", async () => {
+    const readCustomRules = vi
+      .fn()
+      .mockResolvedValueOnce(customRulesDocument)
+      .mockRejectedValueOnce(new Error("사용자 규칙을 읽지 못했습니다"));
+    const gateway = gatewayFor({
+      readCustomRules,
+      saveCustomRules: vi.fn().mockRejectedValue(new Error("저장 명령 실패")),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+    await act(() =>
+      result.current.customRulesActions.preparePreview(customRulesDraft),
+    );
+    await act(() => result.current.customRulesActions.save());
+    expect(result.current.customRules.saveError).toBe("저장 명령 실패");
+    expect(result.current.customRules.preview).toEqual(customRulesPreview);
+
+    await act(() => result.current.customRulesActions.reload());
+
+    expect(result.current.project).toEqual(project);
+    expect(result.current.error).toBeNull();
+    expect(result.current.customRules.readError).toBe("사용자 규칙을 읽지 못했습니다");
+    expect(result.current.customRules.preview).toBeNull();
+    expect(result.current.customRules.saveResult).toBeNull();
+    expect(result.current.customRules.saveError).toBeNull();
+    unmount();
+  });
+
+  it("이전 프로젝트의 늦은 사용자 규칙 조회 응답을 무시한다", async () => {
+    const firstPath = "/projects/first";
+    const secondPath = "/projects/second";
+    const firstRead = deferred<CustomRulesDocument>();
+    const secondDocument = {
+      ...customRulesDocument,
+      body: "두 번째 프로젝트",
+      contentHash: "sha256:second",
+    };
+    const gateway = gatewayFor({
+      inspect: vi.fn().mockImplementation(async (path: string) => ({
+        ...project,
+        rootPath: path,
+        name: path,
+      })),
+      readCustomRules: vi.fn().mockImplementation((path: string) =>
+        path === firstPath ? firstRead.promise : Promise.resolve(secondDocument),
+      ),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    let firstOpen!: Promise<ProjectSummary | null>;
+    act(() => {
+      firstOpen = result.current.openRecent(firstPath);
+    });
+    await waitFor(() => expect(gateway.readCustomRules).toHaveBeenCalledWith(firstPath));
+    await act(() => result.current.openRecent(secondPath));
+    await act(async () => {
+      firstRead.resolve(customRulesDocument);
+      await firstOpen;
+    });
+
+    expect(result.current.project?.rootPath).toBe(secondPath);
+    expect(result.current.customRules.document).toEqual(secondDocument);
+    unmount();
+  });
+
+  it("이전 프로젝트의 늦은 미리보기와 저장 응답을 무시한다", async () => {
+    const secondProject = { ...project, rootPath: "/projects/second" };
+    const pendingPreview = deferred<CustomRulesPreview>();
+    const pendingSave = deferred<SaveCustomRulesResult>();
+    const gateway = gatewayFor({
+      inspect: vi.fn().mockImplementation(async (path: string) =>
+        path === secondProject.rootPath ? secondProject : project,
+      ),
+      readCustomRules: vi.fn().mockImplementation(async (path: string) =>
+        path === secondProject.rootPath ? absentCustomRules : customRulesDocument,
+      ),
+      prepareCustomRulesPreview: vi
+        .fn()
+        .mockReturnValueOnce(pendingPreview.promise)
+        .mockResolvedValue(customRulesPreview),
+      saveCustomRules: vi.fn().mockReturnValue(pendingSave.promise),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+    let previewRequest!: Promise<CustomRulesPreview | null>;
+    act(() => {
+      previewRequest = result.current.customRulesActions.preparePreview(customRulesDraft);
+    });
+    await waitFor(() => expect(gateway.prepareCustomRulesPreview).toHaveBeenCalledTimes(1));
+    await act(() => result.current.openRecent(secondProject.rootPath));
+    await act(async () => {
+      pendingPreview.resolve(customRulesPreview);
+      await previewRequest;
+    });
+    expect(result.current.customRules.preview).toBeNull();
+    expect(result.current.customRules.document).toEqual(absentCustomRules);
+
+    await act(() => result.current.openRecent(project.rootPath));
+    await act(() =>
+      result.current.customRulesActions.preparePreview(customRulesDraft),
+    );
+    let saveRequest!: Promise<SaveCustomRulesResult | null>;
+    act(() => {
+      saveRequest = result.current.customRulesActions.save();
+    });
+    await waitFor(() => expect(gateway.saveCustomRules).toHaveBeenCalledTimes(1));
+    await act(() => result.current.openRecent(secondProject.rootPath));
+    await act(async () => {
+      pendingSave.resolve(savedCustomRules);
+      await saveRequest;
+    });
+
+    expect(result.current.customRules.document).toEqual(absentCustomRules);
+    expect(result.current.customRules.saveResult).toBeNull();
+    unmount();
+  });
+
   it("uses the gateway and remembers an opened project", async () => {
     const gateway = gatewayFor({
       inspectIntegrations: vi.fn().mockRejectedValue(new Error("integrations")),

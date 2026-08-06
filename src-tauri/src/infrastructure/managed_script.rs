@@ -43,6 +43,16 @@ pub struct ManagedScript {
     pub platform: PlatformScript,
 }
 
+pub(crate) struct ManagedScriptPlan {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub path: PathBuf,
+    pub installed_version: Option<u32>,
+    pub provided_version: u32,
+    pub original: Option<Vec<u8>>,
+    pub replacement: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum ManagedScriptError {
     #[error("{path} 경로가 일반 파일이 아니어서 {label}를 설치할 수 없습니다.")]
@@ -56,6 +66,8 @@ pub enum ManagedScriptError {
         found: u32,
         known: u32,
     },
+    #[error("{path}의 {label}가 유효한 UTF-8 파일이 아니어서 관리 자산을 확인할 수 없습니다.")]
+    InvalidEncoding { label: &'static str, path: String },
     #[error("{label}를 읽거나 쓰지 못했습니다: {source}")]
     Io {
         label: &'static str,
@@ -84,27 +96,48 @@ impl ManagedScript {
 
     /// 자산을 앱 버전으로 설치한다. 내용이 이미 같으면 파일을 쓰지 않는다.
     pub fn install(&self, control_root: &Path) -> Result<(), ManagedScriptError> {
-        let path = self.path(control_root);
-        let Some(contents) = self.plan(&path)? else {
+        let plan = self.plan_install(control_root)?;
+        let Some(contents) = plan.replacement else {
             return Ok(());
         };
-        let parent = path.parent().expect("managed script always has a parent");
+        let parent = plan
+            .path
+            .parent()
+            .expect("managed script always has a parent");
         fs::create_dir_all(parent).map_err(|error| self.io(error))?;
-        self.write_atomically(&path, &contents)
+        self.write_atomically(&plan.path, &contents)
     }
 
     /// 설치와 같은 판정만 하고 파일은 쓰지 않는다.
     pub fn validate(&self, control_root: &Path) -> Result<(), ManagedScriptError> {
-        self.plan(&self.path(control_root)).map(|_| ())
+        self.plan_install(control_root).map(|_| ())
     }
 
-    /// 써야 할 본문을 결정한다. 쓸 필요가 없으면 `None`, 덮어쓰면 안 되는 파일이면 오류다.
-    fn plan(&self, path: &Path) -> Result<Option<String>, ManagedScriptError> {
+    /// 설치 판정과 동일한 읽기 전용 계획을 만든다.
+    pub(crate) fn plan_install(
+        &self,
+        control_root: &Path,
+    ) -> Result<ManagedScriptPlan, ManagedScriptError> {
+        let path = self.path(control_root);
         if !path.exists() {
-            return Ok(Some(self.platform.body.to_owned()));
+            return Ok(ManagedScriptPlan {
+                id: "claim_helper",
+                label: self.label,
+                path,
+                installed_version: None,
+                provided_version: self.version,
+                original: None,
+                replacement: Some(self.platform.body.to_owned()),
+            });
         }
-        self.ensure_regular_file(path)?;
-        let contents = fs::read_to_string(path).map_err(|error| self.io(error))?;
+        self.ensure_regular_file(&path)?;
+        let original = fs::read(&path).map_err(|error| self.io(error))?;
+        let contents = String::from_utf8(original.clone()).map_err(|_| {
+            ManagedScriptError::InvalidEncoding {
+                label: self.label,
+                path: path.display().to_string(),
+            }
+        })?;
         if !contents.lines().any(|line| line.trim() == MANAGED_MARKER) {
             return Err(ManagedScriptError::Unmanaged(path.display().to_string()));
         }
@@ -121,11 +154,20 @@ impl ManagedScript {
                 known: self.version,
             });
         }
-        if contents == self.platform.body {
-            Ok(None)
+        let replacement = if contents == self.platform.body {
+            None
         } else {
-            Ok(Some(self.platform.body.to_owned()))
-        }
+            Some(self.platform.body.to_owned())
+        };
+        Ok(ManagedScriptPlan {
+            id: "claim_helper",
+            label: self.label,
+            path,
+            installed_version: Some(version),
+            provided_version: self.version,
+            original: Some(original),
+            replacement,
+        })
     }
 
     fn ensure_regular_file(&self, path: &Path) -> Result<(), ManagedScriptError> {

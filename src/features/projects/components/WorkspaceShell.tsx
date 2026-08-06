@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  CustomRulesActions,
+  CustomRulesState,
   IdeaDocument,
   IntegrationActions,
   IntegrationsState,
+  ManagedAssetsState,
   ProjectSummary,
   SpecDecisionOutcome,
   TaskQaBatchEntry,
@@ -27,7 +30,10 @@ import { SpecWorkspace } from "./SpecWorkspace";
 
 interface Props {
   busy: boolean;
+  customRules: CustomRulesState;
+  customRulesActions: CustomRulesActions;
   error: string | null;
+  managedAssets: ManagedAssetsState;
   project: ProjectSummary;
   updater: AppUpdaterState;
   integrations: IntegrationsState;
@@ -89,7 +95,10 @@ const viewLabels = {
 
 export function WorkspaceShell({
   busy,
+  customRules,
+  customRulesActions,
   error,
+  managedAssets,
   project,
   updater,
   integrations,
@@ -226,6 +235,7 @@ export function WorkspaceShell({
   }
 
   const writable = project.compatibility === "current";
+  const managedNotice = managedRulesNotice(managedAssets);
 
   return (
     <main className="app-shell">
@@ -267,6 +277,20 @@ export function WorkspaceShell({
         </div>
 
         <div className="sidebar-footer">
+          {/* 좌측 메뉴는 화면 전환 분기 바깥이라 이 자리에 두면 어떤 화면에서도 보인다. 세션이 도는지와
+              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 활동 화면이 맡는다(SPEC-050). */}
+          {project.activeLeases.length > 0 && (
+            <button
+              aria-label={`실행 중인 세션 ${project.activeLeases.length}개, 활동 화면 열기`}
+              className="sidebar-activity"
+              onClick={() => setView("activity")}
+              type="button"
+            >
+              <span className="sidebar-activity-dot" />
+              <span>세션 실행 중</span>
+              <small>{project.activeLeases.length}</small>
+            </button>
+          )}
           <UpdateControl updater={updater} />
           <button className={`settings-link ${view === "integrations" ? "active" : ""}`} onClick={() => setView("integrations")}><Icon name="spark" />연동</button>
           <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
@@ -315,6 +339,19 @@ export function WorkspaceShell({
           )}
 
           {error && <div className="error-banner" role="alert">{error}</div>}
+
+          {/* 프로젝트 오류와 다른 자리에 그린다. 동기화가 멈춰도 사이드바와 문서 화면, 설정 화면은
+              그대로 쓸 수 있어야 하고, 사용자가 볼 곳은 프로젝트 문서가 아니라 규칙 파일이다. */}
+          {managedNotice && (
+            <div className="managed-rules-banner" role="alert">
+              <Icon name="stamp" />
+              <div>
+                <strong>{managedNotice.title}</strong>
+                <span>{managedNotice.detail}</span>
+                <span>{managedNotice.action}</span>
+              </div>
+            </div>
+          )}
 
           {view === "today" && (
             <>
@@ -441,7 +478,16 @@ export function WorkspaceShell({
 
           {view === "help" && <HelpView />}
 
-          {view === "settings" && <SettingsView project={project} updater={updater} onSwitchProject={onSwitchProject} />}
+          {view === "settings" && (
+            <SettingsView
+              customRules={customRules}
+              customRulesActions={customRulesActions}
+              managedAssets={managedAssets}
+              project={project}
+              updater={updater}
+              onSwitchProject={onSwitchProject}
+            />
+          )}
 
           {specLoading && <div className="loading-toast">기획서를 불러오는 중…</div>}
         </div>
@@ -457,6 +503,44 @@ export function WorkspaceShell({
 
     </main>
   );
+}
+
+/**
+ * 알림으로 올릴 관리 규칙 상태를 고른다. `current`와 `updated`는 설정 카드에서만 읽으면 되므로
+ * 공통 영역을 차지하지 않는다. 재시도와 충돌은 사용자가 할 일이 서로 달라 문구를 나눠 쓴다.
+ */
+function managedRulesNotice(managedAssets: ManagedAssetsState) {
+  if (managedAssets.error) {
+    return {
+      title: "관리 규칙 동기화 명령이 실패했습니다",
+      detail: managedAssets.error,
+      action: "프로젝트 문서는 그대로 열려 있습니다. 새로 고침을 누르면 다시 시도합니다.",
+    };
+  }
+
+  const result = managedAssets.result;
+  if (!result) return null;
+
+  if (result.status === "retry_required") {
+    return {
+      title: "관리 규칙을 나중에 다시 설치해야 합니다",
+      detail: result.reason ?? "다른 쓰기 작업이 끝나지 않았습니다.",
+      action: "규칙 파일은 바꾸지 않았습니다. 잠시 뒤 새로 고침을 누르면 다시 시도합니다.",
+    };
+  }
+
+  if (result.status === "conflict") {
+    const affected = result.assets.find((asset) => asset.id === result.affectedAsset);
+    return {
+      title: affected
+        ? `관리 규칙 충돌: ${affected.label}`
+        : "관리 규칙에서 충돌이 발생했습니다",
+      detail: result.reason ?? "앱이 관리 형식을 확인하지 못했습니다.",
+      action: "앱은 파일을 덮어쓰지 않았습니다. 설정 화면의 관리 규칙 카드에서 자산별 이유를 확인하세요.",
+    };
+  }
+
+  return null;
 }
 
 function StageCard({

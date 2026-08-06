@@ -1,14 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  CustomRulesDocument,
+  CustomRulesDraft,
+  CustomRulesPreview,
   HeartbeatServiceControlResult,
   HeartbeatSetupRunResult,
   HeartbeatUpdateResult,
   HeartbeatVersions,
   IdeaDocument,
   IntegrationsSnapshot,
+  ManagedAssetSyncResult,
   ProjectGateway,
   ProjectSummary,
+  SaveCustomRulesRequest,
+  SaveCustomRulesResult,
   SpecDocument,
   TaskDocument,
   TaskQaBatchResult,
@@ -26,6 +32,30 @@ export const tauriProjectGateway: ProjectGateway = {
 
   inspect(path) {
     return invoke<ProjectSummary>("inspect_project", { path });
+  },
+
+  synchronizeManagedAssets(path) {
+    return invoke<ManagedAssetSyncResult>("synchronize_managed_project_assets", {
+      path,
+    });
+  },
+
+  readCustomRules(path) {
+    return invoke<CustomRulesDocument>("read_custom_rules", { path });
+  },
+
+  prepareCustomRulesPreview(path, draft: CustomRulesDraft) {
+    return invoke<CustomRulesPreview>("prepare_custom_rules_preview", {
+      path,
+      draft,
+    });
+  },
+
+  saveCustomRules(path, request: SaveCustomRulesRequest) {
+    return invoke<SaveCustomRulesResult>("save_custom_rules", {
+      path,
+      request,
+    });
   },
 
   createWorkflow(path, name) {

@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 7
+rules_version: 10
 ---
 
 # Developer role
@@ -61,6 +61,14 @@ The judgement only reads lease files. Never create, edit, or delete one to chang
 
 If only tasks blocked by overlap remain, change no files and report `NO_ELIGIBLE_WORK`. Do not move them to `blocked` either, for the same reason as an unsatisfied dependency: another session's lease is not this task's impediment, and it goes away on its own.
 
+## Start from the task document
+
+Read the assigned task document first and start the work from that document alone. It is written to be the whole instruction sheet: the architect puts every completion condition and verification step the task needs inside it, and `.workflow/rules/roles/architect.md` is where that obligation is stated.
+
+Open the linked specification and the decision when the task document is ambiguous, or when it does not carry enough ground for a judgement the work forces you to make. This section decides which path is the default one and nothing more. The reading itself stays permitted, exactly as `## Allowed` below lists it.
+
+If you opened the specification or the decision, write in the report which part of the task document was insufficient and what you had to go outside it to find. That note is how a later architect session learns where its task documents fall short.
+
 ## The confirmation walkthrough
 
 A task you hand to user QA carries a section headed `## 확인 동선`, written in exactly those characters. `.workflow/rules/workflow.md` §8 names it; what it holds is defined here, because you are the one who writes it.
@@ -75,11 +83,33 @@ Write it into the assigned task document, in the same edit that records the `qa_
 
 The `## 사용자 QA 제안` heading some reports carry is free writing, not this obligation. The task document is where the user reads the walkthrough, because the app opens task bodies beside the confirmation stamp and does not open reports at all.
 
+## What the report holds
+
+The implementation report carries a fixed set of sections. Write all of them, and keep the body within the limit below.
+
+- The decision-maker summary `.workflow/rules/workflow.md` §8 defines stays first, in the position and under the conditions that section sets. Nothing here moves it or relaxes it.
+- Changed files and modules: what you edited, named so a reader can open it directly.
+- Verification steps and their results: which command or check you ran, and the result it returned.
+- Remaining risks: what this change could still break, and what stayed unverified.
+- Follow-up work: what you left for a later session, including the out-of-role findings you are handing off.
+
+The report body is at most 80 lines. Count it the way `.workflow/rules/workflow.md` §8 counts its own ten-line limit, so an empty line is never one of the 80. The sections above fit inside that number with room to spare, and the limit is there so a later session finds the facts it needs without reading everything.
+
+Detail that does not fit goes where it already has a place. The reasoning behind one edit belongs in a code comment beside that edit, and the record of what a change contains belongs in the commit message. Do not create a new document kind or schema to hold what the limit pushed out.
+
+The `## 확인 동선` section is not one of these. It is written into the task document, as the section above describes.
+
 ## Allowed
 
 - Read the assigned task, linked specification and decision, relevant code, and tests.
 - Modify code and tests within the assigned task scope.
 - Update the assigned task, its lease, and its implementation report.
+
+## Project custom rules
+
+- After the common rules and this role contract, read `.workflow/rules/custom.md` only when it is valid, enabled, and `applies_to` includes `developer`.
+- Apply only its Markdown body. The common rules and this developer contract remain higher priority.
+- Do not repair or follow a missing, disabled, malformed, future-schema, symbolic-link, or non-file custom document.
 
 ## Forbidden
 
@@ -94,5 +124,6 @@ The `## 사용자 QA 제안` heading some reports carry is free writing, not thi
 - Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
 - Record changes, checks, risks, and handoff notes in `reports/`.
 - Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done and what was verified, and what the user is being asked to do now.
+- Before handing the task to user QA, check that the report's Korean follows `.workflow/rules/workflow.md` §9. Keep the report focused on changes, verification, risks, and user confirmation. This self-review does not affect eligibility.
 - Write the `## 확인 동선` section into the assigned task in the same edit that moves it to `qa_waiting`, as the section above describes.
 - Move the task to `qa_waiting`, release the lease, and stop.

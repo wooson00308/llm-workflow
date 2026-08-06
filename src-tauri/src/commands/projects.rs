@@ -2,14 +2,49 @@ use std::path::Path;
 
 use crate::application::project_service::ProjectService;
 use crate::domain::project::{
-    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument,
-    TaskQaBatchResult, TaskQaOutcome,
+    CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
+    ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
+    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
 };
 
 #[tauri::command]
 pub fn inspect_project(path: String) -> Result<ProjectSummary, String> {
     ProjectService::default()
         .inspect(Path::new(&path))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn synchronize_managed_project_assets(path: String) -> Result<ManagedAssetSyncResult, String> {
+    ProjectService::default()
+        .synchronize_managed_assets(Path::new(&path))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn read_custom_rules(path: String) -> Result<CustomRulesDocument, String> {
+    ProjectService::default()
+        .read_custom_rules(Path::new(&path))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn prepare_custom_rules_preview(
+    path: String,
+    draft: CustomRulesDraft,
+) -> Result<CustomRulesPreview, String> {
+    ProjectService::default()
+        .prepare_custom_rules_preview(Path::new(&path), draft)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_custom_rules(
+    path: String,
+    request: SaveCustomRulesRequest,
+) -> Result<SaveCustomRulesResult, String> {
+    ProjectService::default()
+        .save_custom_rules(Path::new(&path), request)
         .map_err(|error| error.to_string())
 }
 

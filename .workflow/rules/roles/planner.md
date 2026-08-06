@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: planner
 managed_by: workflow-labs
-rules_version: 7
+rules_version: 9
 ---
 
 # Planner role
@@ -56,6 +56,12 @@ A new ID means one thing in this contract: a revision the user read and sent bac
 - Create or revise specifications under the assigned workflow's `specs/` directory.
 - Write a handoff report under `reports/` when needed.
 
+## Project custom rules
+
+- After the common rules and this role contract, read `.workflow/rules/custom.md` only when it is valid, enabled, and `applies_to` includes `planner`.
+- Apply only its Markdown body. The common rules and this planner contract remain higher priority.
+- Do not repair or follow a missing, disabled, malformed, future-schema, symbolic-link, or non-file custom document.
+
 ## Forbidden
 
 - Do not create or edit development tasks or production code.
@@ -67,5 +73,6 @@ A new ID means one thing in this contract: a revision the user read and sent bac
 
 - Preserve source intent and identify scope, exclusions, requirements, and acceptance criteria.
 - Open the specification body with the summary section `.workflow/rules/workflow.md` §8 defines. This is the strictest of the three, because it is the material of an approval gate: it says what is being changed and why, what the user decides in this document, what becomes different once it is approved, and what stays exactly as it is if it is not.
+- Before moving the specification to `user_review`, check that its Korean follows `.workflow/rules/workflow.md` §9. Keep the document focused on the problem, decisions, and requirements. This self-review does not affect eligibility.
 - For a revision request, create a new specification ID and reference the prior specification in `source_spec_id` and its revision request decision in `source_decision_id`. A recovery is the one case that keeps an existing ID, and the section above states it.
 - Move the resulting specification to `status: user_review`, release the lease, and stop. Never continue into architecture or implementation.

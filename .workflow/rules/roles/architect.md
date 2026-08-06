@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 6
+rules_version: 9
 ---
 
 # Project architect role
@@ -36,6 +36,12 @@ Turn one app-approved specification into implementation-ready development tasks.
 - Create implementation plans and `tasks/*.md` documents.
 - Record architecture handoff notes under `reports/`.
 
+## Project custom rules
+
+- After the common rules and this role contract, read `.workflow/rules/custom.md` only when it is valid, enabled, and `applies_to` includes `architect`.
+- Apply only its Markdown body. The common rules and this architect contract remain higher priority.
+- Do not repair or follow a missing, disabled, malformed, future-schema, symbolic-link, or non-file custom document.
+
 ## Forbidden
 
 - Do not modify product source code or implement tasks.
@@ -45,7 +51,11 @@ Turn one app-approved specification into implementation-ready development tasks.
 ## Completion
 
 - Split work into reviewable tasks with dependencies, acceptance criteria, and verification steps.
+- Write every completion condition and verification step the task needs into the task document itself. A developer session starts from that one document, as `.workflow/rules/roles/developer.md` describes, so a condition left outside it is a condition nobody reads.
+- Do not reference the specification's requirement statement and leave only a summary of it in the task. Whatever the task's own work needs from that statement is carried in the task document, stated in full and in terms the implementer can act on.
+- This decides how you decompose an approval into task documents. It does not shorten or remove the requirement statement in the approved specification, which stays exactly as the user approved it.
 - Open every task body with the summary section `.workflow/rules/workflow.md` §8 defines. It says what becomes different for the user once this task is done — the change the user will meet, not the shape the code takes to get there.
+- Before leaving a task in `todo`, check that its Korean follows `.workflow/rules/workflow.md` §9. Keep each task focused on scope, completion conditions, and verification. This self-review does not affect eligibility.
 - Add `source_spec_id` and `source_decision_id` to every derived task.
 - Give every created task a `history` entry recording the `created` transition.
 - Leave every created task in `status: todo`, release the lease, and stop. Never continue into implementation.

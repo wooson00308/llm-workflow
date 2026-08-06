@@ -13,6 +13,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             commands::projects::inspect_project,
+            commands::projects::synchronize_managed_project_assets,
+            commands::projects::read_custom_rules,
+            commands::projects::prepare_custom_rules_preview,
+            commands::projects::save_custom_rules,
             commands::projects::create_workflow,
             commands::projects::create_idea,
             commands::projects::read_spec,

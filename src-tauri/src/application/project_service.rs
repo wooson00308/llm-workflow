@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use crate::domain::project::{
-    IdeaDocument, ProjectSummary, SpecDecisionOutcome, SpecDocument, TaskDocument,
-    TaskQaBatchResult, TaskQaOutcome,
+    CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
+    ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
+    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
 };
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
@@ -32,6 +33,33 @@ impl ProjectService {
     ) -> Result<ProjectSummary, ProjectError> {
         self.repository
             .create_idea(root, workflow_directory, content)
+    }
+
+    pub fn synchronize_managed_assets(
+        &self,
+        root: &Path,
+    ) -> Result<ManagedAssetSyncResult, ProjectError> {
+        self.repository.synchronize_managed_assets(root)
+    }
+
+    pub fn read_custom_rules(&self, root: &Path) -> Result<CustomRulesDocument, ProjectError> {
+        self.repository.read_custom_rules(root)
+    }
+
+    pub fn prepare_custom_rules_preview(
+        &self,
+        root: &Path,
+        draft: CustomRulesDraft,
+    ) -> Result<CustomRulesPreview, ProjectError> {
+        self.repository.prepare_custom_rules_preview(root, draft)
+    }
+
+    pub fn save_custom_rules(
+        &self,
+        root: &Path,
+        request: SaveCustomRulesRequest,
+    ) -> Result<SaveCustomRulesResult, ProjectError> {
+        self.repository.save_custom_rules(root, request)
     }
 
     pub fn read_spec(

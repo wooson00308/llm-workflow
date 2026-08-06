@@ -61,6 +61,14 @@ pub struct ProjectSummary {
     pub active_leases: Vec<AgentLeaseSummary>,
     pub workflows: Vec<WorkflowSummary>,
     pub pending_work: PendingRoleWork,
+    /// 넓어진 판정 그대로(SPEC-049 R1). `pending_work`는 이 값에서 파생하므로 둘이 갈라질 수 없다.
+    ///
+    /// 직렬화에서 빠지므로 화면에 나가는 payload의 모양은 이 필드가 생기기 전과 같다. 화면에 대상과
+    /// 제외 사유를 노출하는 일은 SPEC-049의 이번 범위가 아니고, 그래서 프런트엔드 타입도 그대로다.
+    /// 필드를 여기 두는 것은 조건 스크립트와의 대조가 화면이 쓰는 그 배선을 그대로 지나야 하기
+    /// 때문이다 — 판정만 따로 부르는 두 번째 경로를 만들면 대조가 배선을 고정하지 못한다.
+    #[serde(skip)]
+    pub pending_detail: PendingRoleWorkDetail,
 }
 
 /// 역할별 대기 물량. 조건 스크립트가 그 역할로 종료 코드 0을 돌려주는 상태가 `true`다.
@@ -71,6 +79,86 @@ pub struct PendingRoleWork {
     pub architect: bool,
     pub developer: bool,
 }
+
+/// 세 역할의 넓어진 판정(SPEC-049 R1). 역할마다 대상 문서와 후보별 제외 사유를 함께 답한다.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingRoleWorkDetail {
+    pub planner: RoleWorkVerdict,
+    pub architect: RoleWorkVerdict,
+    pub developer: RoleWorkVerdict,
+}
+
+impl PendingRoleWorkDetail {
+    /// 화면에 실리는 payload. 대상이 있는 역할이 `true`이고, 그 뜻은 이 타입이 생기기 전과 같다.
+    pub fn flags(&self) -> PendingRoleWork {
+        PendingRoleWork {
+            planner: self.planner.target.is_some(),
+            architect: self.architect.target.is_some(),
+            developer: self.developer.target.is_some(),
+        }
+    }
+}
+
+/// 역할 하나의 판정 결과.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoleWorkVerdict {
+    /// 그 역할이 집어야 하는 문서의 id. 대상이 없으면 `None`이다.
+    pub target: Option<String>,
+    /// 판정한 후보를 판정한 차례대로 담는다. 대상을 찾은 자리에서 판정이 멈추므로 그 뒤의 후보는
+    /// 목록에 없다. 대상이 없을 때 이 목록은 그 역할이 본 후보 전부다.
+    pub candidates: Vec<WorkCandidate>,
+}
+
+impl RoleWorkVerdict {
+    /// 제외된 후보 하나를 사유와 함께 기록한다.
+    pub fn exclude(&mut self, id: &str, reason: &'static str) {
+        self.candidates.push(WorkCandidate {
+            id: id.to_owned(),
+            verdict: reason.to_owned(),
+        });
+    }
+
+    /// 대상을 정하고 그 후보를 `eligible`로 기록한다.
+    pub fn select(&mut self, id: &str) {
+        self.candidates.push(WorkCandidate {
+            id: id.to_owned(),
+            verdict: ELIGIBLE.to_owned(),
+        });
+        self.target = Some(id.to_owned());
+    }
+}
+
+/// 후보 하나와 그 후보에 내려진 판정.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkCandidate {
+    pub id: String,
+    /// 대상이면 [`ELIGIBLE`], 아니면 제외 사유 코드. 조건 스크립트가 내는 코드와 같은 어휘를 쓴다.
+    pub verdict: String,
+}
+
+/// 대상으로 뽑힌 후보의 판정값.
+pub const ELIGIBLE: &str = "eligible";
+
+/// 비-`draft` 기획서가 이미 참조하는 아이디어.
+pub const SPEC_EXISTS: &str = "spec-exists";
+
+/// 비-`draft` 후속 기획서가 이미 답한 수정 요청 결정.
+pub const FOLLOW_UP_EXISTS: &str = "follow-up-exists";
+
+/// 그 문서 자신을 덮는 미만료 lease가 있다.
+pub const LEASED: &str = "leased";
+
+/// 이미 작업으로 분해된 승인 결정.
+pub const DECOMPOSED: &str = "decomposed";
+
+/// 승인된 기획서를 덮는 미만료 lease가 있다.
+pub const SPEC_LEASED: &str = "spec-leased";
+
+/// 선행 선언이 미충족이거나 읽을 수 없다.
+pub const DEPENDENCIES_UNSATISFIED: &str = "dependencies-unsatisfied";
+
+/// 겹침 선언이 다른 문서를 잡은 미만료 lease와 충돌한다.
+pub const OVERLAP: &str = "overlap";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +345,169 @@ pub enum SchemaCompatibility {
     Current,
     MigrationRequired,
     FutureSchema,
+}
+
+/// 앱이 제공하는 관리 자산 동기화의 전체 결과.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedAssetSyncStatus {
+    Current,
+    Updated,
+    RetryRequired,
+    Conflict,
+}
+
+/// 관리 자산 하나의 사전 검사 또는 동기화 상태.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedAssetStatus {
+    Current,
+    UpdateRequired,
+    Updated,
+    RetryRequired,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAssetState {
+    pub id: String,
+    pub label: String,
+    pub status: ManagedAssetStatus,
+    pub installed_version: Option<u32>,
+    pub provided_version: Option<u32>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAssetRollbackFailure {
+    pub asset_id: String,
+    pub label: String,
+    pub reason: String,
+    pub recovery_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAssetRollbackRecovery {
+    pub asset_id: String,
+    pub label: String,
+    pub recovery_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAssetSyncResult {
+    pub status: ManagedAssetSyncStatus,
+    pub assets: Vec<ManagedAssetState>,
+    pub updated_assets: Vec<String>,
+    pub reason: Option<String>,
+    pub affected_asset: Option<String>,
+    pub rollback_failures: Vec<ManagedAssetRollbackFailure>,
+    pub rollback_recoveries: Vec<ManagedAssetRollbackRecovery>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomRuleRole {
+    Planner,
+    Architect,
+    Developer,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomRulesFileStatus {
+    Absent,
+    Valid,
+    Invalid,
+    FutureSchema,
+    UnsafeFile,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesDocument {
+    pub status: CustomRulesFileStatus,
+    pub enabled: bool,
+    pub applies_to: Vec<CustomRuleRole>,
+    pub body: String,
+    pub updated_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub raw: Option<String>,
+    pub content_hash: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesDraft {
+    pub enabled: bool,
+    pub applies_to: Vec<CustomRuleRole>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomRulesSourceKind {
+    WorkflowRules,
+    RoleContract,
+    UserRules,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesSourcePreview {
+    pub kind: CustomRulesSourceKind,
+    pub label: String,
+    pub order: u8,
+    pub content: String,
+    pub applied: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesRolePreview {
+    pub role: CustomRuleRole,
+    pub sources: Vec<CustomRulesSourcePreview>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomRulesPreview {
+    pub draft: CustomRulesDraft,
+    pub serialized: String,
+    pub updated_at: String,
+    pub preview_hash: String,
+    pub priority_notice: String,
+    pub roles: Vec<CustomRulesRolePreview>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCustomRulesRequest {
+    pub expected_content_hash: Option<String>,
+    pub draft: CustomRulesDraft,
+    pub updated_at: String,
+    pub preview_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveCustomRulesStatus {
+    Saved,
+    Conflict,
+    RetryRequired,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCustomRulesResult {
+    pub status: SaveCustomRulesStatus,
+    pub document: CustomRulesDocument,
+    pub reason: Option<String>,
 }
 
 /// 연동 공통 설치 상태. 값은 미설치·설치됨 두 개뿐이다.

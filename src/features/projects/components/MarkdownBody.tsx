@@ -14,7 +14,11 @@ export function MarkdownBody({
             <a href={href} rel="noopener noreferrer" target="_blank">{children}</a>
           ),
         }}
-        remarkPlugins={preserveLineBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
+        remarkPlugins={
+          preserveLineBreaks
+            ? [[remarkGfm, { singleTilde: false }], remarkBreaks]
+            : [[remarkGfm, { singleTilde: false }]]
+        }
       >
         {body}
       </Markdown>

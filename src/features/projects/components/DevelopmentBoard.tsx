@@ -789,6 +789,12 @@ function LaneQaDialog({
     setRunning(true);
     const entries = await onConfirm(selected.map((item) => item.fileName), comment.trim());
     setRunning(false);
+    // 전 건이 기록되면 읽을 실패가 없으므로 결과 화면을 붙들지 않고 닫는다. 완료로 바뀐
+    // 보드가 곧 피드백이다. 하나라도 실패하거나 호출이 실패하면 열어 둔 채 건별로 말한다(R4).
+    if (entries !== null && entries.length > 0 && entries.every((entry) => entry.recorded)) {
+      onClose();
+      return;
+    }
     setOutcome({ entries });
   }
 

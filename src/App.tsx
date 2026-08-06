@@ -47,7 +47,10 @@ export default function App() {
   return (
     <WorkspaceShell
       busy={workspace.busy}
+      customRules={workspace.customRules}
+      customRulesActions={workspace.customRulesActions}
       error={workspace.error}
+      managedAssets={workspace.managedAssets}
       project={workspace.project}
       updater={updater}
       integrations={workspace.integrations}

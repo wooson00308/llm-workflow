@@ -24,11 +24,18 @@
 
 use std::collections::HashSet;
 
-use crate::domain::project::{PendingRoleWork, WorkflowItems};
+use crate::domain::project::{
+    PendingRoleWorkDetail, RoleWorkVerdict, WorkflowItemSummary, WorkflowItems, DECOMPOSED,
+    DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, LEASED, OVERLAP, SPEC_EXISTS, SPEC_LEASED,
+};
 
 /// 워크플로우 하나의 판정 재료. 스크립트가 워크플로우 하나 안에서 아이디어↔기획서, 결정↔작업을
 /// 대조하므로 짝짓기는 이 단위를 넘지 않는다.
 pub struct WorkflowInput<'a> {
+    /// 컨트롤 루트 아래의 워크플로우 디렉터리 이름. 판정이 워크플로우를 보는 차례를 정한다 —
+    /// 스크립트는 `.workflow/*/` 글롭 순서로 돌고, 대상이 어느 워크플로우에서 나오는지가 그
+    /// 차례로 갈리기 때문이다. 판정 결과(대상 유무)는 차례와 무관하다.
+    pub directory: &'a str,
     pub items: &'a WorkflowItems,
     /// 이 워크플로우의 `outcome: approved` 결정 중 같은 기획서에 더 늦은 결정이 없는 것.
     /// `(결정 id, spec_id)`다(SPEC-028 R4). 최신 판정을 여기서 다시 하지 않는 것은
@@ -55,30 +62,59 @@ pub struct WorkflowInput<'a> {
 
 /// `lease_ids`는 만료 전인 lease 파일 이름 집합이다. 스크립트도 만료된 lease를 선점으로 세지
 /// 않으므로, 죽은 세션이 남긴 lease는 어느 역할에서도 그 대상을 막지 않는다.
+///
+/// 답은 역할마다 대상 하나와 판정한 후보 목록이다(SPEC-049 R1). 대상 유무는 이 작업 전의 불리언
+/// 그대로이고 넓어진 것은 답의 내용이다 — 화면 payload는 [`PendingRoleWorkDetail::flags`]가 낸다.
 pub fn pending_role_work(
     migration_locked: bool,
     lease_ids: &HashSet<String>,
     workflows: &[WorkflowInput<'_>],
-) -> PendingRoleWork {
+) -> PendingRoleWorkDetail {
     // 스크립트 첫 줄: `[ -f ".workflow/.runtime/migration.lock" ] && exit 1`.
+    // 후보를 하나도 보지 않고 끝나므로 목록도 비어 있다. 스크립트도 락을 만나면 분기에 들어가지
+    // 않아 후보 줄을 하나도 내지 않는다.
     if migration_locked {
-        return PendingRoleWork::default();
+        return PendingRoleWorkDetail::default();
     }
 
-    PendingRoleWork {
-        planner: workflows
-            .iter()
-            .any(|workflow| has_planner_work(workflow, lease_ids)),
-        architect: workflows
-            .iter()
-            .any(|workflow| has_architect_work(workflow, lease_ids)),
-        developer: workflows
-            .iter()
-            .any(|workflow| has_developer_work(workflow, lease_ids)),
+    PendingRoleWorkDetail {
+        planner: judge_workflows(workflows, |workflow| planner_verdict(workflow, lease_ids)),
+        architect: judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids)),
+        developer: judge_workflows(workflows, |workflow| developer_verdict(workflow, lease_ids)),
     }
 }
 
-/// 스크립트 `planner)` 절. 둘 중 하나라도 있으면 대기 물량이 있다(SPEC-018 R1).
+/// 워크플로우를 디렉터리 이름 순으로 돌며 처음 대상을 찾은 자리에서 멈춘다. 스크립트의
+/// `for wf in .workflow/*/`가 도는 차례가 그것이고, 대상을 찾으면 그 자리에서 종료하므로 뒤의
+/// 워크플로우는 후보조차 보지 않는다.
+fn judge_workflows(
+    workflows: &[WorkflowInput<'_>],
+    judge: impl Fn(&WorkflowInput<'_>) -> RoleWorkVerdict,
+) -> RoleWorkVerdict {
+    let mut ordered: Vec<&WorkflowInput<'_>> = workflows.iter().collect();
+    ordered.sort_by(|left, right| left.directory.cmp(right.directory));
+
+    let mut merged = RoleWorkVerdict::default();
+    for workflow in ordered {
+        let verdict = judge(workflow);
+        merged.candidates.extend(verdict.candidates);
+        if verdict.target.is_some() {
+            merged.target = verdict.target;
+            break;
+        }
+    }
+    merged
+}
+
+/// 후보를 보는 차례. 스크립트는 디렉터리를 글롭 순서로 훑으므로 파일 이름 오름차순이 그 차례다.
+/// 목록 payload의 정렬(`updated_at` 내림차순)을 그대로 쓰면 두 판정의 대상이 갈라진다.
+fn by_file_name(items: &[WorkflowItemSummary]) -> Vec<&WorkflowItemSummary> {
+    let mut ordered: Vec<&WorkflowItemSummary> = items.iter().collect();
+    ordered.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    ordered
+}
+
+/// 스크립트 `planner)` 절. 아이디어를 먼저 보고 그다음 수정 요청 결정을 본다(SPEC-018 R1).
 ///
 /// 두 경우가 같은 목록 하나를 본다. 원천을 참조하는 기획서가 있더라도 그것이 모두 `draft`이면 멈춘
 /// 기획 작업이므로 그 원천은 다시 대상이다(SPEC-035 R2). "**모두** `draft`"이지 "하나라도 `draft`"가
@@ -91,18 +127,36 @@ pub fn pending_role_work(
 /// (나) 비-`draft` 후속 기획서가 없고 선점되지 않은 최신 `revision_requested` 결정. 후속 판정 키는
 /// 결정 id다 — 한 기획서가 여러 번 반려되면 결정마다 후속이 하나씩 생기므로 기획서 id로는 구분되지
 /// 않는다. 후속 기획서 뒤에 붙은 결정은 보지 않는다.
-fn has_planner_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> bool {
-    let unprocessed_idea = workflow.items.ideas.iter().any(|idea| {
-        !workflow.nondraft_spec_sources.contains(&idea.id) && !lease_ids.contains(&idea.id)
-    });
-    let unanswered_revision = workflow
-        .revision_requested_decisions
-        .iter()
-        .any(|decision_id| {
-            !lease_ids.contains(decision_id)
-                && !workflow.nondraft_spec_sources.contains(decision_id)
-        });
-    unprocessed_idea || unanswered_revision
+///
+/// 제외 사유를 보는 차례는 스크립트의 두 검사 차례 그대로다 — 참조 여부를 먼저 보고 선점을 나중에
+/// 본다. 두 조건이 함께 성립하는 후보에서 어느 사유가 남는지가 그 차례로 갈린다.
+fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
+    let mut verdict = RoleWorkVerdict::default();
+    for idea in by_file_name(&workflow.items.ideas) {
+        if workflow.nondraft_spec_sources.contains(&idea.id) {
+            verdict.exclude(&idea.id, SPEC_EXISTS);
+            continue;
+        }
+        if lease_ids.contains(&idea.id) {
+            verdict.exclude(&idea.id, LEASED);
+            continue;
+        }
+        verdict.select(&idea.id);
+        return verdict;
+    }
+    for decision_id in workflow.revision_requested_decisions {
+        if workflow.nondraft_spec_sources.contains(decision_id) {
+            verdict.exclude(decision_id, FOLLOW_UP_EXISTS);
+            continue;
+        }
+        if lease_ids.contains(decision_id) {
+            verdict.exclude(decision_id, LEASED);
+            continue;
+        }
+        verdict.select(decision_id);
+        return verdict;
+    }
+    verdict
 }
 
 /// 스크립트 `architect)` 절: 그 기획서의 최신 결정인 승인 중 파생 작업이 없고 `spec_id`로 lease가
@@ -113,21 +167,29 @@ fn has_planner_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -
 /// 최신이 아닌 승인은 여기 오지 않는다. 그래서 승인 뒤에 수정 요청이 붙은 기획서는 그 승인에서
 /// 작업이 파생되지 않았어도 아키텍트 대기 물량이 아니다. 역할 계약의 "The latest app-owned decision
 /// must be `approved`"가 그것을 요구한다.
-fn has_architect_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> bool {
-    workflow
-        .approved_decisions
-        .iter()
-        .any(|(decision_id, spec_id)| {
-            // 스크립트도 `spec_id`가 비어 있으면 lease를 보지 않는다.
-            if !spec_id.is_empty() && lease_ids.contains(spec_id) {
-                return false;
-            }
-            !workflow
-                .items
-                .tasks
-                .iter()
-                .any(|task| task.source_decision_id.as_deref() == Some(decision_id.as_str()))
-        })
+///
+/// 분해 여부를 먼저 보고 기획서 선점을 나중에 보는 것이 스크립트의 차례다.
+fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
+    let mut verdict = RoleWorkVerdict::default();
+    for (decision_id, spec_id) in workflow.approved_decisions {
+        let decomposed = workflow
+            .items
+            .tasks
+            .iter()
+            .any(|task| task.source_decision_id.as_deref() == Some(decision_id.as_str()));
+        if decomposed {
+            verdict.exclude(decision_id, DECOMPOSED);
+            continue;
+        }
+        // 스크립트도 `spec_id`가 비어 있으면 lease를 보지 않는다.
+        if !spec_id.is_empty() && lease_ids.contains(spec_id) {
+            verdict.exclude(decision_id, SPEC_LEASED);
+            continue;
+        }
+        verdict.select(decision_id);
+        return verdict;
+    }
+    verdict
 }
 
 /// 스크립트 `developer)` 절: `todo`이거나 `in_progress`인 작업 중 그 id로 lease가 없고, 선행 선언이
@@ -141,15 +203,33 @@ fn has_architect_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>)
 /// `lease_ids`가 그대로 막는다. 상태 집합만 넓어지고 나머지 세 조건은 곱해지는 그대로다.
 /// `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니므로 후보가 아니다.
 ///
+/// 후보가 아닌 작업은 목록에도 오르지 않는다. 스크립트도 `todo`·`in_progress`가 아닌 문서를 후보
+/// 행으로 만들지 않으므로, 그 문서에는 낼 제외 사유가 없다.
+///
 /// 마지막 조건은 잡힌 lease가 있을 때만 개입한다. 활성 lease가 하나도 없으면 `overlap_blocked`가
 /// 비어 있어 판정이 이 조건이 없던 때와 같다(SPEC-032 R9).
-fn has_developer_work(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> bool {
-    workflow.items.tasks.iter().any(|task| {
-        (task.status == "todo" || task.status == "in_progress")
-            && !lease_ids.contains(&task.id)
-            && !workflow.unsatisfied_dependencies.contains(&task.id)
-            && !workflow.overlap_blocked.contains(&task.id)
-    })
+fn developer_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
+    let mut verdict = RoleWorkVerdict::default();
+    for task in by_file_name(&workflow.items.tasks) {
+        if task.status != "todo" && task.status != "in_progress" {
+            continue;
+        }
+        if lease_ids.contains(&task.id) {
+            verdict.exclude(&task.id, LEASED);
+            continue;
+        }
+        if workflow.unsatisfied_dependencies.contains(&task.id) {
+            verdict.exclude(&task.id, DEPENDENCIES_UNSATISFIED);
+            continue;
+        }
+        if workflow.overlap_blocked.contains(&task.id) {
+            verdict.exclude(&task.id, OVERLAP);
+            continue;
+        }
+        verdict.select(&task.id);
+        return verdict;
+    }
+    verdict
 }
 
 #[cfg(test)]
@@ -161,7 +241,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::{tempdir, TempDir};
 
-    use crate::domain::project::PendingRoleWork;
+    use crate::domain::project::{
+        PendingRoleWork, PendingRoleWorkDetail, RoleWorkVerdict, WorkCandidate,
+    };
     use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
     use crate::infrastructure::heartbeat_condition::install_condition_script;
     use crate::infrastructure::heartbeat_condition::test_support::run_condition;
@@ -180,27 +262,52 @@ mod tests {
         (root, workflow_root)
     }
 
-    /// 조회 결과의 판정과 스크립트의 종료 코드를 대조한다. 규칙만이 아니라 배선까지 고정한다.
+    /// 조회 결과의 판정과 스크립트의 답을 대조한다. 규칙만이 아니라 배선까지 고정한다.
     /// 스크립트 실행은 조건 스크립트 모듈의 공용 헬퍼가 한다 — 두 모듈이 다른 명령으로 부르면
     /// 대조의 뜻이 사라진다.
+    ///
+    /// 대조 대상은 셋이다. 종료 코드가 말하는 대상 유무, 대상 문서의 id, 그리고 판정한 후보를
+    /// 판정한 차례대로 담은 목록이다(SPEC-049 완료 조건 4). 이 표 아래의 시나리오 전부가 이
+    /// 헬퍼를 지나므로, 넓어진 답이 갈라지는 자리는 그 시나리오에서 먼저 걸린다.
     fn assert_matches_condition_script(project_root: &Path) -> PendingRoleWork {
-        let pending = FileSystemProjectRepository
+        let detail = FileSystemProjectRepository
             .inspect(project_root)
             .expect("inspect project")
-            .pending_work;
+            .pending_detail;
 
-        for (role, app_flag) in [
-            ("planner", pending.planner),
-            ("architect", pending.architect),
-            ("developer", pending.developer),
+        for (role, verdict) in [
+            ("planner", &detail.planner),
+            ("architect", &detail.architect),
+            ("developer", &detail.developer),
         ] {
+            let run = run_condition(project_root, role);
+
             assert_eq!(
-                app_flag,
-                run_condition(project_root, role).code == 0,
+                verdict.target.is_some(),
+                run.code == 0,
                 "{role} 판정이 조건 스크립트와 다르다"
             );
+            assert_eq!(
+                verdict.target,
+                run.target(),
+                "{role} 대상이 조건 스크립트와 다르다"
+            );
+            assert_eq!(
+                candidate_lines(verdict),
+                run.candidates(),
+                "{role} 후보 목록이 조건 스크립트와 다르다"
+            );
         }
-        pending
+        detail.flags()
+    }
+
+    /// 앱 판정의 후보 목록을 스크립트가 내는 줄과 같은 모양으로 만든다.
+    fn candidate_lines(verdict: &RoleWorkVerdict) -> Vec<String> {
+        verdict
+            .candidates
+            .iter()
+            .map(|candidate| format!("{} {}", candidate.verdict, candidate.id))
+            .collect()
     }
 
     fn write_idea(workflow_root: &Path, id: &str) {
@@ -292,6 +399,16 @@ mod tests {
             format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\ndepends_on: {declaration}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
         )
         .expect("write task with declaration");
+    }
+
+    /// `updated_at`을 부르는 쪽이 정하는 작업. 목록 정렬과 판정 차례가 갈리는지 보는 시나리오가
+    /// 쓴다.
+    fn write_task_updated_at(workflow_root: &Path, id: &str, status: &str, updated_at: &str) {
+        fs::write(
+            workflow_root.join(format!("tasks/{id}.md")),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nupdated_at: {updated_at}\n---\n\n작업 본문\n"),
+        )
+        .expect("write task with updated_at");
     }
 
     /// 겹침 선언을 가진 작업. `scope`는 `scope_files:` 뒤에 그대로 놓이는 원문이라 형식 오류
@@ -1528,6 +1645,171 @@ mod tests {
         assert!(!assert_matches_condition_script(root.path()).planner);
     }
 
+    // ── SPEC-049 R1. 넓어진 답 ────────────────────────────────────────────────────────────
+    //
+    // 위 시나리오는 대부분 후보가 하나뿐이라 "여럿 중 어느 것이 대상인가"를 묻지 못한다. 아래 셋은
+    // 역할마다 후보를 여럿 두고, 그중 일부를 서로 다른 사유로 제외한 상태에서 대상과 목록을
+    // 고정한다(기획서 완료 조건 2·4). 조건 스크립트와의 대조는 대조 헬퍼가 함께 한다.
+
+    /// 대조를 거친 뒤 넓어진 판정을 그대로 돌려준다. 대상과 후보 목록을 시나리오가 직접 읽어야 할
+    /// 때 쓴다. 읽는 경로는 대조 헬퍼와 같은 조회 하나다.
+    fn detail_matching_condition_script(project_root: &Path) -> PendingRoleWorkDetail {
+        assert_matches_condition_script(project_root);
+        FileSystemProjectRepository
+            .inspect(project_root)
+            .expect("inspect project")
+            .pending_detail
+    }
+
+    /// 기획자 후보 셋. 첫째는 비-`draft` 기획서가 참조하고 둘째는 선점됐으므로 셋째가 대상이다.
+    #[test]
+    fn the_planner_answer_names_the_target_and_why_the_earlier_ideas_were_excluded() {
+        let (root, workflow_root) = project();
+        write_idea(&workflow_root, "IDEA-001");
+        write_idea(&workflow_root, "IDEA-002");
+        write_idea(&workflow_root, "IDEA-003");
+        write_spec(&workflow_root, "SPEC-001", "IDEA-001");
+        write_lease(root.path(), "IDEA-002", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.planner.target.as_deref(), Some("IDEA-003"));
+        assert_eq!(
+            candidate_lines(&detail.planner),
+            [
+                "spec-exists IDEA-001",
+                "leased IDEA-002",
+                "eligible IDEA-003",
+            ]
+        );
+    }
+
+    /// 아키텍트 후보 셋. 첫째는 이미 분해됐고 둘째는 그 기획서가 선점됐으므로 셋째가 대상이다.
+    #[test]
+    fn the_architect_answer_names_the_target_and_why_the_earlier_approvals_were_excluded() {
+        let (root, workflow_root) = project();
+        for (id, spec_id) in [
+            ("DECISION-A01", "SPEC-001"),
+            ("DECISION-A02", "SPEC-002"),
+            ("DECISION-A03", "SPEC-003"),
+        ] {
+            write_decision(
+                &workflow_root,
+                id,
+                spec_id,
+                "approved",
+                "2026-08-01T00:00:00Z",
+            );
+        }
+        write_task(
+            &workflow_root,
+            "TASK-001",
+            "qa_waiting",
+            Some("DECISION-A01"),
+        );
+        write_lease(root.path(), "SPEC-002", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("DECISION-A03"));
+        assert_eq!(
+            candidate_lines(&detail.architect),
+            [
+                "decomposed DECISION-A01",
+                "spec-leased DECISION-A02",
+                "eligible DECISION-A03",
+            ]
+        );
+    }
+
+    /// 개발자 후보 넷. 셋이 서로 다른 사유로 빠지고 넷째가 대상이다. 잡힌 lease 하나가 첫째를
+    /// 선점으로, 셋째를 겹침으로 막는다.
+    #[test]
+    fn the_developer_answer_names_the_target_and_why_the_earlier_tasks_were_excluded() {
+        let (root, workflow_root) = project();
+        write_task_with_scope(&workflow_root, "TASK-001", "todo", "[src/shared.rs]");
+        write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-404]");
+        write_task_with_scope(&workflow_root, "TASK-003", "todo", "[src/shared.rs]");
+        write_task_with_scope(&workflow_root, "TASK-004", "todo", "[src/four.rs]");
+        write_lease(root.path(), "TASK-001", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target.as_deref(), Some("TASK-004"));
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            [
+                "leased TASK-001",
+                "dependencies-unsatisfied TASK-002",
+                "overlap TASK-003",
+                "eligible TASK-004",
+            ]
+        );
+    }
+
+    /// 대상이 없으면 목록이 그 역할이 본 후보 전부다. 위 개발자 픽스처에서 대상 하나만 뺀 것이고,
+    /// 남은 셋의 사유는 그대로다.
+    #[test]
+    fn a_role_without_a_target_still_answers_why_every_candidate_was_excluded() {
+        let (root, workflow_root) = project();
+        write_task_with_scope(&workflow_root, "TASK-001", "todo", "[src/shared.rs]");
+        write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-404]");
+        write_task_with_scope(&workflow_root, "TASK-003", "todo", "[src/shared.rs]");
+        write_lease(root.path(), "TASK-001", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            [
+                "leased TASK-001",
+                "dependencies-unsatisfied TASK-002",
+                "overlap TASK-003",
+            ]
+        );
+    }
+
+    /// 후보를 보는 차례는 파일 이름 순이다. 목록 화면의 정렬(`updated_at` 내림차순)을 쓰면 여기서
+    /// 대상이 갈린다 — 두 작업의 `updated_at`이 그 정렬에서 서로를 앞지르도록 픽스처를 세운다.
+    #[test]
+    fn the_target_follows_file_name_order_not_the_list_order() {
+        let (root, workflow_root) = project();
+        write_task_updated_at(&workflow_root, "TASK-001", "todo", "2026-08-01T00:00:00Z");
+        write_task_updated_at(&workflow_root, "TASK-002", "todo", "2026-08-09T00:00:00Z");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        // 목록에서는 `TASK-002`가 앞에 온다. 판정은 그 정렬을 쓰지 않는다.
+        let listed = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project")
+            .workflows[0]
+            .items
+            .tasks
+            .first()
+            .expect("첫 항목")
+            .id
+            .clone();
+        assert_eq!(listed, "TASK-002");
+        assert_eq!(detail.developer.target.as_deref(), Some("TASK-001"));
+    }
+
+    /// 마이그레이션 락은 후보를 하나도 내지 않는다. 스크립트도 분기에 들어가기 전에 끝난다.
+    #[test]
+    fn a_migration_lock_answers_with_no_candidate_at_all() {
+        let (root, workflow_root) = project();
+        write_idea(&workflow_root, "IDEA-001");
+        write_task(&workflow_root, "TASK-001", "todo", None);
+        let runtime = root.path().join(".workflow/.runtime");
+        fs::create_dir_all(&runtime).expect("runtime root");
+        fs::write(runtime.join("migration.lock"), "").expect("migration lock");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail, PendingRoleWorkDetail::default());
+    }
+
     #[test]
     fn a_lease_blocks_the_same_id_in_every_workflow() {
         let items = crate::domain::project::WorkflowItems::default();
@@ -1536,6 +1818,7 @@ mod tests {
         let overlapped = HashSet::new();
         let nondraft_sources = HashSet::new();
         let workflows = [super::WorkflowInput {
+            directory: "wf-demo",
             items: &items,
             approved_decisions: &approved,
             revision_requested_decisions: &[],
@@ -1546,7 +1829,17 @@ mod tests {
         let mut leases = HashSet::new();
         leases.insert("SPEC-001".to_owned());
 
-        assert!(!super::pending_role_work(false, &leases, &workflows).architect);
-        assert!(super::pending_role_work(false, &HashSet::new(), &workflows).architect);
+        let blocked = super::pending_role_work(false, &leases, &workflows).architect;
+        assert_eq!(blocked.target, None);
+        assert_eq!(
+            blocked.candidates,
+            vec![WorkCandidate {
+                id: "DECISION-001".to_owned(),
+                verdict: "spec-leased".to_owned(),
+            }]
+        );
+
+        let open = super::pending_role_work(false, &HashSet::new(), &workflows).architect;
+        assert_eq!(open.target.as_deref(), Some("DECISION-001"));
     }
 }

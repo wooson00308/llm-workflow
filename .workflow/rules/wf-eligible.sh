@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 10
+# condition_script_version: 11
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer  (프로젝트 루트에서 실행)
@@ -8,6 +8,10 @@ set -u
 
 role="${1:-}"
 leases=".workflow/.runtime/leases"
+# 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
+# 개행이 목록의 경계가 된다.
+nl='
+'
 
 # 판정 사유를 표준 출력 첫 줄에 내고 종료한다. 하트비트가 그 줄을 state.json의
 # last_condition_output으로 옮기고, 앱이 코드를 사용자 문장으로 옮긴다.
@@ -22,30 +26,50 @@ verdict() { # $1=사유 코드 $2=종료 코드
 
 [ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
 
-# 유효한(미만료) lease가 있으면 0. 파일이 없거나 시각을 읽을 수 없으면 1.
-# 자리수가 고정된 UTC 표기는 사전순 비교가 곧 시각 비교다. POSIX sh에는 이식 가능한 날짜 파싱이 없다.
+# 만료 표기 판정 한 자리. 자리수가 고정된 UTC 표기는 사전순 비교가 곧 시각 비교다. POSIX sh에는
+# 이식 가능한 날짜 파싱이 없다.
 # 읽을 수 없는 표기를 선점으로 세지 않는다. 선점 헬퍼(wf-claim.sh)는 같은 상황을 반대로 다루는데,
 # 헬퍼가 지는 위험은 살아 있는 남의 lease를 인수하는 것이고 이 판정이 지는 위험은 대상이 영원히
 # 열리지 않는 것이다. 실제 선점은 배타적 생성이 막으므로 이 판정이 관대해도 중복 선점이 되지 않는다.
+lease_unexpired() { # $1=만료 표기 $2=판정 시각
+  case "$1" in
+    ????-??-??T??:??:??Z) [ "$1" '>' "$2" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# 유효한(미만료) lease가 있으면 0. 파일이 없거나 시각을 읽을 수 없으면 1.
+# 기획자·아키텍트 분기가 쓴다. 개발자 분기는 후보마다 이 함수를 부르는 대신 scan_leases가 모아 둔
+# 목록을 보고, 만료 판정은 위 함수 하나가 두 자리 모두에서 한다.
 # 판정은 lease 파일을 읽기만 한다. 지우거나 고치거나 새로 만들지 않는다.
 lease_blocks() { # $1=대상 id
   lease="$leases/$1.yml"
   [ -f "$lease" ] || return 1
   exp=$(sed -n 's/^expires_at: *//p' "$lease" | head -1 | tr -d '"'\''')
-  case "$exp" in
-    ????-??-??T??:??:??Z) [ "$exp" '>' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ] ;;
-    *) return 1 ;;
-  esac
+  lease_unexpired "$exp" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
-# 프론트매터의 한 줄 선언을 읽어 표준 출력에 공백으로 구분한 id 목록을 낸다.
+# 토큰 앞뒤의 공백류를 걷어낸 값을 $trimmed에 담는다. 원래 본문이 토큰마다 sed를 하나씩 띄우던
+# 자리다 — 걷어내는 문자 집합은 그 sed의 [[:space:]]와 같고, 사라지는 것은 프로세스뿐이다.
+trim_token() { # $1=토큰
+  trimmed=$1
+  while :; do
+    case "$trimmed" in [[:space:]]*) trimmed=${trimmed#?} ;; *) break ;; esac
+  done
+  while :; do
+    case "$trimmed" in *[[:space:]]) trimmed=${trimmed%?} ;; *) break ;; esac
+  done
+}
+
+# 프론트매터의 한 줄 선언을 읽어 id 목록을 $parsed에 담는다.
 # 반환값 1은 "키는 있는데 계약 형식이 아니다"이고, 그 작업은 미충족이다.
-deps_of() { # $1=작업 파일
-  count=$(grep -c '^depends_on:' "$1" 2>/dev/null || true)
-  case "$count" in '' | *[!0-9]*) count=0 ;; esac
-  [ "$count" -eq 0 ] && return 0
-  [ "$count" -gt 1 ] && return 1
-  value=$(sed -n 's/^depends_on:[[:space:]]*//p' "$1" | head -1 | sed 's/[[:space:]]*$//')
+# 선언 줄 수와 첫 줄의 값은 scan_tasks가 읽어 온 것을 받는다. 그 훑기가 세고 뽑는 규칙이 원래
+# 본문의 grep -c와 sed 그대로이므로, 이 함수가 보는 재료는 파일에서 직접 읽던 때와 같다.
+deps_of() { # $1=선언 줄 수 $2=첫 선언 줄의 값
+  parsed=""
+  [ "$1" -eq 0 ] && return 0
+  [ "$1" -gt 1 ] && return 1
+  value=$2
   [ -n "$value" ] || return 1
   case "$value" in '['*']') ;; *) return 1 ;; esac
   inner=${value#?}
@@ -54,24 +78,23 @@ deps_of() { # $1=작업 파일
   out=""
   rest="$inner,"
   while [ -n "$rest" ]; do
-    token=$(printf '%s' "${rest%%,*}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    trim_token "${rest%%,*}"
     rest=${rest#*,}
-    [ -n "$token" ] || return 1
-    case "$token" in *[!A-Za-z0-9_-]*) return 1 ;; esac
-    out="$out $token"
+    [ -n "$trimmed" ] || return 1
+    case "$trimmed" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+    out="$out $trimmed"
   done
-  printf '%s\n' "${out# }"
+  parsed=${out# }
 }
 
-# 프론트매터의 겹침 선언 한 줄을 읽어 표준 출력에 공백으로 구분한 경로 목록을 낸다.
+# 프론트매터의 겹침 선언 한 줄을 읽어 경로 목록을 $parsed에 담는다.
 # 반환값 1은 "키가 없거나 계약 형식이 아니다"이고, 그 작업은 판정 불가다. deps_of와 다른 점은
 # 둘이다 — 키가 없는 것도 1이고(선언 없는 작업은 무엇과도 겹치는 것으로 본다), 경로에 쓰이는
 # `.`과 `/`가 허용 문자에 더 있다. 공백이 든 경로는 sh의 단어 분리가 나눠 버리므로 형식 오류다.
-scope_of() { # $1=작업 파일
-  count=$(grep -c '^scope_files:' "$1" 2>/dev/null || true)
-  case "$count" in '' | *[!0-9]*) count=0 ;; esac
-  [ "$count" -eq 1 ] || return 1
-  value=$(sed -n 's/^scope_files:[[:space:]]*//p' "$1" | head -1 | sed 's/[[:space:]]*$//')
+scope_of() { # $1=선언 줄 수 $2=첫 선언 줄의 값
+  parsed=""
+  [ "$1" -eq 1 ] || return 1
+  value=$2
   [ -n "$value" ] || return 1
   case "$value" in '['*']') ;; *) return 1 ;; esac
   inner=${value#?}
@@ -80,76 +103,57 @@ scope_of() { # $1=작업 파일
   out=""
   rest="$inner,"
   while [ -n "$rest" ]; do
-    token=$(printf '%s' "${rest%%,*}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    trim_token "${rest%%,*}"
     rest=${rest#*,}
-    [ -n "$token" ] || return 1
-    case "$token" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
-    out="$out $token"
+    [ -n "$trimmed" ] || return 1
+    case "$trimmed" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
+    out="$out $trimmed"
   done
-  printf '%s\n' "${out# }"
+  parsed=${out# }
 }
 
-# 다른 문서를 잡은 미만료 lease가 이 작업의 착수를 막는가. 자기 자신을 잡은 lease는 보지 않는다 —
-# 그것은 겹침이 아니라 자기 선점이고 lease_blocks가 이미 뺐다.
+# 다른 문서를 잡은 미만료 lease가 이 작업의 착수를 막는가. 원래 본문은 후보마다 lease 디렉터리를
+# 다시 훑고 상대의 선언을 다시 읽었다. 그 값을 scan_leases와 개발자 분기의 훑기가 미리 모으므로
+# 여기 남는 것은 비교뿐이고, 판정은 그대로다.
+# 자기 자신을 잡은 lease는 여기 오지 않는다. 그런 작업은 후보 단계에서 이미 빠졌으므로, 후보가
+# 여기까지 왔다면 자기를 잡은 미만료 lease가 없다 — 원래 본문의 자기 건너뛰기와 같은 자리다.
 # 선언이 없거나 형식 오류인 쪽이 하나라도 있으면 막는다. 겹침은 대칭 관계이고, 판정 불가는 안전한
 # 쪽으로 기운다. lease가 잡은 것이 작업 문서가 아니면 비교할 상대가 없으므로 막지 않는다.
 # 비교는 문자열 완전 일치다. 경로 정규화도 글롭도 하지 않는다.
-# 자기 선언은 막을 lease를 처음 만났을 때 읽는다. 잡힌 lease가 없으면 이 함수는 파일을 열지 않는다.
-overlap_blocks() { # $1=워크플로우 경로 $2=작업 id $3=작업 파일
-  mine_read=0
-  for l in "$leases"/*.yml; do
-    [ -f "$l" ] || continue
-    lid=${l##*/}
-    lid=${lid%.yml}
-    [ "$lid" = "$2" ] && continue
-    lease_blocks "$lid" || continue
-    if [ "$mine_read" -eq 0 ]; then
-      if mine=$(scope_of "$3"); then mine_ok=1; else mine_ok=0; fi
-      mine_read=1
-    fi
-    [ "$mine_ok" -eq 0 ] && return 0
-    uf=$(task_file "$1" "$lid")
-    [ -n "$uf" ] || continue
-    theirs=$(scope_of "$uf") || return 0
-    for a in $mine; do
-      for b in $theirs; do
-        [ "$a" = "$b" ] && return 0
-      done
-    done
+# 잡힌 lease가 하나도 없으면 자기 선언을 보지 않는다. 그 게으름이 판정에 든다 — 선언이 형식
+# 오류여도 활성 lease가 없으면 막히지 않는다.
+overlap_blocks() { # $1=자기 선언의 유효 여부 $2=자기 선언의 경로 목록
+  [ "$active_count" -gt 0 ] || return 1
+  [ "$1" -eq 1 ] || return 0
+  [ "$lease_scope_bad" -eq 0 ] || return 0
+  for a in $2; do
+    case "$lease_paths" in *" $a "*) return 0 ;; esac
   done
   return 1
 }
 
-# 선행 작업 문서를 문서 id로 찾는다. 없으면 미충족이다.
-task_file() { # $1=워크플로우 경로 $2=문서 id
-  grep -ls "^id: *$2\$" "$1"tasks/*.md 2>/dev/null | head -1
-}
-
-# 선행 작업이 충족 상태인가. qa_waiting과 completed만 충족이다.
-dep_satisfied() { # $1=선행 작업 파일
-  grep -qs "^status: qa_waiting" "$1" || grep -qs "^status: completed" "$1"
-}
-
-# $2에서 선언을 따라가 $3에 닿는가. 방문 집합이 종료를 보장한다.
-reaches() { # $1=워크플로우 경로 $2=출발 id $3=목표 id
+# $1에서 선언을 따라가 $2에 닿는가. 방문 집합이 종료를 보장한다.
+# 간선은 훑기가 만든 $edge_map에서 읽는다. 표에 없는 id는 나가는 간선이 없고, 그것이 원래 본문의
+# 세 경우를 그대로 덮는다 — 그 id의 문서가 없는 경우, 선언이 없는 경우, 선언이 형식 오류인 경우다.
+reaches() { # $1=출발 id $2=목표 id
   visited=" "
-  frontier="$2"
+  frontier="$1"
   while [ -n "$frontier" ]; do
     next=""
     for node in $frontier; do
       case "$visited" in *" $node "*) continue ;; esac
       visited="$visited$node "
-      [ "$node" = "$3" ] && return 0
-      nf=$(task_file "$1" "$node")
-      [ -n "$nf" ] || continue
-      next="$next $(deps_of "$nf" || true)"
+      [ "$node" = "$2" ] && return 0
+      case "$edge_map" in *"$nl$node "*) ;; *) continue ;; esac
+      entry=${edge_map#*"$nl$node "}
+      next="$next ${entry%%"$nl"*}"
     done
     frontier="$next"
   done
   return 1
 }
 
-# 아래 셋이 판정 재료를 모으는 훑기다. 한 분기가 한 워크플로우에서 각 디렉터리를 한 번만 읽는다.
+# 아래 다섯이 판정 재료를 모으는 훑기다. 한 분기가 한 워크플로우에서 각 디렉터리를 한 번만 읽는다.
 # 후보마다 같은 디렉터리를 다시 읽으면 판정 비용이 컬렉션 크기의 곱이 되고, 문서가 늘수록 데몬의
 # 한도를 넘긴다(SPEC-033). 모은 값은 셸 변수에 담고 후보별 조회는 case와 파라미터 확장으로만 한다 —
 # 조회마다 프로세스를 띄우면 곱이 프로세스에서 문자열 비교로 옮겨 갈 뿐이다.
@@ -312,6 +316,107 @@ scan_decisions() { # $1=워크플로우 경로 $2=찾는 outcome 값 $3=1이면 
   ' "$@"
 }
 
+# lease 디렉터리를 한 번 훑어 미만료 lease의 대상 id를 $active_leases에 모으고 그 수를
+# $active_count에 담는다. 개발자 분기가 후보마다 이 디렉터리를 다시 훑던 자리다.
+# 판정 시각은 훑기 앞에서 한 번 정하고 그 값을 쓴다. 만료 판정이 판정 시점 기준인 것은 그대로이고,
+# 판정 순간이 하나로 모이는 것은 앱 이식본(role_eligibility.rs)이 이미 그렇게 하는 방식이다.
+# 읽는 규칙과 만료 판정은 lease_blocks와 같은 것을 쓴다. 읽지 못한 파일은 표기를 얻지 못해
+# 미만료로 세어지지 않는다.
+scan_leases() {
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  active_leases="$nl"
+  active_count=0
+  for l in "$leases"/*.yml; do
+    [ -f "$l" ] || continue
+    lid=${l##*/}
+    lid=${lid%.yml}
+    exp=$(sed -n 's/^expires_at: *//p' "$l" | head -1 | tr -d '"'\''')
+    lease_unexpired "$exp" "$now" || continue
+    active_leases="$active_leases$lid$nl"
+    active_count=$((active_count + 1))
+  done
+}
+
+# 훑기가 모은 목록에서 이 문서가 미만료 lease에 잡혔는지 본다. 파일 존재 검사를 먼저 하는 것은
+# 목록 조회가 문자열 검사이기 때문이다 — 두 검사가 함께여야 원래의 파일 이름 대조와 같은 답이 된다.
+lease_active() { # $1=대상 id
+  [ -f "$leases/$1.yml" ] || return 1
+  case "$active_leases" in *"$nl$1$nl"*) return 0 ;; esac
+  return 1
+}
+
+# 작업 디렉터리를 한 번 훑어 문서 하나마다 레코드 하나를 낸다. 원래 본문은 후보 하나마다 상태·id·
+# 선행·겹침을 따로 읽고 선행마다 디렉터리를 다시 훑었다. 그래서 비용이 작업 하나당 상수 개의
+# 프로세스였고, 문서가 늘수록 데몬의 한도에 닿았다(SPEC-041). 읽는 규칙은 원래 본문의 grep·sed
+# 그대로이므로 판정은 바뀌지 않는다.
+#
+# 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
+# 네 자리는 차례로
+#   후보 여부  — ^status: (todo|in_progress)가 파일 아무 줄에나 있는가
+#   충족 여부  — ^status: qa_waiting 또는 ^status: completed가 파일 아무 줄에나 있는가
+#   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
+#   겹침 줄 수 — 0·1·2
+# 다. 뒤따르는 줄은 있다고 적힌 것만 온다: 후보이면 첫 id 줄의 값, 선행 줄 수가 1이면 그 값,
+# 겹침 줄 수가 1이면 그 값이다. 값은 모두 한 줄에서 읽은 것이라 개행을 담을 수 없으므로 한 줄에 담긴다.
+#
+# 두 가지 id 읽기가 여기 함께 있다. 후보의 id는 첫 id 줄 하나이고(sed ... | head -1), 선행 이름
+# 해석은 파일 아무 줄이나 보며 값이 정확히 같은 것을 찾는다(grep -ls "^id: *<id>$" | head -1).
+# 뒤엣것만 계약 문자 집합으로 거르는 것은 선행 이름이 그 집합이라 그 밖의 값이 조회될 수 없기
+# 때문이고, 글롭 순서로 첫 문서가 이기는 것은 그 목록을 받는 쪽이 지킨다.
+scan_tasks() { # $1=워크플로우 경로
+  scan_dir="$1"tasks
+  set --
+  for f in "$scan_dir"/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  [ "$#" -eq 0 ] && return 0
+  awk '
+    function trim(s) {
+      sub(/^[[:space:]]*/, "", s)
+      sub(/[[:space:]]*$/, "", s)
+      return s
+    }
+    function emit(  i, line) {
+      if (!started) return
+      line = "M" cand sat depn scopen " "
+      for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
+      print line
+      if (cand) print first_id
+      if (depn == 1) print dep_value
+      if (scopen == 1) print scope_value
+    }
+    FILENAME != prev {
+      emit()
+      prev = FILENAME
+      started = 1
+      files = files + 1
+      cand = 0; sat = 0; depn = 0; scopen = 0
+      got_id = 0; first_id = ""; dep_value = ""; scope_value = ""; n_ids = 0
+    }
+    {
+      if (index($0, "id:") == 1) {
+        v = substr($0, 4)
+        sub(/^ */, "", v)
+        if (!got_id) { got_id = 1; first_id = v }
+        if (v ~ /^[A-Za-z0-9_-]+$/ && !((files, v) in seen)) {
+          seen[files, v] = 1
+          n_ids = n_ids + 1
+          id_list[n_ids] = v
+        }
+      }
+      if ($0 ~ /^status: (todo|in_progress)/) cand = 1
+      if ($0 ~ /^status: qa_waiting/ || $0 ~ /^status: completed/) sat = 1
+      if (index($0, "depends_on:") == 1) {
+        if (depn == 0) { depn = 1; dep_value = trim(substr($0, 12)) } else depn = 2
+      }
+      if (index($0, "scope_files:") == 1) {
+        if (scopen == 0) { scopen = 1; scope_value = trim(substr($0, 13)) } else scopen = 2
+      }
+    }
+    END { emit() }
+  ' "$@"
+}
+
 case "$role" in
 planner)
   for wf in .workflow/*/; do
@@ -367,31 +472,97 @@ APPROVALS
   done
   ;;
 developer)
+  scan_leases
   for wf in .workflow/*/; do
     [ -d "${wf}tasks" ] || continue
-    for f in "${wf}"tasks/*.md; do
-      [ -f "$f" ] || continue
+    scanned=$(scan_tasks "$wf")
+    known_ids=" "
+    sat_ids=" "
+    edge_map="$nl"
+    lease_paths=" "
+    lease_scope_bad=0
+    rows=""
+    # 훑기 결과를 한 번 읽어 선행 해석용 표와 후보 목록을 만든다. 후보 하나가 자기보다 뒤에 오는
+    # 문서를 선행으로 가리킬 수 있으므로 표가 먼저 완성돼야 하고, 그래서 읽기가 두 번이다.
+    # 후보를 보는 차례는 두 번째 읽기가 지키는 글롭 순서 그대로다.
+    while IFS= read -r meta; do
+      case "$meta" in M*) ;; *) continue ;; esac
+      meta=${meta#M}
+      flags=${meta%%" "*}
+      ids=${meta#* }
+      cand=${flags%???}
+      sat=${flags#?}
+      sat=${sat%??}
+      depn=${flags#??}
+      depn=${depn%?}
+      scopen=${flags#???}
+      tid=""
+      dep_value=""
+      scope_value=""
       # 후보는 todo와 in_progress 둘이다. 죽은 세션이 남긴 in_progress 작업은 그 작업을 덮는
-      # 미만료 lease가 없으므로 아래 lease_blocks가 통과시키고, 살아 있는 세션의 작업은 그 lease가
+      # 미만료 lease가 없으므로 아래 lease_active가 통과시키고, 살아 있는 세션의 작업은 그 lease가
       # 막는다(SPEC-035 R1). 나머지 조건은 todo와 완전히 같고 blocked은 후보가 아니다.
-      # 두 상태를 한 번의 호출로 본다. grep을 한 번 더 부르면 작업 수만큼 프로세스가 늘어 판정
-      # 비용의 상한에 그대로 부딪힌다(SPEC-033 R8).
-      grep -qsE "^status: (todo|in_progress)" "$f" || continue
-      tid=$(sed -n 's/^id: *//p' "$f" | head -1)
+      [ "$cand" = 1 ] && IFS= read -r tid
+      [ "$depn" = 1 ] && IFS= read -r dep_value
+      [ "$scopen" = 1 ] && IFS= read -r scope_value
+      if deps_of "$depn" "$dep_value"; then deps=$parsed; deps_ok=1; else deps=""; deps_ok=0; fi
+      if scope_of "$scopen" "$scope_value"; then scope=$parsed; scope_ok=1; else scope=""; scope_ok=0; fi
+      for v in $ids; do
+        # 같은 id를 담은 문서가 여럿이면 글롭 순서로 첫 문서가 이긴다. 원래 본문의
+        # grep -ls ... | head -1이 고르던 문서가 그것이다.
+        case "$known_ids" in *" $v "*) continue ;; esac
+        known_ids="$known_ids$v "
+        [ "$sat" = 1 ] && sat_ids="$sat_ids$v "
+        [ -n "$deps" ] && edge_map="$edge_map$v $deps$nl"
+        # 활성 lease가 잡은 문서를 처음 만나면 그 겹침 선언을 여기서 읽어 둔다. 원래 본문이
+        # 후보마다 다시 읽던 값이고, 막는 쪽의 선언이 형식 오류이면 그 사실만 남는다.
+        case "$active_leases" in
+          *"$nl$v$nl"*)
+            if [ "$scope_ok" -eq 1 ]; then
+              for a in $scope; do
+                case "$lease_paths" in *" $a "*) ;; *) lease_paths="$lease_paths$a " ;; esac
+              done
+            else
+              lease_scope_bad=1
+            fi
+            ;;
+        esac
+      done
+      [ "$cand" = 1 ] || continue
       [ -n "$tid" ] || continue
-      lease_blocks "$tid" && continue
-      deps=$(deps_of "$f") || continue
+      rows="$rows$deps_ok$scope_ok|$deps|$scope|$tid$nl"
+    done <<SCAN
+$scanned
+SCAN
+    while IFS= read -r row; do
+      case "$row" in ??"|"*) ;; *) continue ;; esac
+      flags=${row%%"|"*}
+      rest=${row#*"|"}
+      deps=${rest%%"|"*}
+      rest=${rest#*"|"}
+      scope=${rest%%"|"*}
+      tid=${rest#*"|"}
+      deps_ok=${flags%?}
+      scope_ok=${flags#?}
+      lease_active "$tid" && continue
+      [ "$deps_ok" -eq 1 ] || continue
       ok=1
+      # 선행 셋이 모두 참이어야 자격이고 셋 중 어느 것도 다른 것을 바꾸지 않으므로, 보는 차례는
+      # 답을 바꾸지 않는다. 값싼 둘을 먼저 보고 순환 탐색은 그 둘을 통과한 선언에만 돈다.
       for dep in $deps; do
-        df=$(task_file "$wf" "$dep")
-        [ -n "$df" ] || { ok=0; break; }
-        reaches "$wf" "$dep" "$tid" && { ok=0; break; }
-        dep_satisfied "$df" || { ok=0; break; }
+        case "$known_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
+        case "$sat_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
       done
       [ "$ok" -eq 1 ] || continue
-      overlap_blocks "$wf" "$tid" "$f" && continue
+      for dep in $deps; do
+        reaches "$dep" "$tid" && { ok=0; break; }
+      done
+      [ "$ok" -eq 1 ] || continue
+      overlap_blocks "$scope_ok" "$scope" && continue
       verdict eligible 0
-    done
+    done <<ROWS
+$rows
+ROWS
   done
   ;;
 *)

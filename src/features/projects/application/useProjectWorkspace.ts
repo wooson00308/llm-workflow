@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  CustomRulesActions,
+  CustomRulesDocument,
+  CustomRulesDraft,
+  CustomRulesPreview,
+  CustomRulesState,
   DreamJobRequest,
   HeartbeatRunFailure,
   HeartbeatServiceOperation,
@@ -11,6 +16,8 @@ import type {
   IntegrationActions,
   IntegrationsSnapshot,
   IntegrationsState,
+  ManagedAssetsState,
+  ManagedAssetSyncTrigger,
   ManagedDreamJob,
   ManagedRoleJob,
   ProjectGateway,
@@ -18,6 +25,7 @@ import type {
   RecentProject,
   RecentProjectStore,
   RoleJobRequest,
+  SaveCustomRulesResult,
   SpecDecisionOutcome,
   TaskQaBatchEntry,
   TaskQaOutcome,
@@ -63,6 +71,31 @@ interface HeartbeatServiceState {
   error: string | null;
 }
 
+function emptyCustomRulesState(): CustomRulesState {
+  return {
+    document: null,
+    reading: false,
+    previewing: false,
+    saving: false,
+    preview: null,
+    previewBaselineContentHash: null,
+    saveResult: null,
+    readError: null,
+    previewError: null,
+    saveError: null,
+  };
+}
+
+function sameCustomRulesDocument(
+  previous: CustomRulesDocument | null,
+  next: CustomRulesDocument,
+): boolean {
+  return (
+    previous?.status === next.status &&
+    previous.contentHash === next.contentHash
+  );
+}
+
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -106,6 +139,15 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [managedAssets, setManagedAssets] = useState<ManagedAssetsState>({
+    syncing: false,
+    result: null,
+    error: null,
+    trigger: null,
+  });
+  const [customRules, setCustomRules] = useState<CustomRulesState>(
+    emptyCustomRulesState,
+  );
   const [integrations, setIntegrations] = useState<IntegrationsReadState>({
     snapshot: null,
     error: null,
@@ -150,6 +192,11 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const runningSteps = useRef<HeartbeatSetupStep[]>([]);
   const checkingVersions = useRef(false);
   const controllingService = useRef(false);
+  const activeProjectPath = useRef<string | null>(null);
+  const customRulesReadRequest = useRef(0);
+  const customRulesPreviewRequest = useRef(0);
+  const customRulesSaveRequest = useRef(0);
+  const savingCustomRules = useRef(false);
 
   const remember = useCallback(
     (next: ProjectSummary) => {
@@ -160,14 +207,124 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [recentStore],
   );
 
+  const resetCustomRules = useCallback(() => {
+    customRulesReadRequest.current += 1;
+    customRulesPreviewRequest.current += 1;
+    customRulesSaveRequest.current += 1;
+    savingCustomRules.current = false;
+    setCustomRules(emptyCustomRulesState());
+  }, []);
+
+  const readCustomRules = useCallback(
+    async (path: string, silent = false, clearTransient = false) => {
+      const request = ++customRulesReadRequest.current;
+      if (!silent || clearTransient) {
+        setCustomRules((previous) => ({
+          ...previous,
+          reading: !silent,
+          preview: clearTransient ? null : previous.preview,
+          previewBaselineContentHash: clearTransient
+            ? null
+            : previous.previewBaselineContentHash,
+          saveResult: clearTransient ? null : previous.saveResult,
+          readError: null,
+          previewError: clearTransient ? null : previous.previewError,
+          saveError: clearTransient ? null : previous.saveError,
+        }));
+      }
+      try {
+        const document = await gateway.readCustomRules(path);
+        if (
+          request !== customRulesReadRequest.current ||
+          activeProjectPath.current !== path
+        ) {
+          return false;
+        }
+        setCustomRules((previous) => ({
+          ...previous,
+          document: sameCustomRulesDocument(previous.document, document)
+            ? previous.document
+            : document,
+          reading: false,
+          readError: null,
+        }));
+        return true;
+      } catch (reason) {
+        if (
+          request !== customRulesReadRequest.current ||
+          activeProjectPath.current !== path
+        ) {
+          return false;
+        }
+        setCustomRules((previous) => ({
+          ...previous,
+          reading: false,
+          readError: messageFrom(reason),
+        }));
+        return false;
+      }
+    },
+    [gateway],
+  );
+
+  const synchronizeManagedAssets = useCallback(
+    async (path: string, trigger: ManagedAssetSyncTrigger) => {
+      setManagedAssets({ syncing: true, result: null, error: null, trigger });
+      try {
+        const result = await gateway.synchronizeManagedAssets(path);
+        if (activeProjectPath.current !== path) return;
+        setManagedAssets({ syncing: false, result, error: null, trigger });
+      } catch (reason) {
+        if (activeProjectPath.current !== path) return;
+        setManagedAssets({
+          syncing: false,
+          result: null,
+          error: messageFrom(reason),
+          trigger,
+        });
+      }
+    },
+    [gateway],
+  );
+
   const inspect = useCallback(
-    async (path: string, silent = false) => {
+    async (
+      path: string,
+      silent = false,
+      syncTrigger: ManagedAssetSyncTrigger | null = null,
+    ) => {
       if (!silent) setBusy(true);
       setError(null);
       try {
         const next = await gateway.inspect(path);
+        if (
+          syncTrigger !== "project_open" &&
+          activeProjectPath.current !== path
+        ) {
+          return null;
+        }
+        if (syncTrigger === "project_open") {
+          activeProjectPath.current = next.rootPath;
+          resetCustomRules();
+        }
         setProject(next);
         remember(next);
+        if (syncTrigger) {
+          if (next.initialized && next.compatibility === "current") {
+            await synchronizeManagedAssets(next.rootPath, syncTrigger);
+            await readCustomRules(next.rootPath);
+          } else {
+            setManagedAssets({
+              syncing: false,
+              result: null,
+              error: null,
+              trigger: null,
+            });
+            resetCustomRules();
+          }
+        } else if (silent && next.initialized && next.compatibility === "current") {
+          await readCustomRules(next.rootPath, true);
+        }
         return next;
       } catch (reason) {
         if (!silent) setError(messageFrom(reason));
@@ -176,20 +333,29 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         if (!silent) setBusy(false);
       }
     },
-    [gateway, remember],
+    [
+      gateway,
+      readCustomRules,
+      remember,
+      resetCustomRules,
+      synchronizeManagedAssets,
+    ],
   );
 
   const openFolder = useCallback(async () => {
     setError(null);
     try {
       const path = await gateway.chooseDirectory();
-      if (path) await inspect(path);
+      if (path) await inspect(path, false, "project_open");
     } catch (reason) {
       setError(messageFrom(reason));
     }
   }, [gateway, inspect]);
 
-  const openRecent = useCallback((path: string) => inspect(path), [inspect]);
+  const openRecent = useCallback(
+    (path: string) => inspect(path, false, "project_open"),
+    [inspect],
+  );
 
   const createWorkflow = useCallback(
     async (name: string) => {
@@ -198,8 +364,12 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       setError(null);
       try {
         const next = await gateway.createWorkflow(project.rootPath, name);
+        if (activeProjectPath.current !== project.rootPath) return false;
         setProject(next);
         remember(next);
+        if (next.initialized && next.compatibility === "current") {
+          await readCustomRules(next.rootPath);
+        }
         return true;
       } catch (reason) {
         setError(messageFrom(reason));
@@ -208,7 +378,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         setBusy(false);
       }
     },
-    [gateway, project, remember],
+    [gateway, project, readCustomRules, remember],
   );
 
   const createIdea = useCallback(
@@ -235,8 +405,180 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   const refresh = useCallback(async () => {
-    if (project) await inspect(project.rootPath);
+    if (project) await inspect(project.rootPath, false, "manual_refresh");
   }, [inspect, project]);
+
+  const prepareCustomRulesPreview = useCallback(
+    async (draft: CustomRulesDraft): Promise<CustomRulesPreview | null> => {
+      if (
+        !project?.initialized ||
+        project.compatibility !== "current" ||
+        !customRules.document ||
+        savingCustomRules.current
+      ) {
+        return null;
+      }
+      const path = project.rootPath;
+      const baselineContentHash = customRules.document.contentHash;
+      const request = ++customRulesPreviewRequest.current;
+      setCustomRules((previous) => ({
+        ...previous,
+        previewing: true,
+        preview: null,
+        previewBaselineContentHash: null,
+        saveResult: null,
+        previewError: null,
+        saveError: null,
+      }));
+      try {
+        const preview = await gateway.prepareCustomRulesPreview(path, draft);
+        if (
+          request !== customRulesPreviewRequest.current ||
+          activeProjectPath.current !== path
+        ) {
+          return null;
+        }
+        setCustomRules((previous) => ({
+          ...previous,
+          previewing: false,
+          preview,
+          previewBaselineContentHash: baselineContentHash,
+          previewError: null,
+        }));
+        return preview;
+      } catch (reason) {
+        if (
+          request !== customRulesPreviewRequest.current ||
+          activeProjectPath.current !== path
+        ) {
+          return null;
+        }
+        setCustomRules((previous) => ({
+          ...previous,
+          previewing: false,
+          preview: null,
+          previewBaselineContentHash: null,
+          previewError: messageFrom(reason),
+        }));
+        return null;
+      }
+    },
+    [customRules.document, gateway, project],
+  );
+
+  const saveCustomRules = useCallback(async (): Promise<SaveCustomRulesResult | null> => {
+    if (
+      !project?.initialized ||
+      project.compatibility !== "current" ||
+      !customRules.preview ||
+      savingCustomRules.current
+    ) {
+      return null;
+    }
+    const path = project.rootPath;
+    const preview = customRules.preview;
+    const expectedContentHash = customRules.previewBaselineContentHash;
+    const request = ++customRulesSaveRequest.current;
+    savingCustomRules.current = true;
+    setCustomRules((previous) => ({
+      ...previous,
+      saving: true,
+      saveResult: null,
+      saveError: null,
+    }));
+    try {
+      const result = await gateway.saveCustomRules(path, {
+        expectedContentHash,
+        draft: preview.draft,
+        updatedAt: preview.updatedAt,
+        previewHash: preview.previewHash,
+      });
+      if (
+        request !== customRulesSaveRequest.current ||
+        activeProjectPath.current !== path
+      ) {
+        return null;
+      }
+      setCustomRules((previous) =>
+        result.status === "saved"
+          ? {
+              ...previous,
+              document: result.document,
+              saving: false,
+              preview: null,
+              previewBaselineContentHash: null,
+              saveResult: result,
+              previewError: null,
+              saveError: null,
+            }
+          : {
+              ...previous,
+              saving: false,
+              saveResult: result,
+              saveError: null,
+            },
+      );
+      return result;
+    } catch (reason) {
+      if (
+        request !== customRulesSaveRequest.current ||
+        activeProjectPath.current !== path
+      ) {
+        return null;
+      }
+      setCustomRules((previous) => ({
+        ...previous,
+        saving: false,
+        saveResult: null,
+        saveError: messageFrom(reason),
+      }));
+      return null;
+    } finally {
+      if (request === customRulesSaveRequest.current) {
+        savingCustomRules.current = false;
+      }
+    }
+  }, [customRules.preview, customRules.previewBaselineContentHash, gateway, project]);
+
+  const reloadCustomRules = useCallback(async () => {
+    if (
+      !project?.initialized ||
+      project.compatibility !== "current" ||
+      savingCustomRules.current
+    ) {
+      return false;
+    }
+    return readCustomRules(project.rootPath, false, true);
+  }, [project, readCustomRules]);
+
+  const clearCustomRulesFeedback = useCallback(() => {
+    if (savingCustomRules.current) return;
+    customRulesPreviewRequest.current += 1;
+    setCustomRules((previous) => ({
+      ...previous,
+      previewing: false,
+      preview: null,
+      previewBaselineContentHash: null,
+      saveResult: null,
+      previewError: null,
+      saveError: null,
+    }));
+  }, []);
+
+  const customRulesActions = useMemo<CustomRulesActions>(
+    () => ({
+      preparePreview: prepareCustomRulesPreview,
+      save: saveCustomRules,
+      reload: reloadCustomRules,
+      clearFeedback: clearCustomRulesFeedback,
+    }),
+    [
+      clearCustomRulesFeedback,
+      prepareCustomRulesPreview,
+      reloadCustomRules,
+      saveCustomRules,
+    ],
+  );
 
   const readSpec = useCallback(
     async (workflowDirectory: string, fileName: string) => {
@@ -694,6 +1036,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     recentProjects,
     busy,
     error,
+    managedAssets,
+    customRules,
+    customRulesActions,
     integrations: integrationsState,
     integrationActions,
     openFolder,
@@ -711,8 +1056,16 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     // 진행 중인 실행은 여기서 비우지 않는다. 잡 이름에 프로젝트 slug가 들어 있어 다른 프로젝트의
     // 카드에는 그려지지 않고, 비우면 아직 돌고 있는 잡의 버튼이 다시 눌리는 상태로 돌아온다(R3).
     closeProject: () => {
+      activeProjectPath.current = null;
+      resetCustomRules();
       setProject(null);
       setError(null);
+      setManagedAssets({
+        syncing: false,
+        result: null,
+        error: null,
+        trigger: null,
+      });
       setIntegrations({ snapshot: null, error: null, writeError: null });
     },
   };

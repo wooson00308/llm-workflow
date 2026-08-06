@@ -2,16 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-129
 title: 기획서 도장과 개발 작업 도장이 누르는 자리에서 갈린다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-042
 source_decision_id: DECISION-FB4A8439
 depends_on: [TASK-121, TASK-128]
 scope_files: [src/features/projects/components/DevelopmentBoard.tsx, src/features/projects/components/DevelopmentBoard.test.tsx, src/features/projects/components/ActivityView.tsx, src/features/projects/components/ActivityView.test.tsx, src/App.css]
-updated_at: 2026-08-05T15:48:00Z
+updated_at: 2026-08-06T07:12:09.226335+00:00
 history:
   - { at: 2026-08-05T10:14:00Z, kind: created }
   - { at: 2026-08-05T15:33:14Z, kind: in_progress }
   - { at: 2026-08-05T15:48:00Z, kind: qa_waiting }
+  - { at: 2026-08-06T07:12:09.226335+00:00, kind: completed }
 ---
 
 # 기획서 도장과 개발 작업 도장이 누르는 자리에서 갈린다

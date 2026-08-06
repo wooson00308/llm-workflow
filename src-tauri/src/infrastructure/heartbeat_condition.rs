@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 11;
+const CONDITION_SCRIPT_VERSION: u32 = 12;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 11;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 11
+# condition_script_version: 12
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer  (프로젝트 루트에서 실행)
@@ -48,6 +48,20 @@ nl='
 verdict() { # $1=사유 코드 $2=종료 코드
   printf '%s\n' "$1"
   exit "$2"
+}
+
+# 대상과 후보별 제외 사유는 표준 오류로 낸다(SPEC-049 R1). 표준 출력은 데몬이 사유 한 줄로 옮기는
+# 자리라 그 계약을 그대로 두고(SPEC-023 R4), 넓어진 답은 사람과 세션이 읽는 자리로 보낸다.
+# 코드를 앞에 두는 것은 뒤가 id이기 때문이다 — 값에 공백이 들어와도 줄의 뜻이 갈라지지 않는다.
+# 이 두 함수는 판정을 바꾸지 않는다. 종료 코드도 후보를 고르는 차례도 그대로다.
+note_candidate() { # $1=제외 사유 코드 $2=후보 id
+  printf 'candidate: %s %s\n' "$1" "$2" >&2
+}
+
+# 대상으로 고른 후보. 후보 줄과 대상 줄을 함께 내어, 목록만 읽어도 대상이 어디서 나왔는지 보인다.
+note_target() { # $1=대상 id
+  printf 'candidate: eligible %s\n' "$1" >&2
+  printf 'target: %s\n' "$1" >&2
 }
 
 [ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
@@ -453,8 +467,9 @@ planner)
       ideas=$(scan_ideas "$wf")
       while IFS= read -r id; do
         [ -n "$id" ] || continue
-        case "$nondraft_refs" in *"source_idea_id:$id"*) continue ;; esac
-        lease_blocks "$id" && continue
+        case "$nondraft_refs" in *"source_idea_id:$id"*) note_candidate spec-exists "$id"; continue ;; esac
+        lease_blocks "$id" && { note_candidate leased "$id"; continue; }
+        note_target "$id"
         verdict eligible 0
       done <<IDEAS
 $ideas
@@ -471,8 +486,9 @@ IDEAS
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       # 판정 키는 결정 id다. 기획서 id로 보면 한 기획서가 여러 번 반려됐을 때 구분되지 않는다.
-      case "$nondraft_refs" in *"source_decision_id:$did"*) continue ;; esac
-      lease_blocks "$did" && continue
+      case "$nondraft_refs" in *"source_decision_id:$did"*) note_candidate follow-up-exists "$did"; continue ;; esac
+      lease_blocks "$did" && { note_candidate leased "$did"; continue; }
+      note_target "$did"
       verdict eligible 0
     done <<REVISIONS
 $revisions
@@ -489,8 +505,9 @@ architect)
     while IFS= read -r did; do
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
-      case "$task_refs" in *"source_decision_id:$did"*) continue ;; esac
-      if [ -n "$spec" ] && lease_blocks "$spec"; then continue; fi
+      case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+      if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
+      note_target "$did"
       verdict eligible 0
     done <<APPROVALS
 $approvals
@@ -570,8 +587,10 @@ SCAN
       tid=${rest#*"|"}
       deps_ok=${flags%?}
       scope_ok=${flags#?}
-      lease_active "$tid" && continue
-      [ "$deps_ok" -eq 1 ] || continue
+      lease_active "$tid" && { note_candidate leased "$tid"; continue; }
+      # 선행 관련 제외는 사유가 하나다. 선언을 읽지 못한 것과 선행이 아직 끝나지 않은 것과 고리가
+      # 있는 것은 세션이 할 일이 같다 — 그 선언을 보고 앞의 작업을 먼저 끝내는 것이다.
+      [ "$deps_ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       ok=1
       # 선행 셋이 모두 참이어야 자격이고 셋 중 어느 것도 다른 것을 바꾸지 않으므로, 보는 차례는
       # 답을 바꾸지 않는다. 값싼 둘을 먼저 보고 순환 탐색은 그 둘을 통과한 선언에만 돈다.
@@ -579,12 +598,13 @@ SCAN
         case "$known_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
         case "$sat_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
       done
-      [ "$ok" -eq 1 ] || continue
+      [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       for dep in $deps; do
         reaches "$dep" "$tid" && { ok=0; break; }
       done
-      [ "$ok" -eq 1 ] || continue
-      overlap_blocks "$scope_ok" "$scope" && continue
+      [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
+      overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
+      note_target "$tid"
       verdict eligible 0
     done <<ROWS
 $rows
@@ -614,7 +634,7 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 11
+# condition_script_version: 12
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role>
@@ -930,6 +950,22 @@ function Write-Verdict([string]$Code, [int]$ExitCode) {
   exit $ExitCode
 }
 
+# The target and the per-candidate exclusion reasons go to stderr (SPEC-049 R1). stdout stays the
+# daemon's one reason line (SPEC-023 R4), so the widened answer goes to the channel a person and a
+# session read. The code comes before the id because the id is the rest of the line: a value with a
+# space in it cannot split the line's meaning. Neither function changes the verdict, the exit code,
+# or the order candidates are judged in.
+function Write-Candidate([string]$Code, [string]$Id) {
+  [Console]::Error.WriteLine('candidate: ' + $Code + ' ' + $Id)
+}
+
+# The candidate picked as the target. Both lines are written so the list alone shows where the
+# target came from.
+function Write-Target([string]$Id) {
+  [Console]::Error.WriteLine('candidate: eligible ' + $Id)
+  [Console]::Error.WriteLine('target: ' + $Id)
+}
+
 if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
   Write-Verdict 'migration-lock' 1
 }
@@ -945,8 +981,9 @@ switch -CaseSensitive ($Role) {
         $id = Get-Value (Get-Lines $path) 'id'
         if ($id.Length -eq 0) { continue }
         if ($nonDraftRefs.IndexOf('source_idea_id:' + $id,
-          [System.StringComparison]::Ordinal) -ge 0) { continue }
-        if (Test-Leased $id) { continue }
+          [System.StringComparison]::Ordinal) -ge 0) { Write-Candidate 'spec-exists' $id; continue }
+        if (Test-Leased $id) { Write-Candidate 'leased' $id; continue }
+        Write-Target $id
         Write-Verdict 'eligible' 0
       }
       # (b) A revision request with no follow-up spec. This runs even with no ideas directory.
@@ -958,8 +995,12 @@ switch -CaseSensitive ($Role) {
       foreach ($row in @(Get-DecisionCandidates $root 'outcome: revision_requested' $true)) {
         # The decision id is the key, not the spec id: one spec can be sent back more than once.
         if ($nonDraftRefs.IndexOf('source_decision_id:' + $row.Id,
-          [System.StringComparison]::Ordinal) -ge 0) { continue }
-        if (Test-Leased $row.Id) { continue }
+          [System.StringComparison]::Ordinal) -ge 0) {
+          Write-Candidate 'follow-up-exists' $row.Id
+          continue
+        }
+        if (Test-Leased $row.Id) { Write-Candidate 'leased' $row.Id; continue }
+        Write-Target $row.Id
         Write-Verdict 'eligible' 0
       }
     }
@@ -971,8 +1012,12 @@ switch -CaseSensitive ($Role) {
       $taskRefs = Get-References $root 'tasks' 'source_decision_id:'
       foreach ($row in @(Get-DecisionCandidates $root 'outcome: approved' $false)) {
         if ($taskRefs.IndexOf('source_decision_id:' + $row.Id,
-          [System.StringComparison]::Ordinal) -ge 0) { continue }
-        if ($row.Spec.Length -gt 0 -and (Test-Leased $row.Spec)) { continue }
+          [System.StringComparison]::Ordinal) -ge 0) { Write-Candidate 'decomposed' $row.Id; continue }
+        if ($row.Spec.Length -gt 0 -and (Test-Leased $row.Spec)) {
+          Write-Candidate 'spec-leased' $row.Id
+          continue
+        }
+        Write-Target $row.Id
         Write-Verdict 'eligible' 0
       }
     }
@@ -988,9 +1033,12 @@ switch -CaseSensitive ($Role) {
         if (-not (Test-Match $lines '^status: (todo|in_progress)')) { continue }
         $tid = Get-Value $lines 'id'
         if ($tid.Length -eq 0) { continue }
-        if (Test-Leased $tid) { continue }
+        if (Test-Leased $tid) { Write-Candidate 'leased' $tid; continue }
+        # Every dependency exclusion shares one reason. An unreadable declaration, an unfinished
+        # predecessor and a cycle all leave the session the same thing to do: read the declaration
+        # and finish what comes first.
         $declaration = Get-Declaration $lines
-        if (-not $declaration.Ok) { continue }
+        if (-not $declaration.Ok) { Write-Candidate 'dependencies-unsatisfied' $tid; continue }
         $ok = $true
         foreach ($dep in $declaration.Ids) {
           $file = Find-TaskFile $root $dep
@@ -998,8 +1046,9 @@ switch -CaseSensitive ($Role) {
           if (Test-Reaches $root $dep $tid) { $ok = $false; break }
           if (-not (Test-DependencySatisfied $file)) { $ok = $false; break }
         }
-        if (-not $ok) { continue }
-        if (Test-Overlapped $root $tid $lines) { continue }
+        if (-not $ok) { Write-Candidate 'dependencies-unsatisfied' $tid; continue }
+        if (Test-Overlapped $root $tid $lines) { Write-Candidate 'overlap' $tid; continue }
+        Write-Target $tid
         Write-Verdict 'eligible' 0
       }
     }
@@ -1074,12 +1123,32 @@ pub(crate) mod test_support {
     pub(crate) struct ConditionRun {
         pub(crate) code: i32,
         pub(crate) stdout: String,
+        /// 넓어진 답이 나오는 자리(SPEC-049 R1). 대상과 후보별 제외 사유가 여기 실린다.
+        pub(crate) stderr: String,
     }
 
     impl ConditionRun {
         /// 데몬이 실어 나르는 값. 표준 출력 첫 줄이고, 아무것도 나오지 않았으면 빈 문자열이다.
         pub(crate) fn reason(&self) -> &str {
             self.stdout.lines().next().unwrap_or_default()
+        }
+
+        /// 표준 오류에 실린 대상 문서의 id. 대상이 없으면 `None`이다.
+        pub(crate) fn target(&self) -> Option<String> {
+            self.stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("target: "))
+                .map(str::to_owned)
+        }
+
+        /// 판정한 후보를 판정한 차례대로 `"<사유 코드> <id>"` 꼴로 읽는다. 앱 판정의 후보 목록과
+        /// 같은 모양으로 만들어 두 값을 그대로 대조한다.
+        pub(crate) fn candidates(&self) -> Vec<String> {
+            self.stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix("candidate: "))
+                .map(str::to_owned)
+                .collect()
         }
     }
 
@@ -1111,6 +1180,7 @@ pub(crate) mod test_support {
         ConditionRun {
             code: output.status.code().expect("exit code"),
             stdout: String::from_utf8(output.stdout).expect("condition stdout is utf-8"),
+            stderr: String::from_utf8(output.stderr).expect("condition stderr is utf-8"),
         }
     }
 }
@@ -1146,7 +1216,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 11"));
+        assert!(script.contains("# condition_script_version: 12"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -1160,8 +1230,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 12",
             "# condition_script_version: 11",
-            "# condition_script_version: 10",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -1424,7 +1494,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 11보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 12보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -2830,6 +2900,279 @@ mod tests {
                     scenario.name
                 );
             }
+        }
+    }
+
+    // ── SPEC-049 R1 넓어진 답의 표 ──────────────────────────────────────────────────────
+    //
+    // 위 표가 종료 코드와 사유를 고정하고, 이 표가 그 옆에 붙은 대상과 후보 목록을 고정한다. 표를
+    // 따로 두는 것은 넓어진 답이 후보가 여럿인 픽스처에서만 뜻을 갖기 때문이다 — 위 표의 행은
+    // 대부분 후보가 하나뿐이라 "셋 중 어느 것이 대상인가"를 물을 수 없다.
+    //
+    // 이 표도 현재 플랫폼에 설치된 구현을 돌린다. CI가 세 플랫폼에서 같은 표를 돌리므로, PowerShell
+    // 본문이 셸 본문과 다른 대상이나 다른 사유를 내면 Windows 러너가 실패한다(완료 조건 5).
+
+    /// 표의 한 행. `build`가 픽스처를 세우고, 그 상태에서 `role` 분기가 표준 오류에 내야 하는 값이
+    /// `target`과 `candidates`다. `candidates`의 각 줄은 `"<사유 코드> <문서 id>"`이고 판정한
+    /// 차례대로다.
+    struct WidenedScenario {
+        name: &'static str,
+        role: &'static str,
+        expected: i32,
+        reason: &'static str,
+        target: Option<&'static str>,
+        candidates: &'static [&'static str],
+        build: fn(&Path),
+    }
+
+    const WIDENED_SCENARIOS: &[WidenedScenario] = &[
+        WidenedScenario {
+            name: "기획자: 후보 셋 중 셋째가 대상이다",
+            role: "planner",
+            expected: 0,
+            reason: "eligible",
+            target: Some("IDEA-003"),
+            candidates: &[
+                "spec-exists IDEA-001",
+                "leased IDEA-002",
+                "eligible IDEA-003",
+            ],
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_idea_document(control, "IDEA-002");
+                write_idea_document(control, "IDEA-003");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea_id: IDEA-001\n---\n",
+                );
+                write_lease(control, "IDEA-002");
+            },
+        },
+        WidenedScenario {
+            // 대상이 없을 때 목록은 그 분기가 본 후보 전부다. 아이디어를 다 보고 나서 수정 요청
+            // 결정으로 넘어가는 차례도 여기서 보인다.
+            name: "기획자: 후보가 모두 제외되면 대상이 없고 사유만 남는다",
+            role: "planner",
+            expected: 1,
+            reason: "no-target",
+            target: None,
+            candidates: &[
+                "spec-exists IDEA-001",
+                "leased IDEA-002",
+                "leased DECISION-R01",
+            ],
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_idea_document(control, "IDEA-002");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea_id: IDEA-001\n---\n",
+                );
+                write_revision_request_document(
+                    control,
+                    "DECISION-R01",
+                    "SPEC-009",
+                    "user",
+                    "2026-08-01T00:00:00Z",
+                );
+                write_lease(control, "IDEA-002");
+                write_lease(control, "DECISION-R01");
+            },
+        },
+        WidenedScenario {
+            name: "기획자: 후속 기획서가 답한 수정 요청은 그 사유로 제외된다",
+            role: "planner",
+            expected: 1,
+            reason: "no-target",
+            target: None,
+            candidates: &["follow-up-exists DECISION-R01"],
+            build: |control: &Path| {
+                write_revision_request_document(
+                    control,
+                    "DECISION-R01",
+                    "SPEC-001",
+                    "user",
+                    "2026-08-01T00:00:00Z",
+                );
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-002",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-002\nstatus: user_review\nsource_decision_id: DECISION-R01\n---\n",
+                );
+            },
+        },
+        WidenedScenario {
+            name: "아키텍트: 후보 셋 중 셋째가 대상이다",
+            role: "architect",
+            expected: 0,
+            reason: "eligible",
+            target: Some("DECISION-A03"),
+            candidates: &[
+                "decomposed DECISION-A01",
+                "spec-leased DECISION-A02",
+                "eligible DECISION-A03",
+            ],
+            build: |control: &Path| {
+                write_approved_decision(control, "DECISION-A01", "SPEC-001");
+                write_approved_decision(control, "DECISION-A02", "SPEC-002");
+                write_approved_decision(control, "DECISION-A03", "SPEC-003");
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "qa_waiting",
+                    Some("source_decision_id: DECISION-A01"),
+                );
+                write_lease(control, "SPEC-002");
+            },
+        },
+        WidenedScenario {
+            name: "개발자: 후보 넷 중 넷째가 대상이다",
+            role: "developer",
+            expected: 0,
+            reason: "eligible",
+            target: Some("TASK-004"),
+            candidates: &[
+                "leased TASK-001",
+                "dependencies-unsatisfied TASK-002",
+                "overlap TASK-003",
+                "eligible TASK-004",
+            ],
+            build: build_developer_candidates,
+        },
+        WidenedScenario {
+            // 같은 픽스처에서 대상이 될 작업 하나만 뺀 것이다. 남은 셋의 사유가 그대로인 것이
+            // 목록이 대상 유무에 흔들리지 않는다는 뜻이다.
+            name: "개발자: 후보가 모두 제외되면 대상이 없고 사유만 남는다",
+            role: "developer",
+            expected: 1,
+            reason: "no-target",
+            target: None,
+            candidates: &[
+                "leased TASK-001",
+                "dependencies-unsatisfied TASK-002",
+                "overlap TASK-003",
+            ],
+            build: |control: &Path| {
+                write_blocked_developer_candidates(control);
+            },
+        },
+        WidenedScenario {
+            // 락은 분기에 들어가기 전에 끝나므로 후보 줄이 하나도 없다. 넓어진 답이 판정보다 앞서
+            // 나가지 않는다는 것을 이 행이 고정한다.
+            name: "마이그레이션 락은 후보를 하나도 내지 않는다",
+            role: "developer",
+            expected: 1,
+            reason: "migration-lock",
+            target: None,
+            candidates: &[],
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                fs::create_dir_all(control.join(".runtime")).expect("runtime root");
+                fs::write(control.join(".runtime/migration.lock"), "").expect("migration lock");
+            },
+        },
+    ];
+
+    /// 세 가지 제외 사유가 모두 걸린 작업 셋. 잡힌 lease 하나가 첫째를 선점으로, 셋째를 겹침으로
+    /// 막는다.
+    fn write_blocked_developer_candidates(control: &Path) {
+        write_task_document(
+            control,
+            "TASK-001",
+            "todo",
+            Some("scope_files: [src/shared.rs]"),
+        );
+        write_task_document(control, "TASK-002", "todo", Some("depends_on: [TASK-404]"));
+        write_task_document(
+            control,
+            "TASK-003",
+            "todo",
+            Some("scope_files: [src/shared.rs]"),
+        );
+        write_lease(control, "TASK-001");
+    }
+
+    /// 위 셋에 대상이 될 작업 하나를 더한다. 겹치지 않는 선언을 가져야 잡힌 lease를 지난다.
+    fn build_developer_candidates(control: &Path) {
+        write_blocked_developer_candidates(control);
+        write_task_document(
+            control,
+            "TASK-004",
+            "todo",
+            Some("scope_files: [src/four.rs]"),
+        );
+    }
+
+    /// 표의 각 행에서 조건 스크립트가 대상과 후보별 제외 사유를 답한다(SPEC-049 완료 조건 1·2·5).
+    ///
+    /// 같은 자리에서 표준 출력이 여전히 사유 한 줄인지도 본다. 넓어진 답은 표준 오류로만 나가므로
+    /// 데몬이 옮기는 값과 앱이 옮기는 문장은 이 변경 전과 같다(완료 조건 3).
+    #[test]
+    fn the_installed_script_names_the_target_and_why_the_rest_were_excluded() {
+        for scenario in WIDENED_SCENARIOS {
+            let (root, control) = project();
+            install_condition_script(&control).expect("install condition script");
+            (scenario.build)(&control);
+
+            let run = run_condition(root.path(), scenario.role);
+            let candidates = run.candidates();
+            let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+
+            assert_eq!(run.code, scenario.expected, "{}: 종료 코드", scenario.name);
+            assert_eq!(run.reason(), scenario.reason, "{}: 사유", scenario.name);
+            assert_eq!(
+                run.stdout.lines().count(),
+                1,
+                "{}: 표준 출력은 사유 한 줄이어야 한다: {:?}",
+                scenario.name,
+                run.stdout
+            );
+            assert_eq!(
+                run.target().as_deref(),
+                scenario.target,
+                "{}: 대상",
+                scenario.name
+            );
+            assert_eq!(
+                candidates, scenario.candidates,
+                "{}: 후보 목록",
+                scenario.name
+            );
+        }
+    }
+
+    /// 넓어진 답이 쓰는 사유 코드도 ASCII 한 줄이다. 두 본문이 같은 어휘를 갖는지도 함께 본다 —
+    /// 한쪽에만 있는 코드는 그 플랫폼에서만 나오는 답이 된다.
+    #[test]
+    fn both_implementations_carry_the_same_exclusion_vocabulary() {
+        const EXCLUSION_CODES: &[&str] = &[
+            "spec-exists",
+            "follow-up-exists",
+            "leased",
+            "decomposed",
+            "spec-leased",
+            "dependencies-unsatisfied",
+            "overlap",
+        ];
+
+        for code in EXCLUSION_CODES {
+            assert!(code.is_ascii(), "{code}가 ASCII가 아니다");
+            assert!(
+                !code.contains([' ', '\n', '\r']),
+                "{code}가 한 줄 계약을 깬다"
+            );
+            for body in [CONDITION_SCRIPT_SH, CONDITION_SCRIPT_PS1] {
+                assert!(body.contains(code), "{code} 제외 사유가 본문에 없다");
+            }
+        }
+        for body in [CONDITION_SCRIPT_SH, CONDITION_SCRIPT_PS1] {
+            assert!(body.contains("candidate: "), "후보 줄 접두사가 없다");
+            assert!(body.contains("target: "), "대상 줄 접두사가 없다");
         }
     }
 

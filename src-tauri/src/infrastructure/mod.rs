@@ -1,4 +1,5 @@
 pub mod claim_helper;
+pub mod custom_rules;
 pub mod fs_project_repository;
 pub mod heartbeat_condition;
 pub mod heartbeat_dream;
@@ -10,6 +11,8 @@ pub mod heartbeat_status;
 pub mod heartbeat_update;
 pub mod launch_agents;
 pub mod launchctl;
+pub mod managed_project_assets;
 pub mod managed_script;
 pub mod project_instructions;
+pub mod project_write_lock;
 pub mod role_eligibility;

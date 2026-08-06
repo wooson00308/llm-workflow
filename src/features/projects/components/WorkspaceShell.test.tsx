@@ -1,7 +1,15 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
-import type { IntegrationsSnapshot, IntegrationsState, ProjectSummary } from "../domain/types";
+import type {
+  CustomRulesActions,
+  CustomRulesState,
+  IntegrationsSnapshot,
+  IntegrationsState,
+  ManagedAssetSyncResult,
+  ManagedAssetsState,
+  ProjectSummary,
+} from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { WorkspaceShell } from "./WorkspaceShell";
 
@@ -47,16 +55,76 @@ const integrationActions = {
   installDreamJob: vi.fn().mockResolvedValue(true),
 };
 
+const managedAssets: ManagedAssetsState = {
+  syncing: false,
+  result: null,
+  error: null,
+  trigger: null,
+};
+
+const customRules: CustomRulesState = {
+  document: {
+    status: "absent",
+    enabled: false,
+    appliesTo: [],
+    body: "",
+    updatedAt: null,
+    modifiedAt: null,
+    raw: null,
+    contentHash: null,
+    error: null,
+  },
+  reading: false,
+  previewing: false,
+  saving: false,
+  preview: null,
+  previewBaselineContentHash: null,
+  saveResult: null,
+  readError: null,
+  previewError: null,
+  saveError: null,
+};
+
+const customRulesActions: CustomRulesActions = {
+  preparePreview: vi.fn().mockResolvedValue(null),
+  save: vi.fn().mockResolvedValue(null),
+  reload: vi.fn().mockResolvedValue(true),
+  clearFeedback: vi.fn(),
+};
+
+function syncResult(overrides: Partial<ManagedAssetSyncResult> = {}): ManagedAssetSyncResult {
+  return {
+    status: "current",
+    assets: [{
+      id: "claim_helper",
+      label: "선점 헬퍼",
+      status: "current",
+      installedVersion: 3,
+      providedVersion: 3,
+      reason: null,
+    }],
+    updatedAssets: [],
+    reason: null,
+    affectedAsset: null,
+    rollbackFailures: [],
+    rollbackRecoveries: [],
+    ...overrides,
+  };
+}
+
 describe("WorkspaceShell", () => {
   it("opens a purpose-built screen for each primary menu", () => {
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -102,12 +170,15 @@ describe("WorkspaceShell", () => {
 
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={completedProject}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -138,12 +209,15 @@ describe("WorkspaceShell", () => {
 
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -188,12 +262,15 @@ describe("WorkspaceShell", () => {
 
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={searchableProject}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -222,12 +299,15 @@ describe("WorkspaceShell", () => {
   it("opens a first-run help guide from the sidebar", () => {
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -252,12 +332,15 @@ describe("WorkspaceShell", () => {
   it("opens the integrations view from its own sidebar menu", () => {
     const { container } = render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -292,12 +375,15 @@ describe("WorkspaceShell", () => {
 
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={twoWorkflows}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -323,12 +409,15 @@ describe("WorkspaceShell", () => {
   it("opens the activity view from its own sidebar menu", () => {
     const { container } = render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -353,12 +442,15 @@ describe("WorkspaceShell", () => {
   it("keeps the today banner out of sight while nothing is running", () => {
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -403,12 +495,15 @@ describe("WorkspaceShell", () => {
 
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={runningProject}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -436,12 +531,15 @@ describe("WorkspaceShell", () => {
     const onSwitchProject = vi.fn();
     render(
       <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
         busy={false}
         error={null}
         project={project}
         updater={updater}
         integrations={integrations}
         integrationActions={integrationActions}
+        managedAssets={managedAssets}
         onAddIdea={vi.fn().mockResolvedValue(true)}
         onAddWorkflow={vi.fn().mockResolvedValue(true)}
         onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -496,12 +594,15 @@ function stubStorage() {
 function shell(overrides: Partial<ComponentProps<typeof WorkspaceShell>> = {}) {
   return render(
     <WorkspaceShell
+      customRules={customRules}
+      customRulesActions={customRulesActions}
       busy={false}
       error={null}
       project={project}
       updater={updater}
       integrations={integrations}
       integrationActions={integrationActions}
+      managedAssets={managedAssets}
       onAddIdea={vi.fn().mockResolvedValue(true)}
       onAddWorkflow={vi.fn().mockResolvedValue(true)}
       onDecideSpec={vi.fn().mockResolvedValue(true)}
@@ -752,5 +853,310 @@ describe("WorkspaceShell 연동 배선", () => {
 
     expect(screen.queryByRole("button", { name: "데몬 끄기" })).toBeNull();
     expect(screen.getByRole("button", { name: "하트비트 업데이트" })).toBeVisible();
+  });
+});
+
+describe("WorkspaceShell 관리 규칙 알림", () => {
+  const baseProps = {
+    busy: false,
+    customRules,
+    customRulesActions,
+    error: null,
+    project,
+    updater,
+    integrations,
+    integrationActions,
+    onAddIdea: vi.fn().mockResolvedValue(true),
+    onAddWorkflow: vi.fn().mockResolvedValue(true),
+    onDecideSpec: vi.fn().mockResolvedValue(true),
+    onMigrate: vi.fn().mockResolvedValue(true),
+    onReadIdea: vi.fn().mockResolvedValue(null),
+    onReadSpec: vi.fn().mockResolvedValue(null),
+    onReadTask: vi.fn().mockResolvedValue(null),
+    onTaskQa: vi.fn().mockResolvedValue(true),
+    onTaskQaBatch: vi.fn().mockResolvedValue([]),
+    onRefresh: vi.fn(),
+    onSwitchProject: vi.fn(),
+  };
+
+  const conflict: ManagedAssetsState = {
+    syncing: false,
+    result: syncResult({
+      status: "conflict",
+      affectedAsset: "claim_helper",
+      reason: "선점 헬퍼: 관리 형식을 확인할 수 없습니다.",
+      assets: [{
+        id: "claim_helper",
+        label: "선점 헬퍼",
+        status: "conflict",
+        installedVersion: null,
+        providedVersion: 3,
+        reason: "관리 형식을 확인할 수 없습니다.",
+      }],
+    }),
+    error: null,
+    trigger: "manual_refresh",
+  };
+
+  // 완료 조건 6. 동기화가 멈춰도 사이드바와 설정 화면, 프로젝트 전환은 그대로 쓸 수 있어야 한다.
+  it("keeps the workspace usable while a conflict is showing", () => {
+    const onSwitchProject = vi.fn();
+    render(
+      <WorkspaceShell {...baseProps} managedAssets={conflict} onSwitchProject={onSwitchProject} />,
+    );
+
+    expect(screen.getByText("관리 규칙 충돌: 선점 헬퍼")).toBeInTheDocument();
+    expect(screen.getByText("선점 헬퍼: 관리 형식을 확인할 수 없습니다.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "설정" }));
+    expect(screen.getByRole("heading", { name: "설정" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "관리 규칙" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "다른 프로젝트 열기" }));
+    expect(onSwitchProject).toHaveBeenCalledTimes(1);
+  });
+
+  // 완료 조건 5. 기다렸다 다시 시도할 상태와 파일을 확인해야 하는 상태를 같은 문구로 합치지 않는다.
+  it("tells the retry state apart from the conflict state", () => {
+    const retry: ManagedAssetsState = {
+      syncing: false,
+      result: syncResult({
+        status: "retry_required",
+        reason: "다른 프로젝트 쓰기 작업이 진행 중입니다.",
+      }),
+      error: null,
+      trigger: "project_open",
+    };
+
+    const { unmount } = render(<WorkspaceShell {...baseProps} managedAssets={retry} />);
+    expect(screen.getByText("관리 규칙을 나중에 다시 설치해야 합니다")).toBeInTheDocument();
+    expect(screen.getByText(/새로 고침을 누르면 다시 시도합니다/)).toBeInTheDocument();
+    unmount();
+
+    render(<WorkspaceShell {...baseProps} managedAssets={conflict} />);
+    expect(screen.queryByText("관리 규칙을 나중에 다시 설치해야 합니다")).not.toBeInTheDocument();
+    expect(screen.getByText(/설정 화면의 관리 규칙 카드/)).toBeInTheDocument();
+  });
+
+  // R4. 프로젝트 문서 조회 실패와 동기화 실패는 서로 다른 알림이다.
+  it("shows the command failure beside the project error, not inside it", () => {
+    render(
+      <WorkspaceShell
+        {...baseProps}
+        error="프로젝트를 읽지 못했습니다."
+        managedAssets={{
+          syncing: false,
+          result: null,
+          error: "관리 자산 동기화 명령을 호출하지 못했습니다.",
+          trigger: "project_open",
+        }}
+      />,
+    );
+
+    const projectError = screen.getByText("프로젝트를 읽지 못했습니다.");
+    expect(projectError).not.toHaveTextContent("관리 규칙");
+    expect(screen.getByText("관리 규칙 동기화 명령이 실패했습니다")).toBeInTheDocument();
+    expect(screen.getByText("관리 자산 동기화 명령을 호출하지 못했습니다.")).toBeInTheDocument();
+  });
+
+  it("stays quiet when the rules are current or were updated", () => {
+    const { unmount } = render(
+      <WorkspaceShell
+        {...baseProps}
+        managedAssets={{ syncing: false, result: syncResult(), error: null, trigger: "project_open" }}
+      />,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    unmount();
+
+    render(
+      <WorkspaceShell
+        {...baseProps}
+        managedAssets={{
+          syncing: false,
+          result: syncResult({ status: "updated", updatedAssets: ["claim_helper"] }),
+          error: null,
+          trigger: "manual_refresh",
+        }}
+      />,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /**
+   * 완료 조건 9. 2.5초 자동 조회는 프로젝트 요약만 바꾸고 관리 자산 상태는 건드리지 않는다
+   * (TASK-133). 껍데기는 알림을 따로 기억하지 않으므로 프로젝트가 새로 들어와도 알림이 남는다.
+   */
+  it("keeps the notice while the automatic re-read replaces the project", () => {
+    const { rerender } = render(
+      <WorkspaceShell {...baseProps} managedAssets={conflict} />,
+    );
+    expect(screen.getByText("관리 규칙 충돌: 선점 헬퍼")).toBeInTheDocument();
+
+    rerender(
+      <WorkspaceShell
+        {...baseProps}
+        project={{ ...project, activeLeases: [] }}
+        managedAssets={conflict}
+      />,
+    );
+
+    expect(screen.getByText("관리 규칙 충돌: 선점 헬퍼")).toBeInTheDocument();
+  });
+});
+
+describe("WorkspaceShell 사용자 규칙 배선", () => {
+  it("설정 화면에 사용자 규칙 상태와 동작을 전달한다", () => {
+    const preparePreview = vi.fn().mockResolvedValue(null);
+    shell({
+      customRules: {
+        ...customRules,
+        document: {
+          ...customRules.document!,
+          status: "valid",
+          enabled: true,
+          appliesTo: ["developer"],
+          body: "검증 결과를 적는다.",
+          contentHash: "sha256:rules",
+        },
+      },
+      customRulesActions: { ...customRulesActions, preparePreview },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "설정" }));
+    expect(screen.getByRole("region", { name: "사용자 정의 규칙" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "사용자 규칙 Markdown 본문" })).toHaveValue(
+      "검증 결과를 적는다.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "미리보기 준비" }));
+    expect(preparePreview).toHaveBeenCalledWith({
+      enabled: true,
+      appliesTo: ["developer"],
+      body: "검증 결과를 적는다.",
+    });
+  });
+
+  it("사용자 규칙 오류가 있어도 화면 이동과 프로젝트 전환을 유지한다", () => {
+    const onSwitchProject = vi.fn();
+    shell({
+      customRules: {
+        ...customRules,
+        readError: "사용자 규칙 조회 실패",
+      },
+      onSwitchProject,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "설정" }));
+    expect(screen.getByText("사용자 규칙 조회 실패")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "관리 규칙" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "아이디어" }));
+    expect(screen.getByRole("heading", { name: "아이디어 인박스" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /프로젝트 전환/ }));
+    expect(onSwitchProject).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WorkspaceShell 활성 세션 축약 표시", () => {
+  const baseProps: ComponentProps<typeof WorkspaceShell> = {
+    busy: false,
+    customRules,
+    customRulesActions,
+    error: null,
+    project,
+    updater,
+    integrations,
+    integrationActions,
+    managedAssets,
+    onAddIdea: vi.fn().mockResolvedValue(true),
+    onAddWorkflow: vi.fn().mockResolvedValue(true),
+    onDecideSpec: vi.fn().mockResolvedValue(true),
+    onMigrate: vi.fn().mockResolvedValue(true),
+    onReadIdea: vi.fn().mockResolvedValue(null),
+    onReadSpec: vi.fn().mockResolvedValue(null),
+    onReadTask: vi.fn().mockResolvedValue(null),
+    onTaskQa: vi.fn().mockResolvedValue(true),
+    onTaskQaBatch: vi.fn().mockResolvedValue([]),
+    onRefresh: vi.fn(),
+    onSwitchProject: vi.fn(),
+  };
+
+  function running(count: number): ProjectSummary {
+    return {
+      ...project,
+      activeLeases: Array.from({ length: count }, (_, index) => ({
+        leaseId: `lease-${index + 1}`,
+        agent: index === 0 ? "planner-claude" : "developer-claude",
+        role: index === 0 ? "planner" : "developer",
+        taskId: index === 0 ? "IDEA-001" : null,
+        heartbeatAt: "2026-08-06T08:55:00Z",
+        expiresAt: "2126-08-06T09:12:00Z",
+      })),
+    };
+  }
+
+  function summary(count: number) {
+    return screen.getByRole("button", { name: `실행 중인 세션 ${count}개, 활동 화면 열기` });
+  }
+
+  /** 완료 조건 1. 좌측 메뉴는 화면 전환 분기 바깥에 있으므로 어느 화면을 열어도 표시가 남아야 한다. */
+  it("오늘이 아닌 모든 화면에서도 좌측 메뉴에 축약 표시를 남긴다", () => {
+    shell({ project: running(2) });
+
+    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "연동", "도움말", "설정"]) {
+      fireEvent.click(screen.getByRole("button", { name: menu }));
+      expect(summary(2)).toBeInTheDocument();
+    }
+  });
+
+  /** 완료 조건 2. 숨김 스타일이 아니라 요소 자체가 없어야 빈 자리가 남지 않는다. */
+  it("활성 세션이 없으면 축약 표시를 그리지 않는다", () => {
+    const { container } = shell();
+
+    fireEvent.click(screen.getByRole("button", { name: "기획서" }));
+
+    expect(screen.queryByRole("button", { name: /실행 중인 세션/ })).not.toBeInTheDocument();
+    expect(container.querySelector(".sidebar-activity")).toBeNull();
+  });
+
+  /**
+   * 완료 조건 3, 6. 축약 표시는 세션이 도는지와 활성 수만 전하고, 담당 에이전트와 대상 문서는 오늘
+   * 화면 카드가 계속 맡는다. 두 표시의 정보량이 뒤바뀌지 않았음을 함께 고정한다.
+   */
+  it("축약 표시에는 활성 수만 담고 상세 정보는 오늘 화면 카드에 남긴다", () => {
+    shell({ project: running(2) });
+
+    const compact = summary(2);
+    expect(compact).toHaveTextContent("2");
+    expect(within(compact).queryByText(/planner-claude/)).not.toBeInTheDocument();
+    expect(within(compact).queryByText(/IDEA-001/)).not.toBeInTheDocument();
+    expect(within(compact).queryByText(/마이그레이션/)).not.toBeInTheDocument();
+
+    const card = screen.getByRole("button", { name: /자세히 보기/ });
+    expect(card).toHaveTextContent("planner-claude");
+    expect(card).toHaveTextContent("IDEA-001");
+  });
+
+  /** 완료 조건 4, 5. 이미 활동 화면일 때 다시 눌러도 같은 값을 넣을 뿐이라 화면이 유지돼야 한다. */
+  it("축약 표시를 누르면 활동 화면으로 이동하고 다시 눌러도 그대로 머문다", () => {
+    shell({ project: running(1) });
+
+    fireEvent.click(summary(1));
+    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
+
+    fireEvent.click(summary(1));
+    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
+  });
+
+  /** 완료 조건 7. 프로젝트가 바뀌면 축약 표시는 새 프로젝트의 활성 수를 따라야 한다. */
+  it("프로젝트가 바뀌면 바뀐 활성 수를 따른다", () => {
+    const { rerender } = render(<WorkspaceShell {...baseProps} project={running(2)} />);
+    expect(summary(2)).toBeInTheDocument();
+
+    rerender(<WorkspaceShell {...baseProps} project={running(1)} />);
+    expect(summary(1)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /실행 중인 세션 2개/ })).not.toBeInTheDocument();
+
+    rerender(<WorkspaceShell {...baseProps} project={project} />);
+    expect(screen.queryByRole("button", { name: /실행 중인 세션/ })).not.toBeInTheDocument();
   });
 });

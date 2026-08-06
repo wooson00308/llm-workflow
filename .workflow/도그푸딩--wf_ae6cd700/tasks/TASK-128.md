@@ -2,16 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-128
 title: 결정이 끝난 기획서 화면에서 후속 기획 요청을 보내고 도장 이력을 읽는다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-042
 source_decision_id: DECISION-FB4A8439
 depends_on: [TASK-120, TASK-121, TASK-127]
 scope_files: [src/features/projects/domain/specDecisionLabels.ts, src/features/projects/domain/specDecisionLabels.test.ts, src/features/projects/components/SpecWorkspace.tsx, src/features/projects/components/SpecWorkspace.test.tsx, src/App.css]
-updated_at: 2026-08-05T14:52:00Z
+updated_at: 2026-08-06T07:12:09.238278+00:00
 history:
   - { at: 2026-08-05T10:12:00Z, kind: created }
   - { at: 2026-08-05T14:40:00Z, kind: in_progress }
   - { at: 2026-08-05T14:52:00Z, kind: qa_waiting }
+  - { at: 2026-08-06T07:12:09.238278+00:00, kind: completed }
 ---
 
 # 결정이 끝난 기획서 화면에서 후속 기획 요청을 보내고 도장 이력을 읽는다
