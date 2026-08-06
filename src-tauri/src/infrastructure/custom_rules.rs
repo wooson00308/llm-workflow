@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn invalid_future_and_unsafe_files_are_structured_without_repair() {
-        let (root, control) = roots();
+        let (_root, control) = roots();
         let path = control.join("rules/custom.md");
         let invalid = "---\nschema: workflow-labs/custom-rules@1\nenabled: true\napplies_to: [developer, developer]\nupdated_at: nope\n---\n\nbody\n";
         fs::write(&path, invalid).expect("invalid");
@@ -690,8 +690,8 @@ mod tests {
         fs::remove_file(&path).expect("remove future");
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(root.path().join("secret.txt"), &path).expect("symlink");
-            fs::write(root.path().join("secret.txt"), "do not read").expect("target");
+            std::os::unix::fs::symlink(_root.path().join("secret.txt"), &path).expect("symlink");
+            fs::write(_root.path().join("secret.txt"), "do not read").expect("target");
             let document = read_custom_rules(&control).expect("read unsafe");
             assert_eq!(document.status, CustomRulesFileStatus::UnsafeFile);
             assert!(document.raw.is_none());
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn every_external_baseline_change_is_a_conflict_and_is_preserved() {
-        let (root, control) = roots();
+        let (_root, control) = roots();
         let first = save_custom_rules(&control, request(&control, None, draft())).expect("first");
         let baseline = first.document.content_hash.clone();
         let path = control.join("rules/custom.md");
@@ -800,7 +800,7 @@ mod tests {
         #[cfg(unix)]
         {
             fs::remove_file(&path).expect("remove external create");
-            let target = root.path().join("external-target.md");
+            let target = _root.path().join("external-target.md");
             fs::write(&target, "external target\n").expect("external target");
             std::os::unix::fs::symlink(&target, &path).expect("external symlink replacement");
 
