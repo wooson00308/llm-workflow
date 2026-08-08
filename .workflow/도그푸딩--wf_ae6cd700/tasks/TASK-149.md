@@ -2,16 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-149
 title: 막힌 작업 패널에서 검증 근거를 입력하고 안전하게 재개한다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
 depends_on: [TASK-145, TASK-148]
 scope_files: [src/App.css, src/features/projects/application/useProjectWorkspace.test.ts, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/components/ActivityView.test.tsx, src/features/projects/components/ActivityView.tsx, src/features/projects/components/BlockedTaskPanel.css, src/features/projects/components/BlockedTaskPanel.test.tsx, src/features/projects/components/BlockedTaskPanel.tsx, src/features/projects/components/DevelopmentBoard.test.tsx, src/features/projects/components/DevelopmentBoard.tsx, src/features/projects/components/WorkspaceShell.test.tsx, src/features/projects/components/WorkspaceShell.tsx, src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts]
-updated_at: 2026-08-08T07:27:10Z
+updated_at: 2026-08-08T07:53:19.793599+00:00
 history:
   - { at: 2026-08-07T16:08:52Z, kind: created }
   - { at: 2026-08-08T07:05:20Z, kind: in_progress }
   - { at: 2026-08-08T07:27:10Z, kind: qa_waiting }
+  - { at: 2026-08-08T07:53:19.793599+00:00, kind: completed }
 ---
 
 # 막힌 작업 패널에서 검증 근거를 입력하고 안전하게 재개한다

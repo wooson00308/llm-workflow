@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 14
+rules_version: 18
 ---
 
 # LLM Workflow agent protocol
@@ -135,6 +135,23 @@ When something you discard is a test, say so plainly and say why it was the dead
 
 This obligation is the same for every role that can take a claim over. It is written here once, and the role contracts point at this section instead of restating it.
 
+### Runtime reservation handoff
+
+The app-managed `wf-reserve` helper may reserve a target before a provider starts. Its successful,
+versioned JSON result names the role, `targetId`, `leaseId`, `resultPrefix`, expiry, and the role
+prompt to send unchanged to the provider. It is a lease handoff, not a second claim path.
+
+- A session receiving those values starts by calling `wf-claim renew <targetId> <leaseId> <minutes>`.
+  It verifies that it owns the reservation and never calls `acquire` for the same target.
+- A session without a reservation follows the ordinary `acquire` procedure above. A missing or
+  failed handoff never authorizes a direct lease-file write.
+- `resultPrefix` is unique to the reserved lease. Planners use it when creating SPEC identifiers;
+  architects use it with task sequence numbers when creating TASK identifiers. Before writing, stop
+  if the resulting document path already exists. Developers preserve it in their report when it
+  explains a runtime handoff but do not invent a new result identifier.
+- The role prompt may name only this role, target, lease, result prefix, and the managed rules it
+  must read. Runtime and provider adapters do not add provider-specific role instructions.
+
 ## 5. Follow the document state machine
 
 ### Ideas and specifications
@@ -164,6 +181,27 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
+The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file, or that edits a task out of `blocked` by hand, resumes nothing and has undone none of what blocked the work.
+
+### Recording why a task is blocked
+
+A session that moves a task to `blocked` writes the reason into the task document in the same edit that sets the status, appends the `blocked` history entry, and updates `updated_at`. The section is headed `## 막힌 사유`, written in exactly those characters, and holds four labels:
+
+```markdown
+## 막힌 사유
+
+- 막힌 지점: 지금 진행할 수 없는 구체적인 이유
+- 필요한 해결: 누가 무엇을 제공하거나 바꿔야 하는지
+- 재개 조건: 어떤 사실이 충족되면 개발을 다시 시작하는지
+- 관련 대상: TASK-001, 외부 승인 대기
+```
+
+- The heading and each of the four labels appear exactly once, and no value is left empty. A repeated label, a missing one, or a label standing over nothing is not the section this contract asks for.
+- `관련 대상` names the tasks, approvals, or outside parties this block is waiting on. With nothing to name, write `없음`. With several, separate them with a comma and a space and keep them in the order you wrote them.
+- While the task stays `blocked` and the reason changes, update the four values and `updated_at` together. A new `blocked` entry belongs to a real status transition only. Editing the wording of a reason is not a transition and never adds one, and the history stays append-only exactly as the next section describes.
+- Leaving `blocked` does not delete the section. It is the last recorded reason and it stays where it is. If the same task is blocked again, the section is replaced by the reason that holds now, and the earlier detail stays in the implementation reports and the append-only history that already carry it.
+- Existing tasks are not converted. A task with no such section, or with an incomplete one, stays valid and readable exactly as it is, and no session is stopped and no judgement changes because of it.
+
 ### Record every task transition
 
 A session that changes a task's status appends one entry to the task's `history` field in the same edit. A session that takes a stopped task over appends an `in_progress` entry as well, even though the status it finds is already `in_progress` and does not change. The takeover is a fact about the task, and the history is where facts about the task live: without that entry, nothing outside a report says the work changed hands.
@@ -177,16 +215,18 @@ history:
   - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }
 ```
 
-- `at` is an RFC3339 timestamp. `kind` is one of six values:
+- `at` is an RFC3339 timestamp. `kind` is one of seven values:
   - `created`: the task document was created
   - `in_progress`: implementation started
   - `blocked`: work became blocked
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no seventh `kind` for a takeover, and there is none for anything else: these six are the whole list.
+  - `resumed`: the user reopened a `blocked` task
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no `kind` of its own for a takeover, and there is none for anything else: these seven are the whole list.
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
-- Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
+- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records all three: the first two when it records the QA decision, the third when the user reopens a blocked task.
+- `resumed` is the fact that the user reopened the work, and it does not stand in for `in_progress`. A developer that claims the returned `todo` task appends its own `in_progress` entry exactly as it would for any other `todo` task.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
 
@@ -227,6 +267,30 @@ Idea documents are outside this section. The user writes there too, so no obliga
 - What each document kind must say is written in the role contract that owns it. There is no exemption: all three kinds carry the section.
 - The limit is ten lines, blank lines excluded. Longer than that and the summary has become a second body.
 
+### The structured summary
+
+A specification and a development task written from here on carry the summary as a fixed set of sub-headings, in this order, each written exactly once:
+
+1. `### 제안`
+2. `### 현재`
+3. `### 변경 후`
+4. `### 사용자 결과`
+5. `### 영향 범위`
+6. `### 비용과 위험` — optional
+7. `### 결정 요청`
+
+- `### 영향 범위` holds two markers, `- 변경:` and `- 유지:`, in that order and once each. Both carry a value; neither may be dropped and neither may be left empty.
+- Every required heading carries a value. A heading standing over nothing is not a filled one.
+- `### 비용과 위험` is written only when there is a real cost or risk to name. With nothing to name, the heading is left out entirely — it is never written empty.
+- A repeated heading, a changed order, a heading at another depth, a sub-heading outside this list, or a missing impact marker is not the structured form. Neither the app nor the writing role guesses at a near-miss heading or invents a value it was not given.
+- An implementation report is outside this. Reports keep the plain summary defined above.
+
+What each heading holds is written in the role contract that owns the document. `### 결정 요청` is the one heading whose meaning differs by kind: in a specification it names the ground on which the user approves or sends the document back, and in a development task it names the result the user checks at QA.
+
+The ten-line limit above does not reach a structured summary, because the headings alone exceed it. Brevity comes from the shape instead: one short paragraph under each ordinary heading, and one item under each impact marker. A plain summary and a report summary keep the ten-line limit exactly as written above.
+
+Everything under "What it must not contain" reaches structured values too. A value is Markdown text and nothing else: a document does not write HTML here, and the app builds no separate HTML copy, no summary cache, no image, no chart payload, no network call, and no model call out of this section. It reads the same body it already reads.
+
 ### What it must not contain
 
 Inside the summary section there are none of the following:
@@ -254,7 +318,9 @@ A development task that goes to `qa_waiting` carries a second section for the sa
 ### Documents written before this section
 
 - A document with no summary section stays valid. It is read, displayed, and judged exactly as it was.
+- A plain summary written before the structured form stays valid too, and so does one whose structure is incomplete. Neither is converted, repaired, or reported as a fault, and no session stops over one.
 - Whether a summary exists is not part of any eligibility judgement, and reading a document never fails over a missing or malformed summary. No session is stopped and no task is closed because a summary is absent.
+- The structure is a body contract. It adds no frontmatter field, changes no schema version, and takes no part in any judgement the app makes.
 - Nothing is filled in retroactively. This section reaches the documents written from here on.
 
 ## 9. Write Korean workflow documents in clear professional language

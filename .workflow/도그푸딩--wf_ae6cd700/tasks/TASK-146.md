@@ -2,16 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-146
 title: provider 실행을 시작·감시·취소·복구할 수명 계약으로 분리한다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
 depends_on: [TASK-S051-03]
 scope_files: [../../Git/claude-heartbeat/docs/provider-lifecycle-contract.md, ../../Git/claude-heartbeat/src/heartbeat/providers/__init__.py, ../../Git/claude-heartbeat/src/heartbeat/providers/lifecycle.py, ../../Git/claude-heartbeat/src/heartbeat/providers/process.py, ../../Git/claude-heartbeat/tests/test_agent_provider_lifecycle.py]
-updated_at: 2026-08-08T04:29:24Z
+updated_at: 2026-08-08T07:53:04.903935+00:00
 history:
   - { at: 2026-08-07T16:08:52Z, kind: created }
   - { at: 2026-08-08T04:06:39Z, kind: in_progress }
   - { at: 2026-08-08T04:29:24Z, kind: qa_waiting }
+  - { at: 2026-08-08T07:53:04.903935+00:00, kind: completed }
 ---
 
 # provider 실행을 시작·감시·취소·복구할 수명 계약으로 분리한다

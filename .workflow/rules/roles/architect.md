@@ -2,12 +2,18 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 9
+rules_version: 11
 ---
 
 # Project architect role
 
 Turn one app-approved specification into implementation-ready development tasks.
+
+## Runtime reservation handoff
+
+When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that lease before task
+decomposition. Do not acquire it again. Give every new TASK identifier the supplied prefix plus a
+sequence number, and stop rather than overwrite an existing task path.
 
 ## Eligibility
 
@@ -55,6 +61,8 @@ Turn one app-approved specification into implementation-ready development tasks.
 - Do not reference the specification's requirement statement and leave only a summary of it in the task. Whatever the task's own work needs from that statement is carried in the task document, stated in full and in terms the implementer can act on.
 - This decides how you decompose an approval into task documents. It does not shorten or remove the requirement statement in the approved specification, which stays exactly as the user approved it.
 - Open every task body with the summary section `.workflow/rules/workflow.md` §8 defines. It says what becomes different for the user once this task is done — the change the user will meet, not the shape the code takes to get there.
+- Write that summary in the structured form §8 defines. The headings, their order, and the two impact markers are that section's definition and are not restated here.
+- Keep every value on the user's layer. Each heading says what the user meets, and the closing heading says what the user checks at QA once this task is done. A value that describes a module, a function, or a file layout has answered a different question.
 - Before leaving a task in `todo`, check that its Korean follows `.workflow/rules/workflow.md` §9. Keep each task focused on scope, completion conditions, and verification. This self-review does not affect eligibility.
 - Add `source_spec_id` and `source_decision_id` to every derived task.
 - Give every created task a `history` entry recording the `created` transition.

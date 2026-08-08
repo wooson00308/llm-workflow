@@ -2568,7 +2568,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 16", "rules_version: 15");
+            .replace("rules_version: 18", "rules_version: 17");
         fs::write(&rules, &old).expect("old rules");
         let modified = fs::metadata(&rules)
             .and_then(|metadata| metadata.modified())
@@ -2596,7 +2596,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 16", "rules_version: 15");
+            .replace("rules_version: 18", "rules_version: 17");
         fs::write(&rules, old).expect("old rules");
 
         let result = repository
@@ -2607,7 +2607,7 @@ mod tests {
         assert!(result.updated_assets.contains(&"workflow_rules".to_owned()));
         assert!(fs::read_to_string(rules)
             .expect("updated rules")
-            .contains("rules_version: 16"));
+            .contains("rules_version: 18"));
     }
 
     #[test]
@@ -2680,7 +2680,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 16", "rules_version: 15");
+            .replace("rules_version: 18", "rules_version: 17");
         fs::write(&rules, old_rules).expect("old managed rules");
 
         repository.inspect(root.path()).expect("inspect project");
@@ -3915,7 +3915,7 @@ mod tests {
         );
         assert!(fs::read_to_string(architect)
             .expect("architect updated on QA")
-            .contains("rules_version: 10"));
+            .contains("rules_version: 11"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
@@ -4474,7 +4474,7 @@ mod tests {
         let developer = root.path().join(".workflow/rules/roles/developer.md");
         let old_developer = fs::read_to_string(&developer)
             .expect("developer")
-            .replace("rules_version: 10", "rules_version: 9");
+            .replace("rules_version: 13", "rules_version: 12");
         fs::write(&developer, old_developer).expect("old developer");
 
         let result = repository
@@ -4493,7 +4493,7 @@ mod tests {
         assert!(result.results.iter().all(|entry| entry.recorded));
         assert!(fs::read_to_string(developer)
             .expect("developer updated on batch QA")
-            .contains("rules_version: 11"));
+            .contains("rules_version: 13"));
         assert_eq!(
             result
                 .results
@@ -4974,7 +4974,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 16", "rules_version: 15");
+            .replace("rules_version: 18", "rules_version: 17");
         fs::write(&rules, old_rules).expect("old rules");
 
         let decided = repository
@@ -4991,7 +4991,7 @@ mod tests {
         assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
         assert!(fs::read_to_string(rules)
             .expect("rules updated on decision")
-            .contains("rules_version: 16"));
+            .contains("rules_version: 18"));
         assert_eq!(
             fs::read_to_string(spec_path).expect("original spec"),
             source

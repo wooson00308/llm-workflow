@@ -2,12 +2,18 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 10
+rules_version: 13
 ---
 
 # Developer role
 
 Implement and verify one eligible development task, then hand it to the user for QA.
+
+## Runtime reservation handoff
+
+When the runtime supplies `targetId` and `leaseId`, renew that exact lease before implementation and
+do not call `acquire` again. Keep the supplied result prefix in the handoff report when relevant;
+the runtime prompt never replaces this contract or adds provider-specific role instructions.
 
 ## Eligibility
 
@@ -83,11 +89,21 @@ Write it into the assigned task document, in the same edit that records the `qa_
 
 The `## 사용자 QA 제안` heading some reports carry is free writing, not this obligation. The task document is where the user reads the walkthrough, because the app opens task bodies beside the confirmation stamp and does not open reports at all.
 
+## Blocking a task
+
+`blocked` is for an impediment you actually hit. The eligibility section above already says why a question or an approval request is not one, and nothing here loosens that.
+
+When you do hit one, write the reason section `.workflow/rules/workflow.md` §5 defines into the assigned task, in the same edit that sets the status and appends the `blocked` entry. The heading and its four labels are that section's definition and are not restated here.
+
+- The four values carry what you have checked and nothing else. Do not write a resolution you have not seen, and do not present as settled anything that is still open.
+- The report says what you verified and what impediment remains. It does not become the place a reader goes for the current reason: the section in the task document is where that lives, and the report is read beside it, not instead of it.
+- Reasons you wrote earlier are not edited away. A later block replaces the section with the reason that holds then, and the earlier one stays in the report that recorded it.
+
 ## What the report holds
 
 The implementation report carries a fixed set of sections. Write all of them, and keep the body within the limit below.
 
-- The decision-maker summary `.workflow/rules/workflow.md` §8 defines stays first, in the position and under the conditions that section sets. Nothing here moves it or relaxes it.
+- The decision-maker summary `.workflow/rules/workflow.md` §8 defines stays first, in the position and under the conditions that section sets. Nothing here moves it or relaxes it. A report is not one of the two kinds that carry the structured form, so this summary stays plain prose under the ten-line limit.
 - Changed files and modules: what you edited, named so a reader can open it directly.
 - Verification steps and their results: which command or check you ran, and the result it returned.
 - Remaining risks: what this change could still break, and what stayed unverified.
@@ -122,6 +138,8 @@ The `## 확인 동선` section is not one of these. It is written into the task 
 
 - Claim the task as `.workflow/rules/workflow.md` §4 describes, move it to `in_progress` immediately, and only then implement and run relevant verification. A takeover finds the status already there and records the `history` entry alone.
 - Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
+- When the task you are transitioning carries the structured summary §8 defines, bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them. Updating a fact is not an occasion to reshape the section.
+- A task whose summary is plain prose, or has no summary at all, stays that way. Do not convert an existing task into the structured form.
 - Record changes, checks, risks, and handoff notes in `reports/`.
 - Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done and what was verified, and what the user is being asked to do now.
 - Before handing the task to user QA, check that the report's Korean follows `.workflow/rules/workflow.md` §9. Keep the report focused on changes, verification, risks, and user confirmation. This self-review does not affect eligibility.
