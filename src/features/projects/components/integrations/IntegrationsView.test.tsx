@@ -1362,6 +1362,17 @@ describe("IntegrationsView 관리 블록 읽기 실패", () => {
     expect(unread).toContain("관리 블록을 읽지 못했습니다");
     expect(unread).not.toContain("역할 잡 미설치");
   });
+
+  // 역할 정책의 정본은 에이전트 화면으로 옮겨 갔다. 이 카드는 옛 잡을 정리하는 고급 관리로 남고,
+  // 두 자리가 나란히 "역할 설정"을 자처하지 않도록 어디서 설정하는지를 먼저 말한다(SPEC-051 R12).
+  it("points role settings at the agents screen and keeps the dream card", () => {
+    renderIntegrations(installed());
+
+    const card = screen.getByRole("article", { name: "claude-heartbeat" });
+    expect(card).toHaveTextContent("역할 설정은 이제 에이전트 화면에서 합니다");
+    expect(card).toHaveTextContent("에이전트 화면의 이전 미리보기로 옮길 수 있습니다");
+    expect(screen.getByRole("article", { name: "dream" })).toBeInTheDocument();
+  });
 });
 
 /**

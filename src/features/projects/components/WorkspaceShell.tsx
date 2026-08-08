@@ -8,6 +8,8 @@ import type {
   ManagedAssetsState,
   ProjectSummary,
   SpecDecisionOutcome,
+  AgentRuntimeActions,
+  AgentRuntimeState,
   TaskQaBatchEntry,
   TaskQaOutcome,
   TaskResumeOutcome,
@@ -20,6 +22,7 @@ import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
 import { ActivityView } from "./ActivityView";
+import { AgentRuntimeView } from "./agents/AgentRuntimeView";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
@@ -71,6 +74,12 @@ interface Props {
     fileNames: string[],
     comment: string,
   ): Promise<TaskQaBatchEntry[] | null>;
+  /**
+   * 에이전트 화면의 상태와 조작. 주인이 작업 공간 훅이라 화면을 옮겨 다녀도 진행 표시가 남는다.
+   * 선택인 것은 이 껍데기를 그리는 검사 리터럴이 아직 이 묶음을 모르기 때문이다.
+   */
+  agentRuntime?: AgentRuntimeState;
+  agentRuntimeActions?: AgentRuntimeActions;
   /** 막힌 작업의 사용자 재개. QA 통로와 나뉘어 있고 개발 화면에만 닿는다. */
   onResumeTask?(
     workflowDirectory: string,
@@ -97,12 +106,15 @@ const viewLabels = {
   tasks: "개발",
   archive: "기록",
   activity: "활동",
+  agents: "에이전트",
   integrations: "연동",
   help: "도움말",
   settings: "설정",
 } as const;
 
 export function WorkspaceShell({
+  agentRuntime,
+  agentRuntimeActions,
   busy,
   customRules,
   customRulesActions,
@@ -131,7 +143,16 @@ export function WorkspaceShell({
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
-    "today" | "ideas" | "specs" | "tasks" | "archive" | "activity" | "integrations" | "help" | "settings"
+    | "today"
+    | "ideas"
+    | "specs"
+    | "tasks"
+    | "archive"
+    | "activity"
+    | "agents"
+    | "integrations"
+    | "help"
+    | "settings"
   >("today");
   const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
@@ -302,6 +323,13 @@ export function WorkspaceShell({
             </button>
           )}
           <UpdateControl updater={updater} />
+          {/*
+            작업 공간이 이 묶음을 넘겨줄 때만 진입점을 세운다. 배선 없이 메뉴만 있으면 사용자가 빈
+            화면을 열게 되므로, 통로가 없는 동안에는 자리를 만들지 않는다.
+          */}
+          {agentRuntime && agentRuntimeActions && (
+            <button className={`settings-link ${view === "agents" ? "active" : ""}`} onClick={() => setView("agents")}><Icon name="spark" />에이전트</button>
+          )}
           <button className={`settings-link ${view === "integrations" ? "active" : ""}`} onClick={() => setView("integrations")}><Icon name="spark" />연동</button>
           <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
           <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
@@ -470,6 +498,13 @@ export function WorkspaceShell({
               `heartbeatSetupRuns`·`heartbeatVersions`·`heartbeatService`는 이 조건에 걸지 않는다.
               없으면 설치 실행 버튼과 버전 표시와 데몬 조작 통로만 빠지고 카드의 나머지는 그대로
               돌아야 한다 — 조회·설치·업데이트가 그 셋을 기다릴 이유가 없다. */}
+          {view === "agents" && agentRuntime && agentRuntimeActions && (
+            <AgentRuntimeView
+              actions={agentRuntimeActions}
+              projectName={project.name}
+              state={agentRuntime}
+            />
+          )}
           {view === "integrations" && integrations.heartbeatRuns && integrations.heartbeatUpdate && (
             <IntegrationsView
               actions={integrationActions}

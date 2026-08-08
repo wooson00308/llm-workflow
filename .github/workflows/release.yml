@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # 번들에 넣을 런타임 배포물의 태그. 앱 릴리스는 이 태그의 산출물 하나만 담는다 —
+  # 어느 런타임이 들어갔는지가 태그 하나로 고정돼야 나중에 그 번들을 재현할 수 있다.
+  RUNTIME_RELEASE_TAG: runtime-v0.8.0
+  RUNTIME_REPOSITORY: wooson00308/claude-heartbeat
+
 jobs:
   release:
     name: Release (${{ matrix.platform }})
@@ -18,12 +24,15 @@ jobs:
           - platform: ubuntu-22.04
             args: ""
             rust-targets: ""
+            runtime-target: linux-x86_64
           - platform: windows-latest
             args: ""
             rust-targets: ""
+            runtime-target: windows-x86_64
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            runtime-target: macos-universal
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +57,68 @@ jobs:
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+      # 이 기기의 target 배포물 하나만 번들에 넣는다. 다른 target의 배포물은 받지도 않는다.
+      # 자산은 저장소에 커밋하지 않고 릴리스 때만 놓는다 — 커밋하면 앱 저장소가 런타임 바이너리의
+      # 사본을 버전마다 들고 있게 되고, 그 사본과 실제 릴리스가 갈리는 날이 온다.
+      - name: Stage the agent runtime resource
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          archive="heartbeat-${{ matrix.runtime-target }}.zip"
+          gh release download "$RUNTIME_RELEASE_TAG" \
+            --repo "$RUNTIME_REPOSITORY" \
+            --pattern "$archive" \
+            --dir runtime-download
+          python3 - "$archive" <<'STAGE'
+          import shutil, sys, zipfile
+          from pathlib import Path
+
+          resource = Path("src-tauri/runtime")
+          if resource.exists():
+              shutil.rmtree(resource)
+          staged = Path("runtime-staging")
+          if staged.exists():
+              shutil.rmtree(staged)
+          with zipfile.ZipFile(Path("runtime-download") / sys.argv[1]) as archive:
+              archive.extractall(staged)
+          # 배포물은 `heartbeat/` 한 겹 아래에 풀린다. 앱은 manifest가 자원 루트에 있길 기대하므로
+          # 그 한 겹을 걷어 낸다.
+          roots = [path for path in staged.iterdir() if path.is_dir()]
+          if len(roots) != 1:
+              raise SystemExit(f"런타임 배포물의 최상위 디렉터리가 하나가 아닙니다: {roots}")
+          shutil.move(str(roots[0]), str(resource))
+          manifest = resource / "runtime-manifest.json"
+          if not manifest.is_file():
+              raise SystemExit("런타임 manifest가 배포물에 없습니다")
+          STAGE
+          # 번들 설정은 저장소에 두지 않고 여기서 붙인다. 자산이 없는 개발 빌드에서 Tauri가
+          # 자원 경로를 찾지 못해 빌드가 깨지는 것을 막는다.
+          python3 - <<'CONFIG'
+          import json
+          from pathlib import Path
+
+          path = Path("src-tauri/tauri.conf.json")
+          config = json.loads(path.read_text(encoding="utf-8"))
+          config["bundle"]["resources"] = ["runtime/**/*"]
+          path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          CONFIG
+      - name: Verify exactly one runtime resource is staged
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'CHECK'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("src-tauri/runtime/runtime-manifest.json").read_text(encoding="utf-8"))
+          expected = "${{ matrix.runtime-target }}"
+          if manifest["target"] != expected:
+              raise SystemExit(f"번들에 담긴 target {manifest['target']}이 이 기기의 {expected}과 다릅니다")
+          versions = {path.name for path in Path("src-tauri/runtime").iterdir()}
+          print(f"staged runtime {manifest['runtimeVersion']} for {manifest['target']}: {sorted(versions)}")
+          CHECK
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

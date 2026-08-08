@@ -1,6 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  AgentInstallApplication,
+  AgentInstallPlan,
+  AgentMigrationPreview,
+  AgentPolicySnapshot,
+  AgentProjectPolicy,
+  AgentRuntimeInspection,
+  AgentUpdateApplication,
+  AgentUpdatePlan,
   CustomRulesDocument,
   CustomRulesDraft,
   CustomRulesPreview,
@@ -179,6 +187,71 @@ export const tauriProjectGateway: ProjectGateway = {
   controlHeartbeatService(operation) {
     return invoke<HeartbeatServiceControlResult>("control_heartbeat_service", {
       operation,
+    });
+  },
+
+  // 아래 열 개가 에이전트 런타임 계약이다. 앞의 넷은 읽기와 계획이라 아무것도 쓰지 않고, 나머지는
+  // 사용자가 확인한 자리에서만 불린다. 인자는 식별자와 앱이 이미 들고 있는 값뿐이다.
+  inspectAgentRuntime() {
+    return invoke<AgentRuntimeInspection>("inspect_agent_runtime");
+  },
+
+  planAgentRuntimeInstall() {
+    return invoke<AgentInstallPlan>("plan_agent_runtime_install");
+  },
+
+  applyAgentRuntimeInstall(planId, confirmed) {
+    return invoke<AgentInstallApplication>("apply_agent_runtime_install", {
+      planId,
+      confirmed,
+    });
+  },
+
+  planAgentRuntimeUpdate() {
+    return invoke<AgentUpdatePlan>("plan_agent_runtime_update");
+  },
+
+  applyAgentRuntimeUpdate(planId, confirmed) {
+    return invoke<AgentUpdateApplication>("apply_agent_runtime_update", {
+      planId,
+      confirmed,
+    });
+  },
+
+  repairAgentRuntime(planId, confirmed) {
+    return invoke<AgentUpdateApplication>("repair_agent_runtime", {
+      planId,
+      confirmed,
+    });
+  },
+
+  readAgentRuntimePolicy(projectId, workingDirectory) {
+    return invoke<AgentPolicySnapshot>("read_agent_runtime_policy", {
+      projectId,
+      workingDirectory,
+    });
+  },
+
+  saveAgentRuntimePolicy(policy: AgentProjectPolicy, baselineRevision) {
+    return invoke<AgentPolicySnapshot>("save_agent_runtime_policy", {
+      policy,
+      baselineRevision,
+    });
+  },
+
+  previewAgentRuntimeMigration(path, projectId) {
+    return invoke<AgentMigrationPreview>("preview_agent_runtime_migration", {
+      path,
+      projectId,
+    });
+  },
+
+  applyAgentRuntimeMigration(path, projectId, previewId, baselineRevision) {
+    return invoke<AgentPolicySnapshot>("apply_agent_runtime_migration", {
+      path,
+      projectId,
+      previewId,
+      baselineRevision,
     });
   },
 };

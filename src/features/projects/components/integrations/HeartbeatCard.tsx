@@ -2340,6 +2340,15 @@ function HeartbeatRoleJobs({
 
   return (
     <div className="heartbeat-jobs">
+      {/*
+        역할 정책의 정본은 에이전트 화면으로 옮겨 갔다(SPEC-051). 이 자리는 옛 잡을 확인하고 옮기기
+        위한 고급 관리로 남기고, 어디서 설정해야 하는지를 먼저 말한다 — 두 자리가 나란히 "역할 설정"을
+        자처하면 사용자가 어느 쪽이 진짜인지 알 수 없다.
+      */}
+      <p className="integration-note heartbeat-legacy-note">
+        역할 설정은 이제 에이전트 화면에서 합니다. 이 아래는 옛 역할 잡을 확인하고 정리하기 위한 고급
+        관리이며, 기존 잡은 에이전트 화면의 이전 미리보기로 옮길 수 있습니다.
+      </p>
       {!installed && (
         <p className="integration-note">역할 잡 미설치 — 앱 관리 블록에 이 프로젝트의 역할 잡이 없습니다.</p>
       )}

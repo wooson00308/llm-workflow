@@ -30,6 +30,10 @@ import type {
   TaskQaBatchEntry,
   TaskQaOutcome,
   TaskResumeOutcome,
+  AgentProjectPolicy,
+  AgentRuntimeActions,
+  AgentRuntimeOperation,
+  AgentRuntimeState,
 } from "../domain/types";
 
 interface Dependencies {
@@ -133,6 +137,25 @@ function failureFrom(reason: unknown, jobName: string): HeartbeatRunFailure {
   };
 }
 
+/** 프로젝트를 열기 전과 닫은 뒤의 에이전트 상태. 프로젝트가 바뀌면 이 값으로 되돌린다. */
+const emptyAgentRuntime: AgentRuntimeState = {
+  inspection: null,
+  policy: null,
+  reading: false,
+  readError: null,
+  planning: null,
+  plan: null,
+  planError: null,
+  applying: false,
+  application: null,
+  applyError: null,
+  migration: null,
+  migrationBusy: false,
+  migrationError: null,
+  saving: false,
+  saveError: null,
+};
+
 export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() =>
@@ -194,6 +217,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const checkingVersions = useRef(false);
   const controllingService = useRef(false);
   const activeProjectPath = useRef<string | null>(null);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeState>(
+    emptyAgentRuntime,
+  );
   const customRulesReadRequest = useRef(0);
   const customRulesPreviewRequest = useRef(0);
   const customRulesSaveRequest = useRef(0);
@@ -206,6 +232,211 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       }
     },
     [recentStore],
+  );
+
+  /**
+   * 기기 상태와 이 프로젝트의 정책을 읽는다. 읽기 명령 둘만 부르므로 화면 진입과 새로고침에서
+   * 불러도 아무것도 쓰지 않는다(R14). 계획과 적용 결과는 지우지 않는다 — 조회가 진행 표시를
+   * 덮으면 다른 메뉴를 다녀온 사용자가 자기 조작의 결과를 잃는다.
+   */
+  const readAgentRuntime = useCallback(
+    async (path: string, projectId: string | null) => {
+      setAgentRuntime((current) => ({ ...current, reading: true, readError: null }));
+      try {
+        const inspection = await gateway.inspectAgentRuntime();
+        if (activeProjectPath.current !== path) return;
+        // 정책은 프로젝트 식별자가 있어야 읽는다. 초기화되지 않은 폴더에는 정책 자체가 없다.
+        const policy = projectId
+          ? await gateway.readAgentRuntimePolicy(projectId, path)
+          : null;
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          inspection,
+          policy,
+          reading: false,
+        }));
+      } catch (reason) {
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          reading: false,
+          readError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  /** 계획을 만든다. 세 조작 모두 계획 단계에서는 아무것도 쓰지 않는다. */
+  const planAgentRuntime = useCallback(
+    async (operation: AgentRuntimeOperation) => {
+      setAgentRuntime((current) => ({
+        ...current,
+        planning: operation,
+        planError: null,
+        applyError: null,
+      }));
+      try {
+        const plan =
+          operation === "install"
+            ? { kind: "install" as const, plan: await gateway.planAgentRuntimeInstall() }
+            : {
+                kind: operation,
+                plan: await gateway.planAgentRuntimeUpdate(),
+              };
+        setAgentRuntime((current) => ({ ...current, planning: null, plan }));
+      } catch (reason) {
+        setAgentRuntime((current) => ({
+          ...current,
+          planning: null,
+          plan: null,
+          planError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  const cancelAgentRuntimePlan = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, plan: null, planError: null }));
+  }, []);
+
+  /**
+   * 확인 대기 중인 계획을 적용한다. 계획이 없으면 아무것도 부르지 않는다.
+   *
+   * 백엔드가 오래된 계획이라고 거절하면 사유를 남기고 같은 조작의 계획을 다시 만든다. 사용자가 본
+   * 계획과 실제로 적용될 계획이 다른 채로 버튼만 다시 열리지 않게 하는 자리다.
+   */
+  const applyAgentRuntimePlan = useCallback(async () => {
+    const pending = agentRuntime.plan;
+    if (!pending) return false;
+    setAgentRuntime((current) => ({ ...current, applying: true, applyError: null }));
+    try {
+      const application =
+        pending.kind === "install"
+          ? {
+              kind: "install" as const,
+              result: await gateway.applyAgentRuntimeInstall(pending.plan.planId, true),
+            }
+          : {
+              kind: pending.kind,
+              result:
+                pending.kind === "update"
+                  ? await gateway.applyAgentRuntimeUpdate(pending.plan.planId, true)
+                  : await gateway.repairAgentRuntime(pending.plan.planId, true),
+            };
+      setAgentRuntime((current) => ({
+        ...current,
+        applying: false,
+        plan: null,
+        application,
+      }));
+      return true;
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        applying: false,
+        plan: null,
+        applyError: messageFrom(reason),
+      }));
+      await planAgentRuntime(pending.kind);
+      return false;
+    }
+  }, [agentRuntime.plan, gateway, planAgentRuntime]);
+
+  /** 기존 역할 잡에서 새 정책을 제안받는다. 파일을 읽기만 한다. */
+  const previewAgentRuntimeMigration = useCallback(async () => {
+    if (!project?.projectId) return;
+    const path = project.rootPath;
+    const projectId = project.projectId;
+    setAgentRuntime((current) => ({
+      ...current,
+      migrationBusy: true,
+      migrationError: null,
+    }));
+    try {
+      const migration = await gateway.previewAgentRuntimeMigration(path, projectId);
+      setAgentRuntime((current) => ({ ...current, migrationBusy: false, migration }));
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        migrationBusy: false,
+        migrationError: messageFrom(reason),
+      }));
+    }
+  }, [gateway, project?.projectId, project?.rootPath]);
+
+  const dismissAgentRuntimeMigration = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, migration: null, migrationError: null }));
+  }, []);
+
+  /** 확인받은 미리보기를 적용한다. 미리보기 식별자와 읽을 때 받은 revision이 함께 나간다. */
+  const applyAgentRuntimeMigration = useCallback(async () => {
+    const preview = agentRuntime.migration;
+    const revision = agentRuntime.policy?.revision;
+    if (!preview || revision === undefined || !project?.projectId) return false;
+    setAgentRuntime((current) => ({
+      ...current,
+      migrationBusy: true,
+      migrationError: null,
+    }));
+    try {
+      const policy = await gateway.applyAgentRuntimeMigration(
+        project.rootPath,
+        project.projectId,
+        preview.previewId,
+        revision,
+      );
+      setAgentRuntime((current) => ({
+        ...current,
+        migrationBusy: false,
+        migration: null,
+        policy,
+      }));
+      return true;
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        migrationBusy: false,
+        migrationError: messageFrom(reason),
+      }));
+      return false;
+    }
+  }, [
+    agentRuntime.migration,
+    agentRuntime.policy?.revision,
+    gateway,
+    project?.projectId,
+    project?.rootPath,
+  ]);
+
+  /**
+   * 정책을 저장한다. 읽을 때 받은 revision을 그대로 실어 보내고, 경합으로 거절되면 사유를 남긴 뒤
+   * 최신 값을 다시 읽는다. 폼을 조용히 덮지 않고 무엇이 달라졌는지 사용자가 볼 수 있게 한다.
+   */
+  const saveAgentRuntimePolicy = useCallback(
+    async (policy: AgentProjectPolicy) => {
+      const revision = agentRuntime.policy?.revision;
+      if (revision === undefined) return false;
+      setAgentRuntime((current) => ({ ...current, saving: true, saveError: null }));
+      try {
+        const saved = await gateway.saveAgentRuntimePolicy(policy, revision);
+        setAgentRuntime((current) => ({ ...current, saving: false, policy: saved }));
+        return true;
+      } catch (reason) {
+        setAgentRuntime((current) => ({
+          ...current,
+          saving: false,
+          saveError: messageFrom(reason),
+        }));
+        if (project) {
+          await readAgentRuntime(project.rootPath, project.projectId);
+        }
+        return false;
+      }
+    },
+    [agentRuntime.policy?.revision, gateway, project, readAgentRuntime],
   );
 
   const resetCustomRules = useCallback(() => {
@@ -307,6 +538,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         if (syncTrigger === "project_open") {
           activeProjectPath.current = next.rootPath;
           resetCustomRules();
+          // 이전 프로젝트의 정책과 계획이 새 프로젝트 화면에 남지 않게 통째로 되돌린다(R5).
+          setAgentRuntime(emptyAgentRuntime);
+          void readAgentRuntime(next.rootPath, next.projectId);
         }
         setProject(next);
         remember(next);
@@ -336,6 +570,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     },
     [
       gateway,
+      readAgentRuntime,
       readCustomRules,
       remember,
       resetCustomRules,
@@ -1072,6 +1307,32 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     return () => window.clearInterval(timer);
   }, [inspect, readIntegrations, project?.initialized, project?.rootPath]);
 
+  const agentRuntimeActions: AgentRuntimeActions = useMemo(
+    () => ({
+      refresh: async () => {
+        if (project) await readAgentRuntime(project.rootPath, project.projectId);
+      },
+      plan: planAgentRuntime,
+      cancelPlan: cancelAgentRuntimePlan,
+      apply: applyAgentRuntimePlan,
+      previewMigration: previewAgentRuntimeMigration,
+      applyMigration: applyAgentRuntimeMigration,
+      dismissMigration: dismissAgentRuntimeMigration,
+      save: saveAgentRuntimePolicy,
+    }),
+    [
+      applyAgentRuntimeMigration,
+      applyAgentRuntimePlan,
+      cancelAgentRuntimePlan,
+      dismissAgentRuntimeMigration,
+      planAgentRuntime,
+      previewAgentRuntimeMigration,
+      project,
+      readAgentRuntime,
+      saveAgentRuntimePolicy,
+    ],
+  );
+
   return {
     project,
     recentProjects,
@@ -1093,6 +1354,8 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     confirmTaskQaBatch,
     resumeTask,
     decideSpec,
+    agentRuntime,
+    agentRuntimeActions,
     refresh,
     migrate,
     // 진행 중인 실행은 여기서 비우지 않는다. 잡 이름에 프로젝트 slug가 들어 있어 다른 프로젝트의
@@ -1100,6 +1363,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     closeProject: () => {
       activeProjectPath.current = null;
       resetCustomRules();
+      setAgentRuntime(emptyAgentRuntime);
       setProject(null);
       setError(null);
       setManagedAssets({

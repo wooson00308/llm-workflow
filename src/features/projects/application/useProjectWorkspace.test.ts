@@ -23,6 +23,14 @@ import type {
   SaveCustomRulesResult,
   TaskQaBatchEntry,
   TaskResumeOutcome,
+  AgentInstallApplication,
+  AgentInstallPlan,
+  AgentMigrationPreview,
+  AgentPolicySnapshot,
+  AgentRolePolicy,
+  AgentRuntimeInspection,
+  AgentUpdateApplication,
+  AgentUpdatePlan,
 } from "../domain/types";
 
 const project: ProjectSummary = {
@@ -235,6 +243,122 @@ const stoppedSnapshot: IntegrationsSnapshot = {
   heartbeat: { ...snapshot.heartbeat, daemonRunning: false },
 };
 
+/** 에이전트 런타임 픽스처. 정상 설치·호환 상태 하나를 기본으로 둔다. */
+const agentService = {
+  platform: "launchd",
+  result: "registered",
+  registered: true,
+  running: true,
+  label: "com.claude-heartbeat",
+  executable: "/opt/runtime/bin/heartbeat",
+  recoverable: true,
+  checkedAt: "2026-08-08T09:00:00Z",
+  evidence: ["launch_agents_directory"],
+};
+
+const agentInspection: AgentRuntimeInspection = {
+  bundledVersion: "0.8.0",
+  status: {
+    result: "ok",
+    checkedAt: "2026-08-08T09:00:00Z",
+    runtimeVersion: "0.8.0",
+    installedVersion: "0.8.0",
+    runningVersion: "0.8.0",
+    apiMajor: 1,
+    target: "macos-universal",
+    installResult: "installed",
+    recoverable: true,
+    service: agentService,
+  },
+  compatibility: { kind: "compatible" },
+  executionAllowed: true,
+  unavailable: null,
+  installRoot: "/Users/tester/.workflow-labs/runtime",
+};
+
+const agentInstallPlan: AgentInstallPlan = {
+  planId: "plan-install-1",
+  bundledVersion: "0.8.0",
+  target: "macos-universal",
+  versionDirectory: "/versions/0.8.0",
+  launcher: "/bin/heartbeat",
+  alreadyInstalled: false,
+  installedVersion: null,
+  serviceTransitionRequired: true,
+};
+
+const agentInstallApplication: AgentInstallApplication = {
+  planId: "plan-install-1",
+  result: "ok",
+  installedVersion: "0.8.0",
+  versionDirectory: "/versions/0.8.0",
+  stages: [{ stage: "version_install", status: "ok", detail: null }],
+  detail: null,
+};
+
+const agentUpdatePlan: AgentUpdatePlan = {
+  planId: "plan-update-1",
+  result: "ready",
+  targetVersion: "0.9.0",
+  target: "macos-universal",
+  manifestVerified: true,
+  launcherSwitchRequired: true,
+  serviceTransitionRequired: true,
+  recoverableOnFailure: true,
+  installedVersion: "0.8.0",
+  runningVersion: "0.8.0",
+  activeRuns: 0,
+  projects: [],
+  service: agentService,
+};
+
+const agentUpdateApplication: AgentUpdateApplication = {
+  planId: "plan-update-1",
+  result: "ok",
+  stages: [{ stage: "launcher_switch", status: "ok", detail: null }],
+  runnableVersion: "0.9.0",
+  recoveryActions: [],
+  detail: null,
+};
+
+function agentRole(provider: string): AgentRolePolicy {
+  return {
+    enabled: true,
+    provider,
+    model: null,
+    runMode: "continuous",
+    maxParallel: 1,
+    intervalSeconds: 300,
+    maxPer: null,
+  };
+}
+
+const agentPolicy: AgentPolicySnapshot = {
+  policy: {
+    projectId: "prj_1",
+    workingDirectory: "/projects/workflow-labs",
+    projectMaxParallel: 3,
+    deviceMaxParallel: 16,
+    roles: {
+      architect: agentRole("claude"),
+      developer: agentRole("claude"),
+      planner: agentRole("claude"),
+    },
+  },
+  stored: true,
+  revision: "rev-1",
+  providers: [{ provider: "claude", status: "ready", version: "1.2.3" }],
+  executionAllowed: true,
+  compatibility: { kind: "compatible" },
+};
+
+const agentMigration: AgentMigrationPreview = {
+  previewId: "preview-1",
+  proposed: agentPolicy.policy,
+  unresolved: [],
+  untouchedRoles: [],
+};
+
 function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
   return {
     chooseDirectory: vi.fn().mockResolvedValue(project.rootPath),
@@ -264,6 +388,16 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     resumeTask: vi
       .fn()
       .mockResolvedValue({ status: "resumed", summary: project, recovery: null }),
+    inspectAgentRuntime: vi.fn().mockResolvedValue(agentInspection),
+    planAgentRuntimeInstall: vi.fn().mockResolvedValue(agentInstallPlan),
+    applyAgentRuntimeInstall: vi.fn().mockResolvedValue(agentInstallApplication),
+    planAgentRuntimeUpdate: vi.fn().mockResolvedValue(agentUpdatePlan),
+    applyAgentRuntimeUpdate: vi.fn().mockResolvedValue(agentUpdateApplication),
+    repairAgentRuntime: vi.fn().mockResolvedValue(agentUpdateApplication),
+    readAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
+    saveAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
+    previewAgentRuntimeMigration: vi.fn().mockResolvedValue(agentMigration),
+    applyAgentRuntimeMigration: vi.fn().mockResolvedValue(agentPolicy),
     migrate: vi.fn().mockResolvedValue(project),
     inspectIntegrations: vi.fn().mockResolvedValue(snapshot),
     installHeartbeatJobs: vi.fn().mockResolvedValue(snapshot),

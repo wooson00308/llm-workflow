@@ -1245,3 +1245,81 @@ describe("WorkspaceShell 막힌 작업 재개 배선", () => {
     ]);
   });
 });
+
+describe("WorkspaceShell 에이전트 진입점", () => {
+  const agentState = {
+    inspection: null,
+    policy: null,
+    reading: false,
+    readError: null,
+    planning: null,
+    plan: null,
+    planError: null,
+    applying: false,
+    application: null,
+    applyError: null,
+    migration: null,
+    migrationBusy: false,
+    migrationError: null,
+    saving: false,
+    saveError: null,
+  };
+
+  const agentActions = {
+    refresh: vi.fn().mockResolvedValue(undefined),
+    plan: vi.fn().mockResolvedValue(undefined),
+    cancelPlan: vi.fn(),
+    apply: vi.fn().mockResolvedValue(true),
+    previewMigration: vi.fn().mockResolvedValue(undefined),
+    applyMigration: vi.fn().mockResolvedValue(true),
+    dismissMigration: vi.fn(),
+    save: vi.fn().mockResolvedValue(true),
+  };
+
+  function renderShell(extra: Record<string, unknown>) {
+    return render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={project}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+        {...extra}
+      />,
+    );
+  }
+
+  it("작업 공간이 통로를 넘기면 메뉴에서 에이전트 화면을 연다", () => {
+    renderShell({ agentRuntime: agentState, agentRuntimeActions: agentActions });
+
+    fireEvent.click(screen.getByRole("button", { name: "에이전트" }));
+
+    expect(screen.getByRole("heading", { level: 1, name: "에이전트" })).toBeInTheDocument();
+    // 화면을 여는 것만으로는 어떤 조작도 시작되지 않는다.
+    expect(agentActions.refresh).not.toHaveBeenCalled();
+    expect(agentActions.plan).not.toHaveBeenCalled();
+    expect(agentActions.save).not.toHaveBeenCalled();
+  });
+
+  // 배선이 없으면 자리를 만들지 않는다. 빈 화면을 여는 진입점을 사용자에게 내밀지 않는다.
+  it("통로가 없으면 진입점을 세우지 않는다", () => {
+    renderShell({});
+
+    expect(screen.queryByRole("button", { name: "에이전트" })).not.toBeInTheDocument();
+  });
+});
