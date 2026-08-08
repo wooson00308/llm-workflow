@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FOLLOW_UP_LABEL } from "../domain/specDecisionLabels";
 import type {
@@ -67,6 +68,48 @@ function taskReader(item: WorkflowItemSummary = tasks[1]) {
     summary: item,
     body: `# ${item.title}\n\n## 작업 범위\n\n${item.excerpt}`,
   });
+}
+
+function structuredTaskBody({ includeRisk = true, incomplete = false } = {}) {
+  return [
+    `# ${tasks[1].title}`,
+    "",
+    "## 결정권자 요약",
+    "",
+    "### 제안",
+    "",
+    "작업 QA 화면에 결정 보드를 둔다.",
+    "",
+    "### 현재",
+    "",
+    "완료 결과와 영향 범위를 한눈에 비교하기 어렵다.",
+    "",
+    "### 변경 후",
+    "",
+    "확인 결과와 유지 영역을 나눠 읽는다.",
+    "",
+    "### 사용자 결과",
+    "",
+    "QA 도장을 찍기 전에 결과를 빠르게 확인한다.",
+    "",
+    "### 영향 범위",
+    "",
+    "- 변경: 단건 작업 QA의 기본 요약 화면",
+    ...(incomplete ? [] : ["- 유지: QA 기록 인자와 원문 Markdown"]),
+    ...(includeRisk ? ["", "### 비용과 위험", "", "반려하면 작업이 개발 준비로 돌아간다."] : []),
+    "",
+    "### 결정 요청",
+    "",
+    "단건 QA 결과가 기대와 같은지 확인한다.",
+    "",
+    "## 확인 동선",
+    "",
+    "작업 카드를 열고 결정 보드와 QA 도장을 확인한다.",
+    "",
+    "## 작업 범위",
+    "",
+    "원문 마지막에서 검증 범위를 다시 설명한다.",
+  ].join("\n");
 }
 
 function dependencyReader(
@@ -902,6 +945,105 @@ describe("DevelopmentBoard", () => {
     fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
     expect(screen.getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
     expect(screen.getByText("이 작업이 끝나면 평문이 먼저 열립니다.")).toBeInTheDocument();
+  });
+
+  it("keeps a structured task board, walkthrough, and QA callback in one keyboard flow", async () => {
+    const user = userEvent.setup();
+    const onReadTask = vi.fn().mockResolvedValue({ summary: tasks[1], body: structuredTaskBody() });
+    const onTaskQa = vi.fn().mockResolvedValue(true);
+    const onTaskQaBatch = vi.fn();
+    const { container } = render(
+      <DevelopmentBoard
+        busy={false}
+        onReadTask={onReadTask}
+        onTaskQa={onTaskQa}
+        onTaskQaBatch={onTaskQaBatch}
+        workflow={workflowWith()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    const board = await screen.findByRole("region", { name: "결정 보드" });
+    expect(within(board).getAllByRole("heading").map((heading) => heading.textContent)).toEqual([
+      "결정 보드", "제안", "현재", "변경 후", "사용자 결과", "영향 범위", "비용과 위험", "결정 요청",
+    ]);
+    expect(within(board).getByText("단건 QA 결과가 기대와 같은지 확인한다.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "개발 준비로 되돌리기" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "확인 완료" })).toBeInTheDocument();
+    expect(screen.getAllByText("작업 카드를 열고 결정 보드와 QA 도장을 확인한다.")).toHaveLength(1);
+    expect(onReadTask).toHaveBeenCalledTimes(1);
+    expect(onTaskQa).not.toHaveBeenCalled();
+    expect(onTaskQaBatch).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: "← 개발 작업으로" }).focus();
+    await user.tab();
+    const sourceToggle = screen.getByRole("button", { name: "원문 전문 보기" });
+    expect(sourceToggle).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: "결정권자 요약" })).toBeInTheDocument();
+    expect(within(documentOf(container)).getByText("원문 마지막에서 검증 범위를 다시 설명한다.")).toBeInTheDocument();
+    expect(screen.getAllByText("작업 카드를 열고 결정 보드와 QA 도장을 확인한다.")).toHaveLength(2);
+
+    await user.tab();
+    expect(screen.getByRole("separator", { name: "QA 패널 너비 조절" })).toHaveFocus();
+    await user.tab();
+    const memo = screen.getByLabelText("테스트 플로우와 확인 메모");
+    expect(memo).toHaveFocus();
+    await user.type(memo, "보드와 원문을 키보드로 확인함");
+    await user.tab();
+    expect(screen.getByRole("button", { name: "개발 준비로 되돌리기" })).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "확인 완료" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(onTaskQa).toHaveBeenCalledWith("TASK-002.md", "confirmed", "보드와 원문을 키보드로 확인함"),
+    );
+  });
+
+  it("falls back for an incomplete task and keeps inactive QA read-only on a riskless board", async () => {
+    const onTaskQa = vi.fn();
+    const incompleteReader = vi.fn().mockResolvedValue({
+      summary: tasks[1],
+      body: structuredTaskBody({ incomplete: true }),
+    });
+    const view = render(
+      <DevelopmentBoard
+        busy={false}
+        onReadTask={incompleteReader}
+        onTaskQa={onTaskQa}
+        onTaskQaBatch={vi.fn()}
+        workflow={workflowWith()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /사용자 QA/ }));
+    await screen.findByLabelText("테스트 플로우와 확인 메모");
+    expect(screen.queryByRole("region", { name: "결정 보드" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "제안" })).toBeInTheDocument();
+    expect(screen.queryByText(/빠진|오류|보완/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "확인 완료" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "← 개발 작업으로" }));
+    const inactiveReader = vi.fn().mockResolvedValue({
+      summary: tasks[0],
+      body: structuredTaskBody({ includeRisk: false }),
+    });
+    view.rerender(
+      <DevelopmentBoard
+        busy={false}
+        onReadTask={inactiveReader}
+        onTaskQa={onTaskQa}
+        onTaskQaBatch={vi.fn()}
+        workflow={workflowWith()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+    await screen.findByText("QA 대기 상태가 되면 확인 도구가 활성화됩니다.");
+    expect(screen.getByRole("region", { name: "결정 보드" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "비용과 위험" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("테스트 플로우와 확인 메모")).not.toBeInTheDocument();
+    expect(onTaskQa).not.toHaveBeenCalled();
   });
 
   it("starts at the summary again after the detail is closed and opened", async () => {
