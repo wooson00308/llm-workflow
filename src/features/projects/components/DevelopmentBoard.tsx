@@ -10,9 +10,10 @@ import type {
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
-import { splitSection } from "../domain/documentSections";
+import { parseBlockedReason, splitSection } from "../domain/documentSections";
 import { UNASSIGNED_LANE_KEY, browserSpecLaneCollapseStore } from "../infrastructure/browserSpecLaneCollapseStore";
-import { DocumentReader } from "./DocumentReader";
+import { BlockedTaskPanel } from "./BlockedTaskPanel";
+import { DECISION_SUMMARY_HEADING, DocumentReader } from "./DocumentReader";
 import { MarkdownBody } from "./MarkdownBody";
 
 /** 다섯 상태의 순서와 열 구성. 기획서 화면의 파생 작업 배지가 같은 목록으로 센다(SPEC-039 R5). */
@@ -146,11 +147,16 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
         busy={busy}
         document={taskDocument}
         onBack={() => setTaskDocument(null)}
+        onOpenRelatedTask={async (item) => {
+          const relatedDocument = await onReadTask(item.fileName);
+          if (relatedDocument) setTaskDocument(relatedDocument);
+        }}
         onTaskQa={async (outcome, comment) => {
           const succeeded = await onTaskQa(taskDocument.summary.fileName, outcome, comment);
           if (succeeded) setTaskDocument(null);
           return succeeded;
         }}
+        tasks={workflow.items.tasks}
         taskTitles={taskTitles}
       />
     );
@@ -291,13 +297,17 @@ function TaskDetail({
   busy,
   document,
   onBack,
+  onOpenRelatedTask,
   onTaskQa,
+  tasks,
   taskTitles,
 }: {
   busy: boolean;
   document: TaskDocument;
   onBack(): void;
+  onOpenRelatedTask(task: WorkflowItemSummary): Promise<void>;
   onTaskQa(outcome: TaskQaOutcome, comment: string): Promise<boolean>;
+  tasks: WorkflowItemSummary[];
   /** 작업 id → 제목. 선행을 제목으로 부르는 자리에서만 쓴다. */
   taskTitles: Map<string, string>;
 }) {
@@ -306,7 +316,18 @@ function TaskDetail({
   const [resizing, setResizing] = useState(false);
   const confirmQa = useArmedConfirm();
   const revisionQa = useArmedConfirm();
+  const blocked = document.summary.status === "blocked";
   const awaitingQa = document.summary.status === "qa_waiting";
+  const blockedReason = useMemo(
+    () => (blocked ? parseBlockedReason(document.body) : null),
+    [blocked, document.body],
+  );
+  const blockedSummary = useMemo(
+    () => (blocked && blockedReason === null
+      ? splitSection(document.body, DECISION_SUMMARY_HEADING).section
+      : null),
+    [blocked, blockedReason, document.body],
+  );
   // 개발자가 적어 둔 확인 동선을 도장 옆으로 가져온다(SPEC-039 R7). 이미 읽어 온 본문 위에서 자르고
   // 문서를 다시 읽지 않는다. 확인 도구가 활성화된 `qa_waiting`에서만 찾는다 — 도장이 없는 자리에
   // 확인 동선만 띄우지 않는다. 절이 없으면 `null`이고, 그때 이 자리는 지금 모습 그대로다.
@@ -403,9 +424,17 @@ function TaskDetail({
             tabIndex={0}
             title="드래그로 너비 조절 · 더블클릭으로 초기화"
           />
-          <p className="eyebrow">USER QA</p>
-          <h2>{awaitingQa ? "직접 확인해 주세요" : "현재 작업 상태"}</h2>
-          {awaitingQa ? (
+          <p className="eyebrow">{blocked ? "BLOCKED TASK" : "USER QA"}</p>
+          <h2>{blocked ? "진행이 막혔습니다" : awaitingQa ? "직접 확인해 주세요" : "현재 작업 상태"}</h2>
+          {blocked ? (
+            <BlockedTaskPanel
+              decisionSummary={blockedSummary}
+              onOpenRelatedTask={onOpenRelatedTask}
+              reason={blockedReason}
+              tasks={tasks}
+              updatedAt={document.summary.updatedAt}
+            />
+          ) : awaitingQa ? (
             <>
               <p>테스트한 순서와 결과를 남기면 완료 기록 또는 개발자 재작업 지시로 전달됩니다.</p>
               {/* 문서가 쓴 문장을 그대로 옮긴다. 앱이 이 절의 문장을 조립하지 않는다(SPEC-039 R4). */}

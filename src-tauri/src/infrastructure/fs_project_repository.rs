@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::domain::project::{
     AgentLease, AgentLeaseSummary, CustomRulesDocument, CustomRulesDraft, CustomRulesPreview,
-    IdeaDocument, ManagedAssetSyncResult, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
+    IdeaDocument, ManagedAssetState, ManagedAssetStatus, ManagedAssetSyncResult,
+    ManagedAssetSyncStatus, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
     ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult, SchemaCompatibility,
     SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState, TaskDocument,
     TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
@@ -25,6 +26,10 @@ use crate::infrastructure::managed_project_assets::{
     validate_managed_project_assets, ManagedProjectAssetsError,
 };
 use crate::infrastructure::project_write_lock::{ProjectWriteLock, ProjectWriteLockError};
+use crate::infrastructure::reservation_helper::{
+    install_reservation_helper, plan_reservation_helper, validate_reservation_helper,
+    RESERVATION_HELPER_VERSION,
+};
 use crate::infrastructure::role_eligibility::{pending_role_work, WorkflowInput};
 
 const CONTROL_DIRECTORY: &str = ".workflow";
@@ -136,7 +141,7 @@ impl FileSystemProjectRepository {
         validate_workflow_name(workflow_name)?;
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
-        validate_managed_project_assets(&root, &control_root)?;
+        validate_all_managed_project_assets(&root, &control_root)?;
         ensure_managed_control_root(&control_root)?;
 
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -161,7 +166,7 @@ impl FileSystemProjectRepository {
             }
         };
 
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
 
         let id = format!("wf_{}", &compact_uuid()[..8]);
         let directory = format!("{}--{}", slugify(workflow_name), id);
@@ -270,7 +275,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&manifest_path)?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        Ok(synchronize_managed_project_assets(&root, &control_root)?)
+        synchronize_all_managed_project_assets(&root, &control_root)
     }
 
     pub fn read_custom_rules(&self, root: &Path) -> Result<CustomRulesDocument, ProjectError> {
@@ -382,7 +387,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
         let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
@@ -433,7 +438,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         record_one_task_qa(&workflow_root, file_name, &outcome, comment)?;
 
@@ -461,7 +466,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
 
         let results = file_names
@@ -592,6 +597,74 @@ fn current_project_control_root(root: &Path) -> Result<PathBuf, ProjectError> {
     validate_workflow_directories(&control_root, &project)?;
     require_current_schema(project.schema_version)?;
     Ok(control_root)
+}
+
+/// 기존 관리 자산과 예약 도구를 함께 검사한다. 예약 도구는 같은 공용 설치 규약을 쓰되, 현재 동기화
+/// 결과 타입을 바꾸지 않기 위해 이 경계에서 한 자산으로 합류한다.
+fn validate_all_managed_project_assets(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<(), ProjectError> {
+    validate_managed_project_assets(project_root, control_root)?;
+    validate_reservation_helper(control_root).map_err(reservation_asset_error)
+}
+
+/// 문서를 쓰는 기존 경로도 예약 도구를 빠뜨리지 않게 한 곳으로 모은다.
+fn install_all_managed_project_assets(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<(), ProjectError> {
+    // 예약 자산의 미래 버전·비관리 파일은 기존 자산을 바꾸기 전에 막는다.
+    validate_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    install_managed_project_assets(project_root, control_root)?;
+    install_reservation_helper(control_root).map_err(reservation_asset_error)
+}
+
+/// 설정 화면의 수동 동기화 결과에 예약 도구도 명시한다. 공용 동기화가 충돌 또는 재시도를 돌려주면
+/// 새 자산을 따로 쓰지 않아 부분 갱신을 만들지 않는다.
+fn synchronize_all_managed_project_assets(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<ManagedAssetSyncResult, ProjectError> {
+    let reservation = plan_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    let mut result = synchronize_managed_project_assets(project_root, control_root)?;
+    if !matches!(
+        result.status,
+        ManagedAssetSyncStatus::Current | ManagedAssetSyncStatus::Updated
+    ) {
+        return Ok(result);
+    }
+
+    let updated = reservation.replacement.is_some();
+    let installed_version = if updated {
+        Some(RESERVATION_HELPER_VERSION)
+    } else {
+        reservation.installed_version
+    };
+    install_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    result.assets.push(ManagedAssetState {
+        id: "reservation_helper".to_owned(),
+        label: "예약 헬퍼".to_owned(),
+        status: if updated {
+            ManagedAssetStatus::Updated
+        } else {
+            ManagedAssetStatus::Current
+        },
+        installed_version,
+        provided_version: Some(RESERVATION_HELPER_VERSION),
+        reason: None,
+    });
+    if updated {
+        result.status = ManagedAssetSyncStatus::Updated;
+        result.updated_assets.push("reservation_helper".to_owned());
+    }
+    Ok(result)
+}
+
+fn reservation_asset_error(
+    error: crate::infrastructure::managed_script::ManagedScriptError,
+) -> ProjectError {
+    ProjectError::ManagedProjectAssets(ManagedProjectAssetsError::Conflict(error.to_string()))
 }
 
 fn ensure_managed_control_root(control_root: &Path) -> Result<(), ProjectError> {
@@ -2238,6 +2311,7 @@ mod tests {
     use crate::infrastructure::heartbeat_condition::install_condition_script;
     use crate::infrastructure::heartbeat_condition::test_support::run_condition;
     use crate::infrastructure::project_write_lock::ProjectWriteLock;
+    use crate::infrastructure::reservation_helper::reservation_helper_path;
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -2299,7 +2373,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&rules, &old).expect("old rules");
         let modified = fs::metadata(&rules)
             .and_then(|metadata| metadata.modified())
@@ -2327,7 +2401,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&rules, old).expect("old rules");
 
         let result = repository
@@ -2338,7 +2412,7 @@ mod tests {
         assert!(result.updated_assets.contains(&"workflow_rules".to_owned()));
         assert!(fs::read_to_string(rules)
             .expect("updated rules")
-            .contains("rules_version: 14"));
+            .contains("rules_version: 15"));
     }
 
     #[test]
@@ -2411,7 +2485,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&rules, old_rules).expect("old managed rules");
 
         repository.inspect(root.path()).expect("inspect project");
@@ -3622,7 +3696,7 @@ mod tests {
         let architect = root.path().join(".workflow/rules/roles/architect.md");
         let old_architect = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 9", "rules_version: 8");
+            .replace("rules_version: 11", "rules_version: 10");
         fs::write(&architect, old_architect).expect("old architect");
 
         let confirmed = repository
@@ -3646,7 +3720,7 @@ mod tests {
         );
         assert!(fs::read_to_string(architect)
             .expect("architect updated on QA")
-            .contains("rules_version: 9"));
+            .contains("rules_version: 10"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
@@ -4224,7 +4298,7 @@ mod tests {
         assert!(result.results.iter().all(|entry| entry.recorded));
         assert!(fs::read_to_string(developer)
             .expect("developer updated on batch QA")
-            .contains("rules_version: 10"));
+            .contains("rules_version: 11"));
         assert_eq!(
             result
                 .results
@@ -4705,7 +4779,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&rules, old_rules).expect("old rules");
 
         let decided = repository
@@ -4722,7 +4796,7 @@ mod tests {
         assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
         assert!(fs::read_to_string(rules)
             .expect("rules updated on decision")
-            .contains("rules_version: 14"));
+            .contains("rules_version: 15"));
         assert_eq!(
             fs::read_to_string(spec_path).expect("original spec"),
             source
@@ -5519,6 +5593,35 @@ mod tests {
             .expect("claim helper");
         assert!(helper.contains("# managed_by: workflow-labs"));
         assert!(helper.contains("# claim_helper_version: 1"));
+        let reservation =
+            fs::read_to_string(reservation_helper_path(&root.path().join(".workflow")))
+                .expect("reservation helper");
+        assert!(reservation.contains("# managed_by: workflow-labs"));
+        assert!(reservation.contains("# reservation_helper_version: 1"));
+    }
+
+    #[test]
+    fn sync_refuses_to_overwrite_a_future_reservation_helper() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let helper = reservation_helper_path(&root.path().join(".workflow"));
+        let future = fs::read_to_string(&helper)
+            .expect("reservation helper")
+            .replace(
+                "# reservation_helper_version: 1",
+                "# reservation_helper_version: 999",
+            );
+        fs::write(&helper, &future).expect("future reservation helper");
+
+        let error = repository
+            .synchronize_managed_assets(root.path())
+            .expect_err("future reservation helper must stay untouched");
+
+        assert!(matches!(error, ProjectError::ManagedProjectAssets(_)));
+        assert_eq!(fs::read_to_string(helper).expect("future helper"), future);
     }
 
     #[test]

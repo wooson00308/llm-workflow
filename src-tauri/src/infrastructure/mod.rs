@@ -15,4 +15,5 @@ pub mod managed_project_assets;
 pub mod managed_script;
 pub mod project_instructions;
 pub mod project_write_lock;
+pub mod reservation_helper;
 pub mod role_eligibility;

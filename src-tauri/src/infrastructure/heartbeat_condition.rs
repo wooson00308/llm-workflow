@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 12;
+const CONDITION_SCRIPT_VERSION: u32 = 13;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,13 +26,17 @@ const CONDITION_SCRIPT_VERSION: u32 = 12;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 12
+# condition_script_version: 13
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
-# 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer  (프로젝트 루트에서 실행)
+# 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
 set -u
 
 role="${1:-}"
+machine_output=0
+[ "${2:-}" = "--json" ] && machine_output=1
+machine_target=""
+machine_candidates=""
 leases=".workflow/.runtime/leases"
 # 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
 # 개행이 목록의 경계가 된다.
@@ -45,7 +49,44 @@ nl='
 # 표준 출력에 쓰는 것은 이 함수뿐이다. deps_of의 목록 출력은 언제나 명령 치환이 받아 가므로
 # 이 줄과 섞이지 않는다 — 그래서 사유가 표준 출력의 첫 줄이자 유일한 줄이 된다.
 # 사유는 판정을 바꾸지 않는다. 종료 코드는 이 함수를 쓰기 전과 같다.
+json_quote() {
+  # 기계 출력은 문서에서 읽은 값을 담으므로 한 줄 JSON의 인용을 여기서 보장한다. 문서의 한 줄 값에는
+  # 개행이 없고, 탭·따옴표·역슬래시만 이스케이프하면 이 계약의 문자열 자리가 유효하다.
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+machine_result() { # $1=사유 코드
+  machine_reason=$1
+  if [ -n "$machine_target" ]; then machine_reason=eligible; fi
+  printf '{"schemaVersion":1,"role":"%s","targetId":' "$(json_quote "$role")"
+  if [ -n "$machine_target" ]; then
+    printf '"%s"' "$(json_quote "$machine_target")"
+  else
+    printf 'null'
+  fi
+  printf ',"candidates":['
+  machine_first=1
+  while IFS='	' read -r machine_code machine_id; do
+    [ -n "$machine_code" ] || continue
+    [ "$machine_first" -eq 1 ] || printf ','
+    machine_first=0
+    printf '{"id":"%s","reason":"%s"}' \
+      "$(json_quote "$machine_id")" "$(json_quote "$machine_code")"
+  done <<MACHINE_CANDIDATES
+$machine_candidates
+MACHINE_CANDIDATES
+  printf '],"verdict":"%s"}\n' "$(json_quote "$machine_reason")"
+}
+
 verdict() { # $1=사유 코드 $2=종료 코드
+  if [ "$machine_output" -eq 1 ]; then
+    if [ -n "$machine_target" ]; then
+      machine_result eligible
+      exit 0
+    fi
+    machine_result "$1"
+    exit "$2"
+  fi
   printf '%s\n' "$1"
   exit "$2"
 }
@@ -55,13 +96,23 @@ verdict() { # $1=사유 코드 $2=종료 코드
 # 코드를 앞에 두는 것은 뒤가 id이기 때문이다 — 값에 공백이 들어와도 줄의 뜻이 갈라지지 않는다.
 # 이 두 함수는 판정을 바꾸지 않는다. 종료 코드도 후보를 고르는 차례도 그대로다.
 note_candidate() { # $1=제외 사유 코드 $2=후보 id
+  if [ "$machine_output" -eq 1 ]; then
+    machine_candidates="${machine_candidates}$1	$2$nl"
+    return
+  fi
   printf 'candidate: %s %s\n' "$1" "$2" >&2
 }
 
 # 대상으로 고른 후보. 후보 줄과 대상 줄을 함께 내어, 목록만 읽어도 대상이 어디서 나왔는지 보인다.
 note_target() { # $1=대상 id
+  if [ "$machine_output" -eq 1 ]; then
+    note_candidate eligible "$1"
+    [ -n "$machine_target" ] || machine_target=$1
+    return
+  fi
   printf 'candidate: eligible %s\n' "$1" >&2
   printf 'target: %s\n' "$1" >&2
+  verdict eligible 0
 }
 
 [ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
@@ -470,7 +521,6 @@ planner)
         case "$nondraft_refs" in *"source_idea_id:$id"*) note_candidate spec-exists "$id"; continue ;; esac
         lease_blocks "$id" && { note_candidate leased "$id"; continue; }
         note_target "$id"
-        verdict eligible 0
       done <<IDEAS
 $ideas
 IDEAS
@@ -489,7 +539,6 @@ IDEAS
       case "$nondraft_refs" in *"source_decision_id:$did"*) note_candidate follow-up-exists "$did"; continue ;; esac
       lease_blocks "$did" && { note_candidate leased "$did"; continue; }
       note_target "$did"
-      verdict eligible 0
     done <<REVISIONS
 $revisions
 REVISIONS
@@ -508,7 +557,6 @@ architect)
       case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
       note_target "$did"
-      verdict eligible 0
     done <<APPROVALS
 $approvals
 APPROVALS
@@ -605,7 +653,6 @@ SCAN
       [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
       note_target "$tid"
-      verdict eligible 0
     done <<ROWS
 $rows
 ROWS
@@ -634,18 +681,21 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 12
+# condition_script_version: 13
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
-# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role>
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
 # Run from the project root. This is the Windows twin of wf-eligible.sh and must reach the same
 # verdict for every input. ASCII only: the installer writes UTF-8 without a BOM.
-param([string]$Role = '')
+param([string]$Role = '', [string]$Output = '')
 
 $ErrorActionPreference = 'Stop'
 
 $leases = '.workflow/.runtime/leases'
 $lineCache = @{}
+$script:machineOutput = $Output -ceq '--json'
+$script:machineTarget = $null
+$script:machineCandidates = @()
 
 # Reads a file as lines. An unreadable file reads as empty, which is what "grep -s" does.
 function Get-Lines([string]$Path) {
@@ -946,6 +996,17 @@ function Get-DecisionCandidates([string]$Root, [string]$Want, [bool]$Strict) {
 # This function is the only writer to stdout, so the reason is the first and only line.
 # The reason does not change the verdict. Exit codes are what they were before it existed.
 function Write-Verdict([string]$Code, [int]$ExitCode) {
+  if ($script:machineOutput) {
+    if ($null -ne $script:machineTarget) { $Code = 'eligible'; $ExitCode = 0 }
+    [ordered]@{
+      schemaVersion = 1
+      role = $Role
+      targetId = $script:machineTarget
+      candidates = @($script:machineCandidates)
+      verdict = $Code
+    } | ConvertTo-Json -Compress -Depth 4
+    exit $ExitCode
+  }
   [Console]::Out.WriteLine($Code)
   exit $ExitCode
 }
@@ -956,14 +1017,24 @@ function Write-Verdict([string]$Code, [int]$ExitCode) {
 # space in it cannot split the line's meaning. Neither function changes the verdict, the exit code,
 # or the order candidates are judged in.
 function Write-Candidate([string]$Code, [string]$Id) {
+  if ($script:machineOutput) {
+    $script:machineCandidates += [ordered]@{ id = $Id; reason = $Code }
+    return
+  }
   [Console]::Error.WriteLine('candidate: ' + $Code + ' ' + $Id)
 }
 
 # The candidate picked as the target. Both lines are written so the list alone shows where the
 # target came from.
 function Write-Target([string]$Id) {
+  if ($script:machineOutput) {
+    Write-Candidate 'eligible' $Id
+    if ($null -eq $script:machineTarget) { $script:machineTarget = $Id }
+    return
+  }
   [Console]::Error.WriteLine('candidate: eligible ' + $Id)
   [Console]::Error.WriteLine('target: ' + $Id)
+  Write-Verdict 'eligible' 0
 }
 
 if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
@@ -984,7 +1055,6 @@ switch -CaseSensitive ($Role) {
           [System.StringComparison]::Ordinal) -ge 0) { Write-Candidate 'spec-exists' $id; continue }
         if (Test-Leased $id) { Write-Candidate 'leased' $id; continue }
         Write-Target $id
-        Write-Verdict 'eligible' 0
       }
       # (b) A revision request with no follow-up spec. This runs even with no ideas directory.
       # The schema line and a non-empty spec_id screen out QA decisions, which also use
@@ -1001,7 +1071,6 @@ switch -CaseSensitive ($Role) {
         }
         if (Test-Leased $row.Id) { Write-Candidate 'leased' $row.Id; continue }
         Write-Target $row.Id
-        Write-Verdict 'eligible' 0
       }
     }
   }
@@ -1018,7 +1087,6 @@ switch -CaseSensitive ($Role) {
           continue
         }
         Write-Target $row.Id
-        Write-Verdict 'eligible' 0
       }
     }
   }
@@ -1049,7 +1117,6 @@ switch -CaseSensitive ($Role) {
         if (-not $ok) { Write-Candidate 'dependencies-unsatisfied' $tid; continue }
         if (Test-Overlapped $root $tid $lines) { Write-Candidate 'overlap' $tid; continue }
         Write-Target $tid
-        Write-Verdict 'eligible' 0
       }
     }
   }
@@ -1161,6 +1228,15 @@ pub(crate) mod test_support {
     /// 표준 출력을 잡아 오므로 `status`가 아니라 `output`을 쓴다. 사유가 판정과 함께 와야 두 값이
     /// 어긋나는 경우를 표가 잡는다.
     pub(crate) fn run_condition(project_root: &Path, role: &str) -> ConditionRun {
+        run_condition_with_arguments(project_root, &[role])
+    }
+
+    /// 기존 판정의 표준 출력·종료 코드와 분리된, 런타임용 버전화 JSON 모드를 실행한다.
+    pub(crate) fn run_machine_condition(project_root: &Path, role: &str) -> ConditionRun {
+        run_condition_with_arguments(project_root, &[role, "--json"])
+    }
+
+    fn run_condition_with_arguments(project_root: &Path, arguments: &[&str]) -> ConditionRun {
         let script = CONDITION_SCRIPT.relative_path();
         let mut command = if cfg!(windows) {
             let mut powershell = Command::new("powershell");
@@ -1173,7 +1249,7 @@ pub(crate) mod test_support {
             shell
         };
         let output = command
-            .arg(role)
+            .args(arguments)
             .current_dir(project_root)
             .output()
             .expect("run condition script");
@@ -1192,7 +1268,7 @@ mod tests {
 
     use tempfile::{tempdir, TempDir};
 
-    use super::test_support::run_condition;
+    use super::test_support::{run_condition, run_machine_condition};
     use super::{
         condition_script_path, install_condition_script, validate_condition_script,
         ConditionScriptError, CONDITION_SCRIPT, CONDITION_SCRIPT_PS1, CONDITION_SCRIPT_SH,
@@ -1216,7 +1292,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 12"));
+        assert!(script.contains("# condition_script_version: 13"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -1230,8 +1306,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 13",
             "# condition_script_version: 12",
-            "# condition_script_version: 11",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -1494,7 +1570,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 12보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 13보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -3143,6 +3219,93 @@ mod tests {
                 "{}: 후보 목록",
                 scenario.name
             );
+        }
+    }
+
+    /// 기계 출력은 표준 호출의 이유 한 줄을 바꾸지 않으면서도 역할별 대상과 후보 전부를 한 JSON
+    /// 문서로 낸다. 기존 넓어진 표는 세 역할과 대상 없음까지 이미 덮고 있어, 같은 표를 여기서
+    /// 다시 읽으면 두 출력 경로의 판단이 갈라지는 경우를 잡는다.
+    #[test]
+    fn machine_output_is_versioned_json_for_every_role_verdict() {
+        for scenario in WIDENED_SCENARIOS {
+            let (root, control) = project();
+            install_condition_script(&control).expect("install condition script");
+            (scenario.build)(&control);
+
+            let run = run_machine_condition(root.path(), scenario.role);
+            let value: serde_json::Value =
+                serde_json::from_str(run.stdout.trim()).expect("machine JSON");
+            let candidates = value["candidates"]
+                .as_array()
+                .expect("candidate array")
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{} {}",
+                        candidate["reason"].as_str().expect("reason"),
+                        candidate["id"].as_str().expect("id")
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(run.code, scenario.expected, "{}: 종료 코드", scenario.name);
+            assert!(
+                run.stderr.is_empty(),
+                "{}: JSON 모드는 stderr를 비워야 한다",
+                scenario.name
+            );
+            assert_eq!(value["schemaVersion"], 1, "{}: 계약 버전", scenario.name);
+            assert_eq!(value["role"], scenario.role, "{}: 역할", scenario.name);
+            assert_eq!(
+                value["targetId"].as_str(),
+                scenario.target,
+                "{}: 대상",
+                scenario.name
+            );
+            assert_eq!(candidates, scenario.candidates, "{}: 후보", scenario.name);
+            assert_eq!(value["verdict"], scenario.reason, "{}: 판정", scenario.name);
+        }
+    }
+
+    #[test]
+    fn machine_output_keeps_candidates_after_the_first_target() {
+        let (root, control) = project();
+        install_condition_script(&control).expect("install condition script");
+        write_task_document(
+            &control,
+            "TASK-001",
+            "todo",
+            Some("scope_files: [src/one.rs]"),
+        );
+        write_task_document(
+            &control,
+            "TASK-002",
+            "todo",
+            Some("scope_files: [src/two.rs]"),
+        );
+
+        let run = run_machine_condition(root.path(), "developer");
+        let value: serde_json::Value =
+            serde_json::from_str(run.stdout.trim()).expect("machine JSON");
+        let candidates = value["candidates"].as_array().expect("candidate array");
+
+        assert_eq!(run.code, 0);
+        assert_eq!(value["targetId"], "TASK-001");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0]["id"], "TASK-001");
+        assert_eq!(candidates[1]["id"], "TASK-002");
+        assert_eq!(candidates[0]["reason"], "eligible");
+        assert_eq!(candidates[1]["reason"], "eligible");
+    }
+
+    #[test]
+    fn both_script_bodies_declare_the_same_machine_output_contract() {
+        for body in [CONDITION_SCRIPT_SH, CONDITION_SCRIPT_PS1] {
+            assert!(body.contains("--json"));
+            assert!(body.contains("schemaVersion"));
+            assert!(body.contains("targetId"));
+            assert!(body.contains("candidates"));
+            assert!(body.contains("eligible"));
         }
     }
 
