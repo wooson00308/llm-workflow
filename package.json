@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run test && npm run build",
+    "agent-runtime:verify": "node scripts/verify-agent-runtime-contract.mjs",
     "release:config": "node scripts/prepare-release-config.mjs",
     "release:verify": "node scripts/verify-release-version.mjs",
     "preview": "vite preview",

@@ -92,6 +92,13 @@ jobs:
           manifest = resource / "runtime-manifest.json"
           if not manifest.is_file():
               raise SystemExit("런타임 manifest가 배포물에 없습니다")
+          # Python zipfile은 Unix 실행 비트를 복원하지 않는다. manifest는 바이트 해시를
+          # 검증하므로 실행 비트만 복원한 뒤 실제 contract 응답을 확인한다.
+          runtime = resource / ("heartbeat.exe" if sys.platform == "win32" else "heartbeat")
+          if not runtime.is_file():
+              raise SystemExit(f"런타임 실행 파일이 없습니다: {runtime}")
+          if sys.platform != "win32":
+              runtime.chmod(runtime.stat().st_mode | 0o755)
           STAGE
           # 번들 설정은 저장소에 두지 않고 여기서 붙인다. 자산이 없는 개발 빌드에서 Tauri가
           # 자원 경로를 찾지 못해 빌드가 깨지는 것을 막는다.
@@ -119,6 +126,13 @@ jobs:
           versions = {path.name for path in Path("src-tauri/runtime").iterdir()}
           print(f"staged runtime {manifest['runtimeVersion']} for {manifest['target']}: {sorted(versions)}")
           CHECK
+      # 실제 배포물의 모든 해시와 target을 다시 읽고, 그 실행 파일의 contract 응답을 앱 지원 범위와
+      # 대조한다. 이 단계가 bundle보다 앞이므로 실패한 조합은 앱 산출물을 만들지 않는다.
+      - name: Verify the staged runtime contract
+        run: >-
+          npm run agent-runtime:verify --
+          --runtime-root src-tauri/runtime
+          --expected-target ${{ matrix.runtime-target }}
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
