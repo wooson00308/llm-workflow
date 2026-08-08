@@ -1,56 +1,61 @@
 # 판 상태 핸드오프 (TL 스냅샷)
 
 > 다음 세션(코덱스 포함) 팔로업용 정본. 개발 로그 전체를 읽기 전에 이 파일을 먼저 본다.
-> 갱신: 2026-08-08T10:50Z (블로킹 해소 TL 세션 마감, Claude 주간 한도로 코덱스 인계). 매 TL 세션 마감 시 덮어쓴다.
+> 갱신: 2026-08-08T12:53Z (코덱스 TL 세션 배터리 마감). 매 TL 세션 마감 시 덮어쓴다.
 
-## 오늘의 통치 변경 (코덱스 필독)
+## 이번 세션의 핵심 결과
 
-1. 사용자 선언(2026-08-08 채팅): 사용자의 필수 관문은 QA 확인 하나뿐이다. 막힘(blocked) 레인은 에이전트가 운영하고, 사용자에게는 가시성만 제공한다. 막힌 카드에 사용자 조작을 요구하지 마라.
-2. 이를 위한 규칙 직접 수정(사용자 지시, 파이프라인 밖) 완료·설치 확인됨(커밋 3e4d76e): 공통 규칙 20, 아키텍트 13. 내용 — 아키텍트는 사용자 수정 요청 기록이 없어도 막힌 작업의 기록된 사유(막힌 사유 절 + 개발 보고서)를 근거로 정의를 수정할 수 있고, 수정 후 작업을 todo로 되돌린다(resumed 이력은 앱 소유 경로 전용이라 쓰지 않음). cargo 688 그린, 설치본 v20/13 실측 확인.
-3. 사용자 보고 언어: 결정권자 언어만. 도구 이름·버전·파일 경로를 사용자 채팅에 쓰지 마라. 선택지는 한 줄씩, 답은 한 단어로 가능하게.
+1. 반복된 범위 누락을 구조적으로 막았다. 아키텍트 규칙 v14는 새 값마다 `원천·생성/저장 → 도메인·전달 → 상태·최상위 조립 → 최종 소비`를 실제 코드로 역추적하고, 작업의 `## 범위 사전 검사`에 `- 값 경로:` 줄을 남기게 한다. 수정 hop 하나라도 `scope_files` 밖이면 task를 todo로 넘길 수 없다. 결과 모델, 목록 payload·사건 생성기, callback·최상위 조립을 명시적으로 검사한다. 커밋 e15edac.
+2. v14 실전 감사로 TASK-S055-04의 세 번째 누락(`src/App.tsx`)을 잡고, 완료 조건 1~14를 11개 값 경로로 닫았다. `src/App.tsx`를 추가하고 이미 pass-through인 `ActivityView.tsx`는 과대 범위라 제거했다. TASK-S055-04는 todo이며 다음 개발 대상이다. 감사 기록은 REPORT-TASK-S055-04-ARCH-3.
+3. TASK-S055-03 구현 완료·qa_waiting. 미처리 작업 정의 수정 요청을 승인 분해보다 먼저 고르고 대상 종류를 함께 반환한다. Cargo 694, Clippy 0. 커밋 136cd9f.
+4. TASK-S051-10 구현 완료·qa_waiting. 에이전트 메뉴 배선, 실행 계획·큐·상태·pause/cancel/retry/log 화면을 구현했다. Vitest 146, npm 전체 903, Cargo 694. 커밋 b51ef2a.
+5. TASK-S052-03·04 완료·qa_waiting. 구조화 요약 결정 보드와 기획 승인/단건 QA 종단 회귀를 구현했다. 마지막 전체 프런트 검사 918/918, typecheck/build 통과. 커밋 8b4fbfe, a2ef814.
+6. TASK-S051-11은 구현을 보존한 채 blocked(implementation_failure). 새 릴리스 계약 검사는 앱 Rust E2E 17건, runtime Python E2E 4건, Node 계약/manifest 검증이 통과했다. 하지만 기존 quota 파서 검사 1건과 범위 밖 Rust 포맷 차이 때문에 전체 게이트가 빨갛다. workflow-labs 커밋 ba113d7, claude-heartbeat 커밋 b4fad0a.
 
-## 보드 (10:50Z 기준)
+## 사용자 결정 (이번 세션)
 
-- blocked 2: TASK-S055-03(판정 결과에 대상 종류 자리 없음 — domain/project.rs 범위 누락), TASK-S055-04(활동 화면 사건을 만드는 백엔드 층 범위 누락 — 완료 조건 9 분리 권고가 개발 보고서에 있음). 둘 다 v20 규칙 반영 후 아키텍트가 사유 기반으로 정의 수정 → todo 복귀 → 개발 재개.
-- in_progress: 없음. 세션 마감 시점 전 워커 완주.
-- qa_waiting 13: S051-03·04·05·06·07·08·09, 143, 147, S052-01, S055-01·02, S056-01. 전부 사용자 도장 대기 — 카드 미리보기가 확인 동선 첫 문단을 보여주므로 사용자는 그 문장 기준으로 판단.
-- S051-09 인계: App.tsx 배선 두 줄이 빠져 에이전트 화면 메뉴가 아직 안 뜬다(빈 화면 노출은 검사로 차단됨). 개발자 v14 범위 규율 준수의 결과. 권고 — 아키텍트가 S051-10 착수 전 그 scope에 src/App.tsx 포함 여부를 판단해 두 줄을 거기 얹을 것(REPORT-TASK-S051-09-DEV 인계 절).
-- todo(대기 체인): S051-10 ← [08✓, 09], S051-11 ← [05✓, 10], S052-03 ← [S051-10, S052-02✓], S052-04 ← [S052-03].
-- 재개 3건 기록 완료(S052-01, S051-04, S051-06 — RESUME- 감사 3건). 원조 blocked 3장 전부 해소됨.
+- SPEC-058 막힘 채택형 관문 + 조건부 자동 재개: 사용자는 채팅에서 `승인`을 선택했다. 다만 승인 도장은 사용자 전용이므로 앱에서 직접 승인해야 파생 작업 자격이 생긴다.
+- 특정 작업 직접 지정 예약: 사용자는 `만들어`를 선택했다. UI는 targets를 runtime plan까지 전달하지만, `wf-reserve`가 첫 후보가 아닌 지정 대상을 보장하도록 선택적 target 인자를 추가하는 후속이 남았다. REPORT-TASK-S051-05-ARCH 발견 2가 근거다.
+- 승인 도장 코멘트 입력: 사용자는 `보류`를 선택했다. 후속 아이디어를 만들지 않는다.
 
-## 사용자 결정 대기 (비긴급, 몰아서)
+## 현재 보드 (12:53Z)
 
-- SPEC-058(막힘 채택형 관문 + 조건부 자동 재개): user_review. 규칙 직접 수정이 이 스펙의 일부를 앞질러 구현하므로, 다음 TL이 중복 범위를 정리해 사용자에게 승인/폐기를 한 줄로 물을 것.
-- wf-reserve 대상 지정 기능(수동 배정이 특정 작업을 콕 집는 것): 사용자 답 미수령. 선택지 "만들어/보류". 만들면 SPEC-051 승인 범위 안 개발 작업 1개 파생으로 충분(REPORT-TASK-S051-05-ARCH의 발견 B 판정 참조).
-- 승인 도장 코멘트 칸: 화면 제약(SpecWorkspace.tsx:25의 CommentDecision이 approved 제외). 백엔드는 이미 comment를 받음. 별도 아이디어 후보(REPORT-SPEC-058-PLAN 인계 참조).
+- todo 1: TASK-S055-04.
+- in_progress 0.
+- blocked 1: TASK-S051-11.
+- qa_waiting 11: S051-05·06·07·08·09·10, S052-03·04, S055-01·02·03.
+- S052 체인은 끝났다. S055-04만 구현하면 SPEC-055 구현 고리가 닫힌다.
+- 활성 lease 없음. SPEC-009의 2026-08-03 lease 파일은 만료된 잔여이며 판정을 막지 않는다.
 
-## 다음 작업 순서 (코덱스 TL용)
+## 다음 세션 작업 순서
 
-1. 미커밋 잔여분 확인 후 보호 커밋(특히 S051-09 결과물이 미커밋이면 그것부터).
-2. 아키텍트 세션으로 S055-03·04 정의 수정(v20 근거: 막힌 사유 + REPORT-TASK-S055-03-DEV/S055-04-DEV) → todo 복귀. S055-03은 domain/project.rs 범위 추가 + 대상 종류 값 명시, S055-04는 완료 조건 9·검증 8을 별도 작업으로 분리(개발자 권고)하거나 백엔드 조회 파일 추가 + 아키텍트 수정 사건의 근거 정의.
-3. S051-09 완료 시 → S051-10 → 11, S052-03 → 04 순차 배정.
-4. S055-03·04 재개분 구현 → SPEC-055 고리 완성.
-5. 사용자 QA 배치 후 릴리스 컷 판단(docs/releasing.md의 병합 조건이 정본).
+1. TASK-S055-04를 developer 역할로 선점해 구현한다. 반드시 ARCH-3의 11개 `값 경로`와 v14 규칙을 기준으로 범위 사전 검사를 다시 읽는다. scope는 15파일이며 App 조립, TaskDocument 범위 상태, 목록 사건 생성, gateway/hook/Shell/Board/Panel 경로를 모두 포함한다.
+2. TASK-S055-04 성공 시 전용 UI 검사 + npm check + Cargo 검증 후 qa_waiting으로 넘기고 보호 커밋한다.
+3. TASK-S051-11의 두 선행 실패를 별도 수리 경로로 처리한다. quota 파서 실패는 claude-heartbeat의 TASK-S051-05 계열, Rust 포맷 차이는 workflow-labs의 기존 범위 밖 파일이다. 현재 작업 문서의 막힌 사유와 REPORT-TASK-S051-11-DEV가 정본이다. 테스트를 제외하거나 완화하지 않는다.
+4. 사용자에게 앱에서 SPEC-058 승인 도장을 요청한다. 도장이 생기면 planner/architect 정상 파이프라인으로 조건부 자동 재개 후속을 진행한다.
+5. 특정 작업 직접 지정 예약 후속을 작업화할 합법적 경로를 정한다. 기존 SPEC-051 승인에는 이미 작업 집합이 있어 일반 architect eligibility로 추가 분해할 수 없다는 REPORT-TASK-S051-05-ARCH의 제약을 먼저 해결한다.
+6. QA 11건을 사용자가 확인한 뒤 `docs/releasing.md`의 병합 조건으로 릴리스 컷을 판단한다.
 
-## 함정 목록 (전부 실측된 것)
+## 구조 패치 검증
 
-1. 규칙 버전 연쇄: project_instructions.rs 문언 변경 시 fs_project_repository.rs·managed_project_assets.rs의 고정 버전 문자열이 반드시 깨진다. 계약별 선택 치환(숫자 일괄 치환 금지), 낮춤/높임 픽스처 방향 유지, 되살아난 픽스처 2개(reads_task_detail_and_records_user_qa_outcomes, a_batch_confirms_every_task_it_was_given)가 계속 실제 낮은 버전을 설치하는지 확인. 방법론은 REPORT-TASK-S055-01-DEV.
-2. "새 표시 값" 완료 조건은 그 값을 만드는 층(domain 구조체/목록 payload)까지 scope_files에 있어야 한다 — S055-03·04가 이 패턴으로 연속 차단됨(REPORT-TASK-S055-04-DEV의 패턴 절).
-3. 화면 배선 작업은 src/App.tsx 포함 여부 판단 필요(149 선례). 규칙 문언 작업은 함정 1의 두 파일 포함.
-4. 승인 도장에 코멘트 불가 → 선택지형 기획서 금지, 단일안으로 쓸 것.
-5. 구조화 결정권자 요약(v17): 문서 전이 시 일곱 제목·순서·표식 보존, 값만 현재 사실로.
-6. 워커 세션이 .md 보고서를 Write로 못 쓰는 가드가 있음 → 셸 heredoc으로 작성(선례 다수).
-7. wf-eligible의 developer 후보는 todo/in_progress뿐 — blocked는 절대 후보가 아님. 재개 버튼=비용 동의 논리는 성립 안 함(비용 동의는 배정 루프에 있음).
+- project instruction 설치/내용 23 passed.
+- managed asset 버전·업데이트·future conflict 17 passed.
+- 낮은 버전 설치 픽스처 `reads_task_detail_and_records_user_qa_outcomes`, `a_batch_confirms_every_task_it_was_given` 각각 통과.
+- Cargo 전체 694 passed, runtime E2E 17 passed, Clippy warnings 0.
+- 설치된 architect v14와 제품 원본 byte diff 없음.
+- 설치된 wf-eligible v14와 제품 원본 byte diff 없음. 커밋 2a53c5b.
 
-## 커밋 상태
+## 작업 트리와 브랜치
 
-- workflow-labs: 브랜치 claude/qa-batch-20260808 (최신 98a3f30). 미커밋: S051-06·07·08 구현, 규칙 수정 진행분, S055-03·04 차단 문서, SPEC-058, 이후 09. 세션 마감 시 보호 커밋 예정 — 미완이면 코덱스가 first thing으로 커밋할 것.
-- claude-heartbeat: 브랜치 claude/agent-runtime-20260808 (최신 99efc5d). 커밋 완료 상태.
-- main 병합·푸시는 사용자 지시 대기. 릴리스 컷은 docs/releasing.md 절차.
+- workflow-labs: `claude/qa-batch-20260808`, 이 핸드오프 커밋 전 HEAD a2ef814. 작업 트리는 핸드오프 파일 외 clean.
+- claude-heartbeat: `claude/agent-runtime-20260808`, HEAD b4fad0a, clean.
+- main 병합·push는 하지 않았다. 릴리스 컷은 사용자 지시와 `docs/releasing.md` 절차를 따른다.
 
-## 운영 규범 (유지)
+## 운영 가드레일
 
-- TL 1 + 역할 워커(한 세션 한 역할, 선점 후 작업). Claude 워커는 오퍼스, 코덱스는 자체 기준.
-- 게이트는 워커 보고 수치 채택(TL 재실측 안 함). 워커 마지막 행동은 리더에게 보고 전문 발신.
-- QA 확인·스펙 승인 도장은 사용자 전용, 어떤 위임으로도 대리 불가. 막힘 레인은 에이전트 운영(오늘 변경).
-- 역할 세션은 개발 로그 면제(정본 reports/). 로그는 셸 append 전용. 팔로업은 이 파일 먼저.
+- 사용자 필수 관문은 QA 확인 하나다. blocked 레인은 에이전트가 운영하며 사용자 조작을 요구하지 않는다.
+- QA 확인·스펙 승인 도장은 사용자 전용이다. 에이전트가 대리 기록하지 않는다.
+- 역할 세션은 한 역할·한 대상·선점 후 작업. 워커 보고의 검사 수치를 TL이 채택한다.
+- 새 표시·판정·전달 값은 소비 파일만 보고 분해하지 않는다. architect v14의 `- 값 경로:`가 원천부터 소비까지 닫혀야 한다.
+- 개발자는 범위 밖 파일을 발견하면 조용히 넓히지 않고 `definition_error`로 막는다.
+- 역할 세션은 개발 로그를 쓰지 않는다. workflow reports와 이 handoff가 정본이다.
