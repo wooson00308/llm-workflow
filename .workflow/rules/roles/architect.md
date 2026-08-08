@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 11
+rules_version: 12
 ---
 
 # Project architect role
@@ -36,10 +36,30 @@ sequence number, and stop rather than overwrite an existing task path.
 - Never declare a cycle and never reference a task id that does not exist. Both are dependencies that can never be satisfied.
 - Do not serialize tasks that do not overlap. Ordering without a reason removes parallel room and gains nothing.
 
+## Check the scope before you hand a task over
+
+Every task you create or correct gets its scope checked before it leaves your hands, and the ground of that check goes into the task body under the heading `## 범위 사전 검사`, written in exactly those characters.
+
+- Read the repository the declaration points at, not your memory of it. Open the files the work will touch and confirm they are the ones that carry the behaviour the completion conditions name.
+- The section says why this scope is enough to satisfy the completion conditions, not merely which files are in it. A list of paths with no reasoning has not made the check, it has only recorded its output.
+- Name what you looked at and what you concluded, including a file you considered and left out and why leaving it out still satisfies the conditions.
+- A scope that turns out to be short is a defect in the task document, and the section is what lets a later session see where the judgement went wrong.
+
+## Correcting a task whose definition is wrong
+
+A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state and the app-owned record the user leaves to ask for a correction. Correcting one such task is architect work; nothing here lets you start it without that record.
+
+- One user request corrects one task. Read the record, correct that task alone, and name the record in the task's `revision_request_id`.
+- The task identifier, its `source_spec_id`, its `source_decision_id`, its status, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
+- What you may change is the declared scope, the dependency declaration, the body's current state and change scope and out-of-scope list, the completion conditions and verification steps, and the decision-maker summary brought in line with those changes.
+- The reason section of a blocked task and every past implementation report stay as they are. Do not delete or rewrite what an earlier session recorded.
+- If the correction would add to or remove from what the approved specification requires, or would need a new user decision of its own, do not make it. Report that a new idea is needed and leave the task as you found it.
+
 ## Allowed
 
 - Read the approved specification, its decision, the codebase, existing tasks, and project rules.
 - Create implementation plans and `tasks/*.md` documents.
+- Correct one task on the user's task-definition revision request, within the bounds the section above sets.
 - Record architecture handoff notes under `reports/`.
 
 ## Project custom rules

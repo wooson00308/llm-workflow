@@ -281,6 +281,8 @@ pub struct TaskDocument {
     /// 이 작업의 착수를 막고 있는 활성 lease와 그 근거(SPEC-032 R7). 비어 있으면 막히지 않은
     /// 것이다. 자기 자신을 잡은 lease는 담지 않는다 — 그것은 겹침이 아니라 자기 선점이다.
     pub overlap_blocks: Vec<TaskOverlapBlock>,
+    /// 이 작업에 남은 사용자 수정 요청. 생성 시각 오름차순이고, 요청이 없으면 비어 있다.
+    pub revision_requests: Vec<TaskRevisionRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -322,6 +324,54 @@ pub struct TaskQaBatchEntry {
     pub recorded: bool,
     /// 실패 사유. 성공이면 `None`.
     pub message: Option<String>,
+}
+
+/// 잘못 분해된 작업을 고쳐 달라는 사용자 요청(SPEC-055 R2). 앱 UI의 사용자 조작만 이 요청을 만든다.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRevisionRequestInput {
+    pub workflow_directory: String,
+    pub file_name: String,
+    /// 사용자가 화면에서 확인한 작업 문서의 `updated_at` 원문. 문자 단위로 같아야 기록한다.
+    pub expected_updated_at: String,
+    /// 사용자가 적은 요청 이유. 앱은 이 문장을 대신 지어내지 않는다.
+    pub reason: String,
+    /// 같은 요청을 한 번만 기록하기 위한 요청 식별자. 재시도는 같은 값을 다시 보낸다.
+    pub request_id: String,
+}
+
+/// 요청 저장의 결말. 새 기록을 만든 경우와 이미 있는 미처리 요청 때문에 만들지 않은 경우를 가른다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRevisionRequestStatus {
+    /// 이번 호출이 기록을 남겼거나, 같은 요청 식별자의 기록이 이미 있어 그것을 그대로 돌려준다.
+    Recorded,
+    /// 같은 작업에 아직 처리되지 않은 요청이 있어 새 기록을 만들지 않았다.
+    AlreadyPending,
+}
+
+/// 작업 하나에 남은 수정 요청 한 건. 조회가 생성 시각 순서로 싣는다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRevisionRequest {
+    pub id: String,
+    /// 요청 당시 사용자가 확인한 작업 갱신 시각.
+    pub previous_updated_at: String,
+    /// 사용자가 적은 이유 원문.
+    pub reason: String,
+    pub created_at: String,
+    /// 작업 문서가 이 요청의 id를 연결하고 있는가. 앱은 다른 근거로 처리 여부를 추측하지 않는다.
+    pub handled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRevisionRequestResult {
+    pub status: TaskRevisionRequestStatus,
+    /// 요청 저장 뒤 다시 계산한 프로젝트 요약.
+    pub summary: ProjectSummary,
+    /// 이번에 남았거나 이미 남아 있던 요청. 판정에 걸려 아무것도 쓰지 않은 경우에도 현재 사실을 싣는다.
+    pub request: Option<TaskRevisionRequest>,
 }
 
 /// 막힌 작업을 사용자 판단으로 다시 여는 요청(SPEC-054 R8). 앱 UI의 사용자 조작만 이 요청을 만든다.

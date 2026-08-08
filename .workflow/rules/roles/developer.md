@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 13
+rules_version: 14
 ---
 
 # Developer role
@@ -75,6 +75,8 @@ Open the linked specification and the decision when the task document is ambiguo
 
 If you opened the specification or the decision, write in the report which part of the task document was insufficient and what you had to go outside it to find. That note is how a later architect session learns where its task documents fall short.
 
+Before you change the first product file, read the task's `## 범위 사전 검사` section against the repository as it is now. This is a short cross-read, not a second decomposition: open what the section names and see whether those files still carry the behaviour the completion conditions ask for. The architect wrote that section from the same repository, and this reading is what catches the gap between then and now.
+
 ## The confirmation walkthrough
 
 A task you hand to user QA carries a section headed `## 확인 동선`, written in exactly those characters. `.workflow/rules/workflow.md` §8 names it; what it holds is defined here, because you are the one who writes it.
@@ -98,6 +100,16 @@ When you do hit one, write the reason section `.workflow/rules/workflow.md` §5 
 - The four values carry what you have checked and nothing else. Do not write a resolution you have not seen, and do not present as settled anything that is still open.
 - The report says what you verified and what impediment remains. It does not become the place a reader goes for the current reason: the section in the task document is where that lives, and the report is read beside it, not instead of it.
 - Reasons you wrote earlier are not edited away. A later block replaces the section with the reason that holds then, and the earlier one stays in the report that recorded it.
+- Record what kind of block it is in `blocked_kind`, in that same edit. `.workflow/rules/workflow.md` §5 defines the four values, and choosing among them is reading what you hit, not guessing at a cause you have not seen.
+
+### When the scope declaration is what is wrong
+
+The cross-read above can end with a file that the completion conditions plainly need and the declaration does not carry. That is a defect in the task document, and it is not yours to repair.
+
+- Do not change a product file outside the declared scope to get past it, and do not widen the declaration yourself.
+- Block the task with `blocked_kind: definition_error` and write the reason section as this contract already describes.
+- The report carries what the next architect session needs: which path is missing, the direct reference that makes the work need it, and which verification fails while it stays out. Name the reference you actually followed, not a suspicion.
+- None of this is ground for deleting a check, loosening one, or writing outside the declared scope. A blocked task with an accurate report costs one session; a quiet edit outside the scope costs the guarantee that two sessions can run at once.
 
 ## What the report holds
 

@@ -5,7 +5,7 @@ use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
     SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
-    TaskResumeRequest, TaskResumeResult,
+    TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
 };
 
 #[tauri::command]
@@ -155,6 +155,17 @@ pub fn confirm_task_qa_batch(
 pub fn resume_task(path: String, request: TaskResumeRequest) -> Result<TaskResumeResult, String> {
     ProjectService::default()
         .resume_task(Path::new(&path), &request)
+        .map_err(|error| error.to_string())
+}
+
+/// 작업 정의 수정 요청 저장. 사용자가 앱 화면에서 이유를 적고 누르는 조작만 이 명령에 도달한다.
+#[tauri::command]
+pub fn record_task_revision_request(
+    path: String,
+    request: TaskRevisionRequestInput,
+) -> Result<TaskRevisionRequestResult, String> {
+    ProjectService::default()
+        .record_task_revision_request(Path::new(&path), &request)
         .map_err(|error| error.to_string())
 }
 

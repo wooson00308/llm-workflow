@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 18
+rules_version: 19
 ---
 
 # LLM Workflow agent protocol
@@ -202,6 +202,26 @@ A session that moves a task to `blocked` writes the reason into the task documen
 - Leaving `blocked` does not delete the section. It is the last recorded reason and it stays where it is. If the same task is blocked again, the section is replaced by the reason that holds now, and the earlier detail stays in the implementation reports and the append-only history that already carry it.
 - Existing tasks are not converted. A task with no such section, or with an incomplete one, stays valid and readable exactly as it is, and no session is stopped and no judgement changes because of it.
 
+### Naming what kind of block it is
+
+The same edit that records the reason also records what kind of block it is, in the optional frontmatter field `blocked_kind`. The field carries meaning only while the task's status is `blocked`, and it holds one of four values:
+
+- `definition_error`: the task document itself is wrong — its scope, its dependencies, or its completion conditions cannot be satisfied as written.
+- `missing_prerequisite`: something the task depends on has not been built or agreed yet, and the task is waiting on it.
+- `implementation_failure`: the work was attempted and did not succeed, and the reason sits in the code or the environment rather than in the document.
+- `external_dependency`: the block is outside this repository — an approval, a third party, a service.
+
+- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified. Nobody guesses the cause from the prose, and no session fills the field in on another session's behalf.
+- Leaving `blocked` does not delete the value. It is the kind of the last block, kept for the same reason the reason section is kept, and it is not read as a present impediment once the status is no longer `blocked`.
+
+### When the task definition itself is wrong
+
+A `definition_error` block is the one kind an implementer cannot clear by working harder, because what is wrong is the instruction sheet. Correcting it is the architect's work and `.workflow/rules/roles/architect.md` states what that session may touch.
+
+The user asks for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. A session told to correct a definition on a request that has no such record refuses and reports the gap, exactly as it would for any other missing user record.
+
+A task corrected on such a request names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task that has never been corrected leaves the key out.
+
 ### Record every task transition
 
 A session that changes a task's status appends one entry to the task's `history` field in the same edit. A session that takes a stopped task over appends an `in_progress` entry as well, even though the status it finds is already `in_progress` and does not change. The takeover is a fact about the task, and the history is where facts about the task live: without that entry, nothing outside a report says the work changed hands.
@@ -239,6 +259,7 @@ history:
 - Task transition facts live in the optional `history` field; leave the key out while there are no entries.
 - The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
 - An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
+- What kind of block a task is under lives in the optional `blocked_kind` field, and the task-definition revision request a task has already answered lives in the optional `revision_request_id` field. §5 defines both, and a task that has neither fact leaves both keys out.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.
