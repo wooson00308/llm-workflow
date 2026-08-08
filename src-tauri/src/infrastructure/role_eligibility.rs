@@ -42,6 +42,9 @@ pub struct WorkflowInput<'a> {
     /// `revision_requested` 쪽과 같은 이유다 — 판정 규칙이 한 벌이어야 하고, 그 판정에 필요한
     /// `created_at`은 목록 payload에 실리지 않는다.
     pub approved_decisions: &'a [(String, String)],
+    /// 아직 처리되지 않은 작업 정의 수정 요청 판정 재료. 처리 여부와 대상 작업의 상태를
+    /// 이 모듈이 판정하도록 원문 값을 함께 받는다.
+    pub task_revision_requests: &'a [TaskRevisionRequestCandidate],
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
     pub revision_requested_decisions: &'a [String],
     /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2). 선언을 여기서 다시 파싱하지 않는 것은 판정
@@ -59,6 +62,18 @@ pub struct WorkflowInput<'a> {
     /// 정규화와 결정 덮어쓰기를 지난 화면용 값이다. 계산은 `fs_project_repository`가 한다.
     pub nondraft_spec_sources: &'a HashSet<String>,
 }
+
+/// 아키텍트 자격 판정이 보는 작업 정의 수정 요청 하나.
+pub struct TaskRevisionRequestCandidate {
+    pub id: String,
+    pub task_id: String,
+    pub created_at: String,
+    pub task_status: String,
+    pub handled: bool,
+}
+
+const SPEC_APPROVAL_KIND: &str = "spec_approval";
+const TASK_REVISION_REQUEST_KIND: &str = "task_revision_request";
 
 /// `lease_ids`는 만료 전인 lease 파일 이름 집합이다. 스크립트도 만료된 lease를 선점으로 세지
 /// 않으므로, 죽은 세션이 남긴 lease는 어느 역할에서도 그 대상을 막지 않는다.
@@ -79,7 +94,7 @@ pub fn pending_role_work(
 
     PendingRoleWorkDetail {
         planner: judge_workflows(workflows, |workflow| planner_verdict(workflow, lease_ids)),
-        architect: judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids)),
+        architect: architect_workflows_verdict(workflows, lease_ids),
         developer: judge_workflows(workflows, |workflow| developer_verdict(workflow, lease_ids)),
     }
 }
@@ -100,6 +115,7 @@ fn judge_workflows(
         merged.candidates.extend(verdict.candidates);
         if verdict.target.is_some() {
             merged.target = verdict.target;
+            merged.target_kind = verdict.target_kind;
             break;
         }
     }
@@ -186,9 +202,51 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
             verdict.exclude(decision_id, SPEC_LEASED);
             continue;
         }
-        verdict.select(decision_id);
+        verdict.select_kind(decision_id, SPEC_APPROVAL_KIND);
         return verdict;
     }
+    verdict
+}
+
+/// 작업 정의 수정 요청을 모든 워크플로우에서 먼저 모은 뒤, 생성 시각이 이른 순서로
+/// 판정한다. 처리할 요청이 없을 때만 기존 승인 분해 판정으로 넘어간다.
+fn architect_workflows_verdict(
+    workflows: &[WorkflowInput<'_>],
+    lease_ids: &HashSet<String>,
+) -> RoleWorkVerdict {
+    let mut requests: Vec<(&str, &TaskRevisionRequestCandidate)> = workflows
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .task_revision_requests
+                .iter()
+                .map(move |request| (workflow.directory, request))
+        })
+        .filter(|(_, request)| {
+            !request.handled && (request.task_status == "todo" || request.task_status == "blocked")
+        })
+        .collect();
+    requests.sort_by(|(left_directory, left), (right_directory, right)| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left_directory.cmp(right_directory))
+    });
+
+    let mut verdict = RoleWorkVerdict::default();
+    for (_, request) in requests {
+        if lease_ids.contains(&request.id) || lease_ids.contains(&request.task_id) {
+            verdict.exclude(&request.id, LEASED);
+            continue;
+        }
+        verdict.select_kind(&request.id, TASK_REVISION_REQUEST_KIND);
+        return verdict;
+    }
+
+    let approvals = judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids));
+    verdict.candidates.extend(approvals.candidates);
+    verdict.target = approvals.target;
+    verdict.target_kind = approvals.target_kind;
     verdict
 }
 
@@ -246,7 +304,9 @@ mod tests {
     };
     use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
     use crate::infrastructure::heartbeat_condition::install_condition_script;
-    use crate::infrastructure::heartbeat_condition::test_support::run_condition;
+    use crate::infrastructure::heartbeat_condition::test_support::{
+        run_condition, run_machine_condition,
+    };
 
     /// 조건 스크립트를 설치한 픽스처 프로젝트. 워크플로우 디렉터리는 앱이 만든 것을 쓴다.
     fn project() -> (TempDir, PathBuf) {
@@ -296,6 +356,15 @@ mod tests {
                 candidate_lines(verdict),
                 run.candidates(),
                 "{role} 후보 목록이 조건 스크립트와 다르다"
+            );
+
+            let machine = run_machine_condition(project_root, role);
+            let value: serde_json::Value =
+                serde_json::from_str(machine.stdout.trim()).expect("machine JSON");
+            assert_eq!(
+                verdict.target_kind.as_deref(),
+                value["targetKind"].as_str(),
+                "{role} 대상 종류가 조건 스크립트와 다르다"
             );
         }
         detail.flags()
@@ -356,6 +425,27 @@ mod tests {
 
     fn write_decision(workflow_root: &Path, id: &str, spec_id: &str, outcome: &str, at: &str) {
         write_decision_created_by(workflow_root, id, spec_id, outcome, "user", at);
+    }
+
+    fn write_task_revision_request(workflow_root: &Path, id: &str, task_id: &str, at: &str) {
+        fs::write(
+            workflow_root.join(format!("decisions/{id}.md")),
+            format!("---\nschema: workflow-labs/task-revision-request@1\nid: {id}\ntask_id: {task_id}\nrequest_id: request-{id}\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: {at}\n---\n\n작업 정의를 고쳐 주세요.\n"),
+        )
+        .expect("write task revision request");
+    }
+
+    fn link_handled_revision_request(workflow_root: &Path, task_id: &str, request_id: &str) {
+        let path = workflow_root.join(format!("tasks/{task_id}.md"));
+        let contents = fs::read_to_string(&path).expect("task before handled link");
+        fs::write(
+            path,
+            contents.replace(
+                "updated_at:",
+                &format!("revision_request_id: {request_id}\nupdated_at:"),
+            ),
+        )
+        .expect("write handled link");
     }
 
     /// `created_by`를 부르는 쪽이 정하는 결정 문서. 위임 대리 결정처럼 앱이 쓸 수 없는 값을 담은
@@ -506,6 +596,144 @@ mod tests {
         );
 
         assert!(assert_matches_condition_script(root.path()).architect);
+        let detail = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project")
+            .pending_detail;
+        assert_eq!(detail.architect.target.as_deref(), Some("DECISION-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("spec_approval")
+        );
+    }
+
+    #[test]
+    fn a_task_revision_request_precedes_an_undecomposed_approval() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "todo", None);
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-001",
+            "2026-08-02T00:00:00Z",
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("REVISION-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("task_revision_request")
+        );
+    }
+
+    #[test]
+    fn the_oldest_unhandled_task_revision_request_is_selected() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "blocked", None);
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-LATE",
+            "TASK-001",
+            "2026-08-03T00:00:00Z",
+        );
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-EARLY",
+            "TASK-001",
+            "2026-08-02T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("REVISION-EARLY"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("task_revision_request")
+        );
+    }
+
+    #[test]
+    fn handled_or_closed_task_revision_requests_are_not_candidates() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-HANDLED", "todo", None);
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-HANDLED",
+            "TASK-HANDLED",
+            "2026-08-01T00:00:00Z",
+        );
+        link_handled_revision_request(&workflow_root, "TASK-HANDLED", "REVISION-HANDLED");
+        for (task, request, status, day) in [
+            ("TASK-QA", "REVISION-QA", "qa_waiting", "02"),
+            ("TASK-DONE", "REVISION-DONE", "completed", "03"),
+        ] {
+            write_task(&workflow_root, task, status, None);
+            write_task_revision_request(
+                &workflow_root,
+                request,
+                task,
+                &format!("2026-08-{day}T00:00:00Z"),
+            );
+        }
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-04T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("DECISION-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("spec_approval")
+        );
+        assert_eq!(
+            candidate_lines(&detail.architect),
+            ["eligible DECISION-001"]
+        );
+    }
+
+    #[test]
+    fn active_request_or_task_leases_hide_revision_requests_but_expired_leases_do_not() {
+        for leased_target in ["REVISION-001", "TASK-001"] {
+            let (root, workflow_root) = project();
+            write_task(&workflow_root, "TASK-001", "blocked", None);
+            write_task_revision_request(
+                &workflow_root,
+                "REVISION-001",
+                "TASK-001",
+                "2026-08-01T00:00:00Z",
+            );
+            write_lease(root.path(), leased_target, &future());
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(detail.architect.target, None, "{leased_target}");
+            assert_eq!(candidate_lines(&detail.architect), ["leased REVISION-001"]);
+        }
+
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "blocked", None);
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-001",
+            "2026-08-01T00:00:00Z",
+        );
+        write_lease(root.path(), "REVISION-001", &past());
+        let detail = detail_matching_condition_script(root.path());
+        assert_eq!(detail.architect.target.as_deref(), Some("REVISION-001"));
     }
 
     #[test]
@@ -1194,6 +1422,28 @@ mod tests {
         assert_eq!(leases_before.len(), 1);
     }
 
+    #[test]
+    fn judging_a_task_revision_request_changes_no_document_or_lease() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "blocked", None);
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-001",
+            "2026-08-01T00:00:00Z",
+        );
+        write_lease(root.path(), "EXPIRED", &past());
+        let leases = root.path().join(".workflow/.runtime/leases");
+        let leases_before = read_lease_directory(&leases);
+        let documents_before = read_document_tree(&workflow_root);
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("REVISION-001"));
+        assert_eq!(leases_before, read_lease_directory(&leases));
+        assert_eq!(documents_before, read_document_tree(&workflow_root));
+    }
+
     /// 워크플로우 디렉터리 아래 모든 파일의 `(상대 경로, 내용)` 목록. 개수와 내용을 함께 고정한다.
     fn read_document_tree(workflow_root: &Path) -> Vec<(String, String)> {
         let mut entries: Vec<(String, String)> = Vec::new();
@@ -1821,6 +2071,7 @@ mod tests {
             directory: "wf-demo",
             items: &items,
             approved_decisions: &approved,
+            task_revision_requests: &[],
             revision_requested_decisions: &[],
             unsatisfied_dependencies: &unsatisfied,
             overlap_blocked: &overlapped,

@@ -104,6 +104,9 @@ impl PendingRoleWorkDetail {
 pub struct RoleWorkVerdict {
     /// 그 역할이 집어야 하는 문서의 id. 대상이 없으면 `None`이다.
     pub target: Option<String>,
+    /// 고른 대상의 종류. 현재는 아키텍트 판정이 승인 결정과 작업 정의 수정 요청을
+    /// 구분할 때만 채우며, 대상이 없으면 `None`이다.
+    pub target_kind: Option<String>,
     /// 판정한 후보를 판정한 차례대로 담는다. 대상을 찾은 자리에서 판정이 멈추므로 그 뒤의 후보는
     /// 목록에 없다. 대상이 없을 때 이 목록은 그 역할이 본 후보 전부다.
     pub candidates: Vec<WorkCandidate>,
@@ -125,6 +128,12 @@ impl RoleWorkVerdict {
             verdict: ELIGIBLE.to_owned(),
         });
         self.target = Some(id.to_owned());
+    }
+
+    /// 종류가 있는 대상을 고르고 그 후보를 `eligible`로 기록한다.
+    pub fn select_kind(&mut self, id: &str, kind: &str) {
+        self.select(id);
+        self.target_kind = Some(kind.to_owned());
     }
 }
 

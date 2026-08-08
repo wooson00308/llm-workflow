@@ -15,6 +15,7 @@ struct RollbackOutcome {
     recoveries: Vec<ManagedAssetRollbackRecovery>,
 }
 use crate::infrastructure::claim_helper::CLAIM_HELPER;
+use crate::infrastructure::heartbeat_condition::CONDITION_SCRIPT;
 use crate::infrastructure::managed_script::{ManagedScriptError, ManagedScriptPlan};
 use crate::infrastructure::project_instructions::{
     plan_project_instruction_assets, ProjectInstructionAssetFailure, ProjectInstructionAssetPlan,
@@ -580,7 +581,7 @@ fn preflight(
     project_root: &Path,
     control_root: &Path,
 ) -> Result<Preflight, ManagedProjectAssetsError> {
-    let mut plans = Vec::with_capacity(7);
+    let mut plans = Vec::with_capacity(8);
     let mut conflicts = Vec::new();
     let mut unexpected = Vec::new();
 
@@ -593,7 +594,31 @@ fn preflight(
 
     match CLAIM_HELPER.plan_install(control_root) {
         Ok(plan) => plans.push(plan.into()),
-        Err(error) => classify_script_failure(error, &mut conflicts, &mut unexpected),
+        Err(error) => classify_script_failure(
+            error,
+            "claim_helper",
+            "선점 헬퍼",
+            CLAIM_HELPER.version,
+            &mut conflicts,
+            &mut unexpected,
+        ),
+    }
+    match CONDITION_SCRIPT.plan_install(control_root) {
+        Ok(plan) => {
+            let mut plan: AssetPlan = plan.into();
+            // 공용 스크립트 계획의 기존 식별자는 선점 헬퍼용이다. 동기화 결과에서는
+            // 조건 스크립트를 독립 자산으로 보여 주어야 하므로 이 경계에서 구분한다.
+            plan.id = "condition_script";
+            plans.push(plan);
+        }
+        Err(error) => classify_script_failure(
+            error,
+            "condition_script",
+            "조건 스크립트",
+            CONDITION_SCRIPT.version,
+            &mut conflicts,
+            &mut unexpected,
+        ),
     }
 
     if !unexpected.is_empty() {
@@ -632,6 +657,9 @@ fn classify_instruction_failure(
 
 fn classify_script_failure(
     error: ManagedScriptError,
+    id: &'static str,
+    label: &'static str,
+    provided_version: u32,
     conflicts: &mut Vec<AssetConflict>,
     unexpected: &mut Vec<String>,
 ) {
@@ -640,18 +668,18 @@ fn classify_script_failure(
         | ManagedScriptError::Unmanaged(_)
         | ManagedScriptError::InvalidEncoding { .. } => {
             conflicts.push(AssetConflict {
-                id: "claim_helper",
-                label: "선점 헬퍼",
+                id,
+                label,
                 installed_version: None,
-                provided_version: Some(CLAIM_HELPER.version),
+                provided_version: Some(provided_version),
                 reason: error.to_string(),
             });
         }
         ManagedScriptError::Downgrade { found, .. } => conflicts.push(AssetConflict {
-            id: "claim_helper",
-            label: "선점 헬퍼",
+            id,
+            label,
             installed_version: Some(found),
-            provided_version: Some(CLAIM_HELPER.version),
+            provided_version: Some(provided_version),
             reason: error.to_string(),
         }),
         error => unexpected.push(error.to_string()),
@@ -826,6 +854,12 @@ fn retry_required_result() -> ManagedAssetSyncResult {
             Some(CLAIM_HELPER.version),
             &reason,
         ),
+        retry_asset(
+            "condition_script",
+            "조건 스크립트",
+            Some(CONDITION_SCRIPT.version),
+            &reason,
+        ),
     ];
     sort_assets(&mut assets);
     ManagedAssetSyncResult {
@@ -856,7 +890,7 @@ fn retry_asset(
 }
 
 fn sort_assets(assets: &mut [ManagedAssetState]) {
-    const ORDER: [&str; 7] = [
+    const ORDER: [&str; 8] = [
         "workflow_rules",
         "planner_rules",
         "architect_rules",
@@ -864,6 +898,7 @@ fn sort_assets(assets: &mut [ManagedAssetState]) {
         "agents_entry",
         "claude_entry",
         "claim_helper",
+        "condition_script",
     ];
     assets.sort_by_key(|asset| {
         ORDER
@@ -914,6 +949,7 @@ mod tests {
         ManagedAssetSyncStatus,
     };
     use crate::infrastructure::claim_helper::claim_helper_path;
+    use crate::infrastructure::heartbeat_condition::condition_script_path;
     use crate::infrastructure::project_write_lock::ProjectWriteLock;
 
     fn roots() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -956,7 +992,7 @@ mod tests {
         let result = synchronize_managed_project_assets(root.path(), &control).expect("sync");
 
         assert_eq!(result.status, ManagedAssetSyncStatus::Updated);
-        assert_eq!(result.assets.len(), 7);
+        assert_eq!(result.assets.len(), 8);
         let versions = result
             .assets
             .iter()
@@ -976,11 +1012,13 @@ mod tests {
                 ("architect_rules", 13, 13),
                 ("developer_rules", 14, 14),
                 ("claim_helper", 1, 1),
+                ("condition_script", 14, 14),
             ]
         );
         assert!(root.path().join("AGENTS.md").is_file());
         assert!(root.path().join("CLAUDE.md").is_file());
         assert!(claim_helper_path(&control).is_file());
+        assert!(condition_script_path(&control).is_file());
     }
 
     #[test]
@@ -1054,6 +1092,51 @@ mod tests {
     }
 
     #[test]
+    fn condition_script_sync_updates_an_older_version_and_preserves_a_future_version() {
+        let (root, control) = roots();
+        synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
+        let script = condition_script_path(&control);
+        let old = fs::read_to_string(&script)
+            .expect("condition script")
+            .replace(
+                "# condition_script_version: 14",
+                "# condition_script_version: 13",
+            );
+        fs::write(&script, old).expect("old condition script");
+
+        let updated = synchronize_managed_project_assets(root.path(), &control).expect("update");
+        let state = updated
+            .assets
+            .iter()
+            .find(|asset| asset.id == "condition_script")
+            .expect("condition script state");
+        assert_eq!(updated.status, ManagedAssetSyncStatus::Updated);
+        assert_eq!(state.installed_version, Some(14));
+        assert!(fs::read_to_string(&script)
+            .expect("updated condition script")
+            .contains("# condition_script_version: 14"));
+
+        let future = fs::read_to_string(&script)
+            .expect("condition script")
+            .replace(
+                "# condition_script_version: 14",
+                "# condition_script_version: 999",
+            );
+        fs::write(&script, &future).expect("future condition script");
+        let conflict =
+            synchronize_managed_project_assets(root.path(), &control).expect("future conflict");
+        let state = conflict
+            .assets
+            .iter()
+            .find(|asset| asset.id == "condition_script")
+            .expect("future condition script state");
+        assert_eq!(conflict.status, ManagedAssetSyncStatus::Conflict);
+        assert_eq!(state.installed_version, Some(999));
+        assert_eq!(state.provided_version, Some(14));
+        assert_eq!(fs::read_to_string(script).expect("future kept"), future);
+    }
+
+    #[test]
     fn every_asset_conflict_is_found_before_any_other_asset_is_written() {
         for (id, relative_path) in [
             ("workflow_rules", ".workflow/rules/workflow.md"),
@@ -1068,6 +1151,14 @@ mod tests {
                     ".workflow/rules/wf-claim.ps1"
                 } else {
                     ".workflow/rules/wf-claim.sh"
+                },
+            ),
+            (
+                "condition_script",
+                if cfg!(windows) {
+                    ".workflow/rules/wf-eligible.ps1"
+                } else {
+                    ".workflow/rules/wf-eligible.sh"
                 },
             ),
         ] {
@@ -1095,7 +1186,7 @@ mod tests {
                 "agents_entry" | "claude_entry" => fs::read_to_string(&target)
                     .expect("entry target")
                     .replace("<!-- workflow-labs:project-instructions:end -->", ""),
-                "claim_helper" => "user managed script\n".to_owned(),
+                "claim_helper" | "condition_script" => "user managed script\n".to_owned(),
                 _ => unreachable!("the asset table is closed"),
             };
             fs::write(&target, &damaged).expect("damaged target");
@@ -1489,6 +1580,14 @@ mod tests {
                     ".workflow/rules/wf-claim.sh"
                 },
             ),
+            (
+                "condition_script",
+                if cfg!(windows) {
+                    ".workflow/rules/wf-eligible.ps1"
+                } else {
+                    ".workflow/rules/wf-eligible.sh"
+                },
+            ),
         ] {
             let (root, control) = roots();
             synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
@@ -1531,7 +1630,7 @@ mod tests {
             synchronize_managed_project_assets(root.path(), &control).expect("retry result");
 
         assert_eq!(result.status, ManagedAssetSyncStatus::RetryRequired);
-        assert_eq!(result.assets.len(), 7);
+        assert_eq!(result.assets.len(), 8);
         assert!(result
             .assets
             .iter()

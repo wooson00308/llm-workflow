@@ -32,7 +32,9 @@ use crate::infrastructure::reservation_helper::{
     install_reservation_helper, plan_reservation_helper, validate_reservation_helper,
     RESERVATION_HELPER_VERSION,
 };
-use crate::infrastructure::role_eligibility::{pending_role_work, WorkflowInput};
+use crate::infrastructure::role_eligibility::{
+    pending_role_work, TaskRevisionRequestCandidate, WorkflowInput,
+};
 
 const CONTROL_DIRECTORY: &str = ".workflow";
 const PROJECT_MANIFEST: &str = "project.yml";
@@ -996,6 +998,7 @@ fn summary_from_manifest(
                 directory: &entry.directory,
                 items: &workflow.items,
                 approved_decisions: &workflow.approved_decisions,
+                task_revision_requests: &workflow.task_revision_requests,
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
                 overlap_blocked: &workflow.overlap_blocked,
@@ -1039,6 +1042,9 @@ struct PreparedWorkflow {
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: approved` 결정의 `(결정 id, spec_id)`
     /// (SPEC-028 R4).
     approved_decisions: Vec<(String, String)>,
+    /// 아키텍트 판정이 보는 작업 정의 수정 요청. 요청 기록과 대상 작업을 한번 읽은
+    /// 결과로 조립한다.
+    task_revision_requests: Vec<TaskRevisionRequestCandidate>,
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
     revision_requested_decisions: Vec<String>,
     /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2).
@@ -1064,12 +1070,14 @@ impl PreparedWorkflow {
             workflow_items(&root, &decisions, &qa_events, tasks, leases);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
+        let task_revision_requests = task_revision_request_candidates(&root, &graph);
         let unsatisfied_dependencies = unsatisfied_dependency_task_ids(&graph);
         let overlap_blocked = overlap_blocked_task_ids(&graph, lease_target_ids);
         Self {
             root,
             items,
             approved_decisions,
+            task_revision_requests,
             revision_requested_decisions,
             unsatisfied_dependencies,
             overlap_blocked,
@@ -2075,6 +2083,7 @@ fn parse_scope_declaration(frontmatter: &str) -> ScopeDeclaration {
 /// 판정에 필요한 값만 담은 작업 문서 하나. 한 번의 읽기에서 셋이 함께 나온다.
 struct TaskNode {
     status: String,
+    revision_request_id: Option<String>,
     dependencies: DependencyDeclaration,
     scope: ScopeDeclaration,
 }
@@ -2121,6 +2130,7 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
         let frontmatter = frontmatter_source(&normalized).unwrap_or_default();
         graph.entry(summary.id.clone()).or_insert(TaskNode {
             status: summary.status.clone(),
+            revision_request_id: yaml_text(metadata.as_ref(), "revision_request_id"),
             dependencies: parse_dependency_declaration(frontmatter),
             scope: parse_scope_declaration(frontmatter),
         });
@@ -2128,6 +2138,34 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
     }
     sort_markdown_summaries(&mut summaries);
     (summaries, graph)
+}
+
+/// 작업 정의 수정 요청과 대상 작업의 현재 값을 아키텍트 판정용 레코드로 접는다.
+fn task_revision_request_candidates(
+    workflow_root: &Path,
+    graph: &HashMap<String, TaskNode>,
+) -> Vec<TaskRevisionRequestCandidate> {
+    let mut candidates = Vec::new();
+    for (task_id, node) in graph {
+        candidates.extend(
+            read_revision_request_records(workflow_root, task_id)
+                .into_iter()
+                .map(|record| TaskRevisionRequestCandidate {
+                    handled: node.revision_request_id.as_deref() == Some(record.entry.id.as_str()),
+                    id: record.entry.id,
+                    task_id: task_id.clone(),
+                    created_at: record.entry.created_at,
+                    task_status: node.status.clone(),
+                }),
+        );
+    }
+    candidates.sort_by(|left, right| {
+        parse_event_instant(&left.created_at)
+            .cmp(&parse_event_instant(&right.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.task_id.cmp(&right.task_id))
+    });
+    candidates
 }
 
 /// 작업 하나의 선언을 판정해 상세 payload에 실을 값으로 만든다. 순서는 선언에 적힌 그대로다 —

@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 13;
+const CONDITION_SCRIPT_VERSION: u32 = 14;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 13;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 13
+# condition_script_version: 14
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -36,6 +36,7 @@ role="${1:-}"
 machine_output=0
 [ "${2:-}" = "--json" ] && machine_output=1
 machine_target=""
+machine_target_kind=""
 machine_candidates=""
 leases=".workflow/.runtime/leases"
 # 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
@@ -61,6 +62,12 @@ machine_result() { # $1=사유 코드
   printf '{"schemaVersion":1,"role":"%s","targetId":' "$(json_quote "$role")"
   if [ -n "$machine_target" ]; then
     printf '"%s"' "$(json_quote "$machine_target")"
+  else
+    printf 'null'
+  fi
+  printf ',"targetKind":'
+  if [ -n "$machine_target_kind" ]; then
+    printf '"%s"' "$(json_quote "$machine_target_kind")"
   else
     printf 'null'
   fi
@@ -104,10 +111,11 @@ note_candidate() { # $1=제외 사유 코드 $2=후보 id
 }
 
 # 대상으로 고른 후보. 후보 줄과 대상 줄을 함께 내어, 목록만 읽어도 대상이 어디서 나왔는지 보인다.
-note_target() { # $1=대상 id
+note_target() { # $1=대상 id $2=대상 종류(없으면 빈 값)
   if [ "$machine_output" -eq 1 ]; then
     note_candidate eligible "$1"
     [ -n "$machine_target" ] || machine_target=$1
+    [ -n "$machine_target_kind" ] || machine_target_kind=${2:-}
     return
   fi
   printf 'candidate: eligible %s\n' "$1" >&2
@@ -407,6 +415,46 @@ scan_decisions() { # $1=워크플로우 경로 $2=찾는 outcome 값 $3=1이면 
   ' "$@"
 }
 
+# 작업 정의 수정 요청을 "생성 시각<TAB>요청 id<TAB>작업 id"로 낸다. 스키마와
+# created_by가 앱이 쓴 기록임을 확정하고, 판정할 수 없는 문서는 그 파일만 건너뛴다.
+scan_task_revision_requests() { # $1=워크플로우 경로
+  scan_dir="$1"decisions
+  set --
+  for f in "$scan_dir"/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  [ "$#" -eq 0 ] && return 0
+  awk '
+    function emit() {
+      if (schema && by == "user" && id != "" && task != "" && at != "") {
+        print at "\t" id "\t" task
+      }
+    }
+    FILENAME != prev {
+      emit()
+      prev = FILENAME
+      id = ""; task = ""; by = ""; at = ""; schema = 0
+      got_id = 0; got_task = 0; got_by = 0; got_at = 0
+    }
+    {
+      if (!got_id && index($0, "id:") == 1) {
+        got_id = 1; id = substr($0, 4); sub(/^ */, "", id)
+      }
+      if (!got_task && index($0, "task_id:") == 1) {
+        got_task = 1; task = substr($0, 9); sub(/^ */, "", task)
+      }
+      if (!got_by && index($0, "created_by:") == 1) {
+        got_by = 1; by = substr($0, 12); sub(/^ */, "", by)
+      }
+      if (!got_at && index($0, "created_at:") == 1) {
+        got_at = 1; at = substr($0, 12); sub(/^ */, "", at)
+      }
+      if (index($0, "schema: workflow-labs/task-revision-request@1") == 1) schema = 1
+    }
+    END { emit() }
+  ' "$@"
+}
+
 # lease 디렉터리를 한 번 훑어 미만료 lease의 대상 id를 $active_leases에 모으고 그 수를
 # $active_count에 담는다. 개발자 분기가 후보마다 이 디렉터리를 다시 훑던 자리다.
 # 판정 시각은 훑기 앞에서 한 번 정하고 그 값을 쓴다. 만료 판정이 판정 시점 기준인 것은 그대로이고,
@@ -545,6 +593,34 @@ REVISIONS
   done
   ;;
 architect)
+  # 작업 정의 수정 요청은 워크플로우 경계를 넘어 모두 먼저 모으고 생성 시각으로 정렬한다.
+  # 승인 분해 후보는 처리할 수 있는 요청이 없을 때만 아래 두 번째 훑기에서 본다.
+  revision_rows=""
+  for wf in .workflow/*/; do
+    rows=$(scan_task_revision_requests "$wf")
+    while IFS='	' read -r created rid tid; do
+      [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] || continue
+      revision_rows="$revision_rows$created	$rid	$tid	$wf$nl"
+    done <<REVISION_ROWS
+$rows
+REVISION_ROWS
+  done
+  ordered_revision_rows=$(printf '%s' "$revision_rows" | LC_ALL=C sort)
+  while IFS='	' read -r created rid tid wf; do
+    [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] && [ -n "$wf" ] || continue
+    task_file=""
+    for f in "${wf}tasks"/*.md; do
+      [ -f "$f" ] && [ -r "$f" ] || continue
+      if grep -qs "^id: *$tid$" "$f"; then task_file=$f; break; fi
+    done
+    [ -n "$task_file" ] || continue
+    grep -Eqs '^status: (todo|blocked)$' "$task_file" || continue
+    grep -qs "^revision_request_id: *$rid$" "$task_file" && continue
+    if lease_blocks "$rid" || lease_blocks "$tid"; then note_candidate leased "$rid"; continue; fi
+    note_target "$rid" task_revision_request
+  done <<ORDERED_REVISION_ROWS
+$ordered_revision_rows
+ORDERED_REVISION_ROWS
   for wf in .workflow/*/; do
     [ -d "${wf}decisions" ] || continue
     # 아키텍트 후보는 스키마 줄도 spec_id도 요구하지 않는다. strict가 0인 것이 그 차이다.
@@ -556,7 +632,7 @@ architect)
       [ -n "$did" ] || continue
       case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
-      note_target "$did"
+      note_target "$did" spec_approval
     done <<APPROVALS
 $approvals
 APPROVALS
@@ -681,7 +757,7 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 13
+# condition_script_version: 14
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -695,6 +771,7 @@ $leases = '.workflow/.runtime/leases'
 $lineCache = @{}
 $script:machineOutput = $Output -ceq '--json'
 $script:machineTarget = $null
+$script:machineTargetKind = $null
 $script:machineCandidates = @()
 
 # Reads a file as lines. An unreadable file reads as empty, which is what "grep -s" does.
@@ -990,6 +1067,28 @@ function Get-DecisionCandidates([string]$Root, [string]$Want, [bool]$Strict) {
   return $candidates
 }
 
+# Reads app-owned task-definition revision requests. The task state and handled link are checked by
+# the architect branch after requests from every workflow have been ordered by CreatedAt and Id.
+function Get-TaskRevisionRequests([string]$Root) {
+  $requests = @()
+  foreach ($path in (Get-Documents $Root 'decisions')) {
+    $lines = Get-Lines $path
+    if (-not (Test-Match $lines '^schema: workflow-labs/task-revision-request@1')) { continue }
+    if ((Get-Value $lines 'created_by') -cne 'user') { continue }
+    $id = Get-Value $lines 'id'
+    $task = Get-Value $lines 'task_id'
+    $createdAt = Get-Value $lines 'created_at'
+    if ($id.Length -eq 0 -or $task.Length -eq 0 -or $createdAt.Length -eq 0) { continue }
+    $requests += [pscustomobject]@{
+      Id = $id
+      Task = $task
+      CreatedAt = $createdAt
+      Root = $Root
+    }
+  }
+  return @($requests)
+}
+
 # Writes the verdict reason as the first stdout line and exits. The heartbeat daemon copies that
 # line into state.json as last_condition_output, and the app turns the code into a sentence.
 # ASCII codes only: a sentence here could not match the one the sh body would have to print.
@@ -1002,6 +1101,7 @@ function Write-Verdict([string]$Code, [int]$ExitCode) {
       schemaVersion = 1
       role = $Role
       targetId = $script:machineTarget
+      targetKind = $script:machineTargetKind
       candidates = @($script:machineCandidates)
       verdict = $Code
     } | ConvertTo-Json -Compress -Depth 4
@@ -1026,10 +1126,13 @@ function Write-Candidate([string]$Code, [string]$Id) {
 
 # The candidate picked as the target. Both lines are written so the list alone shows where the
 # target came from.
-function Write-Target([string]$Id) {
+function Write-Target([string]$Id, [string]$Kind = '') {
   if ($script:machineOutput) {
     Write-Candidate 'eligible' $Id
     if ($null -eq $script:machineTarget) { $script:machineTarget = $Id }
+    if ($null -eq $script:machineTargetKind -and $Kind.Length -gt 0) {
+      $script:machineTargetKind = $Kind
+    }
     return
   }
   [Console]::Error.WriteLine('candidate: eligible ' + $Id)
@@ -1075,6 +1178,23 @@ switch -CaseSensitive ($Role) {
     }
   }
   'architect' {
+    $requests = @()
+    foreach ($root in (Get-WorkflowRoots)) {
+      $requests += @(Get-TaskRevisionRequests $root)
+    }
+    foreach ($row in @($requests | Sort-Object -Property CreatedAt, Id -CaseSensitive)) {
+      $taskPath = Find-TaskFile $row.Root $row.Task
+      if ($taskPath.Length -eq 0) { continue }
+      $taskLines = Get-Lines $taskPath
+      $status = Get-Value $taskLines 'status'
+      if ($status -cne 'todo' -and $status -cne 'blocked') { continue }
+      if ((Get-Value $taskLines 'revision_request_id') -ceq $row.Id) { continue }
+      if ((Test-Leased $row.Id) -or (Test-Leased $row.Task)) {
+        Write-Candidate 'leased' $row.Id
+        continue
+      }
+      Write-Target $row.Id 'task_revision_request'
+    }
     foreach ($root in (Get-WorkflowRoots)) {
       # An architect candidate needs neither the schema line nor a spec_id, which is why Strict is
       # false here. The created_by filter and the latest-decision verdict are the planner branch's.
@@ -1086,7 +1206,7 @@ switch -CaseSensitive ($Role) {
           Write-Candidate 'spec-leased' $row.Id
           continue
         }
-        Write-Target $row.Id
+        Write-Target $row.Id 'spec_approval'
       }
     }
   }
@@ -1292,7 +1412,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 13"));
+        assert!(script.contains("# condition_script_version: 14"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -1306,8 +1426,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 14",
             "# condition_script_version: 13",
-            "# condition_script_version: 12",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -1570,7 +1690,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 13보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 14보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -3262,6 +3382,17 @@ mod tests {
                 "{}: 대상",
                 scenario.name
             );
+            let expected_kind = if scenario.role == "architect" && scenario.target.is_some() {
+                Some("spec_approval")
+            } else {
+                None
+            };
+            assert_eq!(
+                value["targetKind"].as_str(),
+                expected_kind,
+                "{}: 대상 종류",
+                scenario.name
+            );
             assert_eq!(candidates, scenario.candidates, "{}: 후보", scenario.name);
             assert_eq!(value["verdict"], scenario.reason, "{}: 판정", scenario.name);
         }
@@ -3304,6 +3435,7 @@ mod tests {
             assert!(body.contains("--json"));
             assert!(body.contains("schemaVersion"));
             assert!(body.contains("targetId"));
+            assert!(body.contains("targetKind"));
             assert!(body.contains("candidates"));
             assert!(body.contains("eligible"));
         }
