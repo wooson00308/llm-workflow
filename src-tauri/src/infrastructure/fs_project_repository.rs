@@ -53,6 +53,11 @@ const TASK_EVENT_KINDS: [&str; 7] = [
 /// 사용자가 막힌 작업을 다시 연 사실을 남기는 앱 소유 감사 기록의 스키마(SPEC-054 R9).
 /// 기획서 결정·QA 결정과 다른 식별자이므로 두 판정 어디에도 섞이지 않는다.
 const TASK_RESUME_SCHEMA: &str = "workflow-labs/task-resume@1";
+/// 확인 동선 절의 제목. 앱이 설치하는 개발자 계약이 고정한 문자열과 문자 단위로 같다. 이 파일은 그
+/// 문자열을 읽기만 하고 규칙 문언을 정하지 않는다(SPEC-056 R4).
+const TASK_WALKTHROUGH_HEADING: &str = "## 확인 동선";
+/// 카드 미리보기에 담기는 글자 수. 발췌와 확인 동선 미리보기가 같은 한도를 쓴다(SPEC-056 R7).
+const EXCERPT_LIMIT: usize = 160;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -1667,11 +1672,19 @@ fn markdown_summary(
     let source_spec_id = yaml_text(metadata, "source_spec_id");
     let source_decision_id = yaml_text(metadata, "source_decision_id");
     let events = read_task_events(metadata);
+    let status = yaml_text(metadata, "status").unwrap_or_else(|| default_status.to_owned());
+    // QA 대기 카드에는 개발자가 쓴 확인 동선의 첫 문단을 싣는다(SPEC-056 R1). 이미 읽어 둔 같은
+    // 본문에서 값을 하나 더 뽑을 뿐이라 조회가 파일을 더 열지 않는다. 절이 없거나 첫 문단이 비어
+    // 있으면 지금까지의 발췌 그대로다 — 없는 사실을 카드에서 지적하거나 대신 문장을 만들지 않는다.
+    let excerpt = (status == "qa_waiting")
+        .then(|| walkthrough_preview(body))
+        .flatten()
+        .unwrap_or_else(|| markdown_excerpt(body));
     WorkflowItemSummary {
         file_name,
         id: yaml_text(metadata, "id").unwrap_or(fallback_id),
         title,
-        status: yaml_text(metadata, "status").unwrap_or_else(|| default_status.to_owned()),
+        status,
         updated_at,
         due_at,
         source_spec_id,
@@ -1679,7 +1692,7 @@ fn markdown_summary(
         // 아이디어 판정(`derive_idea_states`)만 이 값을 채운다.
         stalled_spec_ids: Vec::new(),
         events,
-        excerpt: markdown_excerpt(body),
+        excerpt,
     }
 }
 
@@ -2104,11 +2117,63 @@ fn markdown_excerpt(body: &str) -> String {
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");
-    let mut excerpt: String = joined.chars().take(160).collect();
-    if joined.chars().count() > 160 {
-        excerpt.push('…');
+    clip_excerpt(&joined)
+}
+
+/// 카드에 담기는 길이로 자른다. 넘치면 말줄임표를 붙인다. 발췌와 확인 동선 미리보기가 이 규칙 하나를
+/// 함께 쓰므로 두 값의 잘림이 갈라지지 않는다.
+fn clip_excerpt(value: &str) -> String {
+    let mut clipped: String = value.chars().take(EXCERPT_LIMIT).collect();
+    if value.chars().count() > EXCERPT_LIMIT {
+        clipped.push('…');
     }
-    excerpt
+    clipped
+}
+
+/// 확인 동선 절의 첫 문단을 카드 미리보기 문장으로 만든다(SPEC-056 R2·R5·R6).
+///
+/// 제목은 계약이 정한 문자열과 문자 단위로 같을 때만 절로 인정하고, 철자·깊이·앞뒤 공백이 다른 제목을
+/// 보완하지 않는다. 코드 울타리 안의 같은 줄은 제목으로 세지 않는다. 첫 문단은 제목 아래 빈 줄을 지나
+/// 처음 만나는 빈 줄 앞까지이고, 여러 줄이면 한 줄로 이어 붙인다. 값은 문서에 적힌 그대로이며 요약하거나
+/// 다시 쓰지 않는다. 절이 없거나 문단이 비어 있으면 `None`이고, 그때 부르는 쪽이 기존 발췌로 되돌아간다.
+fn walkthrough_preview(body: &str) -> Option<String> {
+    let mut lines = body.lines();
+    let mut fenced = false;
+    loop {
+        let line = lines.next()?;
+        if is_code_fence(line) {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced && line == TASK_WALKTHROUGH_HEADING {
+            break;
+        }
+    }
+
+    let mut paragraph: Vec<&str> = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // 제목과 문단 사이의 빈 줄은 지나가고, 문단이 시작된 뒤의 빈 줄에서 멈춘다.
+            if paragraph.is_empty() {
+                continue;
+            }
+            break;
+        }
+        // 다음 절의 제목이나 코드 울타리를 문장으로 싣지 않는다. 여기서 멈추면 문단은 비어 있고,
+        // 그 결과 카드는 기존 발췌를 그대로 보여준다.
+        if trimmed.starts_with('#') || is_code_fence(line) {
+            break;
+        }
+        paragraph.push(trimmed);
+    }
+
+    (!paragraph.is_empty()).then(|| clip_excerpt(&paragraph.join(" ")))
+}
+
+fn is_code_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
 /// QA 결정 문서 하나를 전이 이벤트로 읽는다. 결정 문서는 앱 소유라 여기서는 읽기만 한다.
@@ -2489,11 +2554,11 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        apply_latest_decision, latest_spec_decisions, lease_ids, normalize_spec_status,
-        overlap_blocked_task_ids, parse_scope_declaration, read_markdown_document,
-        read_spec_decisions, slugify, task_dependency_graph, update_task_frontmatter,
-        validate_decision, validate_task_qa, FileSystemProjectRepository, ProjectError,
-        ProjectSummary, ScopeDeclaration,
+        apply_latest_decision, latest_spec_decisions, lease_ids, markdown_excerpt,
+        normalize_spec_status, overlap_blocked_task_ids, parse_scope_declaration,
+        read_markdown_document, read_spec_decisions, slugify, task_dependency_graph,
+        update_task_frontmatter, validate_decision, validate_task_qa, walkthrough_preview,
+        FileSystemProjectRepository, ProjectError, ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
         CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
@@ -7633,6 +7698,214 @@ mod tests {
                 .filter(|(kind, _)| kind == "completed" || kind == "revision_requested")
                 .count(),
             0
+        );
+    }
+
+    /// 미리보기 검사가 함께 쓰는 문서 하나. 본문을 그대로 받아 쓰므로 절의 모양을 검사마다 바꿀 수 있다.
+    fn preview_task(root: &Path, directory: &str, id: &str, status: &str, body: &str) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("tasks")
+                .join(format!("{id}.md")),
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 미리보기 대상\nstatus: {status}\nupdated_at: 2026-08-08T00:00:00Z\n---\n\n{body}"
+            ),
+        )
+        .expect("write preview task");
+    }
+
+    /// 목록에 실린 그 문서의 카드 미리보기.
+    fn preview_of(project: &ProjectSummary, id: &str) -> String {
+        project.workflows[0]
+            .items
+            .tasks
+            .iter()
+            .chain(project.workflows[0].items.specs.iter())
+            .chain(project.workflows[0].items.ideas.iter())
+            .find(|item| item.id == id)
+            .expect("summary")
+            .excerpt
+            .clone()
+    }
+
+    fn walkthrough_body(section: &str) -> String {
+        format!("# 미리보기 대상\n\n## 결정권자 요약\n\n요약 문장이 먼저 온다.\n\n{section}")
+    }
+
+    #[test]
+    fn a_qa_waiting_card_previews_the_first_paragraph_of_the_walkthrough() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+
+        // 화면이 있는 작업, 화면이 없는 작업, 확인 동선이 없는 대기 작업, 대기가 아닌 작업.
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-700",
+            "qa_waiting",
+            &walkthrough_body(
+                "## 확인 동선\n\n개발 화면에서 막힘 열의 카드를 열고\n오른쪽 패널의 재개 영역을 확인한다.\n\n1. 근거를 입력한다.\n",
+            ),
+        );
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-701",
+            "qa_waiting",
+            &walkthrough_body(
+                "## 확인 동선\n\n이 작업에는 눈으로 볼 화면이 없다. 자동 검사로 닫았고 확인 도장은 그 수치를 신뢰한다는 뜻이다.\n",
+            ),
+        );
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-702",
+            "qa_waiting",
+            "# 미리보기 대상\n\n## 결정권자 요약\n\n확인 동선 절이 없는 대기 작업이다.\n",
+        );
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-703",
+            "todo",
+            &walkthrough_body("## 확인 동선\n\n아직 대기가 아니므로 카드에는 실리지 않는다.\n"),
+        );
+
+        let project = repository.inspect(root.path()).expect("inspect project");
+
+        assert_eq!(
+            preview_of(&project, "TASK-700"),
+            "개발 화면에서 막힘 열의 카드를 열고 오른쪽 패널의 재개 영역을 확인한다."
+        );
+        assert_eq!(
+            preview_of(&project, "TASK-701"),
+            "이 작업에는 눈으로 볼 화면이 없다. 자동 검사로 닫았고 확인 도장은 그 수치를 신뢰한다는 뜻이다."
+        );
+        // 절이 없는 대기 작업과 대기가 아닌 작업은 기존 발췌 그대로다.
+        assert_eq!(
+            preview_of(&project, "TASK-702"),
+            "확인 동선 절이 없는 대기 작업이다."
+        );
+        assert_eq!(
+            preview_of(&project, "TASK-703"),
+            "요약 문장이 먼저 온다. 아직 대기가 아니므로 카드에는 실리지 않는다."
+        );
+    }
+
+    #[test]
+    fn ideas_and_specs_keep_their_previews() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        // 상태 값이 `qa_waiting`인 아이디어·기획서는 없지만, 있어도 카드가 바뀌지 않는다는 것을
+        // 같은 본문으로 확인한다.
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("ideas/IDEA-700.md"),
+            format!(
+                "---\nschema: workflow-labs/idea@1\nid: IDEA-700\ntitle: 아이디어\nupdated_at: 2026-08-08T00:00:00Z\n---\n\n{}",
+                walkthrough_body("## 확인 동선\n\n아이디어에는 이 규칙이 닿지 않는다.\n")
+            ),
+        )
+        .expect("write idea");
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("specs/SPEC-700.md"),
+            format!(
+                "---\nschema: workflow-labs/spec@1\nid: SPEC-700\ntitle: 기획서\nstatus: user_review\nupdated_at: 2026-08-08T00:00:00Z\n---\n\n{}",
+                walkthrough_body("## 확인 동선\n\n기획서에도 닿지 않는다.\n")
+            ),
+        )
+        .expect("write spec");
+
+        let project = repository.inspect(root.path()).expect("inspect project");
+
+        assert_eq!(
+            preview_of(&project, "IDEA-700"),
+            "요약 문장이 먼저 온다. 아이디어에는 이 규칙이 닿지 않는다."
+        );
+        assert_eq!(
+            preview_of(&project, "SPEC-700"),
+            "요약 문장이 먼저 온다. 기획서에도 닿지 않는다."
+        );
+    }
+
+    #[test]
+    fn only_the_exact_heading_counts_as_the_walkthrough() {
+        let excerpt_of = |section: &str| {
+            let body = walkthrough_body(section);
+            (walkthrough_preview(&body), markdown_excerpt(&body))
+        };
+
+        // 철자, 제목 깊이, 앞뒤 공백이 다른 제목은 보완하지 않는다.
+        for section in [
+            "## 확인동선\n\n붙여 쓴 제목이다.\n",
+            "### 확인 동선\n\n깊이가 다르다.\n",
+            "##  확인 동선\n\n제목 안의 공백이 다르다.\n",
+            "## 확인 동선 \n\n뒤에 공백이 붙었다.\n",
+            "## 확인 동선입니다\n\n제목이 더 길다.\n",
+        ] {
+            assert_eq!(
+                excerpt_of(section).0,
+                None,
+                "{section}에서 절로 인정됐습니다"
+            );
+        }
+
+        // 코드 울타리 안의 같은 문자열은 제목이 아니다.
+        let fenced = walkthrough_body("```markdown\n## 확인 동선\n\n예시 안의 문장이다.\n```\n");
+        assert_eq!(walkthrough_preview(&fenced), None);
+    }
+
+    #[test]
+    fn an_empty_walkthrough_section_falls_back_to_the_excerpt() {
+        // 절 뒤에 곧바로 다음 제목이 오는 경우와 코드 울타리가 오는 경우 모두 문단이 없다.
+        for section in [
+            "## 확인 동선\n\n## 다음 절\n\n다음 절의 문장이다.\n",
+            "## 확인 동선\n\n```sh\ncargo test\n```\n",
+            "## 확인 동선\n",
+        ] {
+            let body = walkthrough_body(section);
+            assert_eq!(walkthrough_preview(&body), None, "{section}");
+        }
+    }
+
+    #[test]
+    fn a_long_walkthrough_paragraph_is_clipped_like_the_excerpt() {
+        let long = "가".repeat(200);
+        let body = walkthrough_body(&format!("## 확인 동선\n\n{long}\n"));
+        let preview = walkthrough_preview(&body).expect("preview");
+
+        assert_eq!(preview.chars().count(), 161);
+        assert!(preview.ends_with('…'));
+        assert_eq!(
+            preview.chars().take(160).collect::<String>(),
+            long.chars().take(160).collect::<String>()
+        );
+        // 기존 발췌와 같은 한도를 쓴다.
+        assert_eq!(markdown_excerpt(&long).chars().count(), 161);
+    }
+
+    /// 미리보기는 이미 읽어 둔 본문 문자열 하나로 만들어진다. 이 함수가 파일 경로를 받지 않는다는 것이
+    /// 조회가 파일을 더 열지 않는다는 뜻이다.
+    #[test]
+    fn the_walkthrough_preview_reads_only_the_body_it_is_given() {
+        let body = walkthrough_body("## 확인 동선\n\n한 줄짜리 문단이다.\n");
+        assert_eq!(
+            walkthrough_preview(&body),
+            Some("한 줄짜리 문단이다.".to_owned())
         );
     }
 }

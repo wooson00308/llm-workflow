@@ -2,14 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-147
 title: 런타임과 서비스의 기기 상태 및 업데이트 계약을 제공한다
-status: todo
+status: qa_waiting
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
 depends_on: [TASK-S051-02, TASK-S051-05]
 scope_files: [../../Git/claude-heartbeat/docs/runtime-management-contract.md, ../../Git/claude-heartbeat/src/heartbeat/agent_cli.py, ../../Git/claude-heartbeat/src/heartbeat/agent_contract.py, ../../Git/claude-heartbeat/src/heartbeat/agent_store.py, ../../Git/claude-heartbeat/src/heartbeat/cli.py, ../../Git/claude-heartbeat/src/heartbeat/legacy_migration.py, ../../Git/claude-heartbeat/src/heartbeat/runtime_management.py, ../../Git/claude-heartbeat/src/heartbeat/service/__init__.py, ../../Git/claude-heartbeat/src/heartbeat/service/base.py, ../../Git/claude-heartbeat/src/heartbeat/service/launchd.py, ../../Git/claude-heartbeat/src/heartbeat/service/systemd.py, ../../Git/claude-heartbeat/src/heartbeat/service/task_scheduler.py, ../../Git/claude-heartbeat/tests/test_agent_runtime_management.py]
-updated_at: 2026-08-07T16:08:52Z
+updated_at: 2026-08-08T09:08:00Z
 history:
   - { at: 2026-08-07T16:08:52Z, kind: created }
+  - { at: 2026-08-08T08:51:00Z, kind: in_progress }
+  - { at: 2026-08-08T09:08:00Z, kind: qa_waiting }
 ---
 
 # 런타임과 서비스의 기기 상태 및 업데이트 계약을 제공한다
@@ -18,10 +20,13 @@ history:
 
 앱은 설치 버전, 실제 실행 버전과 서비스 생존 상태를 한 계약으로 조회한다.
 조회와 업데이트 계획은 파일이나 서비스를 바꾸지 않고 영향받는 실행과 프로젝트를 먼저 보여 준다.
-확인 뒤 상태가 달라지면 적용을 멈추고 새 영향 범위를 다시 확인하게 한다.
+확인 뒤 기기가 달라지면 적용은 첫 단계 전에 멈추고 새 계획을 요구한다.
 업데이트 결과는 검증부터 서비스 전환까지 각 단계를 구분하고 현재 실행 가능한 버전을 남긴다.
+일부만 성공하면 전체 성공으로 표시하지 않고 남은 복구 행동을 함께 돌려준다.
 세 운영체제는 같은 의미를 사용하며 플랫폼 고유 정보는 진단 세부 정보에만 둔다.
-사용자는 격리된 서비스 검사에서 무쓰기 조회와 실패 시 기존 버전 보존을 확인하면 된다.
+지원하는 명령의 목록도 한 곳에서만 정해져, 계약이 알리는 목록과 실제로 되는 일이 어긋나지 않는다.
+전용 자동 검사 26건을 더했고 알려진 기존 실패 한 건을 제외한 전체 회귀 검사를 통과했다.
+사용자는 아래 확인 동선을 검토한 뒤 QA를 확정할 수 있다.
 
 ## 목적
 
@@ -39,6 +44,13 @@ SPEC-054의 R5부터 R7까지를 구현한다. TASK-S051-05가 만든 독립 실
   확인 불가와 복구 가능 여부를 같은 의미로 반환하지 않는다.
 - TASK-S051-06의 Tauri 설치·업데이트 서비스와 화면은 이 작업 범위 밖이다. 이번 작업은 그 백엔드가
   고정 인자와 JSON만으로 호출할 runtime 측 계약을 제공한다.
+- TASK-S051-05가 품질 확인 수정 요청에 따라 설치 버전, 실행 중 버전, 서비스 등록 상태와 복구 가능
+  여부를 돌려주는 조회 명령을 먼저 만든다. 이 작업은 그 명령을 확장해 계약을 완성하며, 같은 사실을
+  돌려주는 두 번째 명령을 새로 만들지 않는다.
+- 계약 조회의 명령 목록이 현재 두 곳으로 갈라져 있다. `agent_contract.py`는 구현된 명령 다섯 개와
+  예약된 명령 여덟 개를 문자열로 갖고 있고, `agent_cli.py`가 응답을 만들 때 실행 명령을 더하고 예약
+  목록을 비운다. TASK-S051-04가 실행 명령을 구현하면서 생긴 상태이며, 그 작업은 `agent_contract.py`를
+  범위에 갖고 있지 않아 손대지 않았다. 이 작업이 그 파일을 범위에 가지므로 여기서 한 곳으로 모은다.
 
 ## 기계 계약
 
@@ -105,6 +117,13 @@ SPEC-054의 R5부터 R7까지를 구현한다. TASK-S051-05가 만든 독립 실
     직접 파싱할 필요가 없다.
 11. 기존 runtime manifest, 서비스 설치·탐지·재시작과 일반 Heartbeat 회귀 검사가 통과한다.
 12. 기존 자동 검사를 삭제하거나 약화하지 않는다.
+13. 계약 조회의 구현된 명령 목록과 예약된 명령 목록이 한 곳에서만 정의된다. 응답을 만드는 층이 다른
+    층의 목록을 덧붙이거나 지워서 고치지 않는다.
+14. 그 목록이 실제로 처리되는 명령과 일치한다. 구현된 명령을 호출하면 성공 봉투가, 목록에 없는 명령을
+    호출하면 실패 봉투가 나오는 것을 같은 목록으로 대조할 수 있다.
+15. 이 작업이 더하는 기기 조회와 업데이트 명령도 같은 한 곳의 목록에 나타난다.
+16. 설치 버전·실행 중 버전·서비스 상태·복구 가능 여부를 돌려주는 조회는 TASK-S051-05가 만든 명령을
+    확장한 것 하나뿐이다. 같은 사실을 돌려주는 명령이 둘 이상 존재하지 않는다.
 
 ## 검증 절차
 
@@ -120,10 +139,56 @@ SPEC-054의 R5부터 R7까지를 구현한다. TASK-S051-05가 만든 독립 실
 7. launchd, systemd와 Task Scheduler 가짜 어댑터에 같은 표를 적용해 공통 상태와 플랫폼 진단을
    구분한다.
 8. `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_runtime_management.py tests/test_service.py tests/test_agent_package.py -v`를 실행한다.
-9. `pytest tests/ -v`를 실행한다.
+9. 계약 조회 응답의 명령 목록과 실제로 처리되는 명령 집합을 같은 출처에서 읽어 대조한다. 목록에 있는
+   명령이 모두 성공 봉투를 내고 목록에 없는 이름이 실패 봉투를 내는지 확인한다.
+10. `pytest tests/ -v`를 실행한다.
 
 ## 범위와 선행
 
 TASK-S051-02의 agent 계약·저장소와 TASK-S051-05의 패키징·서비스 기반을 사용하므로 두 작업이 선행한다.
 TASK-146과 파일이 겹치지 않아 병렬로 진행할 수 있다. TASK-S051-06의 앱 설치 서비스 파일은 수정하지
 않으며, 이후 사용자가 이 작업의 검증 근거를 확인하고 원래 작업을 재개한다.
+
+## 확인 동선
+
+화면 확인 대상은 없다. 이 작업은 런타임 계약과 명령 목록만 바꾸므로 자동 검사 결과와 명령 출력으로
+확인한다. QA 확정은 아래 숫자와 출력을 직접 확인한 뒤 그 결과를 신뢰한다는 뜻이다.
+
+범위 밖 수정 한 건이 있다. `tests/test_agent_contract.py`의 단언 한 줄을 현재 사실에 맞게 고쳤다.
+그 줄은 `run.start`가 예약 명령이라고 단언했는데 TASK-S051-04가 그 명령을 구현한 뒤로 사실이 아니며,
+완료 조건 13의 이중 정의를 없애면 어떤 구현으로도 통과하지 않는다. 그 파일은 이 작업의 범위 밖이라
+지휘 세션의 사전 승인을 받고 그 한 줄만 고쳤다. 근거와 전후는 개발 보고서에 적어 두었다.
+
+1. `claude-heartbeat` 저장소에서 `pytest tests/test_agent_runtime_management.py -v`를 실행해 26개
+   검사가 통과하는지 확인한다.
+2. 계획이 아무것도 바꾸지 않는지 확인한다.
+   - `test_plan_reports_impact_without_changing_anything`: 영향받는 실행 수와 프로젝트 목록을 돌려주고
+     파일 해시와 저장소 행이 그대로다.
+   - `test_plan_carries_no_prompt_or_credential`: 계획 응답에 prompt와 토큰 문자열이 없다.
+   - `test_the_plan_answers_every_fact_the_app_would_otherwise_parse`: 앱이 SQLite와 plist를 직접 읽지
+     않아도 되는 필드가 모두 들어 있다.
+3. 계획과 적용의 분리를 확인한다.
+   - `test_apply_needs_a_confirmation_even_with_no_active_run`: 실행 중 작업이 없어도 확인 없이는
+     아무것도 하지 않는다.
+   - `test_the_plan_identifier_is_a_fingerprint_of_what_it_assumed`와
+     `test_a_changed_service_identity_also_changes_the_plan`: 실행 집합, manifest, 서비스 신원이 바뀌면
+     계획 식별자가 달라진다.
+   - `test_a_device_that_moved_after_the_plan_is_refused_before_stage_one`: 지문이 다르면 0단계에서
+     멈추고 파일과 저장소가 그대로다.
+4. 단계별 결과를 확인한다.
+   - `test_a_confirmed_plan_moves_the_launcher_and_reports_every_stage`: 다섯 단계가 순서대로 통과한다.
+   - `test_verification_failure_inside_a_matching_plan_is_a_stage_one_failure`: 검증 실패 시 기존
+     launcher가 그대로 남는다.
+   - `test_a_failed_service_stage_is_not_reported_as_a_whole_success`: 서비스 단계만 실패하면 부분
+     성공으로 남고 현재 실행 가능 버전과 복구 행동이 온다.
+   - `test_the_three_platforms_use_the_same_stages_and_meanings`: 세 플랫폼의 단계 이름과 뜻이 같다.
+5. 명령 목록 단일화를 확인한다.
+   - `test_the_command_list_is_defined_once_and_matches_what_runs`: 계약이 알리는 목록에 있는 이름은
+     미구현으로 거절되지 않고 목록 밖 이름은 실패 봉투를 받는다.
+   - `test_the_device_query_is_not_duplicated_as_an_agent_command`: 기기 조회는 runtime 명령군 하나뿐이다.
+   - 설치된 CLI가 있으면 `heartbeat agent contract`를 실행해 `implementedCommands`에 열다섯 개,
+     `runtimeCommands`에 다섯 개, `reservedCommands`가 빈 목록인지 직접 볼 수 있다.
+6. `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_runtime_management.py tests/test_service.py tests/test_agent_package.py -q`를
+   실행해 81 passed, 7 skipped를 확인한다.
+7. `pytest tests/ -q -k 'not test_parse_heartbeat_md_max_per_field'`를 실행해 279 passed, 7 skipped,
+   1 deselected를 확인한다. 제외한 한 검사는 이번 범위 밖의 기존 jobs.d 격리 문제다.

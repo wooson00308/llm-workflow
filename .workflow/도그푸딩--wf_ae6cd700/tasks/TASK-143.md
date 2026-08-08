@@ -2,16 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-143
 title: 막힌 사유 문서 계약을 관리 규칙에 반영한다
-status: qa_waiting
+status: completed
 source_spec_id: SPEC-053
 source_decision_id: DECISION-6723CEE0
 depends_on: [TASK-S052-01]
 scope_files: [docs/file-contract.md, src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/infrastructure/managed_project_assets.rs, src-tauri/src/infrastructure/project_instructions.rs]
-updated_at: 2026-08-08T08:26:40Z
+updated_at: 2026-08-08T08:43:38.399105+00:00
 history:
   - { at: 2026-08-07T15:07:37Z, kind: created }
   - { at: 2026-08-08T08:18:36Z, kind: in_progress }
   - { at: 2026-08-08T08:26:40Z, kind: qa_waiting }
+  - { at: 2026-08-08T08:43:38.399105+00:00, kind: completed }
 ---
 
 # 막힌 사유 문서 계약을 관리 규칙에 반영한다

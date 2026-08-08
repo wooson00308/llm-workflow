@@ -2,34 +2,81 @@
 
 ## 결정권자 요약
 
-독립 실행형 런타임의 빌드, 무결성 확인, 안전한 전환 경로를 구현했다.
-번들 실행 파일에서 계약 조회와 무결성 확인을 실제로 통과했다.
-사용자는 세 운영체제 CI 작업과 배포물 확인 동선을 검토하면 된다.
+사용자 품질 확인이 요구한 기계 판독용 조회를 기존 조회 명령을 넓혀 구현했다.
+이름이 다른 두 번째 조회 명령은 만들지 않았고, 그 사실을 검사로 고정했다.
+한 번 호출로 설치 버전, 실행 중 버전, 서비스 등록·실행 상태, 복구 가능 여부와 판단 근거를 받는다.
+등록 없음, 실행 파일 없음, 등록물 중복, 권한 부족, 지원하지 않는 플랫폼과 버전이 서로 다른 결과다.
+확인하지 못한 값과 권한 때문에 확인할 수 없는 값은 실행 중으로 올라가지 않는다.
+세 운영체제 서비스 어댑터가 같은 필드를 같은 뜻으로 채우며 조회는 아무것도 바꾸지 않는다.
+전용 자동 검사 16건을 더했고 알려진 기존 실패 한 건을 제외한 전체 회귀 검사를 통과했다.
+사용자의 확인을 요청한다.
+
+## 재작업 범위
+
+QA-7C6AA0E3의 요구 하나만 다뤘다. 이미 확인받은 패키징, stable launcher 전환, 마이그레이션 결과는
+설계도 코드도 건드리지 않았다. 범위 밖인 `agent_cli.py`와 `agent_contract.py`는 수정하지 않았고,
+API 주 버전 상수만 기존처럼 가져다 썼다.
 
 ## 변경 파일과 모듈
 
-- Claude Heartbeat 저장소에 PyInstaller one-folder spec, 세 운영체제 CI matrix, 태그 기반 release artifact 흐름을 추가했다.
-- 런타임 manifest 생성·전체 해시 검증·원자적 stable launcher 전환과 기존 설치의 읽기 전용 마이그레이션 미리보기를 구현했다.
-- standalone CLI가 runtime identity, manifest 검증, launcher 전환, migration preview를 JSON으로 반환하도록 확장했다.
-- 서비스 launcher 경로를 우선 사용하도록 하고, Windows Task Scheduler XML에 실패 시 재시작과 중복 실행 방지 정책을 추가했다.
-- 패키지 무결성, 변조 거부, launcher 보존, Dream 제외 마이그레이션, Windows 서비스 XML을 검증하는 테스트를 추가했다.
+- `src/heartbeat/service/base.py`: 구조화된 조회 결과 `ServiceStatus`와 결과 어휘 일곱 개, 복구 가능
+  판정 규칙, 조회 시각 helper를 넣었다. `inspect`를 어댑터 공통 인터페이스에 추가했다.
+- `src/heartbeat/service/launchd.py`: 등록물 목록, plist의 실행 경로, `launchctl list`의 PID로
+  등록·실행을 판정한다. 등록물이 둘 이상이면 모호로 남기고 하나를 고르지 않는다.
+- `src/heartbeat/service/systemd.py`: unit의 `ExecStart` 경로와 `systemctl --user is-active`로
+  판정한다. 사용자 버스에 붙지 못하면 권한 부족으로 남기고 실행 여부를 추측하지 않는다.
+- `src/heartbeat/service/task_scheduler.py`: 등록 여부는 `schtasks /query`, 실행 경로는 같은 명령의
+  XML 출력에서 읽는다. 실행 여부는 로케일 의존 출력이라 모른다고 답한다.
+- `src/heartbeat/service/__init__.py`: `inspect_service`를 더했다. 어댑터가 없는 플랫폼도 같은 모양으로
+  답한다.
+- `src/heartbeat/legacy_migration.py`: stable launcher를 읽어 설치 버전과 target, API 주 버전을 얻는
+  `installed_runtime`과, 등록물의 실행 경로를 버전으로 바꾸는 `runtime_version_of`를 더했다. 둘 다
+  읽기만 한다.
+- `src/heartbeat/cli.py`: `runtime inspect`의 응답을 위 사실로 넓히고 `--install-root`를 더했다.
+  응답 조립은 `runtime_status` 한 함수에 두어 검사가 직접 부를 수 있게 했다.
+- `docs/agent-runtime-contract.md`: `기기 상태 조회` 절에 응답 예시와 필드 뜻, 결과 어휘, 읽기 전용
+  보장을 적었다.
+- `tests/test_service.py`, `tests/test_agent_package.py`: 검사 16건을 더했다.
+
+## 설계 판단
+
+- 세 가지 버전을 서로 다른 사실로 분리했다. 이 호출에 답한 실행 파일의 버전, stable launcher가 가리키는
+  설치 버전, 그리고 서비스가 실행 중임을 확인했고 그 등록물의 경로에서 버전을 읽어낸 실행 중 버전이다.
+  마지막 값은 확인하지 못하면 비운다. 하나로 나머지를 추측하지 않는 것이 이 요구의 핵심이다.
+- 등록과 실행은 참·거짓·모름 세 값으로 뒀다. 오래된 PID나 등록 사실만으로 실행 중이라고 답하지 않기
+  위해서다. 복구 가능 판정도 같은 규칙을 따라 확인하지 못했으면 비운다.
+- 등록물이 여러 개면 복구 가능을 거짓으로 둔다. 무엇을 재기동할지 정할 수 없는 상태에서 하나를 고르면
+  데몬이 둘 뜨는 기존 문제가 다시 생긴다.
+- Windows의 실행 여부는 돌려주지 않는다. Task Scheduler의 상태 문자열이 로케일에 따라 달라 계약 값으로
+  파싱할 수 없다. 기존 재기동 구현이 같은 이유로 상태 파싱을 피하고 있어 그 판단을 유지했다.
+  실행 경로는 XML 태그에서 읽으므로 로케일 영향을 받지 않는다.
 
 ## 검증 절차와 결과
 
-- `python -m pytest tests/test_agent_package.py tests/test_legacy_migration.py tests/test_agent_cli.py tests/test_service.py -q`가 20 passed, 7 skipped로 통과했다.
-- `pyinstaller packaging/heartbeat.spec --noconfirm --clean`으로 macOS arm64 one-folder runtime을 실제 생성했다.
-- 생성한 번들에서 manifest 생성·검증, `runtime inspect`, `agent contract`, `skills`를 실행해 모두 성공했다. 번들 파일 목록에는 Claude Agent SDK·Codex SDK 경로가 없었다.
-- CI와 release workflow YAML은 파싱 검사를 통과했고, 세 대상별 압축 artifact·manifest 검증·번들 계약 조회를 수행하도록 구성했다.
-- 전체 `pytest tests/ -q`는 187 passed, 7 skipped, 1 failed였다. `tests/test_quota.py::test_parse_heartbeat_md_max_per_field`의 jobs.d 격리 누출이며, 이 작업은 `core.py`와 quota 테스트를 변경하지 않았다.
+- `pytest tests/test_service.py tests/test_agent_package.py -q` 통과: 26 passed, 7 skipped. 건너뛴
+  7건은 이전부터 있던 플랫폼 전용 검사다.
+- `pytest tests/ -q -k 'not test_parse_heartbeat_md_max_per_field'` 통과: 253 passed, 7 skipped,
+  1 deselected. 재작업 전 같은 명령은 237 passed였고 늘어난 16건이 이번 추가분이다.
+- 전체 `pytest tests/ -q`는 1 failed, 253 passed, 7 skipped이며 실패는 기존
+  `test_parse_heartbeat_md_max_per_field` 한 건이다. 이번 변경과 무관한 jobs.d 격리 문제다.
+- `python -m compileall -q src/heartbeat` 통과, 변경한 파일의 `ruff check` 통과.
+- 조회 전후 해시 비교는 자동 검사 두 건이 수행한다. 설치 루트, launcher, 서비스 정의 픽스처, 가짜
+  데이터베이스를 모두 포함해 비교했다.
 
 ## 남은 위험
 
-- 로컬에서는 macOS arm64 번들만 실제 빌드했다. macOS universal·Linux·Windows artifact와 OS 서비스 복구는 새 CI matrix 실행으로 확인해야 한다.
-- 전체 테스트의 quota 격리 실패는 기존 테스트 환경 문제로 남아 있다. 이번 작업 범위 밖이므로 수정하지 않았다.
-- 실제 서비스의 강제 종료·재로그인 복구와 installer가 stable launcher를 호출하는 종단 동작은 사용자 QA가 세 운영체제에서 확인해야 한다.
+- 검증은 macOS에서만 실행했다. systemd와 Task Scheduler 경로는 가짜 명령 출력으로 검사했고 실제 두
+  운영체제에서 돌리지 않았다.
+- Windows는 실행 여부를 모른다고만 답한다. 앱이 실행 중 여부로 화면을 가른다면 그 플랫폼에서는 다른
+  근거가 필요하다.
+- 권한 부족 판정은 명령의 영어 출력 문구에 기댄다. 로케일이 다르면 등록 없음으로 분류될 수 있다.
+- 이번 재작업은 조회만 다뤘다. 완료 조건 1부터 13까지의 실제 배포물 빌드와 세 운영체제 서비스 통합
+  확인은 이전 확인분 그대로이며 이번에 다시 실행하지 않았다.
 
 ## 후속 작업
 
-- CI artifact가 세 대상에서 모두 생성되는지와 release tag가 검증된 zip만 게시하는지 확인한다.
-- TASK-S051-06에서 앱 설치기가 manifest 검증 뒤 stable launcher를 전환하고 서비스에 launcher 경로를 전달해야 한다.
-- quota 테스트의 jobs.d 격리 문제는 별도 개발 작업으로 다룬다.
+- TASK-147은 이 응답을 그대로 이어받아 계획과 적용 단계를 얹으면 된다. 필드 이름과 뜻은 계약 문서의
+  `기기 상태 조회` 절에 적어 두었다.
+- 권한 부족 판정을 문구 대신 종료 코드나 다른 신호로 바꾸는 일은 실제 두 운영체제에서 값을 확인한 뒤에
+  하는 편이 낫다.
+- quota 검사 격리는 여전히 별도 작업이 필요하다.
