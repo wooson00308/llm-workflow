@@ -5,6 +5,7 @@
  * 화면이 절 이름의 후보를 추측하지 않는다는 것도 그 픽스처가 지킨다.
  */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { DocumentReader } from "./DocumentReader";
 
@@ -38,7 +39,89 @@ const withoutSummary = [
   "작업자가 작업자에게 쓴 본문입니다.",
 ].join("\n");
 
+function structuredSummary({ includeRisk = true, incomplete = false } = {}) {
+  return [
+    "# 구조 문서",
+    "",
+    "## 결정권자 요약",
+    "",
+    "### 제안",
+    "",
+    "결정 보드 제안",
+    "",
+    "### 현재",
+    "",
+    "현재 화면",
+    "",
+    "### 변경 후",
+    "",
+    "변경된 화면",
+    "",
+    "### 사용자 결과",
+    "",
+    "사용자 결과 문장",
+    "",
+    "### 영향 범위",
+    "",
+    "- 변경: 기본 요약 화면",
+    ...(incomplete ? [] : ["- 유지: 원문 전문"]),
+    ...(includeRisk ? ["", "### 비용과 위험", "", "위험 문장"] : []),
+    "",
+    "### 결정 요청",
+    "",
+    "보드 순서를 확인한다.",
+    "",
+    "## 기획 내용",
+    "",
+    "원문의 마지막 문장",
+  ].join("\n");
+}
+
 describe("DocumentReader", () => {
+  it("완전한 구조는 기본 화면에서 결정 보드로 연다", () => {
+    render(<DocumentReader body={structuredSummary()} />);
+
+    expect(screen.getByRole("region", { name: "결정 보드" })).toBeInTheDocument();
+    expect(screen.getByText("결정 보드 제안")).toBeInTheDocument();
+    expect(screen.queryByText("원문의 마지막 문장")).not.toBeInTheDocument();
+  });
+
+  it("불완전한 구조는 오류나 자동 보완 없이 기존 Markdown 요약으로 폴백한다", () => {
+    render(<DocumentReader body={structuredSummary({ incomplete: true })} />);
+
+    expect(screen.queryByRole("region", { name: "결정 보드" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "제안" })).toBeInTheDocument();
+    expect(screen.queryByText(/빠진|오류|보완/)).not.toBeInTheDocument();
+  });
+
+  it("키보드로 원문 전문을 열고 닫으면 구조화 요약을 포함한 원문과 보드를 오간다", async () => {
+    const user = userEvent.setup();
+    render(<DocumentReader body={structuredSummary()} />);
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: "원문 전문 보기" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(screen.getByRole("button", { name: "요약만 보기" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("heading", { name: "결정권자 요약" })).toBeInTheDocument();
+    expect(screen.getByText("원문의 마지막 문장")).toBeInTheDocument();
+
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "원문 전문 보기" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("region", { name: "결정 보드" })).toBeInTheDocument();
+  });
+
+  it("원문을 연 상태에서 문서가 바뀌면 새 문서의 기본 보드로 돌아간다", () => {
+    const { rerender } = render(<DocumentReader body={structuredSummary()} />);
+    fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
+
+    rerender(<DocumentReader body={structuredSummary({ includeRisk: false }).replace("구조 문서", "다른 구조 문서")} />);
+
+    expect(screen.getByRole("button", { name: "원문 전문 보기" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("region", { name: "결정 보드" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "비용과 위험" })).not.toBeInTheDocument();
+  });
+
   it("문서를 열면 요약 절만 그린다", () => {
     render(<DocumentReader body={withSummary} />);
 
