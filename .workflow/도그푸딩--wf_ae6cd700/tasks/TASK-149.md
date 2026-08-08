@@ -2,14 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-149
 title: 막힌 작업 패널에서 검증 근거를 입력하고 안전하게 재개한다
-status: todo
+status: qa_waiting
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
-depends_on: [TASK-145, TASK-146, TASK-147, TASK-148]
+depends_on: [TASK-145, TASK-148]
 scope_files: [src/App.css, src/features/projects/application/useProjectWorkspace.test.ts, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/components/ActivityView.test.tsx, src/features/projects/components/ActivityView.tsx, src/features/projects/components/BlockedTaskPanel.css, src/features/projects/components/BlockedTaskPanel.test.tsx, src/features/projects/components/BlockedTaskPanel.tsx, src/features/projects/components/DevelopmentBoard.test.tsx, src/features/projects/components/DevelopmentBoard.tsx, src/features/projects/components/WorkspaceShell.test.tsx, src/features/projects/components/WorkspaceShell.tsx, src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts]
-updated_at: 2026-08-07T16:08:52Z
+updated_at: 2026-08-08T07:27:10Z
 history:
   - { at: 2026-08-07T16:08:52Z, kind: created }
+  - { at: 2026-08-08T07:05:20Z, kind: in_progress }
+  - { at: 2026-08-08T07:27:10Z, kind: qa_waiting }
 ---
 
 # 막힌 작업 패널에서 검증 근거를 입력하고 안전하게 재개한다
@@ -22,12 +24,44 @@ history:
 재개 뒤에도 선행이나 파일 겹침이 남으면 현재 시작할 수 없는 이유를 그대로 표시한다.
 재개 이력은 품질 반려와 다른 이름으로 작업 시간선과 활동 화면에 나타난다.
 현재 막힌 두 런타임 작업을 실제 식별자로 검증하되 사용자의 확인 없이 상태를 바꾸지 않는다.
+런타임 보완 작업이 끝나기를 기다리지 않고 만들 수 있으며, 언제 재개할지는 사용자가 판단한다.
+
+## 확인 동선
+
+앱을 열고 왼쪽 메뉴에서 `개발`을 고른 뒤, `막힘` 열의 작업 카드를 눌러 상세를 연다. 오른쪽 패널
+아래에 `개발 준비로 돌리기` 영역이 새로 있다.
+
+1. 그 영역에서 `확인한 갱신 시각`과 `재개 조건`을 읽는다. 갱신 시각은 문서에 적힌 원문 그대로이고,
+   재개 조건은 작업 문서의 `## 막힌 사유` 절에서 온다. 구조화된 사유가 없는 문서에서는 `작성된 재개
+   조건이 없습니다`라는 안내가 대신 서고 재개 영역은 그대로 있다.
+2. `해결 근거`에 무엇이 해결됐는지 적는다. 비어 있으면 `개발 준비로 되돌리기` 버튼이 눌리지 않고,
+   입력한 글자 수가 입력칸 아래에 `n / 2,000자`로 보인다.
+3. 버튼을 한 번 누르면 `한 번 더 누르면 재개`로 바뀌고 무엇을 기록하는지 알리는 문구가 뜬다. 이때는
+   아직 아무것도 저장되지 않는다.
+4. 한 번 더 누르면 재개된다. 정상이면 상태 배지가 `막힘`에서 `준비`로 바뀌고, 재개 영역이 사라지며,
+   그 자리에 `사용자 재개 <시각>` 한 줄이 남는다. 상세 화면은 닫히지 않는다.
+5. 왼쪽 메뉴의 `활동`으로 가면 그 작업에 `사용자 재개` 항목이 한 번 보인다. QA 반려의 `반려`와 개발
+   시작의 `시작`은 이름이 그대로다.
+
+거절 재현: 3번까지 진행한 상태에서 다른 편집기로 같은 작업 문서의 `updated_at`을 바꾼 뒤 4번을
+누른다. 성공 표시 없이 거절 사유가 재개 영역 안에 뜨고, 입력한 근거는 지워지지 않으며, `문서 다시
+읽기` 버튼으로 최신 문서를 다시 읽을 수 있다. `.workflow/.runtime/migration.lock`을 만들어 두거나
+`.workflow/.runtime/leases/<작업-id>.yml`에 미만료 lease를 두고 눌러도 같은 방식으로 거절된다.
+
+첫 적용 대상은 현재 막혀 있는 TASK-S051-04와 TASK-S051-06이다. 두 작업의 패널에는 각각 TASK-146과
+TASK-147의 제목과 현재 상태가 참고 정보로 보이지만, 그 상태가 준비됐다고 앱이 대신 재개하지는
+않는다. 언제 누를지는 사용자가 정한다.
+
+화면이 없는 부분(게이트웨이 배선과 요청 형태)은 자동 검사로 닫았다.
+
+- `npx vitest run src/features/projects/components/BlockedTaskPanel.test.tsx src/features/projects/components/DevelopmentBoard.test.tsx` → 108 passed, 0 failed
+- `npm run check` → 타입 검사 통과, 25개 파일 851 tests 통과, 배포 빌드 성공
 
 ## 목적
 
 SPEC-054의 R8부터 R12까지를 사용자 흐름으로 완성한다. TASK-145의 막힌 사유 패널을 확장해 해결 근거와
-사용자 전용 재개 조작을 제공하고 TASK-148의 원자적 명령에 연결한다. TASK-146과 TASK-147의 검증이
-준비된 뒤 TASK-S051-04와 TASK-S051-06을 첫 적용 대상으로 확인한다.
+사용자 전용 재개 조작을 제공하고 TASK-148의 원자적 명령에 연결한다. TASK-S051-04와 TASK-S051-06을 첫
+적용 대상으로 삼되, 두 작업을 실제로 언제 재개할지는 화면이 아니라 사용자가 정한다.
 
 ## 현재 상태와 선행 결과
 
@@ -35,7 +69,9 @@ SPEC-054의 R8부터 R12까지를 사용자 흐름으로 완성한다. TASK-145�
   열 수 있게 한다.
 - TASK-148은 blocked 상태, stale 갱신 시각, migration lock과 대상 lease를 다시 확인하고 사용자
   감사 기록과 todo 전이를 한 요청으로 처리한다.
-- TASK-146과 TASK-147은 현재 두 런타임 작업이 요구한 보완 계약과 자동 검증 근거를 제공한다.
+- TASK-146과 TASK-147은 현재 막힌 두 런타임 작업이 재개 전에 기다리는 보완 작업이다. 두 작업은 런타임
+  저장소만 바꾸고 이 작업의 화면 파일과 겹치지 않으므로 이 작업의 선행이 아니다. 화면은 두 작업의 제목과
+  현재 상태를 참고 정보로 읽을 뿐이며, 언제 재개할지는 사용자가 그 정보를 보고 판단한다.
 - 현재 개발 화면은 QA 조작만 workspace callback에 연결하고 blocked 상태에서는 쓰기 조작을 제공하지
   않는다.
 
@@ -75,10 +111,11 @@ SPEC-054의 R8부터 R12까지를 사용자 흐름으로 완성한다. TASK-145�
 
 ## 첫 적용 시나리오
 
-- TASK-S051-04 픽스처는 TASK-146이 qa_waiting 또는 completed이고 provider 수명 자동 검사가 통과한
-  근거를 사용한다. 사용자가 재개하면 todo가 되지만 dispatcher 구현 완료로 표시하지 않는다.
-- TASK-S051-06 픽스처는 TASK-147이 qa_waiting 또는 completed이고 기기 상태·업데이트 자동 검사가
-  통과한 근거를 사용한다. 사용자가 재개하면 todo가 되지만 앱 설치 구현 완료로 표시하지 않는다.
+- TASK-S051-04 픽스처는 TASK-146이 qa_waiting 또는 completed인 상태를 검사 데이터로 만들어 쓴다.
+  실제 TASK-146의 진행 상태를 읽지 않으므로 그 작업이 끝나기 전에도 이 검사를 만들 수 있다. 사용자가
+  재개하면 todo가 되지만 dispatcher 구현 완료로 표시하지 않는다.
+- TASK-S051-06 픽스처는 TASK-147이 qa_waiting 또는 completed인 상태를 같은 방식으로 만들어 쓴다.
+  사용자가 재개하면 todo가 되지만 앱 설치 구현 완료로 표시하지 않는다.
 - 두 흐름 모두 선행 작업과 scope 판정을 다시 보여 주고 사용자가 조작하지 않은 다른 blocked 작업은
   그대로 남는다.
 - 보완 작업 상태가 준비되지 않은 경우 경고와 현재 상태를 보여 주되 앱이 사실을 추측하거나 자동 전이를
@@ -132,6 +169,17 @@ SPEC-054의 R8부터 R12까지를 사용자 흐름으로 완성한다. TASK-145�
 ## 범위와 선행
 
 TASK-145의 패널과 폴백을 직접 확장하고 TASK-148의 gateway 계약을 호출하므로 두 작업이 선행한다.
-TASK-146과 TASK-147의 검증 근거를 이용해 현재 두 blocked 작업의 첫 적용 흐름을 확인하므로 두 작업도
-선행한다. 이 작업은 이후 TASK-S051-06·09·10과 화면 기반 파일 일부가 겹치지만, 원래 blocked 체인을
-재개하기 전에 먼저 완료되며 활성 lease의 scope 판정이 동시 수정을 막는다.
+
+TASK-146과 TASK-147은 선행이 아니다. 두 작업은 런타임 저장소의 파일만 바꾸므로 이 작업의 화면 파일과
+겹치지 않고, 이 작업은 두 작업이 만든 함수나 계약을 호출하지 않는다. 보완 작업의 상태는 검사 데이터로
+만들어 쓰며, SPEC-054 R12도 두 작업의 완료를 재개 화면의 제작 조건이 아니라 사용자가 원래 작업을 재개할
+시점의 판단 근거로 둔다. 같은 R12는 앱이 보완 작업 상태를 참고 정보로만 보여 주고 자동으로 원래 작업
+상태를 바꾸지 않는다고 정한다.
+
+두 작업을 선행으로 두면 대기 관계가 원을 그린다. TASK-147은 TASK-S051-05를, TASK-S051-05는
+TASK-S051-04를 기다리는데, 막힌 TASK-S051-04를 사용자가 재개하는 조작이 바로 이 작업의 화면이다.
+재개 화면이 자기 재개 대상을 기다리게 되므로 어느 쪽도 시작할 수 없다. 선행을 두 개로 줄여 이 원을
+끊는다.
+
+이 작업은 이후 TASK-S051-09·10과 화면 기반 파일 일부가 겹치지만, 원래 blocked 체인을 재개하기 전에
+먼저 완료되며 활성 lease의 scope 판정이 동시 수정을 막는다.

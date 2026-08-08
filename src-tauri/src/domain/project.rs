@@ -324,6 +324,50 @@ pub struct TaskQaBatchEntry {
     pub message: Option<String>,
 }
 
+/// 막힌 작업을 사용자 판단으로 다시 여는 요청(SPEC-054 R8). 앱 UI의 사용자 조작만 이 요청을 만든다.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResumeRequest {
+    pub workflow_directory: String,
+    pub file_name: String,
+    /// 사용자가 화면에서 확인한 작업 문서의 `updated_at` 원문. 문자 단위로 같아야 재개한다.
+    pub expected_updated_at: String,
+    /// 사용자가 입력한 해결 근거. 앱은 이 문장을 대신 지어내지 않는다.
+    pub resolution: String,
+    /// 같은 재개를 한 번만 기록하기 위한 요청 식별자. 재시도는 같은 값을 다시 보낸다.
+    pub request_id: String,
+}
+
+/// 재개 요청의 결말. 두 기록 중 하나만 남은 결과는 `Resumed`가 아니다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskResumeStatus {
+    /// 상태 전이와 감사 기록이 함께 남았다. 같은 요청 식별자의 재시도도 이 값이다.
+    Resumed,
+    /// 감사 기록만 남고 작업 문서 교체가 실패했으며 되돌리기까지 실패했다. 사용자가 손으로
+    /// 치워야 할 파일이 있으므로 `recovery`를 함께 싣는다.
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResumeResult {
+    pub status: TaskResumeStatus,
+    /// 재개 뒤 다시 계산한 프로젝트 요약. 개발자 자격 판정도 이 값에서 다시 나온다.
+    pub summary: ProjectSummary,
+    /// `RecoveryRequired`에서만 채운다.
+    pub recovery: Option<TaskResumeRecovery>,
+}
+
+/// 되돌리지 못하고 남은 파일과 사용자가 해야 할 행동.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResumeRecovery {
+    pub created_paths: Vec<String>,
+    pub reason: String,
+    pub action: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentLeaseSummary {

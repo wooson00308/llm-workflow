@@ -18,7 +18,7 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 15;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 16;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 10;
 pub(crate) const ARCHITECT_RULES_VERSION: u32 = 10;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 11;
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 15
+rules_version: 16
 ---
 
 # LLM Workflow agent protocol
@@ -226,6 +226,8 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
+The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file, or that edits a task out of `blocked` by hand, resumes nothing and has undone none of what blocked the work.
+
 ### Record every task transition
 
 A session that changes a task's status appends one entry to the task's `history` field in the same edit. A session that takes a stopped task over appends an `in_progress` entry as well, even though the status it finds is already `in_progress` and does not change. The takeover is a fact about the task, and the history is where facts about the task live: without that entry, nothing outside a report says the work changed hands.
@@ -239,16 +241,18 @@ history:
   - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }
 ```
 
-- `at` is an RFC3339 timestamp. `kind` is one of six values:
+- `at` is an RFC3339 timestamp. `kind` is one of seven values:
   - `created`: the task document was created
   - `in_progress`: implementation started
   - `blocked`: work became blocked
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no seventh `kind` for a takeover, and there is none for anything else: these six are the whole list.
+  - `resumed`: the user reopened a `blocked` task
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no `kind` of its own for a takeover, and there is none for anything else: these seven are the whole list.
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
-- Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
+- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records all three: the first two when it records the QA decision, the third when the user reopens a blocked task.
+- `resumed` is the fact that the user reopened the work, and it does not stand in for `in_progress`. A developer that claims the returned `todo` task appends its own `in_progress` entry exactly as it would for any other `todo` task.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
 
@@ -1176,7 +1180,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1198,7 +1202,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1207,10 +1211,17 @@ mod tests {
             "qa_waiting",
             "completed",
             "revision_requested",
+            "resumed",
         ] {
             assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
         }
         assert!(rules.contains("append-only"));
+        // 재개는 사용자만 남긴다. 에이전트가 쓸 수 있는 규칙 경로에는 같은 권한이 없다.
+        assert!(rules.contains("`schema: workflow-labs/task-resume@1`"));
+        assert!(
+            rules.contains("Do not write `completed`, `revision_requested`, or `resumed` entries.")
+        );
+        assert!(rules.contains("it does not stand in for `in_progress`"));
         assert!(architect.contains("rules_version: 10"));
         assert!(architect.contains("`history`"));
         assert!(developer.contains("rules_version: 11"));
@@ -1234,7 +1245,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
@@ -1258,7 +1269,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1290,7 +1301,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1332,7 +1343,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1366,7 +1377,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
@@ -1397,7 +1408,7 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 15);
+        assert_eq!(WORKFLOW_RULES_VERSION, 16);
         assert_eq!(PLANNER_RULES_VERSION, 10);
         assert_eq!(ARCHITECT_RULES_VERSION, 10);
         assert_eq!(DEVELOPER_RULES_VERSION, 11);
@@ -1419,7 +1430,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1429,11 +1440,11 @@ mod tests {
         assert!(rules.contains("When something you discard is a test"));
         assert!(rules.contains("This obligation is the same for every role"));
 
-        // §5는 상태가 바뀌지 않는 인수도 항목을 남기게 하고, `kind`는 여섯 값 그대로다.
+        // §5는 상태가 바뀌지 않는 인수도 항목을 남기게 하고, 인수 전용 `kind`는 여전히 없다.
         assert!(rules.contains(
             "A session that takes a stopped task over appends an `in_progress` entry as well"
         ));
-        assert!(rules.contains("There is no seventh `kind` for a takeover"));
+        assert!(rules.contains("There is no `kind` of its own for a takeover"));
         assert!(rules.contains("The log is append-only"));
         for kind in [
             "created",
@@ -1442,6 +1453,7 @@ mod tests {
             "qa_waiting",
             "completed",
             "revision_requested",
+            "resumed",
         ] {
             assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
         }
@@ -1499,7 +1511,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1609,7 +1621,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -1709,7 +1721,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -1740,7 +1752,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 15"));
+        assert!(rules.contains("rules_version: 16"));
         assert!(rules.contains("`history`"));
         assert!(architect.contains("rules_version: 10"));
         assert!(developer.contains("rules_version: 11"));

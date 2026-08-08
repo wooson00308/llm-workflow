@@ -128,6 +128,44 @@ export interface TaskQaBatchResult {
   results: TaskQaBatchEntry[];
 }
 
+/**
+ * 막힌 작업을 사용자 판단으로 다시 여는 요청. 화면이 읽은 값을 그대로 싣는다.
+ *
+ * `expectedUpdatedAt`은 사용자가 화면에서 확인한 문서 갱신 시각이고 백엔드가 문자 단위로 대조한다.
+ * `requestId`는 같은 조작을 한 번만 기록하기 위한 값이라 재시도에서 같은 값을 다시 보낸다.
+ */
+export interface TaskResumeRequest {
+  workflowDirectory: string;
+  fileName: string;
+  expectedUpdatedAt: string;
+  resolution: string;
+  requestId: string;
+}
+
+/** 재개 요청의 결말. 상태 전이와 감사 기록 중 하나만 남은 결과는 `resumed`가 아니다. */
+export type TaskResumeStatus = "resumed" | "recovery_required";
+
+/** 되돌리지 못하고 남은 파일과 사용자가 해야 할 행동. `recovery_required`에서만 온다. */
+export interface TaskResumeRecovery {
+  createdPaths: string[];
+  reason: string;
+  action: string;
+}
+
+export interface TaskResumeResult {
+  status: TaskResumeStatus;
+  summary: ProjectSummary;
+  recovery: TaskResumeRecovery | null;
+}
+
+/**
+ * 재개 호출 하나의 결말. 실패 사유를 재개 영역 안에서 읽어야 하므로 전역 오류 문구 하나로 접지
+ * 않는다 — 사용자는 입력을 유지한 채 그 자리에서 다음 행동을 정한다.
+ */
+export type TaskResumeOutcome =
+  | { ok: true; result: TaskResumeResult }
+  | { ok: false; message: string };
+
 export interface AgentLeaseSummary {
   leaseId: string;
   agent: string;
@@ -961,6 +999,13 @@ export interface ProjectGateway {
     fileNames: string[],
     comment: string,
   ): Promise<TaskQaBatchResult>;
+  /**
+   * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. QA 결정과 다른 통로다 — 두 조작은
+   * 남기는 기록도 뜻도 다르므로 `recordTaskQa`를 재사용하지 않는다.
+   *
+   * 사용자가 근거를 적고 확인한 자리에서만 부른다. 조회 주기가 이 메서드를 부르는 경로는 없다.
+   */
+  resumeTask(path: string, request: TaskResumeRequest): Promise<TaskResumeResult>;
   migrate(path: string): Promise<ProjectSummary>;
   /** 연동 조회는 이 메서드 하나다. 연동이 늘어나도 메서드를 늘리지 않는다. */
   inspectIntegrations(path: string): Promise<IntegrationsSnapshot>;

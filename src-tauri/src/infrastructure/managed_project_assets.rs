@@ -971,7 +971,7 @@ mod tests {
         assert_eq!(
             versions,
             vec![
-                ("workflow_rules", 15, 15),
+                ("workflow_rules", 16, 16),
                 ("planner_rules", 10, 10),
                 ("architect_rules", 10, 10),
                 ("developer_rules", 11, 11),
@@ -1082,7 +1082,7 @@ mod tests {
             let sentinel_old = if id == "workflow_rules" {
                 sentinel_current.replace("rules_version: 11", "rules_version: 10")
             } else {
-                sentinel_current.replace("rules_version: 15", "rules_version: 14")
+                sentinel_current.replace("rules_version: 16", "rules_version: 15")
             };
             fs::write(&sentinel, &sentinel_old).expect("old sentinel");
             let target = root.path().join(relative_path);
@@ -1150,7 +1150,7 @@ mod tests {
         let rules = control.join("rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 15", "rules_version: 14");
+            .replace("rules_version: 16", "rules_version: 15");
         fs::write(&rules, &old_rules).expect("old rules");
         let architect = control.join("rules/roles/architect.md");
         let future = fs::read_to_string(&architect)
@@ -1183,7 +1183,7 @@ mod tests {
         let rules = control.join("rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 15", "rules_version: 14");
+            .replace("rules_version: 16", "rules_version: 15");
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(claim_helper_path(&control), "user script\n").expect("unmanaged helper");
 
@@ -1208,7 +1208,7 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 15", "rules_version: 14");
+            .replace("rules_version: 16", "rules_version: 15");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 10", "rules_version: 9");
@@ -1239,7 +1239,7 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 15", "rules_version: 14");
+            .replace("rules_version: 16", "rules_version: 15");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 10", "rules_version: 9");
@@ -1280,7 +1280,7 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 15", "rules_version: 14");
+            .replace("rules_version: 16", "rules_version: 15");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 10", "rules_version: 9");
@@ -1391,7 +1391,7 @@ mod tests {
         let developer = control.join("rules/roles/developer.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 15", "rules_version: 14");
+            .replace("rules_version: 16", "rules_version: 15");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 10", "rules_version: 9");

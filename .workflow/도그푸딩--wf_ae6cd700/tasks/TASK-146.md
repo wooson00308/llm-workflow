@@ -2,26 +2,60 @@
 schema: workflow-labs/task@1
 id: TASK-146
 title: provider 실행을 시작·감시·취소·복구할 수명 계약으로 분리한다
-status: todo
+status: qa_waiting
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
 depends_on: [TASK-S051-03]
 scope_files: [../../Git/claude-heartbeat/docs/provider-lifecycle-contract.md, ../../Git/claude-heartbeat/src/heartbeat/providers/__init__.py, ../../Git/claude-heartbeat/src/heartbeat/providers/lifecycle.py, ../../Git/claude-heartbeat/src/heartbeat/providers/process.py, ../../Git/claude-heartbeat/tests/test_agent_provider_lifecycle.py]
-updated_at: 2026-08-07T16:08:52Z
+updated_at: 2026-08-08T04:29:24Z
 history:
   - { at: 2026-08-07T16:08:52Z, kind: created }
+  - { at: 2026-08-08T04:06:39Z, kind: in_progress }
+  - { at: 2026-08-08T04:29:24Z, kind: qa_waiting }
 ---
 
 # provider 실행을 시작·감시·취소·복구할 수명 계약으로 분리한다
 
 ## 결정권자 요약
 
-Claude와 Codex 실행은 시작 직후 안정적인 실행 신원과 이벤트 위치를 돌려준다.
-런타임이 다시 시작돼도 같은 프로세스인지 확인한 뒤 기존 감시를 이어 갈 수 있다.
-취소는 자식 프로세스와 이벤트 마감을 함께 확인하고 남은 정리 단계를 숨기지 않는다.
-작업 지시와 인증 정보는 실행 핸들, 이벤트와 일반 로그에 저장하지 않는다.
-기존 한 번 실행 방식은 호환 경로로 유지해 일반 Heartbeat 동작을 바꾸지 않는다.
-사용자는 자동 검사에서 재시작, 식별자 재사용과 취소 시나리오를 확인하면 된다.
+Claude와 Codex 실행은 시작 직후 실행 식별자, 프로세스 번호, 시작 시각, 예약 대상과 lease를 담은 핸들을 돌려준다.
+런타임이 다시 시작돼도 같은 프로세스인지 확인한 뒤 마지막으로 읽은 위치부터 이벤트를 이어 읽는다.
+프로세스 번호만 같고 생성 신원이 다르거나 신원을 확인할 수 없으면 실행 중으로 채택하지 않는다.
+취소는 자식 프로세스까지 종료된 것을 확인한 뒤에만 완료로 보고하고 남은 정리 단계를 함께 돌려준다.
+예약이 실패했거나 요청이 예약과 다르면 provider를 시작하지 않는다.
+작업 지시와 인증 값은 핸들, 이벤트 파일, 종료 결과와 일반 로그 어디에도 남지 않는다.
+기존 한 번 실행 방식과 일반 Heartbeat 동작은 그대로 통과한다.
+전용 자동 검사 12건과 전체 회귀 검사를 통과했다. 사용자는 확인 동선의 명령으로 수치를 확인하면 된다.
+
+## 확인 동선
+
+이 작업에는 확인할 화면이 없다. 실행 수명 계약은 코드와 자동 검사로만 확인할 수 있으므로, 확인
+도장은 아래 명령이 돌려주는 수치를 신뢰한다는 뜻이다. 모든 명령은 구현 저장소
+`/Users/catze/Git/claude-heartbeat`에서 실행한다. 가짜 CLI만 사용하므로 실제 Claude·Codex 계정과
+네트워크는 필요하지 않다.
+
+1. `python -m pytest tests/test_agent_provider_lifecycle.py -v` → `12 passed`. 검사 이름이 완료
+   조건과 이렇게 대응한다.
+   - 조건 1: `test_reserved_start_returns_a_handle_that_names_the_reserved_work` (Claude·Codex 각 1건)
+   - 조건 2: `test_start_success_is_not_role_success_and_the_failing_stages_stay_apart`
+   - 조건 3: `test_a_restarted_runtime_resumes_the_same_process_without_starting_a_provider`
+   - 조건 4: `test_pid_reuse_and_unverifiable_identity_are_never_adopted_as_the_run`
+   - 조건 5: `test_cancelling_through_the_handle_leaves_no_child_and_only_the_lease_open`,
+     `test_an_unconfirmed_termination_is_returned_as_a_partial_cancellation`
+   - 조건 6: `test_reservation_failures_and_mismatches_never_start_a_provider`,
+     `test_the_reservation_response_is_read_without_changing_its_contract`
+   - 조건 7: `test_reading_the_same_offset_twice_is_deterministic_and_withholds_a_partial_line`
+   - 조건 8: `test_the_prompt_and_the_secret_stay_out_of_the_handle_events_result_and_log`
+   - 죽은 프로세스의 정리 단계: `test_a_finished_process_recovers_into_the_cleanup_stages`
+2. `python -m pytest tests/test_agent_providers.py tests/test_agent_provider_lifecycle.py -q` →
+   `31 passed`. 기존 provider 검사 19건이 그대로 통과하는지 함께 본다.
+3. `python -m pytest tests/ -q -k 'not test_parse_heartbeat_md_max_per_field'` →
+   `205 passed, 7 skipped, 1 deselected`. 이번 작업 시작 전 같은 명령의 결과는 `193 passed`였고,
+   늘어난 12건은 이번에 추가한 검사다.
+4. 계약 자체를 읽어 확인하려면 `docs/provider-lifecycle-contract.md`를 본다. 실행 시작 실패 단계,
+   복구 판정, 정리 단계와 예약 응답 필드가 표로 정리돼 있다.
+5. 제외한 `test_parse_heartbeat_md_max_per_field` 1건은 사용자 홈의 잡 디렉터리를 격리하지 않는
+   기존 실패이며 이번 변경과 무관하다. 이번 작업 시작 전에도 같은 이유로 실패했다.
 
 ## 목적
 

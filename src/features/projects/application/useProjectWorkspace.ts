@@ -29,6 +29,7 @@ import type {
   SpecDecisionOutcome,
   TaskQaBatchEntry,
   TaskQaOutcome,
+  TaskResumeOutcome,
 } from "../domain/types";
 
 interface Dependencies {
@@ -695,6 +696,46 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   /**
+   * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. QA 기록과 다른 통로다.
+   *
+   * 실패 사유를 돌려주는 값에도 담는다. 재개 영역은 입력을 유지한 채 그 자리에서 사유를 보여 주고
+   * 다음 행동을 묻는데, 다음 호출이 덮는 전역 문구만으로는 그 자리를 채울 수 없다.
+   */
+  const resumeTask = useCallback(
+    async (
+      workflowDirectory: string,
+      fileName: string,
+      expectedUpdatedAt: string,
+      resolution: string,
+      requestId: string,
+    ): Promise<TaskResumeOutcome> => {
+      if (!project) return { ok: false, message: "열린 프로젝트가 없습니다." };
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await gateway.resumeTask(project.rootPath, {
+          workflowDirectory,
+          fileName,
+          expectedUpdatedAt,
+          resolution,
+          requestId,
+        });
+        // 부분 저장으로 끝난 결과도 지금의 사실이다. 요약을 갱신해 다음 조회가 옛 상태를 보여 주지
+        // 않게 하고, 성공 여부 판정은 화면이 `status`로 한다.
+        setProject(result.summary);
+        return { ok: true, result };
+      } catch (reason) {
+        const message = messageFrom(reason);
+        setError(message);
+        return { ok: false, message };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
+  /**
    * 일괄 확인은 앱 호출 한 번이다. 건별 실패는 돌려주는 배열에 담기고 전역 에러로 올라가지 않는다 —
    * 전역 문구는 다음 호출이 덮는 자리라 건별 보고를 담지 못한다. `null`은 호출 자체가 실패한 것이다.
    */
@@ -1050,6 +1091,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     readIdea,
     recordTaskQa,
     confirmTaskQaBatch,
+    resumeTask,
     decideSpec,
     refresh,
     migrate,

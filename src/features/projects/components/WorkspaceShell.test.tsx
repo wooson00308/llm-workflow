@@ -1160,3 +1160,88 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
     expect(screen.queryByRole("button", { name: /실행 중인 세션/ })).not.toBeInTheDocument();
   });
 });
+
+describe("WorkspaceShell 막힌 작업 재개 배선", () => {
+  const blockedTask = {
+    fileName: "TASK-900.md",
+    id: "TASK-900",
+    title: "막힌 작업",
+    status: "blocked",
+    updatedAt: "2026-08-08T01:00:00Z",
+    dueAt: null,
+    excerpt: "보완 작업을 기다린다.",
+  };
+  const blockedProject: ProjectSummary = {
+    ...project,
+    workflows: [{
+      ...project.workflows[0],
+      counts: { ...project.workflows[0].counts, tasks: 1 },
+      items: { ideas: [], specs: [], tasks: [blockedTask] },
+    }],
+  };
+  const blockedBody = [
+    "# 막힌 작업",
+    "",
+    "## 결정권자 요약",
+    "",
+    "보완 작업을 기다린다.",
+    "",
+    "## 막힌 사유",
+    "",
+    "- 막힌 지점: 보완 작업의 결과를 쓸 수 없다.",
+    "- 필요한 해결: 보완 작업이 사용자 확인까지 간다.",
+    "- 재개 조건: 보완 작업의 결과를 읽을 수 있다.",
+    "- 관련 대상: 없음",
+  ].join("\n");
+
+  // 개발 화면의 재개 조작은 워크플로 디렉터리를 붙여 작업 공간으로 나간다. 이 배선이 끊기면 화면에
+  // 조작만 남고 아무것도 기록되지 않으므로 통로 자체를 검사한다.
+  it("연 워크플로 디렉터리를 붙여 재개 호출을 작업 공간으로 넘긴다", async () => {
+    const onResumeTask = vi.fn().mockResolvedValue({
+      ok: true,
+      result: { status: "resumed", summary: blockedProject, recovery: null },
+    });
+    render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={blockedProject}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue({ summary: blockedTask, body: blockedBody })}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
+        onResumeTask={onResumeTask}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    fireEvent.click(screen.getByRole("button", { name: /막힌 작업/ }));
+    await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" });
+
+    fireEvent.change(screen.getByLabelText("해결 근거"), { target: { value: "보완 작업이 끝났다." } });
+    const confirm = screen.getByRole("button", { name: "개발 준비로 되돌리기" });
+    fireEvent.click(confirm);
+    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 재개" }));
+
+    await waitFor(() => expect(onResumeTask).toHaveBeenCalledTimes(1));
+    expect(onResumeTask.mock.calls[0].slice(0, 4)).toEqual([
+      "feature--wf_1",
+      "TASK-900.md",
+      "2026-08-08T01:00:00Z",
+      "보완 작업이 끝났다.",
+    ]);
+  });
+});

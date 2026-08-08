@@ -7,6 +7,7 @@ import type {
   TaskOverlapBlock,
   TaskQaBatchEntry,
   TaskQaOutcome,
+  TaskResumeOutcome,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
@@ -68,7 +69,10 @@ export const eventKinds = [
   { kind: "blocked", label: "막힘" },
   { kind: "qa_waiting", label: "QA 대기" },
   { kind: "completed", label: "완료" },
+  // QA 반려와 사용자 재개는 둘 다 작업을 `todo`로 되돌리지만 서로 다른 사실이라 이름을 나눈다.
+  // 하나는 사용자가 결과를 물린 것이고, 다른 하나는 막힌 일을 사용자가 다시 연 것이다.
   { kind: "revision_requested", label: "반려" },
+  { kind: "resumed", label: "사용자 재개" },
 ] as const;
 
 type ViewMode = (typeof viewModes)[number]["value"];
@@ -76,13 +80,23 @@ type ViewMode = (typeof viewModes)[number]["value"];
 interface Props {
   busy: boolean;
   onReadTask(fileName: string): Promise<TaskDocument | null>;
+  /**
+   * 막힌 작업 하나를 사용자 판단으로 되돌린다. QA 통로와 나뉘어 있고, 없으면 재개 영역이 서지 않는다.
+   * 작업 공간은 언제나 이 값을 넘기며, 선택인 것은 이 보드를 그리는 검사 리터럴 때문이다.
+   */
+  onResumeTask?(
+    fileName: string,
+    expectedUpdatedAt: string,
+    resolution: string,
+    requestId: string,
+  ): Promise<TaskResumeOutcome>;
   onTaskQa(fileName: string, outcome: TaskQaOutcome, comment: string): Promise<boolean>;
   /** 일괄은 입구를 하나 더하는 것이지 `onTaskQa`를 대체하지 않는다(SPEC-031 R7). */
   onTaskQaBatch(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
   workflow: WorkflowSummary;
 }
 
-export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, workflow }: Props) {
+export function DevelopmentBoard({ busy, onReadTask, onResumeTask, onTaskQa, onTaskQaBatch, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [laneGrouping, setLaneGrouping] = useState(false);
   const [query, setQuery] = useState("");
@@ -151,6 +165,28 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
           const relatedDocument = await onReadTask(item.fileName);
           if (relatedDocument) setTaskDocument(relatedDocument);
         }}
+        onReloadTask={async () => {
+          const next = await onReadTask(taskDocument.summary.fileName);
+          if (next) setTaskDocument(next);
+        }}
+        onResumeTask={
+          onResumeTask &&
+          (async (resolution, requestId) => {
+            const outcome = await onResumeTask(
+              taskDocument.summary.fileName,
+              taskDocument.summary.updatedAt ?? "",
+              resolution,
+              requestId,
+            );
+            // 성공하면 같은 문서를 다시 읽어 상태·이력·구조 판정을 최신으로 바꾼다. 상세를 닫거나
+            // 다른 작업으로 옮기지 않는다 — 사용자가 보던 자리가 그대로 남는다.
+            if (outcome.ok && outcome.result.status === "resumed") {
+              const next = await onReadTask(taskDocument.summary.fileName);
+              if (next) setTaskDocument(next);
+            }
+            return outcome;
+          })
+        }
         onTaskQa={async (outcome, comment) => {
           const succeeded = await onTaskQa(taskDocument.summary.fileName, outcome, comment);
           if (succeeded) setTaskDocument(null);
@@ -298,6 +334,8 @@ function TaskDetail({
   document,
   onBack,
   onOpenRelatedTask,
+  onReloadTask,
+  onResumeTask,
   onTaskQa,
   tasks,
   taskTitles,
@@ -306,6 +344,8 @@ function TaskDetail({
   document: TaskDocument;
   onBack(): void;
   onOpenRelatedTask(task: WorkflowItemSummary): Promise<void>;
+  onReloadTask(): Promise<void>;
+  onResumeTask?(resolution: string, requestId: string): Promise<TaskResumeOutcome>;
   onTaskQa(outcome: TaskQaOutcome, comment: string): Promise<boolean>;
   tasks: WorkflowItemSummary[];
   /** 작업 id → 제목. 선행을 제목으로 부르는 자리에서만 쓴다. */
@@ -335,6 +375,11 @@ function TaskDetail({
     () => (awaitingQa ? splitSection(document.body, TASK_WALKTHROUGH_HEADING).section : null),
     [awaitingQa, document.body],
   );
+  // 사용자가 이 작업을 다시 연 사실. 문서 이력에서 그대로 읽고, 없으면 아무 말도 하지 않는다.
+  const lastResumed = useMemo(() => {
+    const resumed = (document.summary.events ?? []).filter((event) => event.kind === "resumed");
+    return resumed.length === 0 ? null : resumed[resumed.length - 1];
+  }, [document.summary.events]);
   const dependencies = document.dependencies ?? [];
   const formatError = document.dependencyFormatError ?? false;
   const overlaps = document.overlapBlocks ?? [];
@@ -428,8 +473,11 @@ function TaskDetail({
           <h2>{blocked ? "진행이 막혔습니다" : awaitingQa ? "직접 확인해 주세요" : "현재 작업 상태"}</h2>
           {blocked ? (
             <BlockedTaskPanel
+              busy={busy}
               decisionSummary={blockedSummary}
               onOpenRelatedTask={onOpenRelatedTask}
+              onReloadTask={onReloadTask}
+              onResume={onResumeTask}
               reason={blockedReason}
               tasks={tasks}
               updatedAt={document.summary.updatedAt}
@@ -497,6 +545,9 @@ function TaskDetail({
               <Icon name={document.summary.status === "completed" ? "stamp" : "board"} />
               <strong>{statusLabels[document.summary.status] ?? document.summary.status}</strong>
               <p>{document.summary.status === "completed" ? "사용자 QA까지 완료된 작업입니다." : "QA 대기 상태가 되면 확인 도구가 활성화됩니다."}</p>
+              {lastResumed !== null && (
+                <p className="task-resume-record">사용자 재개 {formatDate(lastResumed.at)}</p>
+              )}
             </div>
           )}
         </aside>

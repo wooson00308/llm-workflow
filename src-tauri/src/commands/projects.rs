@@ -5,6 +5,7 @@ use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
     SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
+    TaskResumeRequest, TaskResumeResult,
 };
 
 #[tauri::command]
@@ -146,6 +147,14 @@ pub fn confirm_task_qa_batch(
 ) -> Result<TaskQaBatchResult, String> {
     ProjectService::default()
         .confirm_task_qa_batch(Path::new(&path), &workflow_directory, &file_names, &comment)
+        .map_err(|error| error.to_string())
+}
+
+/// 막힌 작업 재개. 사용자가 앱 화면에서 해결 근거를 적고 누르는 조작만 이 명령에 도달한다.
+#[tauri::command]
+pub fn resume_task(path: String, request: TaskResumeRequest) -> Result<TaskResumeResult, String> {
+    ProjectService::default()
+        .resume_task(Path::new(&path), &request)
         .map_err(|error| error.to_string())
 }
 

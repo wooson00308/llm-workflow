@@ -22,6 +22,7 @@ import type {
   RecentProjectStore,
   SaveCustomRulesResult,
   TaskQaBatchEntry,
+  TaskResumeOutcome,
 } from "../domain/types";
 
 const project: ProjectSummary = {
@@ -260,6 +261,9 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     confirmTaskQaBatch: vi
       .fn()
       .mockResolvedValue({ summary: project, results: [] }),
+    resumeTask: vi
+      .fn()
+      .mockResolvedValue({ status: "resumed", summary: project, recovery: null }),
     migrate: vi.fn().mockResolvedValue(project),
     inspectIntegrations: vi.fn().mockResolvedValue(snapshot),
     installHeartbeatJobs: vi.fn().mockResolvedValue(snapshot),
@@ -2039,6 +2043,76 @@ describe("useProjectWorkspace 데몬 끄기·켜기", () => {
     expect(gateway.updateHeartbeat).not.toHaveBeenCalled();
     expect(result.current.integrations.snapshot).toEqual(snapshot);
     expect(result.current.integrations.writeError).toBeNull();
+    unmount();
+  });
+});
+
+describe("막힌 작업 재개", () => {
+  it("화면이 읽은 값을 그대로 보내고 돌아온 요약으로 프로젝트를 갈아 끼운다", async () => {
+    const resumedProject = { ...project, name: "재개 후" };
+    const gateway = gatewayFor({
+      resumeTask: vi
+        .fn()
+        .mockResolvedValue({ status: "resumed", summary: resumedProject, recovery: null }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    let outcome: TaskResumeOutcome | undefined;
+    await act(async () => {
+      outcome = await result.current.resumeTask(
+        "feature--wf_1",
+        "TASK-900.md",
+        "2026-08-08T01:00:00Z",
+        "보완 작업이 끝났다.",
+        "req-1",
+      );
+    });
+
+    expect(gateway.resumeTask).toHaveBeenCalledTimes(1);
+    expect(gateway.resumeTask).toHaveBeenCalledWith(project.rootPath, {
+      workflowDirectory: "feature--wf_1",
+      fileName: "TASK-900.md",
+      expectedUpdatedAt: "2026-08-08T01:00:00Z",
+      resolution: "보완 작업이 끝났다.",
+      requestId: "req-1",
+    });
+    expect(outcome).toEqual({
+      ok: true,
+      result: { status: "resumed", summary: resumedProject, recovery: null },
+    });
+    expect(result.current.project?.name).toBe("재개 후");
+    expect(result.current.error).toBeNull();
+    unmount();
+  });
+
+  // 거절 사유는 재개 영역이 그 자리에서 읽어야 한다. 다음 호출이 덮는 전역 문구만으로는 부족하다.
+  it("거절 사유를 돌려주는 값에도 담는다", async () => {
+    const gateway = gatewayFor({
+      resumeTask: vi.fn().mockRejectedValue("작업 문서가 그사이 변경되었습니다."),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    let outcome: TaskResumeOutcome | undefined;
+    await act(async () => {
+      outcome = await result.current.resumeTask(
+        "feature--wf_1",
+        "TASK-900.md",
+        "2026-08-08T01:00:00Z",
+        "보완 작업이 끝났다.",
+        "req-1",
+      );
+    });
+
+    expect(outcome).toEqual({ ok: false, message: "작업 문서가 그사이 변경되었습니다." });
+    expect(result.current.error).toBe("작업 문서가 그사이 변경되었습니다.");
     unmount();
   });
 });

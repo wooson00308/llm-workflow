@@ -2,40 +2,83 @@
 
 ## 결정권자 요약
 
-Claude와 Codex 명령행 도구를 같은 실행 계약으로 구현했다.
-설치와 로그인과 권한과 지원 버전 문제를 구분하고, 진행·도구·종료 결과를 공통 이벤트로 바꾼다.
-작업 지시와 인증 정보는 실행 인자와 결과에서 제외하며, 취소와 시간 초과는 자식 프로세스까지 정리한다.
-전용 자동 검사와 알려진 기존 격리 문제를 제외한 전체 회귀 검사를 통과했으므로 사용자의 확인을 요청한다.
+사용자 QA 수정 요청에 따라 실행 중 프로세스 핸들을 추가했다.
+실행을 시작하면 종료를 기다리지 않고 프로세스 식별자와 시작 시각과 이벤트 파일 위치를 돌려준다.
+그 핸들만으로 실행 도중 취소하며, 취소는 자식 프로세스 종료를 확인한 뒤에만 성공으로 보고한다.
+이벤트는 실행마다 별도 파일에 쌓이므로 종료 뒤에도 마지막 위치부터 이어 읽을 수 있다.
+기존 한 번 호출 방식은 새 시작·감시·대기 조합을 감싸는 호환 경로로 유지했다.
+전용 자동 검사 19건과, 이번 범위 밖의 기존 실패 한 건을 제외한 전체 회귀 검사를 통과했다.
+사용자의 확인을 요청한다.
+
+## 재작업 범위
+
+QA-D384796A는 실행 계약에 실행 중 프로세스 핸들을 요구했다. 시작 직후 PID·시작 시각·이벤트 파일
+위치 반환, 실행 도중 취소 제어, 종료 후 이벤트 오프셋 재개 세 가지가 요구 사항이며 이번 재작업은
+그 세 가지만 구현했다. TASK-146이 상세 정의한 실행 수명 계약과 모순되지 않도록 이름과 반환 단계를
+맞췄고, TASK-146 전용 파일(수명 모듈, 전용 검사, 계약 문서)은 만들지도 고치지도 않았다.
 
 ## 변경 파일과 모듈
 
-- `src/heartbeat/providers/process.py`: provider 공통 인터페이스, 안전한 진단, 민감정보 제거, JSONL
-  이벤트 처리, 분리된 프로세스 그룹과 취소·시간 초과 시 자식 프로세스 정리를 구현했다.
-- `src/heartbeat/providers/claude.py`: `claude -p --output-format stream-json --verbose` 실행과 Claude
-  인증·이벤트 정규화를 구현했다. API 과금 경로 환경 변수가 있으면 명시적 확인 전 실행하지 않는다.
-- `src/heartbeat/providers/codex.py`: `codex exec --json --sandbox workspace-write` 실행과 Codex
-  인증·thread·turn·item 이벤트 정규화를 구현했다.
-- `src/heartbeat/providers/__init__.py`: 두 provider와 공통 실행 타입을 외부에 노출했다.
-- `tests/test_agent_providers.py`: 가짜 CLI로 인자와 표준 입력, 진단 구분, 비밀값 제거, 계약 밖 출력,
-  사용 제한, 취소·시간 초과 뒤 자식 프로세스 종료를 검증했다.
+- `src/heartbeat/providers/process.py`: 실행 핸들 `ProviderRunHandle`, 시작 실패 단계
+  `ProviderStartFailure`, 이벤트 배치 `ProviderEventBatch`, 취소 결과 `ProviderCancellation`을
+  추가했다. `CliProvider`에 `start`, `watch`, `cancel`, `wait`를 구현하고 기존 `run`은 그 조합을
+  감싸는 호환 경로로 바꿨다. 기존 `execute_process`는 `spawn_process`, `deliver_prompt`,
+  `supervise_process` 세 단계의 합성으로 재구성해 시그니처와 동작을 유지했다.
+  `terminate_process_tree`는 루트와 자손 종료를 실제로 확인해 성공 여부를 반환한다.
+- `src/heartbeat/providers/__init__.py`: 새 실행 핸들 타입과 계약 버전 상수를 외부에 노출했다.
+- `tests/test_agent_providers.py`: 핸들 반환·시작 실패 단계 구분·오프셋 재개·부분 줄 보류·핸들 취소·
+  이벤트 파일 민감정보 제거·미보유 실행 취소 검사 6건을 추가했다. 기존 13건은 그대로 두었고, 실행
+  이벤트가 사용자 홈에 쌓이지 않도록 공통 요청 헬퍼에 임시 디렉터리 경로를 지정했다.
+- `src/heartbeat/providers/claude.py`, `src/heartbeat/providers/codex.py`: 변경하지 않았다. 두
+  provider는 공통 구현에서 새 수명 조작을 그대로 상속한다.
+
+## 설계 판단
+
+- 이벤트 파일은 실행마다 하나이고 줄 단위 JSON이며 덧붙이기만 한다. `watch`는 바이트 오프셋 뒤의
+  완결된 줄만 돌려주고 마지막 부분 줄은 다음 호출까지 보류하므로, 같은 오프셋 재요청은 항상 같은
+  결과를 낸다.
+- 이벤트 파일 위치는 요청에 지정할 수 있고, 지정이 없으면 런타임 소유 기본 경로를 쓴다. 기본 경로
+  규칙은 상태 저장소에서 가져오지 않고 provider 안에서 다시 정의했다. 상태 저장소가 provider
+  패키지를 import하므로 반대 방향 의존은 순환을 만든다. 이 근거는 코드 주석에도 남겼다.
+- 취소는 프로세스 종료와 이벤트 마감을 단계별로 돌려준다. 자식까지 사라진 것을 확인하지 못하면
+  전체 성공으로 표시하지 않고 남은 단계를 알린다.
+- 예약 대상과 lease 식별자를 핸들에 넣는 일, 그리고 PID 재사용 판별을 사용하는 복구 경로는
+  TASK-146의 범위로 남겼다. 그 판별에 필요한 프로세스 생성 신원은 이번에 핸들에 담아 두었다.
+
+## 기존 검사 수정 한 건
+
+과금 경로 확인 없이 Claude를 시작하지 않는지 보는 검사는 프로세스 생성 함수 이름을 바꿔 감시하도록
+고쳤다. `run`이 더 이상 `execute_process`를 직접 부르지 않으므로 예전 감시 지점은 아무것도 막지
+못한다. 새 감시 지점 `spawn_process`는 `run`과 `start` 두 경로가 모두 지나가므로 검사 의도는
+그대로거나 더 넓어진다. 검사를 지우거나 약화하지 않았다.
 
 ## 검증 절차와 결과
 
-- `pytest tests/test_agent_providers.py -v` 통과: 13 passed.
-- `pytest tests/ -q -k 'not test_parse_heartbeat_md_max_per_field'` 통과: 178 passed, 7 skipped, 1 deselected.
-- `python -m compileall -q src/heartbeat` 통과.
-- 전체 `pytest tests/ -v`는 178 passed, 7 skipped 뒤 기존 `test_parse_heartbeat_md_max_per_field` 한 건이
-  실패한다. 선행 TASK-S051-02 보고서에도 기록된 jobs.d 격리 문제이며, 이번 작업은 해당 파서나 검사를
-  수정하지 않았다.
+- `pytest tests/test_agent_providers.py -v` 통과: 19 passed. 반복 실행 3회에서 모두 통과했다.
+- `pytest tests/ -q -k 'not test_parse_heartbeat_md_max_per_field'` 통과: 193 passed, 7 skipped,
+  1 deselected.
+- 전체 `pytest tests/ -q`는 1 failed, 193 passed, 7 skipped이며 실패는 기존
+  `test_parse_heartbeat_md_max_per_field` 한 건이다. 사용자 jobs.d를 격리하지 않는 기존 문제이고
+  이번 변경과 무관하다.
+- `python -m compileall -q src/heartbeat` 통과, `ruff check` 통과.
+- 검사 실행 뒤 사용자 홈에 실행 이벤트 디렉터리가 생기지 않는 것을 확인했다.
 
 ## 남은 위험
 
-- 실제 설치된 Claude·Codex CLI에 대한 계정과 네트워크 기반 실행은 자동 검사에서 호출하지 않았다.
-- 전체 회귀의 quota 파서 검사 한 건은 사용자 jobs.d를 격리하지 않아 실패한다. 이번 provider 변경과
-  독립적인 기존 문제이므로 수정하지 않았다.
+- 검증은 macOS에서만 실행했다. Windows와 Linux 실행은 확인하지 못했다. 이벤트 파일은 줄바꿈을
+  고정해 플랫폼 간 오프셋이 같도록 했지만 실측은 남아 있다.
+- 실제 설치된 Claude·Codex CLI를 계정과 네트워크로 실행하는 경로는 자동 검사에서 호출하지 않았다.
+- 시작한 실행은 종료 결과를 받아 갈 때까지 provider 객체 안에 남는다. 대기 호출을 건너뛰는 호출자가
+  생기면 항목이 쌓이므로, dispatcher를 만들 때 종료 처리를 반드시 거치도록 해야 한다.
+- 전체 회귀 검사 수는 다른 작업이 검사를 추가하면 달라진다. 확인 동선의 숫자는 이번 실행 시점
+  기준이다.
 
 ## 후속 작업
 
-- dispatcher와 실행 이력 연결은 범위 밖이다. 후속 작업은 이 provider 인터페이스와 정규화된 이벤트를
-  사용해야 한다.
-- quota 검사 격리는 별도 작업에서 수정해야 한다.
+- TASK-146은 이 핸들 위에 복구 경로, 예약 대상·lease 대조, 부분 실패 단계 확장을 얹으면 된다.
+  이번 구현은 그 계약과 이름·반환 단계를 맞춰 두었다.
+- TASK-S051-04의 dispatcher는 시작 결과를 저장하고 이벤트를 오프셋으로 읽어 가면 된다.
+- 작업 문서 자체에는 실행 핸들 계약이 없었다. 이번 재작업의 판단 기준은 QA 코멘트와 승인된 이웃
+  작업 문서였다. 실행 계약을 다루는 작업 문서에는 시작 반환 값과 감시 방법을 처음부터 적어 두면
+  좋겠다.
+- quota 검사 격리는 여전히 별도 작업이 필요하다.

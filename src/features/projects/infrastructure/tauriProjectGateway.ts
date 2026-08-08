@@ -18,6 +18,8 @@ import type {
   SpecDocument,
   TaskDocument,
   TaskQaBatchResult,
+  TaskResumeRequest,
+  TaskResumeResult,
 } from "../domain/types";
 
 export const tauriProjectGateway: ProjectGateway = {
@@ -121,6 +123,10 @@ export const tauriProjectGateway: ProjectGateway = {
       fileNames,
       comment,
     });
+  },
+
+  resumeTask(path, request: TaskResumeRequest) {
+    return invoke<TaskResumeResult>("resume_task", { path, request });
   },
 
   migrate(path) {

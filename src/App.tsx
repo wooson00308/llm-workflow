@@ -64,6 +64,7 @@ export default function App() {
       onReadTask={workspace.readTask}
       onTaskQa={workspace.recordTaskQa}
       onTaskQaBatch={workspace.confirmTaskQaBatch}
+      onResumeTask={workspace.resumeTask}
       onRefresh={workspace.refresh}
       onSwitchProject={workspace.closeProject}
     />

@@ -2,14 +2,16 @@
 schema: workflow-labs/task@1
 id: TASK-148
 title: blocked 작업 재개를 원자적 사용자 감사 전이로 기록한다
-status: todo
+status: qa_waiting
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
 depends_on: [TASK-S051-01]
 scope_files: [docs/file-contract.md, src-tauri/src/application/project_service.rs, src-tauri/src/commands/projects.rs, src-tauri/src/domain/project.rs, src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/infrastructure/project_instructions.rs, src-tauri/src/lib.rs]
-updated_at: 2026-08-07T16:08:52Z
+updated_at: 2026-08-08T04:09:16Z
 history:
   - { at: 2026-08-07T16:08:52Z, kind: created }
+  - { at: 2026-08-08T03:49:10Z, kind: in_progress }
+  - { at: 2026-08-08T04:09:16Z, kind: qa_waiting }
 ---
 
 # blocked 작업 재개를 원자적 사용자 감사 전이로 기록한다
@@ -22,6 +24,30 @@ history:
 같은 요청을 반복해도 재개 이력과 감사 기록이 중복되지 않는다.
 에이전트와 일반 문서 편집은 사용자 재개 기록을 만들 수 없고 기존 승인과 품질 확인 의미도 유지된다.
 사용자는 자동 검사에서 충돌, 잠금, 선점과 저장 실패 시 원본 보존을 확인하면 된다.
+
+## 확인 동선
+
+이 작업에는 눈으로 볼 화면이 없다. 재개 버튼과 패널 배치는 이 작업의 범위 밖이고, 여기서 만든 것은
+`resume_task` 명령과 저장 계약, 그리고 관리 규칙·파일 계약의 문언이다. 그래서 확인 도장은 아래
+자동 검사 수치를 신뢰한다는 뜻이다.
+
+- `cargo test --manifest-path src-tauri/Cargo.toml task_resume` → 15 passed, 0 failed
+- `cargo test --manifest-path src-tauri/Cargo.toml` → 609 passed, 0 failed
+- `npm run check` → 타입 검사 통과, 25개 파일 831 tests 통과, 배포 빌드 성공
+
+수치 대신 동작을 직접 보고 싶다면 임시 프로젝트에서 다음을 재현할 수 있다. 화면이 없으므로 명령은
+개발용 호출로 확인한다.
+
+1. `.workflow/<워크플로우>/tasks/`에 `status: blocked`인 작업 문서를 두고, 그 문서의 `updated_at`
+   값과 비어 있지 않은 해결 근거, 임의의 요청 식별자로 `resume_task`를 호출한다.
+2. 작업 문서의 상태가 `todo`로 바뀌고 `history` 끝에 `{ at: <재개 시각>, kind: resumed }` 한 줄이
+   붙는다. 같은 시각으로 `decisions/RESUME-XXXXXXXX.md`가 한 건 생기고 본문에는 입력한 해결 근거가
+   그대로 있다. 기존 `## 막힌 사유` 절과 알 수 없는 프론트매터 필드는 그대로 남는다.
+3. 같은 요청 식별자로 한 번 더 호출하면 성공을 다시 받지만 `resumed` 이력과 감사 파일은 각각 한 건
+   그대로다.
+4. `updated_at`을 다른 값으로 보내거나, `.workflow/.runtime/leases/<작업-id>.yml`에 미만료 lease를
+   두거나, `.workflow/.runtime/migration.lock`이 있는 상태로 호출하면 거절되고 `tasks/`와
+   `decisions/`의 파일 내용이 호출 전과 같다.
 
 ## 목적
 
