@@ -7,6 +7,7 @@ import type {
   AgentRuntimeState,
 } from "../../domain/types";
 import { AgentRoleSettings } from "./AgentRoleSettings";
+import { AgentRunDashboard } from "./AgentRunDashboard";
 
 /**
  * 준비 상태 하나. 제목과 설명과 사용자가 할 다음 행동을 함께 든다. 상태마다 다음 행동이 다르므로
@@ -326,6 +327,8 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
           </ul>
         </section>
       )}
+
+      {state.policy && <AgentRunDashboard actions={actions} state={state} />}
 
       <section aria-label="기존 역할 잡 이전" className="agent-migration">
         <h3>기존 역할 잡 이전</h3>

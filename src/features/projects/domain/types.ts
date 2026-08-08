@@ -1104,6 +1104,26 @@ export interface ProjectGateway {
     previewId: string,
     baselineRevision: string,
   ): Promise<AgentPolicySnapshot>;
+  planAgentRun(projectId: string, roles: AgentRoleSlotRequest[]): Promise<AgentRunPlan>;
+  startAgentRun(
+    projectId: string,
+    planId: string,
+    confirmed: boolean,
+  ): Promise<AgentRunStartOutcome>;
+  cancelAgentRun(
+    projectId: string,
+    runId: string,
+    confirmed: boolean,
+  ): Promise<AgentCancelOutcome>;
+  retryAgentRun(projectId: string, runId: string): Promise<AgentRunSummary>;
+  inspectAgentRuns(projectId: string): Promise<AgentQueueSnapshot>;
+  pauseAgentProject(projectId: string): Promise<AgentQueueSnapshot>;
+  resumeAgentProject(projectId: string): Promise<AgentQueueSnapshot>;
+  readAgentRunLog(
+    projectId: string,
+    runId: string,
+    cursor: number,
+  ): Promise<AgentRunLogPage>;
 }
 
 /**
@@ -1273,6 +1293,96 @@ export interface AgentMigrationPreview {
   untouchedRoles: string[];
 }
 
+export interface AgentRoleSlotRequest {
+  role: string;
+  slots: number;
+  /** 비어 있으면 자동 배정이고, 값이 있으면 런타임이 같은 안전 규칙으로 수동 대상을 검사한다. */
+  targets: string[];
+}
+
+export interface AgentRoleRunPlan {
+  role: string;
+  provider: string;
+  executionMode: string;
+  requested: number;
+  granted: number;
+  excluded: string[];
+  manualTargets: string[];
+  diagnostic: unknown;
+}
+
+export interface AgentRunPlan {
+  planId: string;
+  projectId: string;
+  revision: string;
+  expiresAt: string;
+  deviceRemaining: number;
+  projectRemaining: number;
+  billingRouteRisk: boolean;
+  limits: unknown;
+  roles: AgentRoleRunPlan[];
+}
+
+export type AgentRunStatus =
+  | "reserved"
+  | "queued"
+  | "running"
+  | "paused"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "recovery_required"
+  | "unrecognized";
+
+export interface AgentRunSummary {
+  runId: string;
+  projectId: string;
+  role: string;
+  provider: string;
+  state: AgentRunStatus;
+  targetId: string | null;
+  startedAt: string | null;
+  failureStage: string | null;
+  reason: string | null;
+  remaining: string[];
+  previousRunId: string | null;
+}
+
+export interface AgentRunStartOutcome {
+  started: AgentRunSummary[];
+  failures: unknown[];
+}
+
+export interface AgentCancelPreview {
+  runId: string;
+  targetId: string | null;
+  leaseId: string | null;
+  pid: number | null;
+  processLiveness: string;
+  childProcesses: number;
+  cleanup: string[];
+}
+
+export type AgentCancelOutcome =
+  | { kind: "preview"; preview: AgentCancelPreview }
+  | { kind: "applied"; run: AgentRunSummary }
+  | { kind: "partial"; run: AgentRunSummary; remaining: string[] };
+
+export interface AgentRunLogPage {
+  runId: string;
+  events: unknown[];
+  nextCursor: number;
+}
+
+export interface AgentQueueSnapshot {
+  projectId: string;
+  paused: boolean;
+  runs: AgentRunSummary[];
+  errors: unknown[];
+  providers: unknown[];
+  unavailable: string | null;
+}
+
 /** 앱이 대신 실행하는 런타임 조작 셋. 셋 다 계획을 먼저 보여주고 확인받은 뒤에만 적용한다. */
 export type AgentRuntimeOperation = "install" | "update" | "repair";
 
@@ -1311,6 +1421,23 @@ export interface AgentRuntimeState {
   migrationError: string | null;
   saving: boolean;
   saveError: string | null;
+  runPlan: AgentRunPlan | null;
+  runRequests: AgentRoleSlotRequest[];
+  runPlanning: boolean;
+  runStarting: boolean;
+  runError: string | null;
+  queue: AgentQueueSnapshot | null;
+  queueReading: boolean;
+  queueError: string | null;
+  pausing: boolean;
+  cancelPreview: AgentCancelPreview | null;
+  cancelResult: AgentCancelOutcome | null;
+  retryPreview: AgentRunSummary | null;
+  controllingRunId: string | null;
+  controlError: string | null;
+  logs: Record<string, AgentRunLogPage>;
+  readingLogRunId: string | null;
+  logError: string | null;
 }
 
 export interface AgentRuntimeActions {
@@ -1325,6 +1452,18 @@ export interface AgentRuntimeActions {
   applyMigration(): Promise<boolean>;
   dismissMigration(): void;
   save(policy: AgentProjectPolicy): Promise<boolean>;
+  planRun(requests: AgentRoleSlotRequest[]): Promise<void>;
+  cancelRunPlan(): void;
+  startRun(): Promise<boolean>;
+  refreshRuns(): Promise<void>;
+  setProjectPaused(paused: boolean): Promise<boolean>;
+  previewCancel(runId: string): Promise<void>;
+  dismissCancel(): void;
+  confirmCancel(): Promise<boolean>;
+  previewRetry(runId: string): void;
+  dismissRetry(): void;
+  confirmRetry(): Promise<boolean>;
+  readRunLog(runId: string): Promise<void>;
 }
 
 export interface RecentProjectStore {

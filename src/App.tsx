@@ -46,6 +46,8 @@ export default function App() {
 
   return (
     <WorkspaceShell
+      agentRuntime={workspace.agentRuntime}
+      agentRuntimeActions={workspace.agentRuntimeActions}
       busy={workspace.busy}
       customRules={workspace.customRules}
       customRulesActions={workspace.customRulesActions}

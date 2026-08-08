@@ -398,6 +398,72 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     saveAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
     previewAgentRuntimeMigration: vi.fn().mockResolvedValue(agentMigration),
     applyAgentRuntimeMigration: vi.fn().mockResolvedValue(agentPolicy),
+    planAgentRun: vi.fn().mockResolvedValue({
+      planId: "run-plan-1",
+      projectId: project.projectId,
+      revision: "run-rev-1",
+      expiresAt: "2026-08-08T12:00:00Z",
+      deviceRemaining: 4,
+      projectRemaining: 3,
+      billingRouteRisk: false,
+      limits: {},
+      roles: [],
+    }),
+    startAgentRun: vi.fn().mockResolvedValue({ started: [], failures: [] }),
+    cancelAgentRun: vi.fn().mockResolvedValue({
+      kind: "preview",
+      preview: {
+        runId: "run-1",
+        targetId: "TASK-1",
+        leaseId: "lease-1",
+        pid: 1,
+        processLiveness: "running",
+        childProcesses: 0,
+        cleanup: ["lease"],
+      },
+    }),
+    retryAgentRun: vi.fn().mockResolvedValue({
+      runId: "run-2",
+      projectId: project.projectId,
+      role: "developer",
+      provider: "codex",
+      state: "queued",
+      targetId: "TASK-1",
+      startedAt: null,
+      failureStage: null,
+      reason: null,
+      remaining: [],
+      previousRunId: "run-1",
+    }),
+    inspectAgentRuns: vi.fn().mockResolvedValue({
+      projectId: project.projectId,
+      paused: false,
+      runs: [],
+      errors: [],
+      providers: [],
+      unavailable: null,
+    }),
+    pauseAgentProject: vi.fn().mockResolvedValue({
+      projectId: project.projectId,
+      paused: true,
+      runs: [],
+      errors: [],
+      providers: [],
+      unavailable: null,
+    }),
+    resumeAgentProject: vi.fn().mockResolvedValue({
+      projectId: project.projectId,
+      paused: false,
+      runs: [],
+      errors: [],
+      providers: [],
+      unavailable: null,
+    }),
+    readAgentRunLog: vi.fn().mockResolvedValue({
+      runId: "run-1",
+      events: [],
+      nextCursor: 0,
+    }),
     migrate: vi.fn().mockResolvedValue(project),
     inspectIntegrations: vi.fn().mockResolvedValue(snapshot),
     installHeartbeatJobs: vi.fn().mockResolvedValue(snapshot),
@@ -1224,6 +1290,111 @@ describe("useProjectWorkspace", () => {
     await waitFor(() =>
       expect(result.current.error).toBe("결정 코멘트는 2,000자 이하여야 합니다."),
     );
+    unmount();
+  });
+});
+
+describe("useProjectWorkspace 에이전트 실행", () => {
+  const request = [{ role: "developer", slots: 2, targets: ["TASK-S051-01"] }];
+  const plan = {
+    planId: "run-plan-1",
+    projectId: project.projectId,
+    revision: "queue-rev-1",
+    expiresAt: "2026-08-08T12:00:00Z",
+    deviceRemaining: 4,
+    projectRemaining: 3,
+    billingRouteRisk: false,
+    limits: {},
+    roles: [],
+  };
+
+  it("수동 대상을 프로젝트 식별자와 함께 계획하고 확인 뒤 시작한다", async () => {
+    const gateway = gatewayFor({
+      planAgentRun: vi.fn().mockResolvedValue(plan),
+      startAgentRun: vi.fn().mockResolvedValue({ started: [], failures: [] }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await act(() => result.current.agentRuntimeActions.planRun(request));
+    expect(gateway.planAgentRun).toHaveBeenCalledWith(project.projectId, request);
+    expect(gateway.startAgentRun).not.toHaveBeenCalled();
+
+    let started = false;
+    await act(async () => {
+      started = await result.current.agentRuntimeActions.startRun();
+    });
+    expect(started).toBe(true);
+    expect(gateway.startAgentRun).toHaveBeenCalledWith(project.projectId, "run-plan-1", true);
+    expect(gateway.inspectAgentRuns).toHaveBeenCalledWith(project.projectId);
+    unmount();
+  });
+
+  it("stale plan은 시작하지 않고 새 계획을 다시 확인 상태로 둔다", async () => {
+    const fresh = { ...plan, planId: "run-plan-2", revision: "queue-rev-2" };
+    const gateway = gatewayFor({
+      planAgentRun: vi.fn().mockResolvedValueOnce(plan).mockResolvedValueOnce(fresh),
+      startAgentRun: vi.fn().mockRejectedValue("계획이 더 이상 유효하지 않습니다"),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await act(() => result.current.agentRuntimeActions.planRun(request));
+    let started = true;
+    await act(async () => {
+      started = await result.current.agentRuntimeActions.startRun();
+    });
+
+    expect(started).toBe(false);
+    expect(gateway.startAgentRun).toHaveBeenCalledTimes(1);
+    expect(gateway.planAgentRun).toHaveBeenCalledTimes(2);
+    expect(result.current.agentRuntime.runPlan?.planId).toBe("run-plan-2");
+    expect(result.current.agentRuntime.runError).toMatch(/최신 계획을 다시 확인/);
+    unmount();
+  });
+
+  it("pause·cancel·retry·logs는 모두 열린 프로젝트 식별자를 사용한다", async () => {
+    const gateway = gatewayFor();
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.setProjectPaused(true));
+    await act(() => result.current.agentRuntimeActions.previewCancel("run-1"));
+    await act(() => result.current.agentRuntimeActions.readRunLog("run-1"));
+
+    expect(gateway.pauseAgentProject).toHaveBeenCalledWith(project.projectId);
+    expect(gateway.cancelAgentRun).toHaveBeenCalledWith(project.projectId, "run-1", false);
+    expect(gateway.readAgentRunLog).toHaveBeenCalledWith(project.projectId, "run-1", 0);
+    unmount();
+  });
+
+  it("프로젝트를 다시 열면 메모리 복원 대신 런타임 큐를 즉시 읽는다", async () => {
+    const inspectAgentRuns = vi.fn().mockResolvedValue({
+      projectId: project.projectId,
+      paused: false,
+      runs: [],
+      errors: [],
+      providers: [],
+      unavailable: null,
+    });
+    const gateway = gatewayFor({ inspectAgentRuns });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(inspectAgentRuns).toHaveBeenCalledWith(project.projectId));
+    expect(result.current.agentRuntime.queue?.projectId).toBe(project.projectId);
     unmount();
   });
 });

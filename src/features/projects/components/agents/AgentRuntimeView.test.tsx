@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentPolicySnapshot,
   AgentProviderDiagnosis,
+  AgentQueueSnapshot,
   AgentRolePolicy,
+  AgentRunPlan,
   AgentRuntimeActions,
   AgentRuntimeInspection,
   AgentRuntimeState,
@@ -99,6 +101,23 @@ function state(overrides: Partial<AgentRuntimeState> = {}): AgentRuntimeState {
     migrationError: null,
     saving: false,
     saveError: null,
+    runPlan: null,
+    runRequests: [],
+    runPlanning: false,
+    runStarting: false,
+    runError: null,
+    queue: null,
+    queueReading: false,
+    queueError: null,
+    pausing: false,
+    cancelPreview: null,
+    cancelResult: null,
+    retryPreview: null,
+    controllingRunId: null,
+    controlError: null,
+    logs: {},
+    readingLogRunId: null,
+    logError: null,
     ...overrides,
   };
 }
@@ -113,6 +132,18 @@ function actionsStub(overrides: Partial<AgentRuntimeActions> = {}): AgentRuntime
     applyMigration: vi.fn().mockResolvedValue(true),
     dismissMigration: vi.fn(),
     save: vi.fn().mockResolvedValue(true),
+    planRun: vi.fn().mockResolvedValue(undefined),
+    cancelRunPlan: vi.fn(),
+    startRun: vi.fn().mockResolvedValue(true),
+    refreshRuns: vi.fn().mockResolvedValue(undefined),
+    setProjectPaused: vi.fn().mockResolvedValue(true),
+    previewCancel: vi.fn().mockResolvedValue(undefined),
+    dismissCancel: vi.fn(),
+    confirmCancel: vi.fn().mockResolvedValue(true),
+    previewRetry: vi.fn(),
+    dismissRetry: vi.fn(),
+    confirmRetry: vi.fn().mockResolvedValue(true),
+    readRunLog: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -141,6 +172,65 @@ const updatePlan: AgentUpdatePlan = {
   activeRuns: 2,
   projects: ["workflow-labs", "other"],
   service,
+};
+
+const runPlan: AgentRunPlan = {
+  planId: "run-plan-1",
+  projectId: "prj_1",
+  revision: "queue-rev-1",
+  expiresAt: "2026-08-08T10:00:00Z",
+  deviceRemaining: 4,
+  projectRemaining: 5,
+  billingRouteRisk: false,
+  limits: { device: 16, project: 5 },
+  roles: [
+    {
+      role: "developer",
+      provider: "codex",
+      executionMode: "once",
+      requested: 3,
+      granted: 2,
+      excluded: ["활성 lease: TASK-S051-03"],
+      manualTargets: ["TASK-S051-01", "TASK-S051-02"],
+      diagnostic: {},
+    },
+  ],
+};
+
+const queue: AgentQueueSnapshot = {
+  projectId: "prj_1",
+  paused: false,
+  errors: [],
+  providers: [],
+  unavailable: null,
+  runs: [
+    {
+      runId: "run-running",
+      projectId: "prj_1",
+      role: "developer",
+      provider: "codex",
+      state: "running",
+      targetId: "TASK-S051-01",
+      startedAt: "2026-08-08T09:00:00Z",
+      failureStage: null,
+      reason: null,
+      remaining: [],
+      previousRunId: null,
+    },
+    {
+      runId: "run-failed",
+      projectId: "prj_1",
+      role: "developer",
+      provider: "codex",
+      state: "failed",
+      targetId: "TASK-S051-02",
+      startedAt: "2026-08-08T08:00:00Z",
+      failureStage: "provider_start",
+      reason: "auth_required",
+      remaining: [],
+      previousRunId: null,
+    },
+  ],
 };
 
 describe("AgentRuntimeView 준비 상태", () => {
@@ -389,6 +479,163 @@ describe("AgentRuntimeView 역할 정책", () => {
     );
 
     expect(screen.getByLabelText("기획자 모델")).toHaveValue("");
+  });
+});
+
+describe("AgentRuntimeView 실행 계획과 큐", () => {
+  it("상한의 최솟값으로 계산된 실제 시작 수와 대상을 확인한 뒤에만 시작한다", async () => {
+    const actions = actionsStub();
+    renderView(state({ runPlan, queue }), actions);
+
+    const confirmation = screen.getByRole("region", { name: "시작 확인" });
+    expect(within(confirmation).getByText("2개 세션")).toBeInTheDocument();
+    expect(within(confirmation).getByText(/남음 4개/)).toBeInTheDocument();
+    expect(within(confirmation).getByText("TASK-S051-01, TASK-S051-02")).toBeInTheDocument();
+    expect(actions.startRun).not.toHaveBeenCalled();
+
+    fireEvent.click(within(confirmation).getByRole("button", { name: "이 계획으로 시작" }));
+    await waitFor(() => expect(actions.startRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("시작 수 0은 provider 시작을 막고 수동 배정 진입점을 보여준다", () => {
+    const zeroPlan: AgentRunPlan = {
+      ...runPlan,
+      roles: runPlan.roles.map((role) => ({
+        ...role,
+        granted: 0,
+        manualTargets: [],
+        excluded: ["대상 없음"],
+      })),
+    };
+    renderView(state({ runPlan: zeroPlan }));
+
+    expect(screen.getByText(/시작할 수 있는 대상이 0건/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "이 계획으로 시작" })).toBeDisabled();
+    expect(screen.getAllByRole("option", { name: "직접 지정" }).length).toBe(3);
+  });
+
+  it("API 과금 위험 계획은 별도 확인 전에는 시작하지 않는다", () => {
+    renderView(state({ runPlan: { ...runPlan, billingRouteRisk: true } }));
+    const start = screen.getByRole("button", { name: "이 계획으로 시작" });
+
+    expect(start).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Claude API 과금 경로/ }));
+    expect(start).toBeEnabled();
+  });
+
+  it("수동 대상은 역할별 targets로 계획 검증에 보내고 실행을 바로 시작하지 않는다", async () => {
+    const actions = actionsStub();
+    renderView(state({ runPlan }), actions);
+
+    fireEvent.change(screen.getByLabelText("개발자 배정 방식"), { target: { value: "manual" } });
+    fireEvent.change(screen.getByLabelText("개발자 수동 대상"), {
+      target: { value: "TASK-S051-01,TASK-S051-02" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "계획 확인" }));
+
+    await waitFor(() => expect(actions.planRun).toHaveBeenCalledTimes(1));
+    expect(actions.planRun).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "developer",
+          targets: ["TASK-S051-01", "TASK-S051-02"],
+        }),
+      ]),
+    );
+    expect(actions.startRun).not.toHaveBeenCalled();
+  });
+
+  it("프로젝트 일시 정지는 설명을 확인한 뒤에만 적용한다", async () => {
+    const actions = actionsStub();
+    renderView(state({ queue }), actions);
+
+    fireEvent.click(screen.getByRole("button", { name: "새 배정 일시 정지" }));
+    expect(actions.setProjectPaused).not.toHaveBeenCalled();
+    expect(screen.getByText(/이미 실행 중인 항목과 다른 프로젝트의 상태는 유지/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "확인하고 일시 정지" }));
+    await waitFor(() => expect(actions.setProjectPaused).toHaveBeenCalledWith(true));
+  });
+
+  it("취소와 재시도는 각각 확인 화면을 거친다", async () => {
+    const actions = actionsStub();
+    const current = state({
+      queue,
+      cancelPreview: {
+        runId: "run-running",
+        targetId: "TASK-S051-01",
+        leaseId: "lease-1",
+        pid: 101,
+        processLiveness: "running",
+        childProcesses: 2,
+        cleanup: ["process_tree", "lease"],
+      },
+      retryPreview: queue.runs[1],
+    });
+    renderView(current, actions);
+
+    expect(screen.getByText(/자식 프로세스 2개/)).toBeInTheDocument();
+    expect(screen.getByText(/이전 실행 run-failed/)).toBeInTheDocument();
+    expect(actions.confirmCancel).not.toHaveBeenCalled();
+    expect(actions.confirmRetry).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "확인하고 취소" }));
+    fireEvent.click(screen.getByRole("button", { name: "확인하고 재시도" }));
+    await waitFor(() => expect(actions.confirmCancel).toHaveBeenCalledTimes(1));
+    expect(actions.confirmRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("구조화 로그에서 prompt와 비밀 필드를 DOM에 내보내지 않는다", () => {
+    const { container } = renderView(
+      state({
+        queue,
+        logs: {
+          "run-running": {
+            runId: "run-running",
+            nextCursor: 7,
+            events: [
+              {
+                timestamp: "2026-08-08T09:01:00Z",
+                stage: "provider_start",
+                status: "running",
+                message: "token=SECRET_INSIDE_MESSAGE",
+                prompt: "FULL_PRIVATE_PROMPT",
+                apiKey: "SECRET_API_KEY",
+                token: "SECRET_TOKEN",
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain("provider_start");
+    expect(container.textContent).not.toContain("FULL_PRIVATE_PROMPT");
+    expect(container.textContent).not.toContain("SECRET_API_KEY");
+    expect(container.textContent).not.toContain("SECRET_TOKEN");
+    expect(container.textContent).not.toContain("SECRET_INSIDE_MESSAGE");
+  });
+
+  it.each([
+    ["reserved", "예약 중"],
+    ["queued", "대기"],
+    ["running", "실행 중"],
+    ["paused", "일시 정지"],
+    ["succeeded", "성공"],
+    ["failed", "실패"],
+    ["cancelled", "취소됨"],
+    ["recovery_required", "복구 필요"],
+  ] as const)("%s 상태를 %s 문구로 구분한다", (runState, label) => {
+    renderView(
+      state({
+        queue: {
+          ...queue,
+          runs: [{ ...queue.runs[0], runId: `run-${runState}`, state: runState }],
+        },
+      }),
+    );
+
+    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
   });
 });
 

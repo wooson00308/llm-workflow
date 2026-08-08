@@ -34,6 +34,7 @@ import type {
   AgentRuntimeActions,
   AgentRuntimeOperation,
   AgentRuntimeState,
+  AgentRoleSlotRequest,
 } from "../domain/types";
 
 interface Dependencies {
@@ -154,6 +155,23 @@ const emptyAgentRuntime: AgentRuntimeState = {
   migrationError: null,
   saving: false,
   saveError: null,
+  runPlan: null,
+  runRequests: [],
+  runPlanning: false,
+  runStarting: false,
+  runError: null,
+  queue: null,
+  queueReading: false,
+  queueError: null,
+  pausing: false,
+  cancelPreview: null,
+  cancelResult: null,
+  retryPreview: null,
+  controllingRunId: null,
+  controlError: null,
+  logs: {},
+  readingLogRunId: null,
+  logError: null,
 };
 
 export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
@@ -266,6 +284,287 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       }
     },
     [gateway],
+  );
+
+  /** 런타임의 영속 큐를 읽는다. 프로젝트를 바꾸면 늦게 온 이전 응답은 버린다. */
+  const readAgentRuns = useCallback(
+    async (path: string, projectId: string, silent = false) => {
+      if (!silent) {
+        setAgentRuntime((current) => ({ ...current, queueReading: true, queueError: null }));
+      }
+      try {
+        const queue = await gateway.inspectAgentRuns(projectId);
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          queue,
+          queueReading: false,
+          queueError: queue.unavailable,
+        }));
+      } catch (reason) {
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          queueReading: false,
+          queueError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  const planAgentRun = useCallback(
+    async (requests: AgentRoleSlotRequest[]) => {
+      if (!project?.projectId) return;
+      setAgentRuntime((current) => ({
+        ...current,
+        runPlanning: true,
+        runPlan: null,
+        runRequests: requests,
+        runError: null,
+      }));
+      try {
+        const runPlan = await gateway.planAgentRun(project.projectId, requests);
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({ ...current, runPlanning: false, runPlan }));
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          runPlanning: false,
+          runPlan: null,
+          runError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway, project?.projectId, project?.rootPath],
+  );
+
+  const cancelAgentRunPlan = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, runPlan: null, runError: null }));
+  }, []);
+
+  const startAgentRun = useCallback(async () => {
+    const plan = agentRuntime.runPlan;
+    if (!plan || !project?.projectId) return false;
+    setAgentRuntime((current) => ({ ...current, runStarting: true, runError: null }));
+    try {
+      await gateway.startAgentRun(project.projectId, plan.planId, true);
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        runStarting: false,
+        runPlan: null,
+      }));
+      await readAgentRuns(project.rootPath, project.projectId);
+      return true;
+    } catch (reason) {
+      if (activeProjectPath.current !== project.rootPath) return false;
+      const message = messageFrom(reason);
+      const stale = /계획|stale|revision|expired|만료/i.test(message);
+      if (stale && agentRuntime.runRequests.length > 0) {
+        try {
+          const runPlan = await gateway.planAgentRun(
+            project.projectId,
+            agentRuntime.runRequests,
+          );
+          if (activeProjectPath.current !== project.rootPath) return false;
+          setAgentRuntime((current) => ({
+            ...current,
+            runStarting: false,
+            runPlan,
+            runError: "계획이 변경되었습니다. 최신 계획을 다시 확인해 주세요.",
+          }));
+          return false;
+        } catch (refreshReason) {
+          setAgentRuntime((current) => ({
+            ...current,
+            runStarting: false,
+            runPlan: null,
+            runError: messageFrom(refreshReason),
+          }));
+          return false;
+        }
+      }
+      setAgentRuntime((current) => ({
+        ...current,
+        runStarting: false,
+        runPlan: null,
+        runError: message,
+      }));
+      return false;
+    }
+  }, [agentRuntime.runPlan, agentRuntime.runRequests, gateway, project, readAgentRuns]);
+
+  const setAgentProjectPaused = useCallback(
+    async (paused: boolean) => {
+      if (!project?.projectId) return false;
+      setAgentRuntime((current) => ({ ...current, pausing: true, controlError: null }));
+      try {
+        const queue = paused
+          ? await gateway.pauseAgentProject(project.projectId)
+          : await gateway.resumeAgentProject(project.projectId);
+        if (activeProjectPath.current !== project.rootPath) return false;
+        setAgentRuntime((current) => ({ ...current, pausing: false, queue }));
+        return true;
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return false;
+        setAgentRuntime((current) => ({
+          ...current,
+          pausing: false,
+          controlError: messageFrom(reason),
+        }));
+        return false;
+      }
+    },
+    [gateway, project],
+  );
+
+  const previewAgentRunCancel = useCallback(
+    async (runId: string) => {
+      if (!project?.projectId) return;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: runId,
+        cancelPreview: null,
+        cancelResult: null,
+        controlError: null,
+      }));
+      try {
+        const outcome = await gateway.cancelAgentRun(project.projectId, runId, false);
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          controllingRunId: null,
+          cancelPreview: outcome.kind === "preview" ? outcome.preview : null,
+          cancelResult: outcome.kind === "preview" ? null : outcome,
+        }));
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          controllingRunId: null,
+          controlError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway, project],
+  );
+
+  const dismissAgentRunCancel = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, cancelPreview: null }));
+  }, []);
+
+  const confirmAgentRunCancel = useCallback(async () => {
+    const preview = agentRuntime.cancelPreview;
+    if (!preview || !project?.projectId) return false;
+    setAgentRuntime((current) => ({
+      ...current,
+      controllingRunId: preview.runId,
+      controlError: null,
+    }));
+    try {
+      const outcome = await gateway.cancelAgentRun(project.projectId, preview.runId, true);
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        cancelPreview: null,
+        cancelResult: outcome,
+      }));
+      await readAgentRuns(project.rootPath, project.projectId);
+      return outcome.kind === "applied";
+    } catch (reason) {
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        controlError: messageFrom(reason),
+      }));
+      return false;
+    }
+  }, [agentRuntime.cancelPreview, gateway, project, readAgentRuns]);
+
+  const previewAgentRunRetry = useCallback((runId: string) => {
+    setAgentRuntime((current) => ({
+      ...current,
+      retryPreview: current.queue?.runs.find((run) => run.runId === runId) ?? null,
+      controlError: null,
+    }));
+  }, []);
+
+  const dismissAgentRunRetry = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, retryPreview: null }));
+  }, []);
+
+  const confirmAgentRunRetry = useCallback(async () => {
+    const previous = agentRuntime.retryPreview;
+    if (!previous || !project?.projectId) return false;
+    setAgentRuntime((current) => ({
+      ...current,
+      controllingRunId: previous.runId,
+      controlError: null,
+    }));
+    try {
+      const next = await gateway.retryAgentRun(project.projectId, previous.runId);
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        retryPreview: null,
+        queue: current.queue
+          ? { ...current.queue, runs: [...current.queue.runs, next] }
+          : current.queue,
+      }));
+      await readAgentRuns(project.rootPath, project.projectId);
+      return true;
+    } catch (reason) {
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        controlError: messageFrom(reason),
+      }));
+      return false;
+    }
+  }, [agentRuntime.retryPreview, gateway, project, readAgentRuns]);
+
+  const readAgentRunLog = useCallback(
+    async (runId: string) => {
+      if (!project?.projectId) return;
+      const cursor = agentRuntime.logs[runId]?.nextCursor ?? 0;
+      setAgentRuntime((current) => ({
+        ...current,
+        readingLogRunId: runId,
+        logError: null,
+      }));
+      try {
+        const page = await gateway.readAgentRunLog(project.projectId, runId, cursor);
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => {
+          const previous = current.logs[runId];
+          return {
+            ...current,
+            readingLogRunId: null,
+            logs: {
+              ...current.logs,
+              [runId]: {
+                ...page,
+                events: [...(previous?.events ?? []), ...page.events],
+              },
+            },
+          };
+        });
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          readingLogRunId: null,
+          logError: messageFrom(reason),
+        }));
+      }
+    },
+    [agentRuntime.logs, gateway, project],
   );
 
   /** 계획을 만든다. 세 조작 모두 계획 단계에서는 아무것도 쓰지 않는다. */
@@ -541,6 +840,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
           // 이전 프로젝트의 정책과 계획이 새 프로젝트 화면에 남지 않게 통째로 되돌린다(R5).
           setAgentRuntime(emptyAgentRuntime);
           void readAgentRuntime(next.rootPath, next.projectId);
+          if (next.projectId) void readAgentRuns(next.rootPath, next.projectId);
         }
         setProject(next);
         remember(next);
@@ -571,6 +871,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [
       gateway,
       readAgentRuntime,
+      readAgentRuns,
       readCustomRules,
       remember,
       resetCustomRules,
@@ -1299,18 +1600,26 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   useEffect(() => {
     if (!project?.initialized) return;
     const path = project.rootPath;
+    const projectId = project.projectId;
     void readIntegrations(path);
     const timer = window.setInterval(() => {
       void inspect(path, true);
       void readIntegrations(path);
+      if (projectId) void readAgentRuns(path, projectId, true);
     }, 2_500);
     return () => window.clearInterval(timer);
-  }, [inspect, readIntegrations, project?.initialized, project?.rootPath]);
+  }, [inspect, readAgentRuns, readIntegrations, project?.initialized, project?.projectId, project?.rootPath]);
 
   const agentRuntimeActions: AgentRuntimeActions = useMemo(
     () => ({
       refresh: async () => {
-        if (project) await readAgentRuntime(project.rootPath, project.projectId);
+        if (!project) return;
+        await Promise.all([
+          readAgentRuntime(project.rootPath, project.projectId),
+          project.projectId
+            ? readAgentRuns(project.rootPath, project.projectId)
+            : Promise.resolve(),
+        ]);
       },
       plan: planAgentRuntime,
       cancelPlan: cancelAgentRuntimePlan,
@@ -1319,17 +1628,45 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       applyMigration: applyAgentRuntimeMigration,
       dismissMigration: dismissAgentRuntimeMigration,
       save: saveAgentRuntimePolicy,
+      planRun: planAgentRun,
+      cancelRunPlan: cancelAgentRunPlan,
+      startRun: startAgentRun,
+      refreshRuns: async () => {
+        if (project?.projectId) {
+          await readAgentRuns(project.rootPath, project.projectId);
+        }
+      },
+      setProjectPaused: setAgentProjectPaused,
+      previewCancel: previewAgentRunCancel,
+      dismissCancel: dismissAgentRunCancel,
+      confirmCancel: confirmAgentRunCancel,
+      previewRetry: previewAgentRunRetry,
+      dismissRetry: dismissAgentRunRetry,
+      confirmRetry: confirmAgentRunRetry,
+      readRunLog: readAgentRunLog,
     }),
     [
       applyAgentRuntimeMigration,
       applyAgentRuntimePlan,
       cancelAgentRuntimePlan,
+      cancelAgentRunPlan,
+      confirmAgentRunCancel,
+      confirmAgentRunRetry,
       dismissAgentRuntimeMigration,
+      dismissAgentRunCancel,
+      dismissAgentRunRetry,
       planAgentRuntime,
+      planAgentRun,
       previewAgentRuntimeMigration,
+      previewAgentRunCancel,
+      previewAgentRunRetry,
       project,
       readAgentRuntime,
+      readAgentRunLog,
+      readAgentRuns,
       saveAgentRuntimePolicy,
+      setAgentProjectPaused,
+      startAgentRun,
     ],
   );
 

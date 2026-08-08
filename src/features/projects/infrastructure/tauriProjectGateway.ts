@@ -4,8 +4,15 @@ import type {
   AgentInstallApplication,
   AgentInstallPlan,
   AgentMigrationPreview,
+  AgentCancelOutcome,
   AgentPolicySnapshot,
   AgentProjectPolicy,
+  AgentQueueSnapshot,
+  AgentRoleSlotRequest,
+  AgentRunLogPage,
+  AgentRunPlan,
+  AgentRunStartOutcome,
+  AgentRunSummary,
   AgentRuntimeInspection,
   AgentUpdateApplication,
   AgentUpdatePlan,
@@ -253,5 +260,45 @@ export const tauriProjectGateway: ProjectGateway = {
       previewId,
       baselineRevision,
     });
+  },
+
+  planAgentRun(projectId, roles: AgentRoleSlotRequest[]) {
+    return invoke<AgentRunPlan>("plan_agent_run", { projectId, roles });
+  },
+
+  startAgentRun(projectId, planId, confirmed) {
+    return invoke<AgentRunStartOutcome>("start_agent_run", {
+      projectId,
+      planId,
+      confirmed,
+    });
+  },
+
+  cancelAgentRun(projectId, runId, confirmed) {
+    return invoke<AgentCancelOutcome>("cancel_agent_run", {
+      projectId,
+      runId,
+      confirmed,
+    });
+  },
+
+  retryAgentRun(projectId, runId) {
+    return invoke<AgentRunSummary>("retry_agent_run", { projectId, runId });
+  },
+
+  inspectAgentRuns(projectId) {
+    return invoke<AgentQueueSnapshot>("inspect_agent_runs", { projectId });
+  },
+
+  pauseAgentProject(projectId) {
+    return invoke<AgentQueueSnapshot>("pause_agent_project", { projectId });
+  },
+
+  resumeAgentProject(projectId) {
+    return invoke<AgentQueueSnapshot>("resume_agent_project", { projectId });
+  },
+
+  readAgentRunLog(projectId, runId, cursor) {
+    return invoke<AgentRunLogPage>("read_agent_run_log", { projectId, runId, cursor });
   },
 };
