@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 19
+rules_version: 20
 ---
 
 # LLM Workflow agent protocol
@@ -181,7 +181,7 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
-The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file, or that edits a task out of `blocked` by hand, resumes nothing and has undone none of what blocked the work.
+The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file resumes nothing, and neither does one that adds a `resumed` entry by hand. Leaving `blocked` is not itself reserved — an architect correcting a wrong task definition does exactly that, as this section describes below — but no edit an agent makes is a user reopening, and none of them earns the record or the history entry a reopening leaves.
 
 ### Recording why a task is blocked
 
@@ -218,9 +218,11 @@ The same edit that records the reason also records what kind of block it is, in 
 
 A `definition_error` block is the one kind an implementer cannot clear by working harder, because what is wrong is the instruction sheet. Correcting it is the architect's work and `.workflow/rules/roles/architect.md` states what that session may touch.
 
-The user asks for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. A session told to correct a definition on a request that has no such record refuses and reports the gap, exactly as it would for any other missing user record.
+The user can ask for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. Where such a record exists it is the ground of the correction, and the task corrected on it names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task corrected without one leaves the key out, exactly as a task that has never been corrected does.
 
-A task corrected on such a request names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task that has never been corrected leaves the key out.
+A correction does not wait for that record. A task blocked as `definition_error` already carries its own ground in writing: the `## 막힌 사유` section the blocking session wrote, and the implementation report that recorded what could not be satisfied as written. Those two are enough for an architect session to correct the definition, and the audit record of the correction is that session's own report under `reports/` — what was wrong, what changed, and which ground it worked from. The user's gate is QA on the finished work, not permission to fix a task sheet that is already recorded as broken.
+
+A session that finishes such a correction returns the task to `todo` in the same edit, so the work can be claimed again. That return is not a user reopening: it appends no `resumed` entry, because that `kind` belongs to the app-owned path this section describes above, and the architect's report is what records the return instead. The `blocked_kind` value is not cleared, and it reads as the kind of the last block exactly as the section above says.
 
 ### Record every task transition
 
@@ -247,6 +249,7 @@ history:
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
 - Do not write `completed`, `revision_requested`, or `resumed` entries. The app records all three: the first two when it records the QA decision, the third when the user reopens a blocked task.
 - `resumed` is the fact that the user reopened the work, and it does not stand in for `in_progress`. A developer that claims the returned `todo` task appends its own `in_progress` entry exactly as it would for any other `todo` task.
+- The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`. No `kind` names it, `resumed` is not it, and the architect's report carries that fact instead, as the section above states.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
 

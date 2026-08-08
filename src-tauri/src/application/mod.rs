@@ -1,3 +1,7 @@
+pub mod agent_runtime_config_service;
+pub mod agent_runtime_install_service;
+pub mod agent_runtime_run_service;
+pub mod agent_runtime_status_service;
 pub mod heartbeat_run_service;
 pub mod heartbeat_service;
 pub mod heartbeat_service_control;

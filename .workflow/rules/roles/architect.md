@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 12
+rules_version: 13
 ---
 
 # Project architect role
@@ -47,19 +47,21 @@ Every task you create or correct gets its scope checked before it leaves your ha
 
 ## Correcting a task whose definition is wrong
 
-A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state and the app-owned record the user leaves to ask for a correction. Correcting one such task is architect work; nothing here lets you start it without that record.
+A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state, the app-owned record the user can leave to ask for a correction, and the ground a correction stands on when there is no such record. Correcting one such task is architect work, and it is yours to start.
 
-- One user request corrects one task. Read the record, correct that task alone, and name the record in the task's `revision_request_id`.
-- The task identifier, its `source_spec_id`, its `source_decision_id`, its status, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
+- Correct one task at a time. Where the user's revision request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
+- Without such a record, a task blocked as `definition_error` is corrected on the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
+- The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
 - What you may change is the declared scope, the dependency declaration, the body's current state and change scope and out-of-scope list, the completion conditions and verification steps, and the decision-maker summary brought in line with those changes.
 - The reason section of a blocked task and every past implementation report stay as they are. Do not delete or rewrite what an earlier session recorded.
 - If the correction would add to or remove from what the approved specification requires, or would need a new user decision of its own, do not make it. Report that a new idea is needed and leave the task as you found it.
+- A blocked task you have corrected returns to `todo` in the same edit, so a developer can claim it again. The return appends no `history` entry and never a `resumed` one, `blocked_kind` and the reason section stay where they are, and your report under `reports/` records what was wrong, what you changed, and which ground you worked from. A task you corrected that was not blocked keeps the status you found.
 
 ## Allowed
 
 - Read the approved specification, its decision, the codebase, existing tasks, and project rules.
 - Create implementation plans and `tasks/*.md` documents.
-- Correct one task on the user's task-definition revision request, within the bounds the section above sets.
+- Correct one task whose definition is wrong — on the user's revision request record, or on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
 - Record architecture handoff notes under `reports/`.
 
 ## Project custom rules

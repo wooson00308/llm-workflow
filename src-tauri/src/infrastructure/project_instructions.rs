@@ -18,9 +18,9 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 19;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 20;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 11;
-pub(crate) const ARCHITECT_RULES_VERSION: u32 = 12;
+pub(crate) const ARCHITECT_RULES_VERSION: u32 = 13;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 14;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 19
+rules_version: 20
 ---
 
 # LLM Workflow agent protocol
@@ -226,7 +226,7 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
-The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file, or that edits a task out of `blocked` by hand, resumes nothing and has undone none of what blocked the work.
+The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file resumes nothing, and neither does one that adds a `resumed` entry by hand. Leaving `blocked` is not itself reserved — an architect correcting a wrong task definition does exactly that, as this section describes below — but no edit an agent makes is a user reopening, and none of them earns the record or the history entry a reopening leaves.
 
 ### Recording why a task is blocked
 
@@ -263,9 +263,11 @@ The same edit that records the reason also records what kind of block it is, in 
 
 A `definition_error` block is the one kind an implementer cannot clear by working harder, because what is wrong is the instruction sheet. Correcting it is the architect's work and `.workflow/rules/roles/architect.md` states what that session may touch.
 
-The user asks for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. A session told to correct a definition on a request that has no such record refuses and reports the gap, exactly as it would for any other missing user record.
+The user can ask for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. Where such a record exists it is the ground of the correction, and the task corrected on it names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task corrected without one leaves the key out, exactly as a task that has never been corrected does.
 
-A task corrected on such a request names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task that has never been corrected leaves the key out.
+A correction does not wait for that record. A task blocked as `definition_error` already carries its own ground in writing: the `## 막힌 사유` section the blocking session wrote, and the implementation report that recorded what could not be satisfied as written. Those two are enough for an architect session to correct the definition, and the audit record of the correction is that session's own report under `reports/` — what was wrong, what changed, and which ground it worked from. The user's gate is QA on the finished work, not permission to fix a task sheet that is already recorded as broken.
+
+A session that finishes such a correction returns the task to `todo` in the same edit, so the work can be claimed again. That return is not a user reopening: it appends no `resumed` entry, because that `kind` belongs to the app-owned path this section describes above, and the architect's report is what records the return instead. The `blocked_kind` value is not cleared, and it reads as the kind of the last block exactly as the section above says.
 
 ### Record every task transition
 
@@ -292,6 +294,7 @@ history:
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
 - Do not write `completed`, `revision_requested`, or `resumed` entries. The app records all three: the first two when it records the QA decision, the third when the user reopens a blocked task.
 - `resumed` is the fact that the user reopened the work, and it does not stand in for `in_progress`. A developer that claims the returned `todo` task appends its own `in_progress` entry exactly as it would for any other `todo` task.
+- The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`. No `kind` names it, `resumed` is not it, and the architect's report carries that fact instead, as the section above states.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
 
@@ -509,7 +512,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 12
+rules_version: 13
 ---
 
 # Project architect role
@@ -554,19 +557,21 @@ Every task you create or correct gets its scope checked before it leaves your ha
 
 ## Correcting a task whose definition is wrong
 
-A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state and the app-owned record the user leaves to ask for a correction. Correcting one such task is architect work; nothing here lets you start it without that record.
+A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state, the app-owned record the user can leave to ask for a correction, and the ground a correction stands on when there is no such record. Correcting one such task is architect work, and it is yours to start.
 
-- One user request corrects one task. Read the record, correct that task alone, and name the record in the task's `revision_request_id`.
-- The task identifier, its `source_spec_id`, its `source_decision_id`, its status, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
+- Correct one task at a time. Where the user's revision request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
+- Without such a record, a task blocked as `definition_error` is corrected on the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
+- The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
 - What you may change is the declared scope, the dependency declaration, the body's current state and change scope and out-of-scope list, the completion conditions and verification steps, and the decision-maker summary brought in line with those changes.
 - The reason section of a blocked task and every past implementation report stay as they are. Do not delete or rewrite what an earlier session recorded.
 - If the correction would add to or remove from what the approved specification requires, or would need a new user decision of its own, do not make it. Report that a new idea is needed and leave the task as you found it.
+- A blocked task you have corrected returns to `todo` in the same edit, so a developer can claim it again. The return appends no `history` entry and never a `resumed` one, `blocked_kind` and the reason section stay where they are, and your report under `reports/` records what was wrong, what you changed, and which ground you worked from. A task you corrected that was not blocked keeps the status you found.
 
 ## Allowed
 
 - Read the approved specification, its decision, the codebase, existing tasks, and project rules.
 - Create implementation plans and `tasks/*.md` documents.
-- Correct one task on the user's task-definition revision request, within the bounds the section above sets.
+- Correct one task whose definition is wrong — on the user's revision request record, or on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
 - Record architecture handoff notes under `reports/`.
 
 ## Project custom rules
@@ -1294,7 +1299,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1316,7 +1321,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1336,7 +1341,7 @@ mod tests {
             rules.contains("Do not write `completed`, `revision_requested`, or `resumed` entries.")
         );
         assert!(rules.contains("it does not stand in for `in_progress`"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(architect.contains("`history`"));
         assert!(developer.contains("rules_version: 14"));
         assert!(developer.contains("`history`"));
@@ -1359,11 +1364,11 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(developer.contains("rules_version: 14"));
         assert!(planner.contains("rules_version: 11"));
     }
@@ -1383,7 +1388,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1394,7 +1399,7 @@ mod tests {
         assert!(planner.contains("rules_version: 11"));
         assert!(planner.contains("Runtime reservation handoff"));
         assert!(planner.contains("supplied prefix"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(architect.contains("TASK identifier"));
         assert!(developer.contains("rules_version: 14"));
         assert!(developer.contains("do not call `acquire` again"));
@@ -1415,7 +1420,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1440,7 +1445,7 @@ mod tests {
         assert!(developer.contains("rules_version: 14"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("`qa_waiting` or `completed`"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
         assert!(planner.contains("rules_version: 11"));
@@ -1457,7 +1462,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1491,14 +1496,14 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
@@ -1522,9 +1527,9 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 19);
+        assert_eq!(WORKFLOW_RULES_VERSION, 20);
         assert_eq!(PLANNER_RULES_VERSION, 11);
-        assert_eq!(ARCHITECT_RULES_VERSION, 12);
+        assert_eq!(ARCHITECT_RULES_VERSION, 13);
         assert_eq!(DEVELOPER_RULES_VERSION, 14);
     }
 
@@ -1544,7 +1549,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1606,7 +1611,7 @@ mod tests {
         assert!(planner.contains("Never delete the document and never merge it"));
 
         // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(!architect.contains("Taking over"));
     }
 
@@ -1625,7 +1630,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1702,7 +1707,7 @@ mod tests {
         assert!(planner.contains("rules_version: 11"));
         assert!(planner.contains("what the user decides in this document"));
         assert!(planner.contains("what stays exactly as it is if it is not"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 보고서 요약과 작업 문서의 확인 동선.
@@ -1736,8 +1741,8 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 19"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(rules.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(developer.contains("rules_version: 14"));
         assert!(planner.contains("rules_version: 11"));
 
@@ -1766,7 +1771,24 @@ mod tests {
         assert!(rules.contains("The app records it under `decisions/`"));
         assert!(rules.contains("an agent never writes one"));
         assert!(rules.contains("optional frontmatter field `revision_request_id`"));
-        assert!(rules.contains("refuses and reports the gap"));
+        // 수정의 근거는 요청 기록이 있으면 그것이고, 없으면 막힌 작업 자신의 기록이다.
+        assert!(rules.contains("A correction does not wait for that record"));
+        assert!(rules.contains(
+            "the audit record of the correction is that session's own report under `reports/`"
+        ));
+        assert!(rules.contains("The user's gate is QA on the finished work"));
+        // 수정을 마친 세션이 todo로 되돌리되 사용자 재개 경로는 건드리지 않는다.
+        assert!(rules.contains("returns the task to `todo` in the same edit"));
+        assert!(rules.contains("it appends no `resumed` entry"));
+        assert!(rules.contains("The `blocked_kind` value is not cleared"));
+        assert!(rules.contains(
+            "The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`"
+        ));
+        // 앱 소유 재개 기록과 `resumed` 이력의 사용자 전용 성질은 그대로다.
+        assert!(rules.contains("only the app writes it, and only from the user's own action"));
+        assert!(rules.contains(
+            "An agent that writes such a file resumes nothing, and neither does one that adds a `resumed` entry by hand"
+        ));
         // 두 선택 필드는 파일 계약 절에도 한 번 실린다.
         assert!(rules.contains(
             "What kind of block a task is under lives in the optional `blocked_kind` field"
@@ -1774,13 +1796,23 @@ mod tests {
 
         // 아키텍트 계약: 수정 권한의 대상·보존 대상·돌려보낼 조건.
         assert!(architect.contains("## Correcting a task whose definition is wrong"));
-        assert!(architect.contains("One user request corrects one task"));
+        assert!(architect.contains("Correct one task at a time"));
+        assert!(architect
+            .contains("Correcting one such task is architect work, and it is yours to start"));
         assert!(architect.contains(
-            "The task identifier, its `source_spec_id`, its `source_decision_id`, its status, and its existing `history` are preserved exactly"
+            "a task blocked as `definition_error` is corrected on the ground already written down"
+        ));
+        assert!(architect.contains(
+            "The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly"
         ));
         assert!(architect.contains("What you may change is the declared scope"));
         assert!(architect.contains("Do not delete or rewrite what an earlier session recorded"));
         assert!(architect.contains("Report that a new idea is needed"));
+        assert!(architect
+            .contains("A blocked task you have corrected returns to `todo` in the same edit"));
+        assert!(
+            architect.contains("The return appends no `history` entry and never a `resumed` one")
+        );
 
         // 아키텍트 계약: 범위 사전 검사 의무와 고정 제목.
         assert!(architect.contains("## Check the scope before you hand a task over"));
@@ -1833,10 +1865,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(developer.contains("rules_version: 14"));
         assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
 
         // 전이와 같은 편집에서 남기는 고정 절.
         assert!(rules.contains("### Recording why a task is blocked"));
@@ -1922,7 +1954,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("### The structured summary"));
 
         // 일곱 하위 제목이 이 순서로 한 번씩만 정의된다.
@@ -2000,7 +2032,7 @@ mod tests {
             "Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request"
         ));
         assert!(planner.contains("what stays exactly as it is while this document is not approved"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(architect.contains("Write that summary in the structured form §8 defines"));
         assert!(architect.contains("what the user checks at QA once this task is done"));
         assert!(developer.contains("rules_version: 14"));
@@ -2027,7 +2059,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2067,7 +2099,7 @@ mod tests {
         assert!(architect.contains("scope, completion conditions, and verification"));
         assert!(developer.contains("changes, verification, risks, and user confirmation"));
         assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(developer.contains("rules_version: 14"));
     }
 
@@ -2127,7 +2159,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2158,9 +2190,9 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 19"));
+        assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 13"));
         assert!(developer.contains("rules_version: 14"));
     }
 
