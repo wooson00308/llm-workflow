@@ -1009,7 +1009,7 @@ mod tests {
             vec![
                 ("workflow_rules", 20, 20),
                 ("planner_rules", 11, 11),
-                ("architect_rules", 13, 13),
+                ("architect_rules", 14, 14),
                 ("developer_rules", 14, 14),
                 ("claim_helper", 1, 1),
                 ("condition_script", 14, 14),
@@ -1025,7 +1025,7 @@ mod tests {
     fn every_role_uses_its_own_version_for_updates_and_future_conflicts() {
         for (id, relative_path, current) in [
             ("planner_rules", "rules/roles/planner.md", 11),
-            ("architect_rules", "rules/roles/architect.md", 13),
+            ("architect_rules", "rules/roles/architect.md", 14),
             ("developer_rules", "rules/roles/developer.md", 14),
         ] {
             let (root, control) = roots();
@@ -1246,7 +1246,7 @@ mod tests {
         let architect = control.join("rules/roles/architect.md");
         let future = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 13", "rules_version: 14");
+            .replace("rules_version: 14", "rules_version: 15");
         fs::write(&architect, &future).expect("future architect");
 
         let result =
@@ -1263,8 +1263,8 @@ mod tests {
             .find(|asset| asset.id == "architect_rules")
             .expect("architect state");
         assert_eq!(state.status, ManagedAssetStatus::Conflict);
-        assert_eq!(state.installed_version, Some(14));
-        assert_eq!(state.provided_version, Some(13));
+        assert_eq!(state.installed_version, Some(15));
+        assert_eq!(state.provided_version, Some(14));
     }
 
     #[test]
@@ -1488,7 +1488,7 @@ mod tests {
             .replace("rules_version: 11", "rules_version: 10");
         let old_architect = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 13", "rules_version: 12");
+            .replace("rules_version: 14", "rules_version: 13");
         let old_developer = fs::read_to_string(&developer)
             .expect("developer")
             .replace("rules_version: 14", "rules_version: 13");

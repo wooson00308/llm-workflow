@@ -20,7 +20,7 @@ const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
 pub(crate) const WORKFLOW_RULES_VERSION: u32 = 20;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 11;
-pub(crate) const ARCHITECT_RULES_VERSION: u32 = 13;
+pub(crate) const ARCHITECT_RULES_VERSION: u32 = 14;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 14;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
@@ -512,7 +512,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 13
+rules_version: 14
 ---
 
 # Project architect role
@@ -553,6 +553,10 @@ Every task you create or correct gets its scope checked before it leaves your ha
 - Read the repository the declaration points at, not your memory of it. Open the files the work will touch and confirm they are the ones that carry the behaviour the completion conditions name.
 - The section says why this scope is enough to satisfy the completion conditions, not merely which files are in it. A list of paths with no reasoning has not made the check, it has only recorded its output.
 - Name what you looked at and what you concluded, including a file you considered and left out and why leaving it out still satisfies the conditions.
+- Trace every new or changed value in the completion conditions from its source of truth to its final consumer. A field, event, callback, command output, status, label, or list is a value for this check. Follow the real code through the layer that creates or stores it, every domain or transport shape that carries it, the application state or top-level assembly that passes it on, and the screen, script, or judgement that consumes it.
+- Write one line beginning with `- 값 경로:` for each such value under `## 범위 사전 검사`. Name the completion condition, the concrete files and symbols at every hop, and whether each hop already carries the value unchanged or must be edited. A hop marked for editing must appear in `scope_files`; a hop left outside the declaration needs an explicit code-based reason that it already carries the value without change.
+- Check result models, list payloads and event builders, callbacks and top-level assembly explicitly. Do not call one of them a pass-through from memory: open the current signature or constructed value and verify that the required field or operation is present end to end.
+- Close the check against every completion condition before creating or returning a task to `todo`. If one condition needs an edit outside `scope_files`, the task is still definitionally incomplete: correct the declaration and its overlap ordering now, or leave the blocked task blocked and report the unresolved gap.
 - A scope that turns out to be short is a defect in the task document, and the section is what lets a later session see where the judgement went wrong.
 
 ## Correcting a task whose definition is wrong
@@ -1341,7 +1345,7 @@ mod tests {
             rules.contains("Do not write `completed`, `revision_requested`, or `resumed` entries.")
         );
         assert!(rules.contains("it does not stand in for `in_progress`"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(architect.contains("`history`"));
         assert!(developer.contains("rules_version: 14"));
         assert!(developer.contains("`history`"));
@@ -1368,7 +1372,7 @@ mod tests {
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(developer.contains("rules_version: 14"));
         assert!(planner.contains("rules_version: 11"));
     }
@@ -1399,7 +1403,7 @@ mod tests {
         assert!(planner.contains("rules_version: 11"));
         assert!(planner.contains("Runtime reservation handoff"));
         assert!(planner.contains("supplied prefix"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(architect.contains("TASK identifier"));
         assert!(developer.contains("rules_version: 14"));
         assert!(developer.contains("do not call `acquire` again"));
@@ -1445,7 +1449,7 @@ mod tests {
         assert!(developer.contains("rules_version: 14"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("`qa_waiting` or `completed`"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
         assert!(planner.contains("rules_version: 11"));
@@ -1503,7 +1507,7 @@ mod tests {
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
@@ -1529,7 +1533,7 @@ mod tests {
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
         assert_eq!(WORKFLOW_RULES_VERSION, 20);
         assert_eq!(PLANNER_RULES_VERSION, 11);
-        assert_eq!(ARCHITECT_RULES_VERSION, 13);
+        assert_eq!(ARCHITECT_RULES_VERSION, 14);
         assert_eq!(DEVELOPER_RULES_VERSION, 14);
     }
 
@@ -1611,7 +1615,7 @@ mod tests {
         assert!(planner.contains("Never delete the document and never merge it"));
 
         // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(!architect.contains("Taking over"));
     }
 
@@ -1707,7 +1711,7 @@ mod tests {
         assert!(planner.contains("rules_version: 11"));
         assert!(planner.contains("what the user decides in this document"));
         assert!(planner.contains("what stays exactly as it is if it is not"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 보고서 요약과 작업 문서의 확인 동선.
@@ -1742,7 +1746,7 @@ mod tests {
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
         assert!(rules.contains("rules_version: 20"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(developer.contains("rules_version: 14"));
         assert!(planner.contains("rules_version: 11"));
 
@@ -1820,6 +1824,13 @@ mod tests {
         assert!(architect.contains("not merely which files are in it"));
         assert!(architect
             .contains("Read the repository the declaration points at, not your memory of it"));
+        assert!(architect.contains("source of truth to its final consumer"));
+        assert!(architect.contains("`- 값 경로:`"));
+        assert!(architect.contains("result models, list payloads and event builders"));
+        assert!(architect.contains("callbacks and top-level assembly"));
+        assert!(architect.contains("A hop marked for editing must appear in `scope_files`"));
+        assert!(architect.contains("Close the check against every completion condition"));
+        assert!(architect.contains("leave the blocked task blocked"));
 
         // 개발자 계약: 구현 전 대조와 정의 오류 차단, 그리고 그 경계.
         assert!(developer.contains("Before you change the first product file"));
@@ -1868,7 +1879,7 @@ mod tests {
         assert!(rules.contains("rules_version: 20"));
         assert!(developer.contains("rules_version: 14"));
         assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
 
         // 전이와 같은 편집에서 남기는 고정 절.
         assert!(rules.contains("### Recording why a task is blocked"));
@@ -2032,7 +2043,7 @@ mod tests {
             "Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request"
         ));
         assert!(planner.contains("what stays exactly as it is while this document is not approved"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(architect.contains("Write that summary in the structured form §8 defines"));
         assert!(architect.contains("what the user checks at QA once this task is done"));
         assert!(developer.contains("rules_version: 14"));
@@ -2099,7 +2110,7 @@ mod tests {
         assert!(architect.contains("scope, completion conditions, and verification"));
         assert!(developer.contains("changes, verification, risks, and user confirmation"));
         assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(developer.contains("rules_version: 14"));
     }
 
@@ -2192,7 +2203,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
         assert!(rules.contains("rules_version: 20"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 13"));
+        assert!(architect.contains("rules_version: 14"));
         assert!(developer.contains("rules_version: 14"));
     }
 

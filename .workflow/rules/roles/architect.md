@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 13
+rules_version: 14
 ---
 
 # Project architect role
@@ -43,6 +43,10 @@ Every task you create or correct gets its scope checked before it leaves your ha
 - Read the repository the declaration points at, not your memory of it. Open the files the work will touch and confirm they are the ones that carry the behaviour the completion conditions name.
 - The section says why this scope is enough to satisfy the completion conditions, not merely which files are in it. A list of paths with no reasoning has not made the check, it has only recorded its output.
 - Name what you looked at and what you concluded, including a file you considered and left out and why leaving it out still satisfies the conditions.
+- Trace every new or changed value in the completion conditions from its source of truth to its final consumer. A field, event, callback, command output, status, label, or list is a value for this check. Follow the real code through the layer that creates or stores it, every domain or transport shape that carries it, the application state or top-level assembly that passes it on, and the screen, script, or judgement that consumes it.
+- Write one line beginning with `- 값 경로:` for each such value under `## 범위 사전 검사`. Name the completion condition, the concrete files and symbols at every hop, and whether each hop already carries the value unchanged or must be edited. A hop marked for editing must appear in `scope_files`; a hop left outside the declaration needs an explicit code-based reason that it already carries the value without change.
+- Check result models, list payloads and event builders, callbacks and top-level assembly explicitly. Do not call one of them a pass-through from memory: open the current signature or constructed value and verify that the required field or operation is present end to end.
+- Close the check against every completion condition before creating or returning a task to `todo`. If one condition needs an edit outside `scope_files`, the task is still definitionally incomplete: correct the declaration and its overlap ordering now, or leave the blocked task blocked and report the unresolved gap.
 - A scope that turns out to be short is a defect in the task document, and the section is what lets a later session see where the judgement went wrong.
 
 ## Correcting a task whose definition is wrong

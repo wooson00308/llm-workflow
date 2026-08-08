@@ -4222,7 +4222,7 @@ mod tests {
         let architect = root.path().join(".workflow/rules/roles/architect.md");
         let old_architect = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 13", "rules_version: 12");
+            .replace("rules_version: 14", "rules_version: 13");
         fs::write(&architect, old_architect).expect("old architect");
 
         let confirmed = repository
@@ -4246,7 +4246,7 @@ mod tests {
         );
         assert!(fs::read_to_string(architect)
             .expect("architect updated on QA")
-            .contains("rules_version: 13"));
+            .contains("rules_version: 14"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
