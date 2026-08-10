@@ -276,7 +276,7 @@ describe("DevelopmentBoard", () => {
     expect(screen.getAllByText("QA 대기").length).toBeGreaterThan(0);
   });
 
-  it("shows the three most recently changed QA tasks first and folds the rest", () => {
+  it("separates QA from the kanban and presents one next check with a compact queue", () => {
     const items: WorkflowItemSummary[] = Array.from({ length: 5 }, (_, index) => ({
       ...tasks[1],
       fileName: `TASK-QA-${index}.md`,
@@ -288,21 +288,18 @@ describe("DevelopmentBoard", () => {
       <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />,
     );
 
-    const qaColumn = container.querySelector(".task-column.tone-review");
-    const primary = qaColumn?.querySelector(".task-stack-primary");
-    expect(qaColumn).toHaveTextContent("내 확인최근 변경부터 확인5");
-    expect(primary?.querySelectorAll(".task-card")).toHaveLength(3);
-    expect(Array.from(primary?.querySelectorAll(".task-card > strong") ?? [], (node) => node.textContent)).toEqual([
-      "확인 작업 4",
-      "확인 작업 3",
-      "확인 작업 2",
-    ]);
-    expect(within(qaColumn as HTMLElement).getByText("이전 확인 대기")).toBeInTheDocument();
-    expect(within(qaColumn as HTMLElement).getByText("2건 보기")).toBeInTheDocument();
+    const inbox = screen.getByRole("region", { name: "사용자 확인 대기" });
+    expect(within(inbox).getByRole("button", { name: /다음 확인.*확인 작업 4/ })).toBeInTheDocument();
+    expect(within(inbox).getByRole("heading", { name: "확인할 작업" })).toBeInTheDocument();
+    expect(inbox.querySelector(":scope > header > strong")).toHaveTextContent("5");
+    expect(inbox.querySelector(".task-qa-queue")).not.toHaveAttribute("open");
+    expect(within(inbox).getByText("다른 확인 대기")).toBeInTheDocument();
+    expect(within(inbox).getByText("4건")).toBeInTheDocument();
+    expect(container.querySelector(".task-column.tone-review")).toBeNull();
 
     fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "qa_waiting" } });
-    expect(container.querySelector(".task-column-overflow")).toBeNull();
-    expect(container.querySelectorAll(".task-stack-primary .task-card")).toHaveLength(5);
+    expect(container.querySelector(".task-qa-queue")).toHaveAttribute("open");
+    expect(screen.queryByRole("region", { name: "개발 작업 칸반 보드" })).not.toBeInTheDocument();
   });
 
   it("carries the recorded overflow excerpt all the way onto a board card", () => {
