@@ -258,6 +258,8 @@ describe("AgentRuntimeView 준비 상태", () => {
 
     expect(screen.getByRole("heading", { level: 1, name: "에이전트" })).toBeInTheDocument();
     expect(screen.getByText("실행 환경이 준비됐습니다")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "업데이트 계획 보기" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "상태 다시 확인" })).not.toBeInTheDocument();
   });
 
   // 여섯 상태가 각각 다른 문구와 다음 행동을 갖는다(완료 조건 8).
@@ -422,10 +424,10 @@ describe("AgentRuntimeView 계획과 적용", () => {
     expect(actions.refresh).not.toHaveBeenCalled();
   });
 
-  it("다시 읽기는 조회만 부른다", async () => {
-    const { actions } = renderView();
+  it("조회 결과가 없을 때만 상태 다시 확인을 보이고 조회만 부른다", async () => {
+    const { actions } = renderView(state({ inspection: null, readError: "상태를 읽지 못했습니다" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "다시 읽기" }));
+    fireEvent.click(screen.getByRole("button", { name: "상태 다시 확인" }));
 
     await waitFor(() => expect(actions.refresh).toHaveBeenCalledTimes(1));
     expect(actions.plan).not.toHaveBeenCalled();
@@ -469,12 +471,13 @@ describe("AgentRuntimeView 역할 정책", () => {
   it("세 역할을 고정 순서로 보여주고 초기값이 계약의 기본값이다", () => {
     const { container } = renderView();
 
-    const rows = Array.from(container.querySelectorAll<HTMLElement>(".agent-role-table tbody tr"));
-    expect(rows.map((row) => row.querySelector("th")?.textContent)).toEqual([
+    const cards = Array.from(container.querySelectorAll<HTMLElement>(".agent-role-card"));
+    expect(cards.map((card) => card.querySelector("h4")?.textContent)).toEqual([
       "기획자",
       "아키텍트",
       "개발자",
     ]);
+    expect(container.querySelector(".agent-role-table")).not.toBeInTheDocument();
     expect(screen.getByLabelText("기획자 최대 인원")).toHaveValue(1);
     expect(screen.getByLabelText("프로젝트 상한")).toHaveValue(3);
     expect(screen.getByLabelText("기기 상한")).toHaveValue(16);
@@ -494,12 +497,14 @@ describe("AgentRuntimeView 역할 정책", () => {
   it("역할 사용 여부는 사실만 보여주고 조작을 열지 않는다", () => {
     const { container } = renderView();
 
-    const row = container.querySelector<HTMLElement>(".agent-role-table tbody tr");
-    expect(within(row as HTMLElement).getByText("사용함")).toBeInTheDocument();
+    const card = container.querySelector<HTMLElement>(".agent-role-card");
+    expect(within(card as HTMLElement).getByText("사용 중")).toBeInTheDocument();
     expect(
-      within(row as HTMLElement).getByText("런타임 계약에 끄기 필드가 없어 이 값은 바꿀 수 없습니다."),
+      within(card as HTMLElement).getByText(
+        "역할은 현재 사용 중이며 이 버전에서는 역할 끄기를 지원하지 않습니다.",
+      ),
     ).toBeInTheDocument();
-    expect(within(row as HTMLElement).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(card as HTMLElement).queryByRole("checkbox")).not.toBeInTheDocument();
   });
 
   it("첫 확인은 요약만 보여주고 두 번째 확인이 저장한다", async () => {

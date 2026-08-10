@@ -85,33 +85,24 @@ export function AgentRoleSettings({
         </p>
       </header>
 
-      <table className="agent-role-table">
-        <caption className="visually-hidden">역할별 실행 도구와 한도</caption>
-        <thead>
-          <tr>
-            <th scope="col">역할</th>
-            <th scope="col">실행 도구</th>
-            <th scope="col">모델</th>
-            <th scope="col">사용</th>
-            <th scope="col">실행 방식</th>
-            <th scope="col">최대 인원</th>
-            <th scope="col">판정 간격(초)</th>
-            <th scope="col">실행 한도</th>
-          </tr>
-        </thead>
-        <tbody>
-          {ROLE_ORDER.map((role) => {
-            const value = draft.roles[role];
-            if (!value) return null;
-            const label = roleLabels[role] ?? role;
-            return (
-              <tr key={role}>
-                <th scope="row">{label}</th>
-                <td>
-                  <label className="visually-hidden" htmlFor={`agent-provider-${role}`}>
-                    {label} 실행 도구
-                  </label>
+      <div aria-label="역할별 실행 도구와 한도" className="agent-role-cards">
+        {ROLE_ORDER.map((role) => {
+          const value = draft.roles[role];
+          if (!value) return null;
+          const label = roleLabels[role] ?? role;
+          return (
+            <section className="agent-role-card" data-role={role} key={role}>
+              <header>
+                <h4>{label}</h4>
+                <span className="agent-role-enabled">
+                  {value.enabled ? "사용 중" : "사용 안 함"}
+                </span>
+              </header>
+              <div className="agent-role-primary-fields">
+                <label htmlFor={`agent-provider-${role}`}>
+                  <span>실행 도구</span>
                   <select
+                    aria-label={`${label} 실행 도구`}
                     disabled={locked}
                     id={`agent-provider-${role}`}
                     onChange={(event) => editRole(role, { provider: event.target.value })}
@@ -123,36 +114,24 @@ export function AgentRoleSettings({
                       </option>
                     ))}
                   </select>
-                </td>
-                <td>
-                  <label className="visually-hidden" htmlFor={`agent-model-${role}`}>
-                    {label} 모델
-                  </label>
+                </label>
+                <label htmlFor={`agent-model-${role}`}>
+                  <span>모델</span>
                   <input
+                    aria-label={`${label} 모델`}
                     disabled={locked}
                     id={`agent-model-${role}`}
                     onChange={(event) =>
                       editRole(role, { model: event.target.value.trim() ? event.target.value : null })
                     }
-                    placeholder="비우면 기본 모델"
+                    placeholder="기본 모델"
                     value={value.model ?? ""}
                   />
-                </td>
-                <td>
-                  {/*
-                    런타임 설정 계약에 역할을 끄는 필드가 없다. 켠 채로 조용히 저장하면 사용자는 끈 줄
-                    알고, 끈 채로 보내면 백엔드가 거절한다. 그래서 조작을 열지 않고 사실을 적는다.
-                  */}
-                  <span className="agent-role-enabled">
-                    {value.enabled ? "사용함" : "사용 안 함"}
-                  </span>
-                  <small>런타임 계약에 끄기 필드가 없어 이 값은 바꿀 수 없습니다.</small>
-                </td>
-                <td>
-                  <label className="visually-hidden" htmlFor={`agent-run-mode-${role}`}>
-                    {label} 실행 방식
-                  </label>
+                </label>
+                <label htmlFor={`agent-run-mode-${role}`}>
+                  <span>실행 방식</span>
                   <select
+                    aria-label={`${label} 실행 방식`}
                     disabled={locked}
                     id={`agent-run-mode-${role}`}
                     onChange={(event) => editRole(role, { runMode: event.target.value })}
@@ -164,12 +143,11 @@ export function AgentRoleSettings({
                       </option>
                     ))}
                   </select>
-                </td>
-                <td>
-                  <label className="visually-hidden" htmlFor={`agent-max-parallel-${role}`}>
-                    {label} 최대 인원
-                  </label>
+                </label>
+                <label htmlFor={`agent-max-parallel-${role}`}>
+                  <span>최대 인원</span>
                   <input
+                    aria-label={`${label} 최대 인원`}
                     disabled={locked}
                     id={`agent-max-parallel-${role}`}
                     min={1}
@@ -179,76 +157,86 @@ export function AgentRoleSettings({
                     type="number"
                     value={value.maxParallel}
                   />
-                </td>
-                <td>
-                  <label className="visually-hidden" htmlFor={`agent-interval-${role}`}>
-                    {label} 판정 간격
+                </label>
+              </div>
+              <details className="agent-role-advanced">
+                <summary>고급 실행 설정</summary>
+                <div>
+                  <label htmlFor={`agent-interval-${role}`}>
+                    <span>판정 간격(초)</span>
+                    <input
+                      aria-label={`${label} 판정 간격`}
+                      disabled={locked}
+                      id={`agent-interval-${role}`}
+                      min={1}
+                      onChange={(event) =>
+                        editRole(role, { intervalSeconds: Number(event.target.value) })
+                      }
+                      type="number"
+                      value={value.intervalSeconds}
+                    />
                   </label>
-                  <input
-                    disabled={locked}
-                    id={`agent-interval-${role}`}
-                    min={1}
-                    onChange={(event) =>
-                      editRole(role, { intervalSeconds: Number(event.target.value) })
-                    }
-                    type="number"
-                    value={value.intervalSeconds}
-                  />
-                </td>
-                <td>
-                  <label className="visually-hidden" htmlFor={`agent-max-per-${role}`}>
-                    {label} 실행 한도
+                  <label htmlFor={`agent-max-per-${role}`}>
+                    <span>실행 한도</span>
+                    <input
+                      aria-label={`${label} 실행 한도`}
+                      disabled={locked}
+                      id={`agent-max-per-${role}`}
+                      min={0}
+                      onChange={(event) =>
+                        editRole(role, {
+                          maxPer: event.target.value === "" ? null : Number(event.target.value),
+                        })
+                      }
+                      placeholder="한도 없음"
+                      type="number"
+                      value={value.maxPer ?? ""}
+                    />
                   </label>
-                  <input
-                    disabled={locked}
-                    id={`agent-max-per-${role}`}
-                    min={0}
-                    onChange={(event) =>
-                      editRole(role, {
-                        maxPer: event.target.value === "" ? null : Number(event.target.value),
-                      })
-                    }
-                    placeholder="비우면 한도 없음"
-                    type="number"
-                    value={value.maxPer ?? ""}
-                  />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                </div>
+                <small>역할은 현재 사용 중이며 이 버전에서는 역할 끄기를 지원하지 않습니다.</small>
+              </details>
+            </section>
+          );
+        })}
+      </div>
 
       <div className="agent-limits">
-        <label htmlFor="agent-project-max">프로젝트 상한</label>
-        <input
-          disabled={locked}
-          id="agent-project-max"
-          min={1}
-          onChange={(event) => editPolicy({ projectMaxParallel: Number(event.target.value) })}
-          type="number"
-          value={draft.projectMaxParallel}
-        />
-        <details className="agent-advanced">
-          <summary>고급 설정</summary>
-          <label htmlFor="agent-device-max">기기 상한</label>
+        <label htmlFor="agent-project-max">
+          <span>프로젝트 최대 동시 실행</span>
           <input
+            aria-label="프로젝트 상한"
             disabled={locked}
-            id="agent-device-max"
-            max={DEVICE_MAX_PARALLEL_CEILING}
+            id="agent-project-max"
             min={1}
-            onChange={(event) =>
-              editPolicy({
-                deviceMaxParallel: Math.min(
-                  DEVICE_MAX_PARALLEL_CEILING,
-                  Number(event.target.value),
-                ),
-              })
-            }
+            onChange={(event) => editPolicy({ projectMaxParallel: Number(event.target.value) })}
             type="number"
-            value={draft.deviceMaxParallel}
+            value={draft.projectMaxParallel}
           />
-          <small>1부터 {DEVICE_MAX_PARALLEL_CEILING}까지 낮출 수 있고 더 높이지는 못합니다.</small>
+        </label>
+        <details className="agent-advanced">
+          <summary>기기 전체 한도</summary>
+          <div>
+            <label htmlFor="agent-device-max">기기 최대 동시 실행</label>
+            <input
+              aria-label="기기 상한"
+              disabled={locked}
+              id="agent-device-max"
+              max={DEVICE_MAX_PARALLEL_CEILING}
+              min={1}
+              onChange={(event) =>
+                editPolicy({
+                  deviceMaxParallel: Math.min(
+                    DEVICE_MAX_PARALLEL_CEILING,
+                    Number(event.target.value),
+                  ),
+                })
+              }
+              type="number"
+              value={draft.deviceMaxParallel}
+            />
+            <small>1부터 {DEVICE_MAX_PARALLEL_CEILING}까지 낮출 수 있습니다.</small>
+          </div>
         </details>
       </div>
 
@@ -285,7 +273,7 @@ export function AgentRoleSettings({
       )}
 
       <button
-        className={`stamp-button ${confirm.armed ? "armed" : ""}`}
+        className={`stamp-button agent-role-save ${confirm.armed ? "armed" : ""}`}
         disabled={locked}
         onClick={() => confirm.fire(() => void onSave(draft))}
         type="button"

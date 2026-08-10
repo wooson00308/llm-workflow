@@ -98,7 +98,7 @@ export function readinessOf(state: AgentRuntimeState): Readiness {
     return {
       tone: "attention",
       title: "준비 상태를 아직 읽지 않았습니다",
-      detail: "다시 읽기를 눌러 이 기기의 상태를 확인해 주세요.",
+      detail: "기기 상태를 아직 받지 못했습니다. 조회가 끝나지 않으면 상태를 다시 확인할 수 있습니다.",
       operation: null,
       actionLabel: null,
     };
@@ -133,9 +133,9 @@ function readinessOfCompatibility(
       return {
         tone: "ready",
         title: "실행 환경이 준비됐습니다",
-        detail: "역할 정책을 저장하면 그대로 적용됩니다.",
-        operation: "update",
-        actionLabel: "업데이트 계획 보기",
+        detail: "바로 실행 계획을 확인하거나 역할 정책을 조정할 수 있습니다.",
+        operation: null,
+        actionLabel: null,
       };
     case "restartRequired":
       return {
@@ -175,7 +175,7 @@ function readinessOfCompatibility(
       return {
         tone: "attention",
         title: "준비 상태를 아직 읽지 않았습니다",
-        detail: "다시 읽기를 눌러 이 기기의 상태를 확인해 주세요.",
+        detail: "기기 상태를 아직 받지 못했습니다. 조회가 끝나지 않으면 상태를 다시 확인할 수 있습니다.",
         operation: null,
         actionLabel: null,
       };
@@ -198,6 +198,8 @@ interface Props {
 export function AgentRuntimeView({ actions, projectName, state }: Props) {
   const readiness = readinessOf(state);
   const pending = state.plan;
+  const refreshNeeded = state.inspection === null || state.readError !== null;
+  const providerAttention = state.policy?.providers.some((provider) => provider.status !== "ready") ?? false;
 
   return (
     <section className="agents-view">
@@ -207,14 +209,21 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
           <h1>에이전트</h1>
           <p>{projectName}에서 어떤 역할을 어떤 도구로 돌릴지 정합니다.</p>
         </div>
-        <button
-          className="secondary-button"
-          disabled={state.reading}
-          onClick={() => void actions.refresh()}
-          type="button"
-        >
-          {state.reading ? "읽는 중" : "다시 읽기"}
-        </button>
+        {state.reading && refreshNeeded ? (
+          <span className="agent-refresh-status" role="status">
+            상태 확인 중
+          </span>
+        ) : (
+          refreshNeeded && (
+            <button
+              className="secondary-button agent-compact-action"
+              onClick={() => void actions.refresh()}
+              type="button"
+            >
+              상태 다시 확인
+            </button>
+          )
+        )}
       </div>
 
       <section aria-label="실행 환경 준비 상태" className={`agent-readiness tone-${readiness.tone}`}>
@@ -232,7 +241,7 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
         </div>
         {readiness.operation && readiness.actionLabel && (
           <button
-            className="secondary-button"
+            className="stamp-button agent-primary-action"
             disabled={state.planning !== null || state.applying}
             onClick={() => void actions.plan(readiness.operation as AgentRuntimeOperation)}
             type="button"
@@ -382,8 +391,20 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
       )}
 
       {state.policy && (
-        <section aria-label="실행 도구 준비 상태" className="agent-providers">
-          <h3>실행 도구</h3>
+        <details
+          aria-label="실행 도구 준비 상태"
+          className="agent-providers agent-secondary-section"
+          open={providerAttention}
+          role="region"
+        >
+          <summary>
+            <span>실행 도구</span>
+            <small>
+              {providerAttention
+                ? "확인이 필요한 도구가 있습니다"
+                : `${state.policy.providers.length}개 도구 준비됨`}
+            </small>
+          </summary>
           <ul>
             {state.policy.providers.map((provider) => (
               <li key={provider.provider}>
@@ -391,22 +412,31 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
               </li>
             ))}
           </ul>
-        </section>
+        </details>
       )}
 
       {state.policy && <AgentRunDashboard actions={actions} state={state} />}
 
-      <section aria-label="기존 역할 잡 이전" className="agent-migration">
-        <h3>기존 역할 잡 이전</h3>
-        <p>기존 하트비트 역할 잡이 있으면 이 프로젝트의 역할 정책으로 옮길 수 있습니다.</p>
-        <button
-          className="secondary-button"
-          disabled={state.migrationBusy}
-          onClick={() => void actions.previewMigration()}
-          type="button"
-        >
-          {state.migrationBusy ? "확인하는 중" : "이전 미리보기"}
-        </button>
+      <details
+        aria-label="기존 역할 잡 이전"
+        className="agent-migration agent-secondary-section"
+        open={state.migration !== null || state.migrationError !== null}
+        role="region"
+      >
+        <summary>
+          <span>기존 설정 가져오기</span>
+          <small>이전에 사용하던 역할 설정이 있을 때만 확인합니다</small>
+        </summary>
+        <div className="agent-secondary-content">
+          <p>기존 하트비트 역할 잡이 있으면 이 프로젝트의 역할 정책으로 옮길 수 있습니다.</p>
+          <button
+            className="secondary-button agent-compact-action"
+            disabled={state.migrationBusy}
+            onClick={() => void actions.previewMigration()}
+            type="button"
+          >
+            {state.migrationBusy ? "확인하는 중" : "이전할 설정 확인"}
+          </button>
         {state.migrationError !== null && (
           <p className="agent-error" role="status">
             {state.migrationError}
@@ -458,7 +488,8 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
             </div>
           </div>
         )}
-      </section>
+        </div>
+      </details>
 
       {state.policy ? (
         <AgentRoleSettings
