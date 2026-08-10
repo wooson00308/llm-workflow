@@ -276,6 +276,35 @@ describe("DevelopmentBoard", () => {
     expect(screen.getAllByText("QA 대기").length).toBeGreaterThan(0);
   });
 
+  it("shows the three most recently changed QA tasks first and folds the rest", () => {
+    const items: WorkflowItemSummary[] = Array.from({ length: 5 }, (_, index) => ({
+      ...tasks[1],
+      fileName: `TASK-QA-${index}.md`,
+      id: `TASK-QA-${index}`,
+      title: `확인 작업 ${index}`,
+      updatedAt: `2026-07-${String(20 + index).padStart(2, "0")}T08:00:00Z`,
+    }));
+    const { container } = render(
+      <DevelopmentBoard busy={false} onReadTask={taskReader()} onTaskQa={vi.fn()} onTaskQaBatch={vi.fn()} workflow={workflowWith(items)} />,
+    );
+
+    const qaColumn = container.querySelector(".task-column.tone-review");
+    const primary = qaColumn?.querySelector(".task-stack-primary");
+    expect(qaColumn).toHaveTextContent("내 확인최근 변경부터 확인5");
+    expect(primary?.querySelectorAll(".task-card")).toHaveLength(3);
+    expect(Array.from(primary?.querySelectorAll(".task-card > strong") ?? [], (node) => node.textContent)).toEqual([
+      "확인 작업 4",
+      "확인 작업 3",
+      "확인 작업 2",
+    ]);
+    expect(within(qaColumn as HTMLElement).getByText("이전 확인 대기")).toBeInTheDocument();
+    expect(within(qaColumn as HTMLElement).getByText("2건 보기")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "qa_waiting" } });
+    expect(container.querySelector(".task-column-overflow")).toBeNull();
+    expect(container.querySelectorAll(".task-stack-primary .task-card")).toHaveLength(5);
+  });
+
   it("carries the recorded overflow excerpt all the way onto a board card", () => {
     // jsdom은 레이아웃을 계산하지 않으므로 이 시나리오가 보장하는 것은 "이 데이터가 카드에 실린다"까지다.
     // 상자 크기를 묻지 않는다 — 물으면 전부 0이 돌아와 통과하는 것처럼 보이는 거짓 검사가 된다.

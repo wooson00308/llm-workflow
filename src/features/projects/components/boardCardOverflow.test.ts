@@ -57,10 +57,11 @@ describe("개발 보드에서 깨지면 안 되는 선언", () => {
     expect(excerpt.get("-webkit-line-clamp")).toBe("2");
   });
 
-  it("보드의 최소 폭과 가로 스크롤 정책이 그대로다", () => {
+  it("보드가 고정 최소 폭 없이 창 너비에 맞춰 열을 다시 배치한다", () => {
     const board = declarationsOf(".task-board");
-    expect(board.get("min-width")).toBe("950px");
-    expect(board.get("overflow-x")).toBe("auto");
+    expect(board.get("min-width")).toBe("0");
+    expect(board.get("grid-template-columns")).toMatch(/auto-fit/);
+    expect(board.has("overflow-x")).toBe(false);
   });
 
   it("한글 줄바꿈을 지키는 두 자리가 그대로다", () => {

@@ -1,7 +1,7 @@
 # 판 상태 핸드오프 (TL 스냅샷)
 
 > 다음 세션(코덱스 포함) 팔로업용 정본. 개발 로그 전체를 읽기 전에 이 파일을 먼저 본다.
-> 갱신: 2026-08-10 (blocked 자동 복구 실전 완료 및 TASK-S051-11 품질 확인 인계).
+> 갱신: 2026-08-10 (blocked 자동 복구와 에이전트·개발 보드 UX 직접 개선 완료).
 
 ## 이번 세션의 핵심 결과
 
@@ -10,11 +10,13 @@
 3. 새 blocked 경로를 실제 `TASK-S051-11`에 적용했다. developer가 두 실패를 재현하고 범위 누락을 `definition_error`로 분류했으며, architect가 기존 ID와 이력을 보존한 채 작업 정의를 교정해 `todo`로 돌렸다. 두 번째 developer가 같은 구현을 이어받아 `qa_waiting`으로 마감했다. 사용자 재개 결정과 `resumed` 이력은 만들지 않았다.
 4. quota 회귀의 원인은 제품 파서가 아니라 테스트가 로컬 jobs.d를 격리하지 않은 것이었다. claude-heartbeat의 두 파서 검사에 임시 jobs.d를 지정했다. 보호 커밋은 `66af7b0`이다.
 5. workflow-labs의 Rust 8경로에는 현재 rustfmt가 만드는 결과만 반영했다. HEAD 원본을 rustfmt 표준 출력으로 변환한 결과와 각 작업 파일을 byte 비교해 모두 일치함을 TL이 재확인했다.
+6. 에이전트 화면은 정상 상태의 불필요한 갱신 행동, 세 역할 동시 폼과 반복 빈 목록을 정리했다. 개발 보드는 고정 950px 가로 보드를 제거하고 최근 QA 3건만 `내 확인`에 노출하며 이전 7건을 접는다. 두 변경 모두 최신 debug 앱에서 직접 확인했다.
 
 ## 현재 보드와 인수 기준
 
 - blocked 작업은 0건이다.
 - `TASK-S051-11`: qa_waiting. 런타임 전체 284건, 프런트 902건, Rust 본체 701건과 종단 17건, 포맷·Clippy·계약 fixture가 모두 통과했다. 실제 운영체제 서비스 smoke와 실제 Claude·Codex 로그인 확인만 사용자 QA/target CI에 남았다.
+- `TASK-S051-09`, `TASK-S051-10`: qa_waiting. 에이전트 설정과 실행 대시보드의 사용자 피드백을 반영한 최신 앱이 준비됐다.
 - `TASK-S055-04`: todo. 14개 완료 조건과 11개 값 경로 감사가 끝난 다음 developer 대상이다. 현재 정책과 충돌하는 “사용자 재개 조작 유지” 문구는 구현하지 않는다. 기존 저장·사건 구현을 재사용하고 남은 정의 수정 요청 UI와 활동 표시만 이어서 구현한다.
 - `TASK-S052-03`, `TASK-S052-04`: 이번 세션 중 앱의 사용자 QA로 completed가 됐다. 앱이 만든 두 QA 결정과 task 변경은 내용을 수정하지 않고 TASK-S051-11과 분리된 사용자 QA 보호 커밋으로 보존한다.
 - 활성 lease 없음. SPEC-009의 오래된 lease 파일은 만료된 잔여다.
@@ -29,7 +31,7 @@
 ## 검증
 
 - claude-heartbeat: quota 13 passed, runtime E2E 4 passed·실서비스 1 target-CI skip, 전체 284 passed·8 platform skip.
-- workflow-labs: 계약 정상 fixture와 불일치 3건 거절 통과, 프런트 902 passed·typecheck·build 통과, Rust 본체 701 passed·종단 17 passed.
+- workflow-labs: 계약 정상 fixture와 불일치 3건 거절 통과, 프런트 최신 910 passed·typecheck·build 통과, Rust 본체 701 passed·종단 17 passed.
 - workflow-labs: `cargo fmt --check`, Clippy `-D warnings`, 양 저장소 `git diff --check` 통과.
 - Rust 8파일은 HEAD 원본을 rustfmt한 결과와 현재 파일의 byte 비교가 모두 일치한다.
 

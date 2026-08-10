@@ -214,7 +214,7 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
       <div className="development-summary">
         <span><i className="summary-dot active" />진행 중 {count(workflow.items.tasks, "in_progress")}</span>
         <span><i className="summary-dot danger" />막힘 {count(workflow.items.tasks, "blocked")}</span>
-        <span><i className="summary-dot review" />QA 대기 {count(workflow.items.tasks, "qa_waiting")}</span>
+        <span><i className="summary-dot review" />내 확인 {count(workflow.items.tasks, "qa_waiting")}</span>
         <span className="result-count">
           {viewMode === "calendar"
             ? `${timelineTasks.length}개 표시 · 완료 작업까지 전부 표시`
@@ -635,16 +635,29 @@ function BoardView({
 
   return (
     <div className={`task-board columns-${columns.length}`} aria-label={label} role="region">
-      {columns.map((column) => (
-        <TaskColumn
-          description={column.description}
-          items={items.filter((item) => item.status === column.status)}
-          key={column.status}
-          onOpen={onOpen}
-          title={column.title}
-          tone={column.tone}
-        />
-      ))}
+      {columns.map((column) => {
+        const columnItems = items.filter((item) => item.status === column.status);
+        const isQaFocus = statusFilter === "all" && column.status === "qa_waiting";
+        return (
+          <TaskColumn
+            collapsedAfter={isQaFocus ? 3 : null}
+            description={isQaFocus ? "최근 변경부터 확인" : column.description}
+            items={
+              isQaFocus
+                ? [...columnItems].sort(
+                    (left, right) =>
+                      timestamp(right.updatedAt) - timestamp(left.updatedAt) ||
+                      left.fileName.localeCompare(right.fileName),
+                  )
+                : columnItems
+            }
+            key={column.status}
+            onOpen={onOpen}
+            title={isQaFocus ? "내 확인" : column.title}
+            tone={column.tone}
+          />
+        );
+      })}
       {statusFilter === "all" && unknown.length > 0 && (
         <TaskColumn description="규격을 확인해야 하는 상태" items={unknown} onOpen={onOpen} title="확인 필요" tone="danger" />
       )}
@@ -1060,33 +1073,57 @@ function CalendarView({
 }
 
 function TaskColumn({
+  collapsedAfter,
   description,
   items,
   onOpen,
   title,
   tone,
 }: {
+  collapsedAfter?: number | null;
   description: string;
   items: WorkflowItemSummary[];
   onOpen(item: WorkflowItemSummary): void;
   title: string;
   tone: "neutral" | "active" | "danger" | "review" | "done";
 }) {
+  const visibleItems = collapsedAfter === null || collapsedAfter === undefined
+    ? items
+    : items.slice(0, collapsedAfter);
+  const deferredItems = collapsedAfter === null || collapsedAfter === undefined
+    ? []
+    : items.slice(collapsedAfter);
+
   return (
     <section className={`task-column tone-${tone}`}>
       <header><div><strong>{title}</strong><small>{description}</small></div><span>{items.length}</span></header>
-      <div className="task-stack">
-        {items.map((item) => (
-          <button className="task-card" key={item.fileName} onClick={() => onOpen(item)}>
-            <div><span className={`status-pill status-${item.status}`}>{statusLabels[item.status] ?? item.status}</span><small>{item.id}</small></div>
-            <strong>{item.title}</strong>
-            {item.excerpt && <p>{item.excerpt}</p>}
-            <footer><Icon name="board" /><span>{item.dueAt ? `목표 ${formatDueDate(item.dueAt)}` : formatDate(item.updatedAt)}</span></footer>
-          </button>
-        ))}
+      <div className="task-stack task-stack-primary">
+        {visibleItems.map((item) => <TaskCard item={item} key={item.fileName} onOpen={onOpen} />)}
         {items.length === 0 && <div className="task-column-empty"><span /><small>작업 없음</small></div>}
       </div>
+      {deferredItems.length > 0 && (
+        <details className="task-column-overflow">
+          <summary>
+            <span>이전 확인 대기</span>
+            <small>{deferredItems.length}건 보기</small>
+          </summary>
+          <div className="task-stack">
+            {deferredItems.map((item) => <TaskCard item={item} key={item.fileName} onOpen={onOpen} />)}
+          </div>
+        </details>
+      )}
     </section>
+  );
+}
+
+function TaskCard({ item, onOpen }: { item: WorkflowItemSummary; onOpen(item: WorkflowItemSummary): void }) {
+  return (
+    <button className="task-card" onClick={() => onOpen(item)}>
+      <div><span className={`status-pill status-${item.status}`}>{statusLabels[item.status] ?? item.status}</span><small>{item.id}</small></div>
+      <strong>{item.title}</strong>
+      {item.excerpt && <p>{item.excerpt}</p>}
+      <footer><Icon name="board" /><span>{item.dueAt ? `목표 ${formatDueDate(item.dueAt)}` : formatDate(item.updatedAt)}</span></footer>
+    </button>
   );
 }
 
