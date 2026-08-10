@@ -1187,9 +1187,11 @@ svg { width: 20px; height: 20px; }
 .agent-role-advanced summary, .agent-advanced summary { padding-top: 9px; color: #747970; cursor: pointer; font-size: 10px; font-weight: 650; }
 .agent-role-advanced > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 9px; }
 .agent-role-advanced > small { display: block; margin-top: 7px; color: #8b8f86; font-size: 9px; line-height: 1.45; }
-.agent-limits { display: grid; grid-template-columns: auto repeat(2, minmax(150px, 220px)); align-items: end; gap: 12px; padding: 11px 12px; border: 1px solid #e5e3dc; border-radius: 9px; background: #f6f6f1; }
-.agent-limits h4 { align-self: center; margin: 0 8px 0 0; color: #4c544d; font-size: 11px; white-space: nowrap; }
-.agent-limits small { color: #8b8f86; font-size: 8px; }
+.agent-limits { display: grid; grid-template-columns: repeat(2, minmax(150px, 220px)); align-items: start; gap: 8px 12px; padding: 11px 12px; border: 1px solid #e5e3dc; border-radius: 9px; background: #f6f6f1; }
+.agent-limits > header, .agent-limits-note { grid-column: 1 / -1; }
+.agent-limits h4 { margin: 0; color: #4c544d; font-size: 11px; }
+.agent-limits header p, .agent-limits-note { margin: 2px 0 0; color: #8b8f86; font-size: 9px; line-height: 1.45; }
+.agent-limits-note { margin-top: 0; }
 .agent-advanced { min-width: 180px; }
 .agent-advanced > div { display: grid; grid-template-columns: minmax(0, 120px) 74px minmax(0, 1fr); align-items: center; gap: 8px; padding-top: 9px; }
 .agent-advanced small { color: #8b8f86; font-size: 9px; }
@@ -1283,7 +1285,6 @@ svg { width: 20px; height: 20px; }
   .agent-run-summary, .agent-run-plan dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-role-primary-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-limits { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .agent-limits h4 { grid-column: 1 / -1; }
 }
 
 @media (max-width: 820px) {
@@ -1300,7 +1301,6 @@ svg { width: 20px; height: 20px; }
   .agent-readiness.is-compact > div { display: grid; gap: 2px; }
   .agent-readiness.is-compact .agent-versions { white-space: normal; }
   .agent-policy-role-tabs, .agent-role-primary-fields, .agent-role-advanced > div, .agent-limits { grid-template-columns: minmax(0, 1fr); }
-  .agent-limits h4 { grid-column: auto; }
   .agent-secondary-section > summary { align-items: flex-start; }
   .agent-secondary-section > summary small { display: none; }
   .agent-advanced > div { grid-template-columns: minmax(0, 1fr); }
@@ -1318,13 +1318,11 @@ svg { width: 20px; height: 20px; }
 @container agents (max-width: 760px) {
   .agent-role-primary-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-limits { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .agent-limits h4 { grid-column: 1 / -1; }
   .agent-run-summary, .agent-run-plan dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @container agents (max-width: 560px) {
   .agent-policy-role-tabs, .agent-role-primary-fields, .agent-role-advanced > div, .agent-limits { grid-template-columns: minmax(0, 1fr); }
-  .agent-limits h4 { grid-column: auto; }
   .agent-run-builder-heading, .agent-run-plan-heading, .agent-settings-actions { align-items: flex-start; flex-direction: column; }
   .agent-run-builder-heading > p { text-align: left; }
   .agent-run-summary, .agent-run-plan dl, .agent-run-request-fields { grid-template-columns: minmax(0, 1fr); }

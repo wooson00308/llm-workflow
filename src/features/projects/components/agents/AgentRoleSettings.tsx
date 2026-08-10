@@ -246,9 +246,12 @@ export function AgentRoleSettings({
       })()}
 
       <section aria-label="동시 실행 한도" className="agent-limits">
-        <h4>동시 실행 한도</h4>
+        <header>
+          <h4>동시 실행 한도</h4>
+          <p>동시에 실행할 수 있는 에이전트 수를 제한합니다.</p>
+        </header>
         <label htmlFor="agent-project-max">
-          <span>프로젝트 최대 동시 실행</span>
+          <span>이 프로젝트</span>
           <input
             aria-label="프로젝트 상한"
             disabled={locked}
@@ -260,7 +263,7 @@ export function AgentRoleSettings({
           />
         </label>
         <label htmlFor="agent-device-max">
-          <span>기기 최대 동시 실행</span>
+          <span>이 기기 전체</span>
           <input
             aria-label="기기 상한"
             disabled={locked}
@@ -278,8 +281,10 @@ export function AgentRoleSettings({
             type="number"
             value={draft.deviceMaxParallel}
           />
-          <small>최대 {DEVICE_MAX_PARALLEL_CEILING}명</small>
         </label>
+        <p className="agent-limits-note">
+          기기 전체는 최대 {DEVICE_MAX_PARALLEL_CEILING}명이며, 실제 실행 수는 두 한도를 모두 넘지 않습니다.
+        </p>
       </section>
 
       {!executionAllowed && (
