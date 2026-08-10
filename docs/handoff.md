@@ -16,7 +16,7 @@
 - blocked 작업은 0건이다.
 - `TASK-S051-11`: qa_waiting. 런타임 전체 284건, 프런트 902건, Rust 본체 701건과 종단 17건, 포맷·Clippy·계약 fixture가 모두 통과했다. 실제 운영체제 서비스 smoke와 실제 Claude·Codex 로그인 확인만 사용자 QA/target CI에 남았다.
 - `TASK-S055-04`: todo. 14개 완료 조건과 11개 값 경로 감사가 끝난 다음 developer 대상이다. 현재 정책과 충돌하는 “사용자 재개 조작 유지” 문구는 구현하지 않는다. 기존 저장·사건 구현을 재사용하고 남은 정의 수정 요청 UI와 활동 표시만 이어서 구현한다.
-- `TASK-S052-03`, `TASK-S052-04`: 이번 세션 중 앱의 사용자 QA로 completed가 됐다. 앱이 만든 두 QA 결정과 task 변경은 사용자 소유 상태이며 이번 보호 커밋 범위에서 제외하고 그대로 보존한다.
+- `TASK-S052-03`, `TASK-S052-04`: 이번 세션 중 앱의 사용자 QA로 completed가 됐다. 앱이 만든 두 QA 결정과 task 변경은 내용을 수정하지 않고 TASK-S051-11과 분리된 사용자 QA 보호 커밋으로 보존한다.
 - 활성 lease 없음. SPEC-009의 오래된 lease 파일은 만료된 잔여다.
 
 ## 다음 작업 순서
@@ -35,7 +35,7 @@
 
 ## 작업 트리와 브랜치
 
-- workflow-labs: `claude/qa-batch-20260808`. 이번 TASK-S051-11 산출물과 Rust 포맷 변경만 보호 커밋한다. 앱이 만든 TASK-S052-03/04와 QA 결정 두 건은 별도 사용자 변경으로 남긴다.
+- workflow-labs: `claude/qa-batch-20260808`. TASK-S051-11 산출물과 Rust 포맷 변경, 앱이 만든 TASK-S052-03/04와 QA 결정 두 건을 서로 분리한 보호 커밋으로 보존한다.
 - claude-heartbeat: `claude/agent-runtime-20260808`, HEAD `66af7b0`, clean.
 - main 병합·push는 하지 않았다. 릴리스 컷은 사용자 지시와 `docs/releasing.md` 절차를 따른다.
 
