@@ -1310,6 +1310,39 @@ describe("useProjectWorkspace 에이전트 실행", () => {
     roles: [],
   };
 
+  it("정책 조회가 실패해도 런타임 검사 결과를 보존한다", async () => {
+    const launcherMissing: AgentRuntimeInspection = {
+      ...agentInspection,
+      status: null,
+      compatibility: { kind: "undetermined", reason: "launcher_missing" },
+      executionAllowed: false,
+      unavailable: "launcher_missing",
+    };
+    const policyFailure = "launcher_missing: 실행 파일을 찾을 수 없습니다";
+    const gateway = gatewayFor({
+      inspectAgentRuntime: vi.fn().mockResolvedValue(launcherMissing),
+      readAgentRuntimePolicy: vi.fn().mockRejectedValue(new Error(policyFailure)),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+
+    expect(result.current.agentRuntime.inspection).toEqual(launcherMissing);
+    expect(result.current.agentRuntime.readError).toBe(policyFailure);
+
+    await act(() => result.current.agentRuntimeActions.plan("install"));
+    expect(gateway.planAgentRuntimeInstall).toHaveBeenCalledTimes(1);
+    expect(result.current.agentRuntime.plan).toEqual({
+      kind: "install",
+      plan: agentInstallPlan,
+    });
+    unmount();
+  });
+
   it("수동 대상을 프로젝트 식별자와 함께 계획하고 확인 뒤 시작한다", async () => {
     const gateway = gatewayFor({
       planAgentRun: vi.fn().mockResolvedValue(plan),

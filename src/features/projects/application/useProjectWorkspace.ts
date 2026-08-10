@@ -263,17 +263,32 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       try {
         const inspection = await gateway.inspectAgentRuntime();
         if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({ ...current, inspection }));
         // 정책은 프로젝트 식별자가 있어야 읽는다. 초기화되지 않은 폴더에는 정책 자체가 없다.
-        const policy = projectId
-          ? await gateway.readAgentRuntimePolicy(projectId, path)
-          : null;
-        if (activeProjectPath.current !== path) return;
-        setAgentRuntime((current) => ({
-          ...current,
-          inspection,
-          policy,
-          reading: false,
-        }));
+        if (!projectId) {
+          setAgentRuntime((current) => ({
+            ...current,
+            policy: null,
+            reading: false,
+          }));
+          return;
+        }
+        try {
+          const policy = await gateway.readAgentRuntimePolicy(projectId, path);
+          if (activeProjectPath.current !== path) return;
+          setAgentRuntime((current) => ({
+            ...current,
+            policy,
+            reading: false,
+          }));
+        } catch (reason) {
+          if (activeProjectPath.current !== path) return;
+          setAgentRuntime((current) => ({
+            ...current,
+            reading: false,
+            readError: messageFrom(reason),
+          }));
+        }
       } catch (reason) {
         if (activeProjectPath.current !== path) return;
         setAgentRuntime((current) => ({
