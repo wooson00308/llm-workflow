@@ -587,7 +587,8 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
 
     expect(screen.getByText(/시작할 수 있는 대상이 0건/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "이 계획으로 시작" })).toBeDisabled();
-    expect(screen.getAllByRole("option", { name: "직접 지정" }).length).toBe(3);
+    expect(screen.getAllByRole("option", { name: "직접 지정" })).toHaveLength(1);
+    expect(screen.getByLabelText("설정할 역할")).toBeInTheDocument();
   });
 
   it("API 과금 위험 계획은 별도 확인 전에는 시작하지 않는다", () => {
@@ -603,6 +604,7 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     const actions = actionsStub();
     renderView(state({ runPlan }), actions);
 
+    fireEvent.click(screen.getByRole("button", { name: "개발자" }));
     fireEvent.change(screen.getByLabelText("개발자 배정 방식"), { target: { value: "manual" } });
     fireEvent.change(screen.getByLabelText("개발자 수동 대상"), {
       target: { value: "TASK-S051-01,TASK-S051-02" },
@@ -625,12 +627,53 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     const actions = actionsStub();
     renderView(state({ queue }), actions);
 
+    fireEvent.click(screen.getByText("프로젝트 실행 제어"));
     fireEvent.click(screen.getByRole("button", { name: "새 배정 일시 정지" }));
     expect(actions.setProjectPaused).not.toHaveBeenCalled();
     expect(screen.getByText(/이미 실행 중인 항목과 다른 프로젝트의 상태는 유지/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "확인하고 일시 정지" }));
     await waitFor(() => expect(actions.setProjectPaused).toHaveBeenCalledWith(true));
+  });
+
+  it("정상 큐는 자동 갱신에 맡기고 오류가 있을 때만 수동 복구를 보여준다", async () => {
+    const actions = actionsStub();
+    const { rerender } = renderView(state({ queue }), actions);
+
+    expect(screen.queryByRole("button", { name: "실행 상태 다시 확인" })).not.toBeInTheDocument();
+
+    rerender(
+      <AgentRuntimeView
+        actions={actions}
+        projectName="workflow-labs"
+        state={state({ queue: null, queueError: "런타임 응답 실패" })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "실행 상태 다시 확인" }));
+
+    await waitFor(() => expect(actions.refreshRuns).toHaveBeenCalledTimes(1));
+  });
+
+  it("세 역할 입력은 선택한 한 역할만 보여주고 값은 역할별로 유지한다", () => {
+    renderView(state({ queue }));
+
+    expect(screen.getByLabelText("기획자 배정 방식")).toBeInTheDocument();
+    expect(screen.queryByLabelText("개발자 배정 방식")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "개발자" }));
+    fireEvent.change(screen.getByLabelText("개발자 요청 인원"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "기획자" }));
+    fireEvent.click(screen.getByRole("button", { name: "개발자" }));
+
+    expect(screen.getByLabelText("개발자 요청 인원")).toHaveValue(2);
+  });
+
+  it("실행 기록이 없으면 중복된 빈 목록 대신 한 문장만 보여준다", () => {
+    renderView(state({ queue: { ...queue, runs: [] } }));
+
+    expect(screen.getAllByText("아직 실행 기록이 없습니다.")).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "실행 중과 대기" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "최근 종료" })).not.toBeInTheDocument();
   });
 
   it("취소와 재시도는 각각 확인 화면을 거친다", async () => {

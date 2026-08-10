@@ -32,6 +32,7 @@ interface Props {
 }
 
 export function AgentRunDashboard({ actions, state }: Props) {
+  const [selectedRole, setSelectedRole] = useState<(typeof ROLE_ORDER)[number]>("planner");
   const [allocation, setAllocation] = useState<Record<string, "automatic" | "manual">>(() =>
     Object.fromEntries(ROLE_ORDER.map((role) => [role, "automatic"])),
   );
@@ -48,6 +49,12 @@ export function AgentRunDashboard({ actions, state }: Props) {
   const active = runs.filter((run) => activeStates.has(run.state));
   const recent = runs.filter((run) => !activeStates.has(run.state));
   const totalGranted = plan?.roles.reduce((sum, role) => sum + role.granted, 0) ?? 0;
+  const runningCount = runs.filter((run) => run.state === "running").length;
+  const waitingCount = runs.filter(
+    (run) => run.state === "queued" || run.state === "reserved",
+  ).length;
+  const latestResult = [...recent].reverse()[0];
+  const queueNeedsAttention = Boolean(state.queueError || queue?.unavailable);
 
   useEffect(() => {
     if (!plan) return;
@@ -80,119 +87,140 @@ export function AgentRunDashboard({ actions, state }: Props) {
       <header className="agent-run-heading">
         <div>
           <h3>실행 계획과 큐</h3>
-          <p>계획을 확인하기 전에는 유료 CLI 세션을 시작하지 않습니다.</p>
+          <p>역할을 고르고 계획을 확인한 뒤에만 유료 CLI 세션을 시작합니다.</p>
         </div>
-        <button
-          className="secondary-button"
-          disabled={state.queueReading}
-          onClick={() => void actions.refreshRuns()}
-          type="button"
-        >
-          {state.queueReading ? "큐 읽는 중" : "큐 다시 읽기"}
-        </button>
+        {state.queueReading && !queue ? (
+          <span className="agent-run-reading" role="status">실행 상태 확인 중</span>
+        ) : (queueNeedsAttention || !queue) ? (
+          <button
+            className="secondary-button"
+            disabled={state.queueReading}
+            onClick={() => void actions.refreshRuns()}
+            type="button"
+          >
+            실행 상태 다시 확인
+          </button>
+        ) : null}
       </header>
 
       <section aria-label="프로젝트 실행 현황" className="agent-run-summary">
         <Summary label="새 배정" value={queue?.paused ? "일시 정지" : "활성"} />
-        <Summary label="실행 중" value={`${runs.filter((run) => run.state === "running").length}건`} />
-        <Summary label="대기" value={`${runs.filter((run) => run.state === "queued" || run.state === "reserved").length}건`} />
-        <Summary label="최근 종료" value={`${recent.length}건`} />
-        <Summary
-          label="기기 슬롯 사용량"
-          value={
-            plan && state.policy
-              ? `${Math.max(0, state.policy.policy.deviceMaxParallel - plan.deviceRemaining)}/${state.policy.policy.deviceMaxParallel}`
-              : "계획에서 확인"
-          }
-        />
+        <Summary label="실행 중" value={`${runningCount}건`} />
+        <Summary label="대기" value={`${waitingCount}건`} />
+        <Summary label="최근 결과" value={latestResult ? stateLabels[latestResult.state] : "없음"} />
       </section>
 
       {queue?.unavailable && <p className="agent-error">상태를 읽을 수 없음: {queue.unavailable}</p>}
       {state.queueError && !queue?.unavailable && <p className="agent-error">{state.queueError}</p>}
 
-      <div className="agent-pause-controls">
-        {queue?.paused ? (
-          <button
-            className="secondary-button"
-            disabled={state.pausing}
-            onClick={() => void actions.setProjectPaused(false)}
-            type="button"
-          >
-            새 배정 재개
-          </button>
-        ) : (
-          <button
-            className="secondary-button"
-            disabled={state.pausing}
-            onClick={() => setPauseArmed(true)}
-            type="button"
-          >
-            새 배정 일시 정지
-          </button>
-        )}
-        {pauseArmed && !queue?.paused && (
-          <div className="agent-control-preview" role="status">
-            <p>새 배정만 멈춥니다. 이미 실행 중인 항목과 다른 프로젝트의 상태는 유지됩니다.</p>
-            <button className="secondary-button" onClick={() => setPauseArmed(false)} type="button">
-              돌아가기
-            </button>
+      <details className="agent-project-controls">
+        <summary>
+          <span>프로젝트 실행 제어</span>
+          <small>{queue?.paused ? "새 배정 일시 정지 중" : "새 배정 활성"}</small>
+        </summary>
+        <div className="agent-project-controls-content">
+          <p>현재 실행은 유지하고, 이 프로젝트의 새 에이전트 배정만 제어합니다.</p>
+          {queue?.paused ? (
             <button
-              className="stamp-button"
+              className="secondary-button"
               disabled={state.pausing}
-              onClick={() => {
-                setPauseArmed(false);
-                void actions.setProjectPaused(true);
-              }}
+              onClick={() => void actions.setProjectPaused(false)}
               type="button"
             >
-              확인하고 일시 정지
+              새 배정 재개
             </button>
-          </div>
-        )}
-      </div>
+          ) : (
+            <button
+              className="secondary-button"
+              disabled={state.pausing}
+              onClick={() => setPauseArmed(true)}
+              type="button"
+            >
+              새 배정 일시 정지
+            </button>
+          )}
+          {pauseArmed && !queue?.paused && (
+            <div className="agent-control-preview" role="status">
+              <p>새 배정만 멈춥니다. 이미 실행 중인 항목과 다른 프로젝트의 상태는 유지됩니다.</p>
+              <div className="agent-plan-actions">
+                <button className="secondary-button" onClick={() => setPauseArmed(false)} type="button">
+                  돌아가기
+                </button>
+                <button
+                  className="stamp-button"
+                  disabled={state.pausing}
+                  onClick={() => {
+                    setPauseArmed(false);
+                    void actions.setProjectPaused(true);
+                  }}
+                  type="button"
+                >
+                  확인하고 일시 정지
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </details>
 
       <section aria-label="새 실행 설정" className="agent-run-builder">
         <h4>새 실행 설정</h4>
-        <p>자동 배정과 직접 지정을 역할별로 고릅니다. 실행 방식은 저장된 역할 정책의 한 번 또는 반복을 따릅니다.</p>
+        <p>편집할 역할을 고르세요. 실행 방식과 상한은 위에서 저장한 역할 정책을 따릅니다.</p>
+        <div aria-label="설정할 역할" className="agent-run-role-tabs">
+          {ROLE_ORDER.map((role) => (
+            <button
+              aria-pressed={selectedRole === role}
+              className={selectedRole === role ? "is-active" : undefined}
+              key={role}
+              onClick={() => setSelectedRole(role)}
+              type="button"
+            >
+              {roleLabels[role]}
+            </button>
+          ))}
+        </div>
         <div className="agent-run-request-grid">
-          {ROLE_ORDER.map((role) => {
+          {(() => {
+            const role = selectedRole;
             const policy = state.policy?.policy.roles[role];
             return (
               <fieldset key={role}>
-                <legend>{roleLabels[role]}</legend>
-                <p>
-                  {policy?.provider ?? "provider 미정"} · {policy?.model ?? "기본 모델"} · {policy?.runMode === "continuous" ? "반복" : "한 번"} · 역할 상한 {policy?.maxParallel ?? "-"}명
+                <legend>{roleLabels[role]} 실행 요청</legend>
+                <p className="agent-run-role-policy">
+                  {policy?.provider ?? "provider 미정"} · {policy?.model ?? "기본 모델"} · {policy?.runMode === "continuous" ? "반복" : "한 번"} · 최대 {policy?.maxParallel ?? "-"}명
                 </p>
-                <label>
-                  배정 방식
-                  <select
-                    aria-label={`${roleLabels[role]} 배정 방식`}
-                    onChange={(event) => {
-                      actions.cancelRunPlan();
-                      setAllocation((current) => ({
-                        ...current,
-                        [role]: event.target.value as "automatic" | "manual",
-                      }));
-                    }}
-                    value={allocation[role]}
-                  >
-                    <option value="automatic">자동 배정</option>
-                    <option value="manual">직접 지정</option>
-                  </select>
-                </label>
-                <label>
-                  요청 인원
-                  <input
-                    aria-label={`${roleLabels[role]} 요청 인원`}
-                    min={1}
-                    onChange={(event) => {
-                      actions.cancelRunPlan();
-                      setSlots((current) => ({ ...current, [role]: Number(event.target.value) }));
-                    }}
-                    type="number"
-                    value={slots[role]}
-                  />
-                </label>
+                <div className="agent-run-request-fields">
+                  <label>
+                    배정 방식
+                    <select
+                      aria-label={`${roleLabels[role]} 배정 방식`}
+                      onChange={(event) => {
+                        actions.cancelRunPlan();
+                        setAllocation((current) => ({
+                          ...current,
+                          [role]: event.target.value as "automatic" | "manual",
+                        }));
+                      }}
+                      value={allocation[role]}
+                    >
+                      <option value="automatic">자동 배정</option>
+                      <option value="manual">직접 지정</option>
+                    </select>
+                  </label>
+                  <label>
+                    요청 인원
+                    <input
+                      aria-label={`${roleLabels[role]} 요청 인원`}
+                      min={1}
+                      onChange={(event) => {
+                        actions.cancelRunPlan();
+                        setSlots((current) => ({ ...current, [role]: Number(event.target.value) }));
+                      }}
+                      type="number"
+                      value={slots[role]}
+                    />
+                  </label>
+                </div>
                 {allocation[role] === "manual" && (
                   <label>
                     대상 문서
@@ -221,11 +249,11 @@ export function AgentRunDashboard({ actions, state }: Props) {
                 )}
               </fieldset>
             );
-          })}
+          })()}
         </div>
         {manualMissing && <p className="agent-blocked-note">직접 지정 역할의 대상 문서를 선택해 주세요.</p>}
         <button
-          className="secondary-button"
+          className="stamp-button"
           disabled={state.runPlanning || manualMissing || !state.policy?.executionAllowed}
           onClick={() => {
             setBillingAccepted(false);
@@ -248,17 +276,17 @@ export function AgentRunDashboard({ actions, state }: Props) {
             <div><dt>기기 제한</dt><dd>상한 {state.policy?.policy.deviceMaxParallel ?? "-"}개 · 남음 {plan.deviceRemaining}개</dd></div>
             <div><dt>계획 만료</dt><dd>{plan.expiresAt}</dd></div>
           </dl>
-          <table>
+          <table className="agent-run-plan-table">
             <thead><tr><th>역할</th><th>provider</th><th>실행 방식</th><th>요청/시작</th><th>대상</th><th>제외 사유</th></tr></thead>
             <tbody>
               {plan.roles.map((role) => (
                 <tr key={role.role}>
-                  <th>{roleLabels[role.role] ?? role.role}</th>
-                  <td>{role.provider}</td>
-                  <td>{role.executionMode === "continuous" ? "반복" : "한 번"}</td>
-                  <td>{role.requested}/{role.granted}</td>
-                  <td>{role.manualTargets.length ? role.manualTargets.join(", ") : "자동 배정"}</td>
-                  <td>{role.excluded.length ? role.excluded.join(", ") : "없음"}</td>
+                  <th data-label="역할">{roleLabels[role.role] ?? role.role}</th>
+                  <td data-label="provider">{role.provider}</td>
+                  <td data-label="실행 방식">{role.executionMode === "continuous" ? "반복" : "한 번"}</td>
+                  <td data-label="요청/시작">{role.requested}/{role.granted}</td>
+                  <td data-label="대상">{role.manualTargets.length ? role.manualTargets.join(", ") : "자동 배정"}</td>
+                  <td data-label="제외 사유">{role.excluded.length ? role.excluded.join(", ") : "없음"}</td>
                 </tr>
               ))}
             </tbody>
@@ -288,8 +316,9 @@ export function AgentRunDashboard({ actions, state }: Props) {
       )}
 
       <RoleStatusTable runs={runs} state={state} />
-      <RunList actions={actions} runs={active} state={state} title="실행 중과 대기" />
-      <RunList actions={actions} runs={recent} state={state} title="최근 종료" />
+      {active.length > 0 && <RunList actions={actions} runs={active} state={state} title="실행 중과 대기" />}
+      {recent.length > 0 && <RunList actions={actions} runs={recent} state={state} title="최근 종료" />}
+      {runs.length === 0 && <p className="agent-run-empty-state">아직 실행 기록이 없습니다.</p>}
 
       {state.cancelPreview && (
         <section aria-label="취소 확인" className="agent-control-preview">
@@ -337,11 +366,14 @@ function RoleStatusTable({ runs, state }: { runs: AgentRunSummary[]; state: Agen
             const last = [...rows].reverse().find((run) => !activeStates.has(run.state));
             return (
               <tr key={role}>
-                <th>{roleLabels[role]}</th><td>{policy?.provider ?? "-"}</td><td>{policy?.model ?? "기본"}</td>
-                <td>{policy?.runMode === "continuous" ? "반복" : "한 번"}</td><td>{policy?.maxParallel ?? "-"}</td>
-                <td>{rows.filter((run) => run.state === "running").length}</td>
-                <td>{rows.filter((run) => run.state === "queued" || run.state === "reserved").length}</td>
-                <td>{last ? stateLabels[last.state] : "없음"}</td>
+                <th data-label="역할">{roleLabels[role]}</th>
+                <td data-label="provider">{policy?.provider ?? "-"}</td>
+                <td data-label="model">{policy?.model ?? "기본"}</td>
+                <td data-label="실행 방식">{policy?.runMode === "continuous" ? "반복" : "한 번"}</td>
+                <td data-label="최대">{policy?.maxParallel ?? "-"}</td>
+                <td data-label="실행">{rows.filter((run) => run.state === "running").length}</td>
+                <td data-label="대기">{rows.filter((run) => run.state === "queued" || run.state === "reserved").length}</td>
+                <td data-label="마지막 결과">{last ? stateLabels[last.state] : "없음"}</td>
               </tr>
             );
           })}
