@@ -1131,6 +1131,10 @@ svg { width: 20px; height: 20px; }
 .agents-view { container-name: agents; container-type: inline-size; display: grid; gap: 12px; }
 .agents-view > .view-heading { align-items: center; }
 .agents-view .secondary-button, .agents-view .stamp-button { width: fit-content; min-height: 34px; padding: 7px 11px; border-radius: 8px; font-size: 11px; }
+.agent-heading-actions { display: flex; align-items: center; gap: 8px; }
+.agent-ready-indicator { display: inline-flex; align-items: center; gap: 6px; color: #57705f; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.agent-ready-indicator > span { width: 7px; height: 7px; border-radius: 50%; background: #4e8060; box-shadow: 0 0 0 3px rgb(78 128 96 / 10%); }
+.agent-ready-indicator small { color: #8a8e87; font-size: 9px; font-weight: 600; }
 .agent-refresh-status { color: #7a7e76; font-size: 11px; white-space: nowrap; }
 .agent-view-tabs { display: flex; gap: 4px; border-bottom: 1px solid #deddd6; }
 .agent-view-tabs button { display: flex; min-height: 38px; align-items: center; gap: 7px; padding: 7px 12px 9px; border: 0; border-bottom: 2px solid transparent; color: #737871; background: transparent; cursor: pointer; font: inherit; font-size: 11px; font-weight: 750; }
@@ -1140,15 +1144,10 @@ svg { width: 20px; height: 20px; }
 .agent-settings-heading h2 { margin: 0; color: #3f473f; font-size: 17px; }
 .agent-settings-heading p { margin: 4px 0 0; color: #72776f; font-size: 11px; line-height: 1.55; }
 .agent-readiness { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid #dfddd5; border-left-width: 3px; border-radius: 11px; background: #fbfaf6; }
-.agent-readiness.tone-ready { border-left-color: #4d785d; background: #eaf2ed; }
 .agent-readiness.tone-attention { border-left-color: #c5842f; background: #faf2e6; }
 .agent-readiness.tone-blocked { border-left-color: #a45a51; background: #f8ecea; }
 .agent-readiness strong { color: #3d4a40; font-size: 13px; }
 .agent-readiness p { margin: 3px 0 0; color: #5a5f58; font-size: 11px; line-height: 1.55; }
-.agent-readiness.is-compact { grid-template-columns: auto minmax(0, 1fr); padding-block: 8px; }
-.agent-readiness.is-compact > div { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
-.agent-readiness.is-compact > div > p:not(.agent-versions) { display: none; }
-.agent-readiness.is-compact .agent-versions { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-versions { color: #8b8f86; font-size: 10px; }
 .agent-plan, .agent-application, .agent-roles { display: grid; min-width: 0; gap: 10px; padding: 14px 16px; border: 1px solid #dfddd5; border-radius: 11px; background: #fbfaf6; overflow-wrap: anywhere; }
 .agent-plan dl { margin: 0; }
@@ -1298,7 +1297,6 @@ svg { width: 20px; height: 20px; }
 
 @media (max-width: 980px) {
   .agent-readiness { grid-template-columns: minmax(0, 1fr); }
-  .agent-readiness.is-compact { grid-template-columns: auto minmax(0, 1fr); }
   .agent-plan dl > div { grid-template-columns: minmax(0, 1fr); }
   .agent-run-summary, .agent-run-plan dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-role-primary-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1316,8 +1314,6 @@ svg { width: 20px; height: 20px; }
 
 @media (max-width: 720px) {
   .agents-view > .view-heading { align-items: flex-start; }
-  .agent-readiness.is-compact > div { display: grid; gap: 2px; }
-  .agent-readiness.is-compact .agent-versions { white-space: normal; }
   .agent-policy-role-tabs, .agent-role-primary-fields, .agent-role-advanced > div, .agent-capacity-controls { grid-template-columns: minmax(0, 1fr); }
   .agent-capacity-allocation { grid-template-columns: minmax(0, 1fr); }
   .agent-capacity-allocation > div { border-right: 0; border-bottom: 1px solid #eceae3; }

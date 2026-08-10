@@ -214,6 +214,10 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
         state.inspection.bundledVersion ? `앱 번들 ${state.inspection.bundledVersion}` : null,
       ].filter((fact): fact is string => fact !== null)
     : [];
+  const readyVersion = state.inspection?.status?.runningVersion
+    ?? state.inspection?.status?.installedVersion
+    ?? state.inspection?.bundledVersion;
+  const showReadyIndicator = readiness.tone === "ready" && !refreshNeeded;
 
   return (
     <section className="agents-view">
@@ -223,20 +227,34 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
           <h1>에이전트</h1>
           <p>{projectName}의 에이전트 작업을 시작하고 진행 상황을 확인합니다.</p>
         </div>
-        {state.reading && refreshNeeded ? (
-          <span className="agent-refresh-status" role="status">
-            상태 확인 중
-          </span>
-        ) : (
-          refreshNeeded && (
-            <button
-              className="secondary-button agent-compact-action"
-              onClick={() => void actions.refresh()}
-              type="button"
-            >
-              상태 다시 확인
-            </button>
-          )
+        {(showReadyIndicator || refreshNeeded) && (
+          <div className="agent-heading-actions">
+            {showReadyIndicator && (
+              <span
+                aria-label={`실행 환경 정상${readyVersion ? `, 버전 ${readyVersion}` : ""}`}
+                className="agent-ready-indicator"
+              >
+                <span aria-hidden="true" />
+                실행 정상
+                {readyVersion && <small>{readyVersion}</small>}
+              </span>
+            )}
+            {state.reading && refreshNeeded ? (
+              <span className="agent-refresh-status" role="status">
+                상태 확인 중
+              </span>
+            ) : (
+              refreshNeeded && (
+                <button
+                  className="secondary-button agent-compact-action"
+                  onClick={() => void actions.refresh()}
+                  type="button"
+                >
+                  상태 다시 확인
+                </button>
+              )
+            )}
+          </div>
         )}
       </div>
 
@@ -268,27 +286,29 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
         </button>
       </div>
 
-      <section
-        aria-label="실행 환경 준비 상태"
-        className={`agent-readiness tone-${readiness.tone} ${readiness.tone === "ready" ? "is-compact" : ""}`}
-      >
-        <Icon name={readiness.tone === "ready" ? "spark" : "board"} />
-        <div>
-          <strong>{readiness.title}</strong>
-          <p>{readiness.detail}</p>
-          {versionFacts.length > 0 && <p className="agent-versions">{versionFacts.join(" · ")}</p>}
-        </div>
-        {readiness.operation && readiness.actionLabel && (
-          <button
-            className="stamp-button agent-primary-action"
-            disabled={state.planning !== null || state.applying}
-            onClick={() => void actions.plan(readiness.operation as AgentRuntimeOperation)}
-            type="button"
-          >
-            {state.planning === readiness.operation ? "계획을 만드는 중" : readiness.actionLabel}
-          </button>
-        )}
-      </section>
+      {readiness.tone !== "ready" && (
+        <section
+          aria-label="실행 환경 준비 상태"
+          className={`agent-readiness tone-${readiness.tone}`}
+        >
+          <Icon name="board" />
+          <div>
+            <strong>{readiness.title}</strong>
+            <p>{readiness.detail}</p>
+            {versionFacts.length > 0 && <p className="agent-versions">{versionFacts.join(" · ")}</p>}
+          </div>
+          {readiness.operation && readiness.actionLabel && (
+            <button
+              className="stamp-button agent-primary-action"
+              disabled={state.planning !== null || state.applying}
+              onClick={() => void actions.plan(readiness.operation as AgentRuntimeOperation)}
+              type="button"
+            >
+              {state.planning === readiness.operation ? "계획을 만드는 중" : readiness.actionLabel}
+            </button>
+          )}
+        </section>
+      )}
 
       {state.readError !== null && (
         <p className="agent-error" role="status">

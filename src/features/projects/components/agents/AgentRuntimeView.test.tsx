@@ -310,16 +310,18 @@ describe("AgentRuntimeView 준비 상태", () => {
     expect(screen.getByRole("button", { name: "기본 설정 저장" })).toBeEnabled();
   });
 
-  it("정상 상태에서는 내부 하트비트 이름을 주 제목으로 쓰지 않는다", () => {
+  it("정상 상태는 큰 배너 대신 헤더의 작은 상태로만 보여준다", () => {
     renderView();
 
     expect(screen.getByRole("heading", { level: 1, name: "에이전트" })).toBeInTheDocument();
-    expect(screen.getByText("실행 환경이 준비됐습니다")).toBeInTheDocument();
+    expect(screen.getByLabelText("실행 환경 정상, 버전 0.8.0")).toBeInTheDocument();
+    expect(screen.queryByText("실행 환경이 준비됐습니다")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "실행 환경 준비 상태" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "업데이트 계획 보기" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "상태 다시 확인" })).not.toBeInTheDocument();
   });
 
-  it("준비 상태에서 확인하지 못한 버전을 실패처럼 나열하지 않는다", () => {
+  it("정상 상태는 확인한 버전 하나만 헤더에 표시한다", () => {
     renderView(
       state({
         inspection: inspection({
@@ -329,9 +331,8 @@ describe("AgentRuntimeView 준비 상태", () => {
       }),
     );
 
-    const readiness = screen.getByRole("region", { name: "실행 환경 준비 상태" });
-    expect(within(readiness).getByText("설치 0.8.0")).toBeInTheDocument();
-    expect(within(readiness).queryByText(/확인 불가/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("실행 환경 정상, 버전 0.8.0")).toBeInTheDocument();
+    expect(screen.queryByText(/확인 불가/)).not.toBeInTheDocument();
   });
 
   // 여섯 상태가 각각 다른 문구와 다음 행동을 갖는다(완료 조건 8).
@@ -374,8 +375,9 @@ describe("AgentRuntimeView 준비 상태", () => {
   ])("%s 상태를 고유한 문구와 행동으로 보여준다", (_label, value, title, action) => {
     renderView(state({ inspection: value }));
 
-    expect(screen.getByText(title)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: action })).toBeInTheDocument();
+    const readiness = screen.getByRole("region", { name: "실행 환경 준비 상태" });
+    expect(within(readiness).getByText(title)).toBeInTheDocument();
+    expect(within(readiness).getByRole("button", { name: action })).toBeInTheDocument();
   });
 
   // 런타임 계약의 여섯 진단 값이 각각 다른 문장과 다음 행동을 갖는다.
