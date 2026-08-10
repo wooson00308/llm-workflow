@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useArmedConfirm } from "../../../../shared/ui/useArmedConfirm";
 import type { AgentPolicySnapshot, AgentProjectPolicy, AgentRolePolicy } from "../../domain/types";
 
 /** 화면이 보여주는 역할 차례. 계약의 세 역할이고 앱이 새 역할을 만들지 않는다. */
@@ -17,6 +16,22 @@ const providers = [
   { value: "codex", label: "Codex CLI" },
 ] as const;
 
+const modelOptions: Record<string, Array<{ label: string; value: string }>> = {
+  claude: [
+    { value: "", label: "Claude 기본 모델 (권장)" },
+    { value: "opus", label: "Opus · 복잡한 작업" },
+    { value: "sonnet", label: "Sonnet · 균형" },
+    { value: "haiku", label: "Haiku · 빠른 작업" },
+    { value: "fable", label: "Fable" },
+  ],
+  codex: [
+    { value: "", label: "Codex 기본 모델 (권장)" },
+    { value: "gpt-5.6", label: "GPT-5.6 Sol · 최고 성능" },
+    { value: "gpt-5.6-terra", label: "GPT-5.6 Terra · 균형" },
+    { value: "gpt-5.6-luna", label: "GPT-5.6 Luna · 빠르고 경제적" },
+  ],
+};
+
 const runModes = [
   { value: "continuous", label: "반복" },
   { value: "once", label: "한 번" },
@@ -24,6 +39,10 @@ const runModes = [
 
 /** 기기 상한의 상한. 첫 릴리스는 낮추기만 제공한다. */
 export const DEVICE_MAX_PARALLEL_CEILING = 16;
+
+function providerLabel(provider: string) {
+  return providers.find((candidate) => candidate.value === provider)?.label ?? provider;
+}
 
 interface Props {
   busy: boolean;
@@ -54,17 +73,15 @@ export function AgentRoleSettings({
   const [draft, setDraft] = useState<AgentProjectPolicy>(snapshot.policy);
   const [baseline, setBaseline] = useState(snapshot.revision);
   const [selectedRole, setSelectedRole] = useState<(typeof ROLE_ORDER)[number]>("planner");
-  const confirm = useArmedConfirm();
   if (baseline !== snapshot.revision) {
     setBaseline(snapshot.revision);
     setDraft(snapshot.policy);
-    confirm.disarm();
   }
 
   const locked = saving || busy || !executionAllowed;
+  const hasChanges = !snapshot.stored || JSON.stringify(draft) !== JSON.stringify(snapshot.policy);
 
   function editRole(role: string, change: Partial<AgentRolePolicy>) {
-    confirm.disarm();
     setDraft((current) => ({
       ...current,
       roles: { ...current.roles, [role]: { ...current.roles[role], ...change } },
@@ -72,7 +89,6 @@ export function AgentRoleSettings({
   }
 
   function editPolicy(change: Partial<AgentProjectPolicy>) {
-    confirm.disarm();
     setDraft((current) => ({ ...current, ...change }));
   }
 
@@ -98,7 +114,7 @@ export function AgentRoleSettings({
             >
               <strong>{roleLabels[role]}</strong>
               <small>
-                {value?.provider ?? "도구 미정"} · {value?.runMode === "once" ? "한 번" : "반복"} · 최대 {value?.maxParallel ?? "-"}명
+                {value ? providerLabel(value.provider) : "도구 미정"} · {value?.runMode === "once" ? "한 번" : "반복"} · 최대 {value?.maxParallel ?? "-"}명
               </small>
             </button>
           );
@@ -121,7 +137,7 @@ export function AgentRoleSettings({
             <header>
               <div>
                 <h4>{label}</h4>
-                <p>{value.provider} · {value.model ?? "기본 모델"}</p>
+                <p>{providerLabel(value.provider)} · {value.model ?? "공급자 기본 모델"}</p>
               </div>
               <span className="agent-role-enabled">
                 {value.enabled ? "사용 중" : "사용 안 함"}
@@ -134,7 +150,7 @@ export function AgentRoleSettings({
                   aria-label={`${label} 실행 도구`}
                   disabled={locked}
                   id={`agent-provider-${role}`}
-                  onChange={(event) => editRole(role, { provider: event.target.value })}
+                  onChange={(event) => editRole(role, { provider: event.target.value, model: null })}
                   value={value.provider}
                 >
                   {providers.map((provider) => (
@@ -146,16 +162,20 @@ export function AgentRoleSettings({
               </label>
               <label htmlFor={`agent-model-${role}`}>
                 <span>모델</span>
-                <input
+                <select
                   aria-label={`${label} 모델`}
                   disabled={locked}
                   id={`agent-model-${role}`}
-                  onChange={(event) =>
-                    editRole(role, { model: event.target.value.trim() ? event.target.value : null })
-                  }
-                  placeholder="기본 모델"
+                  onChange={(event) => editRole(role, { model: event.target.value || null })}
                   value={value.model ?? ""}
-                />
+                >
+                  {!modelOptions[value.provider]?.some((option) => option.value === (value.model ?? "")) && value.model && (
+                    <option value={value.model}>현재 설정 · {value.model}</option>
+                  )}
+                  {(modelOptions[value.provider] ?? [{ value: "", label: "공급자 기본 모델" }]).map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
               </label>
               <label htmlFor={`agent-run-mode-${role}`}>
                 <span>실행 방식</span>
@@ -268,26 +288,6 @@ export function AgentRoleSettings({
         </p>
       )}
 
-      {confirm.armed && (
-        <div className="agent-save-summary" role="status">
-          <strong>이 내용으로 저장합니다</strong>
-          <ul>
-            {ROLE_ORDER.map((role) => {
-              const value = draft.roles[role];
-              if (!value) return null;
-              return (
-                <li key={role}>
-                  {roleLabels[role] ?? role}: {value.provider} · {value.model ?? "기본 모델"} ·{" "}
-                  {value.runMode === "once" ? "한 번" : "반복"} · 최대 {value.maxParallel}명
-                </li>
-              );
-            })}
-            <li>프로젝트 상한 {draft.projectMaxParallel}명 · 기기 상한 {draft.deviceMaxParallel}명</li>
-            <li>적용 프로젝트: {draft.workingDirectory}</li>
-          </ul>
-        </div>
-      )}
-
       {saveError !== null && (
         <p className="agent-save-error" role="status">
           {saveError}
@@ -295,14 +295,18 @@ export function AgentRoleSettings({
       )}
 
       <footer className="agent-settings-actions">
-        <p>저장 전 한 번 더 확인합니다.</p>
+        <p>
+          {snapshot.stored
+            ? "변경 내용은 이 프로젝트에만 적용됩니다."
+            : "저장하면 이 프로젝트에서 에이전트 작업을 시작할 수 있습니다."}
+        </p>
         <button
-          className={`stamp-button agent-role-save ${confirm.armed ? "armed" : ""}`}
-          disabled={locked}
-          onClick={() => confirm.fire(() => void onSave(draft))}
+          className="stamp-button agent-role-save"
+          disabled={locked || !hasChanges}
+          onClick={() => void onSave(draft)}
           type="button"
         >
-          {saving ? "저장하는 중" : confirm.armed ? "한 번 더 누르면 저장" : "변경 내용 저장"}
+          {saving ? "저장하는 중" : snapshot.stored ? "변경 내용 저장" : "기본 설정 저장"}
         </button>
       </footer>
     </section>

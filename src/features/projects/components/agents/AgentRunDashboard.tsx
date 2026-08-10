@@ -28,10 +28,11 @@ const activeStates = new Set<AgentRunStatus>(["reserved", "queued", "running", "
 
 interface Props {
   actions: AgentRuntimeActions;
+  onOpenSettings(): void;
   state: AgentRuntimeState;
 }
 
-export function AgentRunDashboard({ actions, state }: Props) {
+export function AgentRunDashboard({ actions, onOpenSettings, state }: Props) {
   const [selectedRole, setSelectedRole] = useState<(typeof ROLE_ORDER)[number]>("planner");
   const [allocation, setAllocation] = useState<Record<string, "automatic" | "manual">>(() =>
     Object.fromEntries(ROLE_ORDER.map((role) => [role, "automatic"])),
@@ -54,6 +55,11 @@ export function AgentRunDashboard({ actions, state }: Props) {
     (run) => run.state === "queued" || run.state === "reserved",
   ).length;
   const queueNeedsAttention = Boolean(state.queueError || queue?.unavailable);
+  const policyStored = state.policy?.stored === true;
+  const selectedAllocation = allocation[selectedRole] ?? "automatic";
+  const selectedSlots = Math.max(1, slots[selectedRole] ?? 1);
+  const selectedTarget = targets[selectedRole] ?? "";
+  const manualMissing = selectedAllocation === "manual" && !selectedTarget.trim();
 
   useEffect(() => {
     if (!plan) return;
@@ -63,23 +69,71 @@ export function AgentRunDashboard({ actions, state }: Props) {
     }));
   }, [plan]);
 
-  function requests(): AgentRoleSlotRequest[] {
-    return ROLE_ORDER.map((role) => ({
-      role,
-      slots: Math.max(1, slots[role] ?? 1),
-      targets:
-        allocation[role] === "manual"
-          ? (targets[role] ?? "")
-              .split(",")
-              .map((target) => target.trim())
-              .filter(Boolean)
-          : [],
-    }));
+  useEffect(() => {
+    if (!policyStored || !state.policy?.executionAllowed || manualMissing) return;
+
+    const timer = window.setTimeout(() => {
+      setBillingAccepted(false);
+      const request: AgentRoleSlotRequest = {
+        role: selectedRole,
+        slots: selectedSlots,
+        targets:
+          selectedAllocation === "manual"
+            ? selectedTarget
+                .split(",")
+                .map((target) => target.trim())
+                .filter(Boolean)
+            : [],
+      };
+      void actions.planRun([request]);
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    actions,
+    manualMissing,
+    policyStored,
+    runs.length,
+    selectedAllocation,
+    selectedRole,
+    selectedSlots,
+    selectedTarget,
+    state.policy?.executionAllowed,
+    state.policy?.revision,
+  ]);
+
+  function selectRole(role: (typeof ROLE_ORDER)[number]) {
+    actions.cancelRunPlan();
+    setBillingAccepted(false);
+    setSelectedRole(role);
   }
 
-  const manualMissing = ROLE_ORDER.some(
-    (role) => allocation[role] === "manual" && !(targets[role] ?? "").trim(),
-  );
+  function providerLabel(provider: string | undefined) {
+    if (provider === "claude") return "Claude Code";
+    if (provider === "codex") return "Codex CLI";
+    return "실행 도구 미정";
+  }
+
+  if (!policyStored) {
+    return (
+      <section aria-label="에이전트 실행 대시보드" className="agent-run-dashboard">
+        <header className="agent-run-heading">
+          <div>
+            <h3>에이전트 작업</h3>
+            <p>이 프로젝트에서 사용할 에이전트 설정을 먼저 저장해 주세요.</p>
+          </div>
+        </header>
+        <section aria-label="에이전트 첫 설정" className="agent-first-run">
+          <span className="agent-section-kicker">FIRST SETUP</span>
+          <h4>기본 설정이 준비돼 있습니다</h4>
+          <p>역할별 실행 도구와 모델을 확인한 뒤 한 번 저장하면 바로 작업을 시작할 수 있습니다.</p>
+          <button className="stamp-button" onClick={onOpenSettings} type="button">
+            에이전트 설정 열기
+          </button>
+        </section>
+      </section>
+    );
+  }
 
   return (
     <section aria-label="에이전트 실행 대시보드" className="agent-run-dashboard">
@@ -111,7 +165,7 @@ export function AgentRunDashboard({ actions, state }: Props) {
             <span className="agent-section-kicker">NEW SESSION</span>
             <h4>새 작업 시작</h4>
           </div>
-          <p>역할 정책에 맞춰 실행 가능 여부를 먼저 확인합니다.</p>
+          <p>입력을 바꾸면 시작 조건을 자동으로 확인합니다.</p>
         </header>
         <div aria-label="설정할 역할" className="agent-run-role-tabs">
           {ROLE_ORDER.map((role) => (
@@ -119,7 +173,7 @@ export function AgentRunDashboard({ actions, state }: Props) {
               aria-pressed={selectedRole === role}
               className={selectedRole === role ? "is-active" : undefined}
               key={role}
-              onClick={() => setSelectedRole(role)}
+              onClick={() => selectRole(role)}
               type="button"
             >
               {roleLabels[role]}
@@ -134,7 +188,7 @@ export function AgentRunDashboard({ actions, state }: Props) {
               <fieldset key={role}>
                 <legend>{roleLabels[role]}</legend>
                 <p className="agent-run-role-policy">
-                  {policy?.provider ?? "provider 미정"} · {policy?.model ?? "기본 모델"} · {policy?.runMode === "continuous" ? "반복" : "한 번"} · 최대 {policy?.maxParallel ?? "-"}명
+                  {providerLabel(policy?.provider)} · {policy?.model ?? "공급자 기본 모델"} · {policy?.runMode === "continuous" ? "반복" : "한 번"} · 최대 {policy?.maxParallel ?? "-"}명
                 </p>
                 <div className="agent-run-request-fields">
                   <label>
@@ -198,50 +252,46 @@ export function AgentRunDashboard({ actions, state }: Props) {
             );
           })()}
         </div>
-        {manualMissing && <p className="agent-blocked-note">직접 지정 역할의 대상 문서를 선택해 주세요.</p>}
-        <button
-          className="stamp-button"
-          disabled={state.runPlanning || manualMissing || !state.policy?.executionAllowed}
-          onClick={() => {
-            setBillingAccepted(false);
-            void actions.planRun(requests());
-          }}
-          type="button"
-        >
-          {state.runPlanning ? "확인 중" : "시작 가능 여부 확인"}
-        </button>
+        {manualMissing ? (
+          <p className="agent-auto-plan-status">대상 문서를 선택하면 시작 조건을 자동으로 확인합니다.</p>
+        ) : state.runPlanning ? (
+          <p className="agent-auto-plan-status" role="status">시작할 작업을 확인하는 중…</p>
+        ) : !plan ? (
+          <p className="agent-auto-plan-status">설정을 바꾸면 시작 조건을 자동으로 다시 확인합니다.</p>
+        ) : null}
       </section>
 
       {state.runError && <p className="agent-error">{state.runError}</p>}
       {plan && (
-        <section aria-label="시작 확인" className="agent-run-plan">
-          <h4>시작 확인</h4>
+        <section aria-label="실행 준비" className="agent-run-plan">
+          <header className="agent-run-plan-heading">
+            <div>
+              <span className="agent-section-kicker">READY TO RUN</span>
+              <h4>실행 준비</h4>
+            </div>
+            <strong>{totalGranted}개 세션 시작 가능</strong>
+          </header>
           <dl>
-            <div><dt>적용 프로젝트</dt><dd>{plan.projectId}</dd></div>
-            <div><dt>실제 시작 수</dt><dd>{totalGranted}개 세션</dd></div>
-            <div><dt>프로젝트 제한</dt><dd>상한 {state.policy?.policy.projectMaxParallel ?? "-"}개 · 남음 {plan.projectRemaining}개</dd></div>
-            <div><dt>기기 제한</dt><dd>상한 {state.policy?.policy.deviceMaxParallel ?? "-"}개 · 남음 {plan.deviceRemaining}개</dd></div>
-            <div><dt>계획 만료</dt><dd>{plan.expiresAt}</dd></div>
+            <div><dt>프로젝트 여유</dt><dd>상한 {state.policy?.policy.projectMaxParallel ?? "-"}개 · 남음 {plan.projectRemaining}개</dd></div>
+            <div><dt>기기 여유</dt><dd>상한 {state.policy?.policy.deviceMaxParallel ?? "-"}개 · 남음 {plan.deviceRemaining}개</dd></div>
           </dl>
-          <table className="agent-run-plan-table">
-            <thead><tr><th>역할</th><th>provider</th><th>실행 방식</th><th>요청/시작</th><th>대상</th><th>제외 사유</th></tr></thead>
-            <tbody>
-              {plan.roles.map((role) => (
-                <tr key={role.role}>
-                  <th data-label="역할">{roleLabels[role.role] ?? role.role}</th>
-                  <td data-label="provider">{role.provider}</td>
-                  <td data-label="실행 방식">{role.executionMode === "continuous" ? "반복" : "한 번"}</td>
-                  <td data-label="요청/시작">{role.requested}/{role.granted}</td>
-                  <td data-label="대상">{role.manualTargets.length ? role.manualTargets.join(", ") : "자동 배정"}</td>
-                  <td data-label="제외 사유">{role.excluded.length ? role.excluded.join(", ") : "없음"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <ul className="agent-run-plan-roles">
+            {plan.roles.map((role) => (
+              <li key={role.role}>
+                <div>
+                  <strong>{roleLabels[role.role] ?? role.role}</strong>
+                  <span>{providerLabel(role.provider)} · {role.executionMode === "continuous" ? "반복" : "한 번"}</span>
+                </div>
+                <b>{role.granted}/{role.requested}명</b>
+                <p>대상: {role.manualTargets.length ? role.manualTargets.join(", ") : "자동 배정"}</p>
+                {role.excluded.length > 0 && <p className="agent-plan-excluded">제외: {role.excluded.join(", ")}</p>}
+              </li>
+            ))}
+          </ul>
           {totalGranted === 0 && (
             <p className="agent-blocked-note">시작할 수 있는 대상이 0건입니다. 제외 사유를 확인하고 직접 지정을 선택할 수 있습니다.</p>
           )}
-          <p>확인하면 여러 유료 CLI 세션이 동시에 시작될 수 있습니다.</p>
+          <p>아래 버튼을 누르기 전에는 에이전트가 실행되지 않습니다.</p>
           {plan.billingRouteRisk && (
             <label className="agent-billing-check">
               <input checked={billingAccepted} onChange={(event) => setBillingAccepted(event.target.checked)} type="checkbox" />
@@ -249,14 +299,13 @@ export function AgentRunDashboard({ actions, state }: Props) {
             </label>
           )}
           <div className="agent-plan-actions">
-            <button className="secondary-button" onClick={() => actions.cancelRunPlan()} type="button">계획 취소</button>
             <button
               className="stamp-button"
               disabled={state.runStarting || totalGranted === 0 || (plan.billingRouteRisk && !billingAccepted)}
               onClick={() => void actions.startRun()}
               type="button"
             >
-              {state.runStarting ? "시작 중" : "이 계획으로 시작"}
+              {state.runStarting ? "시작 중" : "에이전트 시작"}
             </button>
           </div>
         </section>

@@ -193,8 +193,8 @@ interface Props {
 /**
  * 프로젝트의 에이전트 화면. 준비 상태와 역할 정책을 한 자리에서 다룬다.
  *
- * 화면에 들어오는 것과 다시 읽기는 조회 명령만 부른다. 설치·업데이트·복구·마이그레이션·저장은 모두
- * 사용자가 누른 자리에서만 시작하고, 계획을 보여 준 뒤에만 적용 버튼이 열린다.
+ * 화면 진입은 상태 조회와 선택 역할의 읽기 전용 실행 계획만 자동화한다. 실제 에이전트 실행과
+ * 설치·업데이트·복구·마이그레이션·저장은 사용자가 누른 자리에서만 시작한다.
  */
 export function AgentRuntimeView({ actions, projectName, state }: Props) {
   const [activeView, setActiveView] = useState<"work" | "settings">("work");
@@ -202,6 +202,7 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
   const pending = state.plan;
   const refreshNeeded = state.inspection === null || state.readError !== null;
   const providerAttention = state.policy?.providers.some((provider) => provider.status !== "ready") ?? false;
+  const setupRequired = state.policy?.stored === false;
   const versionFacts = state.inspection?.status
     ? [
         state.inspection.status.installedVersion
@@ -259,7 +260,11 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
           type="button"
         >
           설정
-          {providerAttention && <span className="agent-tab-alert">확인 필요</span>}
+          {setupRequired ? (
+            <span className="agent-tab-alert">설정 필요</span>
+          ) : providerAttention ? (
+            <span className="agent-tab-alert">확인 필요</span>
+          ) : null}
         </button>
       </div>
 
@@ -427,7 +432,11 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
       {activeView === "work" ? (
         <div className="agent-view-panel" id="agent-work-panel" role="tabpanel">
           {state.policy ? (
-            <AgentRunDashboard actions={actions} state={state} />
+            <AgentRunDashboard
+              actions={actions}
+              onOpenSettings={() => setActiveView("settings")}
+              state={state}
+            />
           ) : (
             <p className="agent-empty">작업을 시작할 역할 정책을 아직 읽지 못했습니다.</p>
           )}
@@ -438,6 +447,12 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
             <h2>에이전트 설정</h2>
             <p>역할별 실행 도구와 한도를 조정합니다. 작업 시작과 진행 기록은 작업 탭에 있습니다.</p>
           </header>
+
+          {setupRequired && (
+            <p className="agent-setup-note" role="status">
+              아직 이 프로젝트에 저장된 설정이 없습니다. 아래 기본값을 확인하고 저장하면 작업을 시작할 수 있습니다.
+            </p>
+          )}
 
           {state.policy ? (
             <AgentRoleSettings

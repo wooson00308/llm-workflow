@@ -52,6 +52,12 @@ pub enum RuntimeCallFailure {
     NotFound { looked: PathBuf },
     /// 찾긴 찾았는데 띄우지 못했다(실행 권한 등).
     NotStarted { reason: String },
+    /// 런타임이 계약 안의 실패 봉투로 요청을 거절했다.
+    Rejected {
+        stage: Option<String>,
+        code: String,
+        detail: String,
+    },
     /// 띄웠는데 답이 계약의 모양이 아니다. 받은 원문을 그대로 보존한다.
     OffContract {
         code: Option<i32>,
@@ -69,6 +75,16 @@ impl RuntimeCallFailure {
             }
             RuntimeCallFailure::NotStarted { reason } => {
                 format!("런타임을 실행하지 못했습니다: {reason}")
+            }
+            RuntimeCallFailure::Rejected { code, detail, .. } => {
+                if code == "project_not_configured" {
+                    "이 프로젝트는 아직 에이전트 설정이 없습니다. 설정을 저장한 뒤 다시 시도해 주세요."
+                        .to_owned()
+                } else if detail.trim().is_empty() {
+                    "런타임이 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.".to_owned()
+                } else {
+                    format!("요청을 처리하지 못했습니다: {}", detail.trim())
+                }
             }
             RuntimeCallFailure::OffContract {
                 code,
@@ -443,13 +459,34 @@ fn envelope(
 fn decode_envelope<T: for<'de> Deserialize<'de>>(
     captured: &Captured,
 ) -> Result<T, RuntimeCallFailure> {
-    let Ok(value) = serde_json::from_str::<Value>(first_line(&captured.stdout)) else {
+    let value = [captured.stdout.as_str(), captured.stderr.as_str()]
+        .into_iter()
+        .map(first_line)
+        .filter(|line| !line.is_empty())
+        .find_map(|line| serde_json::from_str::<Value>(line).ok());
+    let Some(value) = value else {
         return Err(off_contract(captured));
     };
-    let Some(data) = value.get("data") else {
-        return Err(off_contract(captured));
-    };
-    serde_json::from_value(data.clone()).map_err(|_| off_contract(captured))
+    if let Some(data) = value.get("data") {
+        return serde_json::from_value(data.clone()).map_err(|_| off_contract(captured));
+    }
+    if let Some(error) = value.get("error") {
+        let Some(code) = error.get("code").and_then(Value::as_str) else {
+            return Err(off_contract(captured));
+        };
+        let Some(detail) = error.get("message").and_then(Value::as_str) else {
+            return Err(off_contract(captured));
+        };
+        return Err(RuntimeCallFailure::Rejected {
+            stage: error
+                .get("stage")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            code: code.to_owned(),
+            detail: detail.to_owned(),
+        });
+    }
+    Err(off_contract(captured))
 }
 
 /// 봉투가 없는 응답(`runtime inspect`)을 읽는다.
@@ -640,6 +677,47 @@ pub(crate) mod tests {
         assert_eq!(request["installRoot"], json!("/opt/runtime"));
         assert_eq!(request["apiVersion"], json!("1"));
         assert!(request.get("planId").is_none());
+    }
+
+    #[test]
+    fn a_structured_runtime_rejection_from_stderr_is_not_called_off_contract() {
+        let caller = FakeCaller::new(vec![Ok(Captured {
+            code: Some(2),
+            stdout: String::new(),
+            stderr: json!({
+                "apiVersion": "1",
+                "runtimeVersion": "0.8.0",
+                "requestId": "417b9cac-f09b-436e-b8fd-d05ba91fae70",
+                "command": "plan.read",
+                "outcome": "failure",
+                "error": {
+                    "stage": "request_validation",
+                    "code": "project_not_configured",
+                    "message": "projectId has no stored configuration",
+                },
+            })
+            .to_string(),
+        })]);
+
+        let failure = plan_update(
+            &caller,
+            &PathBuf::from("/opt/runtime"),
+            &PathBuf::from("/opt/runtime/versions/0.9.0"),
+        )
+        .expect_err("configuration is required");
+
+        assert_eq!(
+            failure,
+            RuntimeCallFailure::Rejected {
+                stage: Some("request_validation".to_owned()),
+                code: "project_not_configured".to_owned(),
+                detail: "projectId has no stored configuration".to_owned(),
+            }
+        );
+        assert_eq!(
+            failure.message(),
+            "이 프로젝트는 아직 에이전트 설정이 없습니다. 설정을 저장한 뒤 다시 시도해 주세요."
+        );
     }
 
     #[test]

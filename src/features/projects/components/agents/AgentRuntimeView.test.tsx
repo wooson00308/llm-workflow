@@ -273,6 +273,28 @@ describe("AgentRuntimeView 준비 상태", () => {
     expect(screen.getByRole("region", { name: "실행 도구 준비 상태" })).toBeInTheDocument();
   });
 
+  it("저장된 설정이 없으면 내부 오류 대신 첫 설정으로 안내한다", () => {
+    const raw = '런타임 응답이 계약 밖입니다: {"code":"project_not_configured"}';
+    const { actions } = renderView(
+      state({
+        policy: policy(undefined, { stored: false }),
+        queueError: raw,
+        runError: raw,
+      }),
+    );
+
+    expect(screen.getByRole("region", { name: "에이전트 첫 설정" })).toBeInTheDocument();
+    expect(screen.getByText("기본 설정이 준비돼 있습니다")).toBeInTheDocument();
+    expect(screen.queryByText(raw)).not.toBeInTheDocument();
+    expect(actions.planRun).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "에이전트 설정 열기" }));
+
+    expect(screen.getByRole("tab", { name: /설정.*필요/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText(/아직 이 프로젝트에 저장된 설정이 없습니다/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "기본 설정 저장" })).toBeEnabled();
+  });
+
   it("정상 상태에서는 내부 하트비트 이름을 주 제목으로 쓰지 않는다", () => {
     renderView();
 
@@ -551,24 +573,50 @@ describe("AgentRuntimeView 역할 정책", () => {
     expect(within(card as HTMLElement).queryByRole("checkbox")).not.toBeInTheDocument();
   });
 
-  it("첫 확인은 요약만 보여주고 두 번째 확인이 저장한다", async () => {
+  it("변경 내용은 한 번의 명확한 저장으로 반영한다", async () => {
     const { actions } = renderView();
     openSettings();
 
     fireEvent.change(screen.getByLabelText("기획자 모델"), { target: { value: "opus" } });
     fireEvent.click(screen.getByRole("button", { name: "변경 내용 저장" }));
 
-    expect(actions.save).not.toHaveBeenCalled();
-    const summary = screen.getByText("이 내용으로 저장합니다").closest("div");
-    expect(within(summary as HTMLElement).getByText(/기획자: claude · opus/)).toBeInTheDocument();
-    expect(within(summary as HTMLElement).getByText(/프로젝트 상한 3명/)).toBeInTheDocument();
-    expect(
-      within(summary as HTMLElement).getByText(/적용 프로젝트: \/projects\/workflow-labs/),
-    ).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 저장" }));
     await waitFor(() => expect(actions.save).toHaveBeenCalledTimes(1));
     expect((actions.save as ReturnType<typeof vi.fn>).mock.calls[0][0].roles.planner.model).toBe("opus");
+  });
+
+  it("모델은 공급자별 선택지로만 고르고 도구를 바꾸면 기본 모델로 돌아간다", () => {
+    renderView();
+    openSettings();
+
+    const model = screen.getByLabelText("기획자 모델");
+    expect(within(model).getByRole("option", { name: /Claude 기본 모델/ })).toBeInTheDocument();
+    expect(within(model).getByRole("option", { name: /Opus/ })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("기획자 실행 도구"), { target: { value: "codex" } });
+
+    expect(model).toHaveValue("");
+    expect(within(model).getByRole("option", { name: /Codex 기본 모델/ })).toBeInTheDocument();
+    expect(within(model).getByRole("option", { name: /GPT-5.6 Terra/ })).toBeInTheDocument();
+    expect(within(model).queryByRole("option", { name: /Opus/ })).not.toBeInTheDocument();
+  });
+
+  it("기존 목록 밖 모델은 저장 전까지 현재 값으로 보존한다", () => {
+    const current = policy();
+    current.policy.roles.planner.model = "claude-company-pinned";
+    renderView(state({ policy: current }));
+    openSettings();
+
+    expect(screen.getByLabelText("기획자 모델")).toHaveValue("claude-company-pinned");
+    expect(
+      screen.getByRole("option", { name: "현재 설정 · claude-company-pinned" }),
+    ).toBeInTheDocument();
+  });
+
+  it("저장된 값과 같으면 저장 버튼을 비활성화한다", () => {
+    renderView();
+    openSettings();
+
+    expect(screen.getByRole("button", { name: "변경 내용 저장" })).toBeDisabled();
   });
 
   it("호환되지 않는 런타임에서는 저장을 막고 이유를 보여준다", () => {
@@ -607,17 +655,30 @@ describe("AgentRuntimeView 역할 정책", () => {
 });
 
 describe("AgentRuntimeView 실행 계획과 큐", () => {
+  it("저장된 설정은 화면 진입 후 선택 역할의 시작 조건을 자동으로 확인한다", async () => {
+    const actions = actionsStub();
+    renderView(state({ queue: { ...queue, runs: [] } }), actions);
+
+    await waitFor(() => expect(actions.planRun).toHaveBeenCalledTimes(1));
+    expect(actions.planRun).toHaveBeenCalledWith([
+      { role: "planner", slots: 1, targets: [] },
+    ]);
+    expect(screen.queryByRole("button", { name: "시작 가능 여부 확인" })).not.toBeInTheDocument();
+  });
+
   it("상한의 최솟값으로 계산된 실제 시작 수와 대상을 확인한 뒤에만 시작한다", async () => {
     const actions = actionsStub();
     renderView(state({ runPlan, queue }), actions);
 
-    const confirmation = screen.getByRole("region", { name: "시작 확인" });
-    expect(within(confirmation).getByText("2개 세션")).toBeInTheDocument();
+    const confirmation = screen.getByRole("region", { name: "실행 준비" });
+    expect(within(confirmation).getByText("2개 세션 시작 가능")).toBeInTheDocument();
     expect(within(confirmation).getByText(/남음 4개/)).toBeInTheDocument();
-    expect(within(confirmation).getByText("TASK-S051-01, TASK-S051-02")).toBeInTheDocument();
+    expect(within(confirmation).getByText(/TASK-S051-01, TASK-S051-02/)).toBeInTheDocument();
+    expect(within(confirmation).queryByText("prj_1")).not.toBeInTheDocument();
+    expect(within(confirmation).queryByText(runPlan.expiresAt)).not.toBeInTheDocument();
     expect(actions.startRun).not.toHaveBeenCalled();
 
-    fireEvent.click(within(confirmation).getByRole("button", { name: "이 계획으로 시작" }));
+    fireEvent.click(within(confirmation).getByRole("button", { name: "에이전트 시작" }));
     await waitFor(() => expect(actions.startRun).toHaveBeenCalledTimes(1));
   });
 
@@ -634,21 +695,21 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     renderView(state({ runPlan: zeroPlan }));
 
     expect(screen.getByText(/시작할 수 있는 대상이 0건/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "이 계획으로 시작" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "에이전트 시작" })).toBeDisabled();
     expect(screen.getAllByRole("option", { name: "직접 지정" })).toHaveLength(1);
     expect(screen.getByLabelText("설정할 역할")).toBeInTheDocument();
   });
 
   it("API 과금 위험 계획은 별도 확인 전에는 시작하지 않는다", () => {
     renderView(state({ runPlan: { ...runPlan, billingRouteRisk: true } }));
-    const start = screen.getByRole("button", { name: "이 계획으로 시작" });
+    const start = screen.getByRole("button", { name: "에이전트 시작" });
 
     expect(start).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox", { name: /Claude API 과금 경로/ }));
     expect(start).toBeEnabled();
   });
 
-  it("수동 대상은 역할별 targets로 계획 검증에 보내고 실행을 바로 시작하지 않는다", async () => {
+  it("선택한 한 역할만 입력 변경 뒤 자동 검증하고 실행을 바로 시작하지 않는다", async () => {
     const actions = actionsStub();
     renderView(state({ runPlan }), actions);
 
@@ -657,17 +718,15 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     fireEvent.change(screen.getByLabelText("개발자 수동 대상"), {
       target: { value: "TASK-S051-01,TASK-S051-02" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "시작 가능 여부 확인" }));
-
     await waitFor(() => expect(actions.planRun).toHaveBeenCalledTimes(1));
-    expect(actions.planRun).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({
-          role: "developer",
-          targets: ["TASK-S051-01", "TASK-S051-02"],
-        }),
-      ]),
-    );
+    expect(actions.planRun).toHaveBeenCalledWith([
+      {
+        role: "developer",
+        slots: 1,
+        targets: ["TASK-S051-01", "TASK-S051-02"],
+      },
+    ]);
+    expect(screen.queryByRole("button", { name: "시작 가능 여부 확인" })).not.toBeInTheDocument();
     expect(actions.startRun).not.toHaveBeenCalled();
   });
 

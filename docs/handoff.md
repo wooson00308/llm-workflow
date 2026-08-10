@@ -1,7 +1,7 @@
 # 판 상태 핸드오프 (TL 스냅샷)
 
 > 다음 세션(코덱스 포함) 팔로업용 정본. 개발 로그 전체를 읽기 전에 이 파일을 먼저 본다.
-> 갱신: 2026-08-10 (blocked 자동 복구와 개발 QA·에이전트 UX 직접 개선 완료).
+> 갱신: 2026-08-10 (blocked 자동 복구와 개발 QA·에이전트 최초 설정/실행 UX 직접 개선 완료).
 
 ## 이번 세션의 핵심 결과
 
@@ -9,8 +9,9 @@
 2. 대형 워크플로우 조회가 작업마다 모든 결정 YAML을 다시 읽던 병목을 workflow당 한 번의 스캔과 graph join으로 바꿨다. Rust 701건, Clippy와 조건 스크립트 검사가 통과했다.
 3. 새 blocked 경로를 실제 `TASK-S051-11`에 적용했다. developer의 범위 누락 판정→architect 정의 교정→developer 재구현을 같은 작업에서 이어 갔고, 사용자 재개 결정과 `resumed` 이력은 만들지 않았다. quota 격리와 Rust 표준 포맷은 보호 커밋 `66af7b0`에 보존됐다.
 4. 개발 보드는 작업 카드를 사용자 QA 단위로 나열하지 않는다. 같은 기획서의 개발이 끝났을 때만 기능 QA 세션 하나로 묶고, 화면 확인 단계와 자동 검증 근거를 분리한다. 940px 최소 창에서도 한 흐름으로 읽힌다.
-5. 에이전트 화면은 작업과 설정을 분리했다. 기본 `작업` 탭은 새 세션과 진행 기록만, `설정` 탭은 역할 정책·도구 상태·기존 설정 가져오기만 보여준다. 빈 역할 표와 0 통계는 제거했고 역할 정책은 한 역할씩 편집한다.
-6. GitHub Actions의 요약→상세, Cursor·Copilot Agents·Devin의 세션 중심 구조를 참고했다. 최신 debug 앱의 1180px 기본 창과 940px 최소 창에서 작업·설정 탭을 직접 확인했고, 준비 완료 상태의 모순된 `확인 불가` 버전 문구도 제거했다.
+5. 에이전트 화면은 작업과 설정을 분리했다. 저장된 정책이 없으면 내부 `project_not_configured` 오류나 빈 실행 폼 대신 최초 설정 하나만 안내한다. 설정 저장 전에는 실행 계획 API를 부르지 않는다.
+6. 실행 시작 조건은 선택 역할 입력이 바뀔 때 읽기 전용으로 자동 확인한다. 화면에서 고른 한 역할만 계획 요청에 보내며 실제 실행은 `에이전트 시작` 전까지 일어나지 않는다. 수동 확인·계획 취소 버튼과 내부 project id·만료 시각·6열 계획 표는 제거했다.
+7. 모델은 주관식이 아니라 공급자별 선택지다. 저장은 변경이 있을 때 한 번만 누르며, 좁은 창에서는 전체 창이 아닌 에이전트 본문 폭 기준으로 4열→2열→1열 재배치된다.
 
 ## 현재 보드와 인수 기준
 
@@ -31,16 +32,16 @@
 ## 검증
 
 - claude-heartbeat: quota 13 passed, runtime E2E 4 passed·실서비스 1 target-CI skip, 전체 284 passed·8 platform skip.
-- workflow-labs Rust 기준선: 본체 701 passed·종단 17 passed, `cargo fmt --check`, Clippy `-D warnings`, 계약 fixture 통과.
-- workflow-labs 프런트 최신: 28파일·912 passed, typecheck·production build, Agents 집중 53 passed, `git diff --check` 통과.
-- 최신 debug macOS `.app`와 `.dmg` 번들 완료. 실제 앱 1180px·940px 작업/설정 화면 확인 완료.
+- workflow-labs Rust 최신: 본체 710 passed, `cargo fmt --check`, Clippy `-D warnings`, 런타임 계약 검증 통과.
+- workflow-labs 프런트 최신: 28파일·917 passed, typecheck·production build, Agents 집중 58 passed, `git diff --check` 통과.
+- 최신 debug macOS `.app`와 `.dmg` 번들 완료. 실제 앱 최초 설정·모델 선택과 940px 최소 창의 본문 기준 2열 재배치를 확인했다.
 
 ## 작업 트리와 브랜치
 
 - workflow-labs: `claude/qa-batch-20260808`. 이번 에이전트 UX 변경과 최신 개발 기록·핸드오프를 마감 커밋으로 보호한다.
 - claude-heartbeat: `claude/agent-runtime-20260808`, HEAD `66af7b0`, clean.
 - main 병합·push는 하지 않았다. 릴리스 컷은 사용자 지시와 `docs/releasing.md` 절차를 따른다.
-- 최신 debug 앱은 `/Users/catze/project/workflow-labs/src-tauri/target/debug/bundle/macos/LLM Workflow.app`이며 에이전트 작업 화면에 열려 있다.
+- 최신 debug 앱은 `/Users/catze/project/workflow-labs/src-tauri/target/debug/bundle/macos/LLM Workflow.app`이며 에이전트 설정 화면에 열려 있다. 정책 저장과 에이전트 시작은 수행하지 않았다.
 
 ## 운영 가드레일
 
