@@ -726,6 +726,24 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     expect(screen.queryByRole("button", { name: "시작 가능 여부 확인" })).not.toBeInTheDocument();
   });
 
+  it("프로젝트 자동 조회가 조작 묶음을 새로 만들어도 같은 실행 계획을 반복하지 않는다", async () => {
+    const actions = actionsStub();
+    const current = state({ queue: { ...queue, runs: [] } });
+    const { rerender } = renderView(current, actions);
+
+    await waitFor(() => expect(actions.planRun).toHaveBeenCalledTimes(1));
+    rerender(
+      <AgentRuntimeView
+        actions={{ ...actions }}
+        projectName="workflow-labs"
+        state={current}
+      />,
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+
+    expect(actions.planRun).toHaveBeenCalledTimes(1);
+  });
+
   it("상한의 최솟값으로 계산된 실제 시작 수와 대상을 확인한 뒤에만 시작한다", async () => {
     const actions = actionsStub();
     renderView(state({ runPlan, queue }), actions);

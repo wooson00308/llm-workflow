@@ -33,6 +33,9 @@ interface Props {
 }
 
 export function AgentRunDashboard({ actions, onOpenSettings, state }: Props) {
+  // 부모의 조작 묶음은 프로젝트 자동 조회 때 새 객체가 될 수 있다. 계획 함수 자체는 같은 입력에
+  // 같은 수명을 가지므로 이 참조만 효과의 의존성으로 삼아 주기 조회를 사용자 입력 변경으로 오인하지 않는다.
+  const planRun = actions.planRun;
   const [selectedRole, setSelectedRole] = useState<(typeof ROLE_ORDER)[number]>("planner");
   const [allocation, setAllocation] = useState<Record<string, "automatic" | "manual">>(() =>
     Object.fromEntries(ROLE_ORDER.map((role) => [role, "automatic"])),
@@ -85,13 +88,13 @@ export function AgentRunDashboard({ actions, onOpenSettings, state }: Props) {
                 .filter(Boolean)
             : [],
       };
-      void actions.planRun([request]);
+      void planRun([request]);
     }, 250);
 
     return () => window.clearTimeout(timer);
   }, [
-    actions,
     manualMissing,
+    planRun,
     policyStored,
     runs.length,
     selectedAllocation,
