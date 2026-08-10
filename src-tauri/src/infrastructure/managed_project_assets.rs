@@ -1007,12 +1007,12 @@ mod tests {
         assert_eq!(
             versions,
             vec![
-                ("workflow_rules", 20, 20),
+                ("workflow_rules", 21, 21),
                 ("planner_rules", 11, 11),
-                ("architect_rules", 14, 14),
-                ("developer_rules", 14, 14),
+                ("architect_rules", 15, 15),
+                ("developer_rules", 15, 15),
                 ("claim_helper", 1, 1),
-                ("condition_script", 14, 14),
+                ("condition_script", 15, 15),
             ]
         );
         assert!(root.path().join("AGENTS.md").is_file());
@@ -1025,8 +1025,8 @@ mod tests {
     fn every_role_uses_its_own_version_for_updates_and_future_conflicts() {
         for (id, relative_path, current) in [
             ("planner_rules", "rules/roles/planner.md", 11),
-            ("architect_rules", "rules/roles/architect.md", 14),
-            ("developer_rules", "rules/roles/developer.md", 14),
+            ("architect_rules", "rules/roles/architect.md", 15),
+            ("developer_rules", "rules/roles/developer.md", 15),
         ] {
             let (root, control) = roots();
             synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
@@ -1099,8 +1099,8 @@ mod tests {
         let old = fs::read_to_string(&script)
             .expect("condition script")
             .replace(
+                "# condition_script_version: 15",
                 "# condition_script_version: 14",
-                "# condition_script_version: 13",
             );
         fs::write(&script, old).expect("old condition script");
 
@@ -1111,15 +1111,15 @@ mod tests {
             .find(|asset| asset.id == "condition_script")
             .expect("condition script state");
         assert_eq!(updated.status, ManagedAssetSyncStatus::Updated);
-        assert_eq!(state.installed_version, Some(14));
+        assert_eq!(state.installed_version, Some(15));
         assert!(fs::read_to_string(&script)
             .expect("updated condition script")
-            .contains("# condition_script_version: 14"));
+            .contains("# condition_script_version: 15"));
 
         let future = fs::read_to_string(&script)
             .expect("condition script")
             .replace(
-                "# condition_script_version: 14",
+                "# condition_script_version: 15",
                 "# condition_script_version: 999",
             );
         fs::write(&script, &future).expect("future condition script");
@@ -1132,7 +1132,7 @@ mod tests {
             .expect("future condition script state");
         assert_eq!(conflict.status, ManagedAssetSyncStatus::Conflict);
         assert_eq!(state.installed_version, Some(999));
-        assert_eq!(state.provided_version, Some(14));
+        assert_eq!(state.provided_version, Some(15));
         assert_eq!(fs::read_to_string(script).expect("future kept"), future);
     }
 
@@ -1171,9 +1171,9 @@ mod tests {
             };
             let sentinel_current = fs::read_to_string(&sentinel).expect("sentinel");
             let sentinel_old = if id == "workflow_rules" {
-                sentinel_current.replace("rules_version: 14", "rules_version: 13")
+                sentinel_current.replace("rules_version: 15", "rules_version: 14")
             } else {
-                sentinel_current.replace("rules_version: 20", "rules_version: 19")
+                sentinel_current.replace("rules_version: 21", "rules_version: 20")
             };
             fs::write(&sentinel, &sentinel_old).expect("old sentinel");
             let target = root.path().join(relative_path);
@@ -1241,12 +1241,12 @@ mod tests {
         let rules = control.join("rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, &old_rules).expect("old rules");
         let architect = control.join("rules/roles/architect.md");
         let future = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 14", "rules_version: 15");
+            .replace("rules_version: 15", "rules_version: 16");
         fs::write(&architect, &future).expect("future architect");
 
         let result =
@@ -1263,8 +1263,8 @@ mod tests {
             .find(|asset| asset.id == "architect_rules")
             .expect("architect state");
         assert_eq!(state.status, ManagedAssetStatus::Conflict);
-        assert_eq!(state.installed_version, Some(15));
-        assert_eq!(state.provided_version, Some(14));
+        assert_eq!(state.installed_version, Some(16));
+        assert_eq!(state.provided_version, Some(15));
     }
 
     #[test]
@@ -1274,7 +1274,7 @@ mod tests {
         let rules = control.join("rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(claim_helper_path(&control), "user script\n").expect("unmanaged helper");
 
@@ -1299,7 +1299,7 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 11", "rules_version: 10");
@@ -1330,7 +1330,7 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 11", "rules_version: 10");
@@ -1371,7 +1371,7 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 11", "rules_version: 10");
@@ -1482,16 +1482,16 @@ mod tests {
         let developer = control.join("rules/roles/developer.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         let old_planner = fs::read_to_string(&planner)
             .expect("planner")
             .replace("rules_version: 11", "rules_version: 10");
         let old_architect = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         let old_developer = fs::read_to_string(&developer)
             .expect("developer")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(&planner, &old_planner).expect("old planner");
         fs::write(&architect, &old_architect).expect("old architect");

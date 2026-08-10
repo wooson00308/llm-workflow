@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 14
+# condition_script_version: 15
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -268,11 +268,34 @@ scan_refs() { # $1=문서 디렉터리 경로 $2=콜론까지 포함한 키
   done
   [ "$#" -eq 0 ] && return 0
   awk -v key="$scan_key" '
+    function emit_direct() {
+      if (status == "blocked" && kind == "definition_error" && id != "") {
+        print "__WF_DIRECT__\t" id
+      }
+    }
+    FILENAME != prev {
+      emit_direct()
+      prev = FILENAME
+      id = ""; status = ""; kind = ""
+      got_id = 0; got_status = 0; got_kind = 0
+    }
+    {
+      if (!got_id && index($0, "id:") == 1) {
+        got_id = 1; id = substr($0, 4); sub(/^ */, "", id)
+      }
+      if (!got_status && index($0, "status:") == 1) {
+        got_status = 1; status = substr($0, 8); sub(/^ */, "", status)
+      }
+      if (!got_kind && index($0, "blocked_kind:") == 1) {
+        got_kind = 1; kind = substr($0, 14); sub(/^ */, "", kind)
+      }
+    }
     index($0, key) > 0 {
       line = $0
       gsub(key " +", key, line)
       print line
     }
+    END { emit_direct() }
   ' "$@"
 }
 
@@ -465,7 +488,7 @@ lease_active() { # $1=대상 id
 #
 # 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
 # 네 자리는 차례로
-#   후보 여부  — ^status: (todo|in_progress)가 파일 아무 줄에나 있는가
+#   후보 여부  — ^status: (todo|in_progress)가 있거나, definition_error가 아닌 blocked인가
 #   충족 여부  — ^status: qa_waiting 또는 ^status: completed가 파일 아무 줄에나 있는가
 #   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
 #   겹침 줄 수 — 0·1·2
@@ -489,8 +512,9 @@ scan_tasks() { # $1=워크플로우 경로
       sub(/[[:space:]]*$/, "", s)
       return s
     }
-    function emit(  i, line) {
+    function emit(  i, line, cand) {
       if (!started) return
+      cand = ordinary || (blocked && !definition_error)
       line = "M" cand sat depn scopen " "
       for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
       print line
@@ -503,7 +527,8 @@ scan_tasks() { # $1=워크플로우 경로
       prev = FILENAME
       started = 1
       files = files + 1
-      cand = 0; sat = 0; depn = 0; scopen = 0
+      ordinary = 0; blocked = 0; definition_error = 0
+      sat = 0; depn = 0; scopen = 0
       got_id = 0; first_id = ""; dep_value = ""; scope_value = ""; n_ids = 0
     }
     {
@@ -517,7 +542,9 @@ scan_tasks() { # $1=워크플로우 경로
           id_list[n_ids] = v
         }
       }
-      if ($0 ~ /^status: (todo|in_progress)/) cand = 1
+      if ($0 ~ /^status: (todo|in_progress)/) ordinary = 1
+      if ($0 ~ /^status: blocked/) blocked = 1
+      if ($0 ~ /^blocked_kind: definition_error/) definition_error = 1
       if ($0 ~ /^status: qa_waiting/ || $0 ~ /^status: completed/) sat = 1
       if (index($0, "depends_on:") == 1) {
         if (depn == 0) { depn = 1; dep_value = trim(substr($0, 12)) } else depn = 2
@@ -580,6 +607,7 @@ $rows
 REVISION_ROWS
   done
   ordered_revision_rows=$(printf '%s' "$revision_rows" | LC_ALL=C sort)
+  revision_task_ids="$nl"
   while IFS='	' read -r created rid tid wf; do
     [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] && [ -n "$wf" ] || continue
     task_file=""
@@ -590,16 +618,44 @@ REVISION_ROWS
     [ -n "$task_file" ] || continue
     grep -Eqs '^status: (todo|blocked)$' "$task_file" || continue
     grep -qs "^revision_request_id: *$rid$" "$task_file" && continue
+    case "$revision_task_ids" in *"$nl$tid$nl"*) ;; *) revision_task_ids="$revision_task_ids$tid$nl" ;; esac
     if lease_blocks "$rid" || lease_blocks "$tid"; then note_candidate leased "$rid"; continue; fi
     note_target "$rid" task_revision_request
   done <<ORDERED_REVISION_ROWS
 $ordered_revision_rows
 ORDERED_REVISION_ROWS
+  # 이전 앱이 남긴 사용자 수정 요청은 먼저 처리한다. 그런 요청이 없으면 task 문서가 이미 기록한
+  # definition_error를 사용자 조작 없이 바로 아키텍트 작업으로 연다. 이 훑기는 승인 분해 판정이
+  # 필요로 하는 source_decision_id 줄도 함께 모아 아래 두 판단이 tasks/를 한 번만 읽게 한다.
+  architect_task_refs=""
+  direct_rows=""
+  for wf in .workflow/*/; do
+    task_scan=$(scan_refs "${wf}tasks" "source_decision_id:")
+    task_refs=""
+    while IFS= read -r task_row; do
+      case "$task_row" in
+        "__WF_DIRECT__	"*) direct_rows="$direct_rows$wf	${task_row#*	}$nl" ;;
+        *) task_refs="$task_refs$task_row$nl" ;;
+      esac
+    done <<TASK_SCAN
+$task_scan
+TASK_SCAN
+    architect_task_refs="$architect_task_refs${nl}W$wf$nl$task_refs${nl}E$wf$nl"
+  done
+  while IFS='	' read -r wf tid; do
+    [ -n "$wf" ] && [ -n "$tid" ] || continue
+    case "$revision_task_ids" in *"$nl$tid$nl"*) continue ;; esac
+    lease_blocks "$tid" && { note_candidate leased "$tid"; continue; }
+    note_target "$tid" blocked_task
+  done <<DIRECT_ROWS
+$direct_rows
+DIRECT_ROWS
   for wf in .workflow/*/; do
     [ -d "${wf}decisions" ] || continue
     # 아키텍트 후보는 스키마 줄도 spec_id도 요구하지 않는다. strict가 0인 것이 그 차이다.
     # created_by 필터와 최신 검사는 기획자 분기와 같은 훑기가 한다.
-    task_refs=$(scan_refs "${wf}tasks" "source_decision_id:")
+    task_ref_section=${architect_task_refs#*"$nl"W$wf"$nl"}
+    task_refs=${task_ref_section%%"$nl"E$wf"$nl"*}
     approvals=$(scan_decisions "$wf" approved 0)
     while IFS= read -r did; do
       IFS= read -r spec || spec=""
@@ -640,9 +696,10 @@ developer)
       tid=""
       dep_value=""
       scope_value=""
-      # 후보는 todo와 in_progress 둘이다. 죽은 세션이 남긴 in_progress 작업은 그 작업을 덮는
-      # 미만료 lease가 없으므로 아래 lease_active가 통과시키고, 살아 있는 세션의 작업은 그 lease가
-      # 막는다(SPEC-035 R1). 나머지 조건은 todo와 완전히 같고 blocked은 후보가 아니다.
+      # 후보는 todo, in_progress, 그리고 definition_error가 아닌 blocked다. 죽은 세션이 남긴
+      # in_progress 작업은 그 작업을 덮는 미만료 lease가 없으므로 아래 lease_active가 통과시키고,
+      # 살아 있는 세션의 작업은 그 lease가 막는다(SPEC-035 R1). blocked 복구에도 lease·선행·겹침
+      # 조건은 완전히 같다. definition_error는 위 아키텍트 분기의 대상이라 후보로 내지 않는다.
       [ "$cand" = 1 ] && IFS= read -r tid
       [ "$depn" = 1 ] && IFS= read -r dep_value
       [ "$scopen" = 1 ] && IFS= read -r scope_value

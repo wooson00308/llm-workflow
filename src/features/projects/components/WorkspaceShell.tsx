@@ -12,7 +12,6 @@ import type {
   AgentRuntimeState,
   TaskQaBatchEntry,
   TaskQaOutcome,
-  TaskResumeOutcome,
   TaskDocument,
   SpecDocument,
   WorkflowItemSummary,
@@ -80,14 +79,6 @@ interface Props {
    */
   agentRuntime?: AgentRuntimeState;
   agentRuntimeActions?: AgentRuntimeActions;
-  /** 막힌 작업의 사용자 재개. QA 통로와 나뉘어 있고 개발 화면에만 닿는다. */
-  onResumeTask?(
-    workflowDirectory: string,
-    fileName: string,
-    expectedUpdatedAt: string,
-    resolution: string,
-    requestId: string,
-  ): Promise<TaskResumeOutcome>;
   onRefresh(): Promise<void> | void;
   onSwitchProject(): void;
 }
@@ -133,7 +124,6 @@ export function WorkspaceShell({
   onReadTask,
   onTaskQa,
   onTaskQaBatch,
-  onResumeTask,
   onRefresh,
   onSwitchProject,
 }: Props) {
@@ -471,7 +461,7 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onResumeTask={onResumeTask && ((fileName, expectedUpdatedAt, resolution, requestId) => onResumeTask(workflow.directory, fileName, expectedUpdatedAt, resolution, requestId))} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
+          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 

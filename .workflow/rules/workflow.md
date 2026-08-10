@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 20
+rules_version: 21
 ---
 
 # LLM Workflow agent protocol
@@ -98,7 +98,7 @@ Judge every call by its exit code, never by the text it printed:
 
 The obligations around the claim do not change. Only the way the lease itself is written moves to the helper:
 
-1. Immediately after a successful `acquire`, record the working state in the document itself before doing the real work: create the specification skeleton with `status: draft`, or move the claimed task to `status: in_progress`.
+1. Immediately after a successful `acquire`, record the working state in the document itself before doing the real work: create the specification skeleton with `status: draft`, or move a `todo` task to `status: in_progress`. A claimed `blocked` task follows §5's agent-recovery check first and moves to `in_progress` only when recovery work can actually begin.
 2. `renew` during long work, and keep the validity short (minutes, not hours).
 3. `release` after writing the final report or when abandoning the item.
 
@@ -146,7 +146,7 @@ prompt to send unchanged to the provider. It is a lease handoff, not a second cl
 - A session without a reservation follows the ordinary `acquire` procedure above. A missing or
   failed handoff never authorizes a direct lease-file write.
 - `resultPrefix` is unique to the reserved lease. Planners use it when creating SPEC identifiers;
-  architects use it with task sequence numbers when creating TASK identifiers. Before writing, stop
+  architects use it with task sequence numbers only when decomposing an approval into new TASK identifiers. A task correction creates no new identifier. Before writing, stop
   if the resulting document path already exists. Developers preserve it in their report when it
   explains a runtime handoff but do not invent a new result identifier.
 - The role prompt may name only this role, target, lease, result prefix, and the managed rules it
@@ -181,7 +181,9 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
-The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file resumes nothing, and neither does one that adds a `resumed` entry by hand. Leaving `blocked` is not itself reserved — an architect correcting a wrong task definition does exactly that, as this section describes below — but no edit an agent makes is a user reopening, and none of them earns the record or the history entry a reopening leaves.
+Blocked recovery is agent-operated. The user may inspect the recorded reason and status, but is never required to provide a resolution, reopen the task, or create a request before work continues. A `definition_error` block is routed to an architect; every other block, including an unclassified legacy block, is routed to a developer. The eventual user handoff for recovered implementation work is the ordinary QA gate.
+
+Older projects may contain app-owned `workflow-labs/task-resume@1` decisions and `resumed` history entries from the retired user-reopen path. Readers preserve those records as historical audit data. Agents never create or imitate either record, and their presence is not required for agent recovery.
 
 ### Recording why a task is blocked
 
@@ -211,14 +213,22 @@ The same edit that records the reason also records what kind of block it is, in 
 - `implementation_failure`: the work was attempted and did not succeed, and the reason sits in the code or the environment rather than in the document.
 - `external_dependency`: the block is outside this repository — an approval, a third party, a service.
 
-- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified. Nobody guesses the cause from the prose, and no session fills the field in on another session's behalf.
+- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified and is routed to a developer. Eligibility never guesses the cause from the prose. After claiming it, the developer may classify it only from facts verified during that recovery attempt.
 - Leaving `blocked` does not delete the value. It is the kind of the last block, kept for the same reason the reason section is kept, and it is not read as a present impediment once the status is no longer `blocked`.
+
+### Agent-operated recovery
+
+- An architect directly claims a `definition_error` task. No user revision request is needed.
+- A developer directly claims every other `blocked` task under the same lease, dependency, and overlap checks as `todo` and `in_progress` work. A declared prerequisite that is still unsatisfied therefore keeps the task ineligible until the prerequisite reaches `qa_waiting` or `completed`.
+- After claiming a blocked task, the developer first re-reads the recorded reason, its resume condition, and the latest implementation report. If the impediment still exists and there is no in-scope recovery to perform, the task stays `blocked`; the session records what it rechecked and releases the lease without fabricating progress.
+- When recovery work can actually begin, the developer changes the task to `in_progress`, appends an `in_progress` history entry, and updates `updated_at` in the same edit. This is an agent retry, not a user reopening, so it never creates a `task-resume@1` decision or a `resumed` history entry.
+- If that inspection proves the task definition itself is wrong, the developer keeps the task `blocked`, records `blocked_kind: definition_error` with the verified reason, reports the finding, and releases it for an architect. The user is not the handoff target.
 
 ### When the task definition itself is wrong
 
 A `definition_error` block is the one kind an implementer cannot clear by working harder, because what is wrong is the instruction sheet. Correcting it is the architect's work and `.workflow/rules/roles/architect.md` states what that session may touch.
 
-The user can ask for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. Where such a record exists it is the ground of the correction, and the task corrected on it names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task corrected without one leaves the key out, exactly as a task that has never been corrected does.
+Older projects may also contain an app-owned task-definition revision request. An agent never writes one. Where such a historical record exists it remains valid ground for the correction, and the task corrected on it names the handled record in the optional frontmatter field `revision_request_id`. A direct `definition_error` recovery without such a record leaves the key out.
 
 A correction does not wait for that record. A task blocked as `definition_error` already carries its own ground in writing: the `## 막힌 사유` section the blocking session wrote, and the implementation report that recorded what could not be satisfied as written. Those two are enough for an architect session to correct the definition, and the audit record of the correction is that session's own report under `reports/` — what was wrong, what changed, and which ground it worked from. The user's gate is QA on the finished work, not permission to fix a task sheet that is already recorded as broken.
 
@@ -244,11 +254,11 @@ history:
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-  - `resumed`: the user reopened a `blocked` task
+  - `resumed`: a legacy app version recorded that the user reopened a `blocked` task
 - The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no `kind` of its own for a takeover, and there is none for anything else: these seven are the whole list.
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
-- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records all three: the first two when it records the QA decision, the third when the user reopens a blocked task.
-- `resumed` is the fact that the user reopened the work, and it does not stand in for `in_progress`. A developer that claims the returned `todo` task appends its own `in_progress` entry exactly as it would for any other `todo` task.
+- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records the first two from QA decisions; `resumed` is preserved only for compatibility with the retired user-reopen path.
+- `resumed` never stands in for `in_progress`. A developer that starts agent-operated recovery from `blocked` appends its own `in_progress` entry when recovery work actually begins.
 - The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`. No `kind` names it, `resumed` is not it, and the architect's report carries that fact instead, as the section above states.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.

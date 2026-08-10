@@ -999,6 +999,7 @@ fn summary_from_manifest(
                 items: &workflow.items,
                 approved_decisions: &workflow.approved_decisions,
                 task_revision_requests: &workflow.task_revision_requests,
+                definition_error_tasks: &workflow.definition_error_tasks,
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
                 overlap_blocked: &workflow.overlap_blocked,
@@ -1045,6 +1046,8 @@ struct PreparedWorkflow {
     /// 아키텍트 판정이 보는 작업 정의 수정 요청. 요청 기록과 대상 작업을 한번 읽은
     /// 결과로 조립한다.
     task_revision_requests: Vec<TaskRevisionRequestCandidate>,
+    /// 현재 `definition_error`로 막힌 작업 id. 작업 문서를 훑을 때 함께 읽는다.
+    definition_error_tasks: HashSet<String>,
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
     revision_requested_decisions: Vec<String>,
     /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2).
@@ -1071,6 +1074,13 @@ impl PreparedWorkflow {
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
         let task_revision_requests = task_revision_request_candidates(&root, &graph);
+        let definition_error_tasks = graph
+            .iter()
+            .filter(|(_, node)| {
+                node.status == "blocked" && node.blocked_kind.as_deref() == Some("definition_error")
+            })
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
         let unsatisfied_dependencies = unsatisfied_dependency_task_ids(&graph);
         let overlap_blocked = overlap_blocked_task_ids(&graph, lease_target_ids);
         Self {
@@ -1078,6 +1088,7 @@ impl PreparedWorkflow {
             items,
             approved_decisions,
             task_revision_requests,
+            definition_error_tasks,
             revision_requested_decisions,
             unsatisfied_dependencies,
             overlap_blocked,
@@ -1393,16 +1404,18 @@ fn handled_revision_request_id(task_path: &Path) -> Option<String> {
 /// 결정 디렉터리에서 읽은 수정 요청 한 건. 화면에 나가는 값과 재시도 판정에만 쓰는 요청 식별자를
 /// 함께 든다. 요청 식별자는 사용자에게 보여줄 값이 아니라 같은 조작을 알아보는 값이다.
 struct RevisionRequestRecord {
+    task_id: String,
     request_id: String,
     entry: TaskRevisionRequest,
 }
 
-/// 한 작업의 수정 요청을 생성 시각 순서로 읽는다. 앱이 쓴 기록만 세고, 형식이 어긋난 문서는 그 파일만
-/// 건너뛴다(SPEC-055 R10). `handled`는 여기서 채우지 않고 부르는 쪽이 연결 id로 정한다.
-fn read_revision_request_records(
-    workflow_root: &Path,
-    task_id: &str,
-) -> Vec<RevisionRequestRecord> {
+/// 워크플로우의 수정 요청을 한 번의 결정 디렉터리 순회로 읽는다. 앱이 쓴 기록만 세고, 형식이
+/// 어긋난 문서는 그 파일만 건너뛴다(SPEC-055 R10). `handled`는 여기서 채우지 않고 부르는 쪽이
+/// 연결 id로 정한다.
+///
+/// 프로젝트 조회는 이 결과를 작업 그래프와 한 번만 접는다. 작업마다 `decisions/`를 다시 훑으면
+/// 작업 수와 결정 수의 곱만큼 파일을 읽게 되므로, 큰 워크플로우에서는 이 함수만 호출해야 한다.
+fn read_all_revision_request_records(workflow_root: &Path) -> Vec<RevisionRequestRecord> {
     let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
         return Vec::new();
     };
@@ -1418,13 +1431,13 @@ fn read_revision_request_records(
             let metadata = metadata.as_ref();
             if yaml_text(metadata, "schema").as_deref() != Some(TASK_REVISION_REQUEST_SCHEMA)
                 || yaml_text(metadata, "created_by").as_deref() != Some("user")
-                || yaml_text(metadata, "task_id").as_deref() != Some(task_id)
             {
                 return None;
             }
             let created_at = yaml_text(metadata, "created_at")?;
             parse_event_instant(&created_at)?;
             Some(RevisionRequestRecord {
+                task_id: yaml_text(metadata, "task_id")?,
                 request_id: yaml_text(metadata, "request_id")?,
                 entry: TaskRevisionRequest {
                     id: yaml_text(metadata, "id")?,
@@ -1440,8 +1453,21 @@ fn read_revision_request_records(
         parse_event_instant(&left.entry.created_at)
             .cmp(&parse_event_instant(&right.entry.created_at))
             .then_with(|| left.entry.id.cmp(&right.entry.id))
+            .then_with(|| left.task_id.cmp(&right.task_id))
     });
     records
+}
+
+/// 한 작업의 수정 요청만 생성 시각 순서로 읽는다. 단건 조회·쓰기 경로는 전체 결정 디렉터리를 한 번
+/// 읽은 뒤 이 작업에 속한 기록만 남긴다.
+fn read_revision_request_records(
+    workflow_root: &Path,
+    task_id: &str,
+) -> Vec<RevisionRequestRecord> {
+    read_all_revision_request_records(workflow_root)
+        .into_iter()
+        .filter(|record| record.task_id == task_id)
+        .collect()
 }
 
 /// 조회에 실리는 목록. 작업이 연결한 요청 id 하나가 처리 완료를 정하고 나머지는 미처리다.
@@ -2084,6 +2110,7 @@ fn parse_scope_declaration(frontmatter: &str) -> ScopeDeclaration {
 struct TaskNode {
     status: String,
     revision_request_id: Option<String>,
+    blocked_kind: Option<String>,
     dependencies: DependencyDeclaration,
     scope: ScopeDeclaration,
 }
@@ -2131,6 +2158,7 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
         graph.entry(summary.id.clone()).or_insert(TaskNode {
             status: summary.status.clone(),
             revision_request_id: yaml_text(metadata.as_ref(), "revision_request_id"),
+            blocked_kind: yaml_text(metadata.as_ref(), "blocked_kind"),
             dependencies: parse_dependency_declaration(frontmatter),
             scope: parse_scope_declaration(frontmatter),
         });
@@ -2145,27 +2173,21 @@ fn task_revision_request_candidates(
     workflow_root: &Path,
     graph: &HashMap<String, TaskNode>,
 ) -> Vec<TaskRevisionRequestCandidate> {
-    let mut candidates = Vec::new();
-    for (task_id, node) in graph {
-        candidates.extend(
-            read_revision_request_records(workflow_root, task_id)
-                .into_iter()
-                .map(|record| TaskRevisionRequestCandidate {
-                    handled: node.revision_request_id.as_deref() == Some(record.entry.id.as_str()),
-                    id: record.entry.id,
-                    task_id: task_id.clone(),
-                    created_at: record.entry.created_at,
-                    task_status: node.status.clone(),
-                }),
-        );
-    }
-    candidates.sort_by(|left, right| {
-        parse_event_instant(&left.created_at)
-            .cmp(&parse_event_instant(&right.created_at))
-            .then_with(|| left.id.cmp(&right.id))
-            .then_with(|| left.task_id.cmp(&right.task_id))
-    });
-    candidates
+    // 결정 디렉터리는 여기서 딱 한 번 읽는다. 레코드가 이미 후보와 같은 순서로 정렬돼 있으므로
+    // HashMap인 작업 그래프의 순회 순서도 결과에 새어 나오지 않는다.
+    read_all_revision_request_records(workflow_root)
+        .into_iter()
+        .filter_map(|record| {
+            let node = graph.get(&record.task_id)?;
+            Some(TaskRevisionRequestCandidate {
+                handled: node.revision_request_id.as_deref() == Some(record.entry.id.as_str()),
+                id: record.entry.id,
+                task_id: record.task_id,
+                created_at: record.entry.created_at,
+                task_status: node.status.clone(),
+            })
+        })
+        .collect()
 }
 
 /// 작업 하나의 선언을 판정해 상세 payload에 실을 값으로 만든다. 순서는 선언에 적힌 그대로다 —
@@ -2822,8 +2844,9 @@ mod tests {
         apply_latest_decision, latest_spec_decisions, lease_ids, markdown_excerpt,
         normalize_spec_status, overlap_blocked_task_ids, parse_scope_declaration,
         read_markdown_document, read_spec_decisions, slugify, task_dependency_graph,
-        update_task_frontmatter, validate_decision, validate_task_qa, walkthrough_preview,
-        FileSystemProjectRepository, ProjectError, ProjectSummary, ScopeDeclaration,
+        task_revision_request_candidates, update_task_frontmatter, validate_decision,
+        validate_task_qa, walkthrough_preview, FileSystemProjectRepository, ProjectError,
+        ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
         CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
@@ -2899,7 +2922,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, &old).expect("old rules");
         let modified = fs::metadata(&rules)
             .and_then(|metadata| metadata.modified())
@@ -2927,7 +2950,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, old).expect("old rules");
 
         let result = repository
@@ -2938,7 +2961,7 @@ mod tests {
         assert!(result.updated_assets.contains(&"workflow_rules".to_owned()));
         assert!(fs::read_to_string(rules)
             .expect("updated rules")
-            .contains("rules_version: 20"));
+            .contains("rules_version: 21"));
     }
 
     #[test]
@@ -3011,7 +3034,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, old_rules).expect("old managed rules");
 
         repository.inspect(root.path()).expect("inspect project");
@@ -4222,7 +4245,7 @@ mod tests {
         let architect = root.path().join(".workflow/rules/roles/architect.md");
         let old_architect = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&architect, old_architect).expect("old architect");
 
         let confirmed = repository
@@ -4246,7 +4269,7 @@ mod tests {
         );
         assert!(fs::read_to_string(architect)
             .expect("architect updated on QA")
-            .contains("rules_version: 14"));
+            .contains("rules_version: 15"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
@@ -4805,7 +4828,7 @@ mod tests {
         let developer = root.path().join(".workflow/rules/roles/developer.md");
         let old_developer = fs::read_to_string(&developer)
             .expect("developer")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&developer, old_developer).expect("old developer");
 
         let result = repository
@@ -4824,7 +4847,7 @@ mod tests {
         assert!(result.results.iter().all(|entry| entry.recorded));
         assert!(fs::read_to_string(developer)
             .expect("developer updated on batch QA")
-            .contains("rules_version: 14"));
+            .contains("rules_version: 15"));
         assert_eq!(
             result
                 .results
@@ -5305,7 +5328,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 20", "rules_version: 19");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, old_rules).expect("old rules");
 
         let decided = repository
@@ -5322,7 +5345,7 @@ mod tests {
         assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
         assert!(fs::read_to_string(rules)
             .expect("rules updated on decision")
-            .contains("rules_version: 20"));
+            .contains("rules_version: 21"));
         assert_eq!(
             fs::read_to_string(spec_path).expect("original spec"),
             source
@@ -7832,14 +7855,15 @@ mod tests {
     }
 
     #[test]
-    fn task_resume_leaves_the_developer_verdict_ineligible_while_a_dependency_is_unsatisfied() {
+    fn task_resume_keeps_the_dependent_closed_and_opens_blocked_prerequisite_recovery() {
         let root = tempdir().expect("temp project");
         let project = FileSystemProjectRepository
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
         let directory = project.workflows[0].directory.clone();
         blocked_task(root.path(), &directory, "depends_on: [TASK-800]\n");
-        // 선행이 `blocked`이므로 재개 뒤에도 충족되지 않고, 그 선행 자체도 후보가 아니다.
+        // 선행이 `blocked`이므로 재개 뒤에도 TASK-900에는 충족되지 않는다. blocked 레인은 이제
+        // 에이전트 소유이므로 미분류 선행 TASK-800 자체가 개발자 복구 대상으로 열린다.
         fs::write(
             root.path()
                 .join(".workflow")
@@ -7866,7 +7890,11 @@ mod tests {
                 .status,
             "todo"
         );
-        assert_eq!(result.summary.pending_work.developer, false);
+        assert_eq!(result.summary.pending_work.developer, true);
+        assert_eq!(
+            result.summary.pending_detail.developer.target.as_deref(),
+            Some("TASK-800")
+        );
     }
 
     /// 재개를 모르던 기존 QA 경로가 새 이력과 감사 문서를 만났을 때. 원문을 지우지도, 기존 결정으로
@@ -8528,6 +8556,73 @@ mod tests {
                 .expect("spec")
                 .status,
             "approved"
+        );
+    }
+
+    #[test]
+    fn project_revision_candidates_join_one_sorted_decision_scan_to_the_task_graph() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: []\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "blocked",
+            "revision_request_id: REVISION-LATE\nscope_files: []\n",
+        );
+        let request = |id: &str, task_id: &str, created_at: &str| {
+            format!(
+                "---\nschema: workflow-labs/task-revision-request@1\nid: {id}\ntask_id: {task_id}\nrequest_id: request-{id}\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{id} 사유\n"
+            )
+        };
+        // 파일 이름과 작업 그래프의 HashMap 순서가 아니라 생성 시각, 요청 id, 작업 id 순서로
+        // 결과가 고정된다. 그래프에 없는 작업의 기록은 후보에서 빠진다.
+        for (file_name, contents) in [
+            (
+                "Z-ORPHAN.md",
+                request("REVISION-ORPHAN", "TASK-999", "2026-08-01T00:00:00Z"),
+            ),
+            (
+                "Z-EARLY-B.md",
+                request("REVISION-EARLY-B", "TASK-002", "2026-08-01T01:00:00Z"),
+            ),
+            (
+                "Z-LATE.md",
+                request("REVISION-LATE", "TASK-002", "2026-08-01T02:00:00Z"),
+            ),
+            (
+                "Z-EARLY-A.md",
+                request("REVISION-EARLY-A", "TASK-001", "2026-08-01T01:00:00Z"),
+            ),
+        ] {
+            write_decision(root.path(), &directory, file_name, &contents);
+        }
+
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let graph = task_dependency_graph(&workflow_root.join("tasks"));
+        let candidates = task_revision_request_candidates(&workflow_root, &graph);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.id.as_str(),
+                    candidate.task_id.as_str(),
+                    candidate.task_status.as_str(),
+                    candidate.handled,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("REVISION-EARLY-A", "TASK-001", "todo", false),
+                ("REVISION-EARLY-B", "TASK-002", "blocked", false),
+                ("REVISION-LATE", "TASK-002", "blocked", true),
+            ]
         );
     }
 }

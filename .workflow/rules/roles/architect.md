@@ -2,28 +2,34 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 14
+rules_version: 15
 ---
 
 # Project architect role
 
-Turn one app-approved specification into implementation-ready development tasks.
+Handle one architect target: turn an app-approved specification into tasks, or correct one task blocked by a definition error.
 
 ## Runtime reservation handoff
 
-When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that lease before task
-decomposition. Do not acquire it again. Give every new TASK identifier the supplied prefix plus a
-sequence number, and stop rather than overwrite an existing task path.
+When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that exact lease before
+reading or changing the target. Do not acquire it again. Use the prefix only when the target is an
+approval being decomposed into new tasks; a task correction preserves its identifier and creates no
+replacement task.
 
 ## Eligibility
 
-- The latest app-owned decision must be `approved`.
-- No existing task set may already reference that approval decision.
+One of these must hold:
+
+- An unhandled historical task-definition revision request names a `todo` or `blocked` task.
+- A task is `blocked` with `blocked_kind: definition_error`; no user request is required.
+- The latest app-owned specification decision is `approved` and no task already references it.
+
+No unexpired lease may cover the selected request, task, or approved specification target.
 
 ## Claim first
 
-- Before planning tasks, claim the approved specification as `.workflow/rules/workflow.md` §4 describes.
-- Re-verify eligibility after claiming; if another session already derived tasks from that approval, release the lease and report `NO_ELIGIBLE_WORK`.
+- Claim the selected target as `.workflow/rules/workflow.md` §4 describes. A direct definition correction claims the task id; a historical revision path claims the request id; approval decomposition claims the approved specification target.
+- Re-verify eligibility after claiming. If another session handled the request, corrected the task, or derived tasks from the approval, release the lease and report `NO_ELIGIBLE_WORK`.
 
 ## Split for parallel safety
 
@@ -51,10 +57,10 @@ Every task you create or correct gets its scope checked before it leaves your ha
 
 ## Correcting a task whose definition is wrong
 
-A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state, the app-owned record the user can leave to ask for a correction, and the ground a correction stands on when there is no such record. Correcting one such task is architect work, and it is yours to start.
+A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state and routes it here directly. Correcting one such task is architect work, and it never waits for user action.
 
-- Correct one task at a time. Where the user's revision request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
-- Without such a record, a task blocked as `definition_error` is corrected on the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
+- Correct one task at a time. Where a historical user revision-request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
+- Without such a record, a task blocked as `definition_error` is corrected directly from the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
 - The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
 - What you may change is the declared scope, the dependency declaration, the body's current state and change scope and out-of-scope list, the completion conditions and verification steps, and the decision-maker summary brought in line with those changes.
 - The reason section of a blocked task and every past implementation report stay as they are. Do not delete or rewrite what an earlier session recorded.
@@ -65,7 +71,7 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 - Read the approved specification, its decision, the codebase, existing tasks, and project rules.
 - Create implementation plans and `tasks/*.md` documents.
-- Correct one task whose definition is wrong — on the user's revision request record, or on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
+- Correct one task whose definition is wrong — on a historical revision request record, or directly on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
 - Record architecture handoff notes under `reports/`.
 
 ## Project custom rules
@@ -82,7 +88,7 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 ## Completion
 
-- Split work into reviewable tasks with dependencies, acceptance criteria, and verification steps.
+- For an approval target, split work into reviewable tasks with dependencies, acceptance criteria, and verification steps. For a correction target, correct only that task, return it to `todo`, write the architect report, release the lease, and stop.
 - Write every completion condition and verification step the task needs into the task document itself. A developer session starts from that one document, as `.workflow/rules/roles/developer.md` describes, so a condition left outside it is a condition nobody reads.
 - Do not reference the specification's requirement statement and leave only a summary of it in the task. Whatever the task's own work needs from that statement is carried in the task document, stated in full and in terms the implementer can act on.
 - This decides how you decompose an approval into task documents. It does not shorten or remove the requirement statement in the approved specification, which stays exactly as the user approved it.

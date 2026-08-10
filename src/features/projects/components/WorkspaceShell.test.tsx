@@ -1161,7 +1161,7 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
   });
 });
 
-describe("WorkspaceShell 막힌 작업 재개 배선", () => {
+describe("WorkspaceShell 막힌 작업 안내", () => {
   const blockedTask = {
     fileName: "TASK-900.md",
     id: "TASK-900",
@@ -1194,13 +1194,7 @@ describe("WorkspaceShell 막힌 작업 재개 배선", () => {
     "- 관련 대상: 없음",
   ].join("\n");
 
-  // 개발 화면의 재개 조작은 워크플로 디렉터리를 붙여 작업 공간으로 나간다. 이 배선이 끊기면 화면에
-  // 조작만 남고 아무것도 기록되지 않으므로 통로 자체를 검사한다.
-  it("연 워크플로 디렉터리를 붙여 재개 호출을 작업 공간으로 넘긴다", async () => {
-    const onResumeTask = vi.fn().mockResolvedValue({
-      ok: true,
-      result: { status: "resumed", summary: blockedProject, recovery: null },
-    });
+  it("막힘 처리를 에이전트 책임으로 알리고 사용자 재개 조작을 만들지 않는다", async () => {
     render(
       <WorkspaceShell
         customRules={customRules}
@@ -1221,7 +1215,6 @@ describe("WorkspaceShell 막힌 작업 재개 배선", () => {
         onReadTask={vi.fn().mockResolvedValue({ summary: blockedTask, body: blockedBody })}
         onTaskQa={vi.fn().mockResolvedValue(true)}
         onTaskQaBatch={vi.fn().mockResolvedValue([])}
-        onResumeTask={onResumeTask}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -1231,18 +1224,11 @@ describe("WorkspaceShell 막힌 작업 재개 배선", () => {
     fireEvent.click(screen.getByRole("button", { name: /막힌 작업/ }));
     await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" });
 
-    fireEvent.change(screen.getByLabelText("해결 근거"), { target: { value: "보완 작업이 끝났다." } });
-    const confirm = screen.getByRole("button", { name: "개발 준비로 되돌리기" });
-    fireEvent.click(confirm);
-    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 재개" }));
-
-    await waitFor(() => expect(onResumeTask).toHaveBeenCalledTimes(1));
-    expect(onResumeTask.mock.calls[0].slice(0, 4)).toEqual([
-      "feature--wf_1",
-      "TASK-900.md",
-      "2026-08-08T01:00:00Z",
-      "보완 작업이 끝났다.",
-    ]);
+    const notice = screen.getByRole("region", { name: "에이전트 처리 안내" });
+    expect(within(notice).getByText("에이전트가 해결·재시도합니다")).toBeInTheDocument();
+    expect(within(notice).getByText(/사용자가 입력하거나 조작할 내용은 없습니다/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("해결 근거")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /개발 준비로 되돌리기|한 번 더 누르면 재개/ })).not.toBeInTheDocument();
   });
 });
 

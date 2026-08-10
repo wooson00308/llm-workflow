@@ -2,30 +2,31 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 14
+rules_version: 15
 ---
 
 # Developer role
 
-Implement and verify one eligible development task, then hand it to the user for QA.
+Implement one eligible task or recover one agent-owned blocked task, verify the result, then hand finished work to the user for QA.
 
 ## Runtime reservation handoff
 
-When the runtime supplies `targetId` and `leaseId`, renew that exact lease before implementation and
-do not call `acquire` again. Keep the supplied result prefix in the handoff report when relevant;
-the runtime prompt never replaces this contract or adds provider-specific role instructions.
+When the runtime supplies `targetId` and `leaseId`, renew that exact lease before inspecting or
+implementing the task and do not call `acquire` again. Keep the supplied result prefix in the handoff
+report when relevant; the runtime prompt never replaces this contract or adds provider-specific role
+instructions.
 
 ## Eligibility
 
-- The task must be `todo` or `in_progress`, its dependencies must be satisfied, and its source decision must remain approved.
+- The task must be `todo`, `in_progress`, or `blocked` without `blocked_kind: definition_error`; its dependencies must be satisfied and its source decision must remain approved.
 - An `in_progress` task qualifies only while no unexpired lease covers it. A missing lease file and an expired one mean the same thing here, and `.workflow/rules/workflow.md` §4 is where "unexpired" is defined. Every other condition on this list holds for it exactly as it holds for a `todo` task; none of them is loosened because the task was already started.
-- A `blocked` task never qualifies, whatever its lease says. `blocked` is a state a session declared on purpose after hitting a real impediment, so it is not the trace of a session that stopped — a session that stopped leaves the state it was working in.
+- A non-definition `blocked` task qualifies only while no unexpired lease covers it. Missing-prerequisite declarations, overlapping work, and source approval are checked exactly as they are for the other states. A `definition_error` task belongs to the architect and never qualifies here.
 - No unexpired lease may cover work that overlaps the task's `scope_files`. "Overlapping work" below is that judgement.
 - If the task returned from user QA, read the latest `workflow-labs/qa-decision@1` comment and follow its test flow.
 
 ## Choose in this order
 
-- Take a resumable `in_progress` task before a `todo` task. Work that stopped has already been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it — satisfied dependencies count only `qa_waiting` and `completed`, so a task nobody resumes starves the ones behind it too.
+- Take a resumable `in_progress` task first, then an eligible `blocked` recovery, then a `todo` task. Work already attempted has been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it.
 - When the claim fails, move on to the next target in this order. When every target is already claimed, change no files and report `NO_ELIGIBLE_WORK`.
 - One session still processes exactly one task. The condition script and the app's pending-work display answer only whether work exists, never which work comes first, so do not read either as an order.
 
@@ -35,6 +36,14 @@ the runtime prompt never replaces this contract or adds provider-specific role i
 - Evaluate the stopped session's residue as `.workflow/rules/workflow.md` §4 requires, and report the split it asks for.
 - The body of the task document — its scope and its completion conditions — belongs to the architect, and a takeover does not edit it. What the stopped session failed to finish and what the task is defined to be are different things, and this line is what keeps them apart.
 - If the stopped session damaged that body, report it as an out-of-role finding and stop. Repairing it is not this role's work.
+
+## Recovering a blocked task
+
+- Read the `## 막힌 사유` section, its resume condition, `blocked_kind`, and the latest implementation report before changing the status or product files.
+- Recheck the recorded impediment from current repository and environment facts. If it still exists and there is no in-scope recovery to perform, leave the task and its history unchanged, report the recheck, release the lease, and stop. Never ask the user to reopen it or provide a resolution.
+- When recovery work can begin, move the task from `blocked` to `in_progress`, append an `in_progress` history entry, and update `updated_at` in the same edit. Do not append `resumed`; that value is historical compatibility for the retired user path.
+- Preserve the reason section as the last recorded block. If implementation fails again, replace it only with the reason that now holds and append a new `blocked` transition.
+- If verified facts show that the definition, scope, dependencies, or completion conditions are wrong, leave the task `blocked`, set `blocked_kind: definition_error`, update the structured reason and report, then release the lease. The architect is the next owner; the user is not.
 
 ## Satisfied dependencies
 
@@ -148,7 +157,7 @@ The `## 확인 동선` section is not one of these. It is written into the task 
 
 ## Completion
 
-- Claim the task as `.workflow/rules/workflow.md` §4 describes, move it to `in_progress` immediately, and only then implement and run relevant verification. A takeover finds the status already there and records the `history` entry alone.
+- Claim the task as `.workflow/rules/workflow.md` §4 describes. Move a `todo` task to `in_progress` immediately; a takeover records its new `in_progress` history entry; a `blocked` recovery moves only after the recovery check above says work can actually begin.
 - Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
 - When the task you are transitioning carries the structured summary §8 defines, bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them. Updating a fact is not an occasion to reshape the section.
 - A task whose summary is plain prose, or has no summary at all, stays that way. Do not convert an existing task into the structured form.

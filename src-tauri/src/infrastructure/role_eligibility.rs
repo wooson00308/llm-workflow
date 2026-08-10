@@ -45,6 +45,10 @@ pub struct WorkflowInput<'a> {
     /// 아직 처리되지 않은 작업 정의 수정 요청 판정 재료. 처리 여부와 대상 작업의 상태를
     /// 이 모듈이 판정하도록 원문 값을 함께 받는다.
     pub task_revision_requests: &'a [TaskRevisionRequestCandidate],
+    /// `status: blocked`이면서 `blocked_kind: definition_error`인 작업 id. 작업 요약 payload에는
+    /// `blocked_kind`가 없으므로 파일을 읽는 저장소가 이 집합을 만든다. 아키텍트는 이 집합의 작업을
+    /// 사용자 수정 요청 없이 직접 고치고, 개발자는 같은 작업을 후보에서 제외한다.
+    pub definition_error_tasks: &'a HashSet<String>,
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
     pub revision_requested_decisions: &'a [String],
     /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2). 선언을 여기서 다시 파싱하지 않는 것은 판정
@@ -74,6 +78,7 @@ pub struct TaskRevisionRequestCandidate {
 
 const SPEC_APPROVAL_KIND: &str = "spec_approval";
 const TASK_REVISION_REQUEST_KIND: &str = "task_revision_request";
+const BLOCKED_TASK_KIND: &str = "blocked_task";
 
 /// `lease_ids`는 만료 전인 lease 파일 이름 집합이다. 스크립트도 만료된 lease를 선점으로 세지
 /// 않으므로, 죽은 세션이 남긴 lease는 어느 역할에서도 그 대상을 막지 않는다.
@@ -208,8 +213,10 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
     verdict
 }
 
-/// 작업 정의 수정 요청을 모든 워크플로우에서 먼저 모은 뒤, 생성 시각이 이른 순서로
-/// 판정한다. 처리할 요청이 없을 때만 기존 승인 분해 판정으로 넘어간다.
+/// 작업 정의 수정 요청을 모든 워크플로우에서 먼저 모은 뒤, 생성 시각이 이른 순서로 판정한다.
+/// 처리할 요청이 없으면 사용자 요청 없이 고칠 수 있는 `definition_error` 작업을 보고, 그마저 없을
+/// 때만 기존 승인 분해 판정으로 넘어간다. 과거 요청을 먼저 보는 순서는 기존 감사 기록과 예약
+/// 호환성을 보존한다.
 fn architect_workflows_verdict(
     workflows: &[WorkflowInput<'_>],
     lease_ids: &HashSet<String>,
@@ -232,6 +239,10 @@ fn architect_workflows_verdict(
             .then_with(|| left.id.cmp(&right.id))
             .then_with(|| left_directory.cmp(right_directory))
     });
+    let request_backed_tasks: HashSet<&str> = requests
+        .iter()
+        .map(|(_, request)| request.task_id.as_str())
+        .collect();
 
     let mut verdict = RoleWorkVerdict::default();
     for (_, request) in requests {
@@ -243,6 +254,31 @@ fn architect_workflows_verdict(
         return verdict;
     }
 
+    let direct_corrections = judge_workflows(workflows, |workflow| {
+        let mut direct = RoleWorkVerdict::default();
+        for task in by_file_name(&workflow.items.tasks) {
+            if task.status != "blocked" || !workflow.definition_error_tasks.contains(&task.id) {
+                continue;
+            }
+            if request_backed_tasks.contains(task.id.as_str()) {
+                continue;
+            }
+            if lease_ids.contains(&task.id) {
+                direct.exclude(&task.id, LEASED);
+                continue;
+            }
+            direct.select_kind(&task.id, BLOCKED_TASK_KIND);
+            return direct;
+        }
+        direct
+    });
+    verdict.candidates.extend(direct_corrections.candidates);
+    if direct_corrections.target.is_some() {
+        verdict.target = direct_corrections.target;
+        verdict.target_kind = direct_corrections.target_kind;
+        return verdict;
+    }
+
     let approvals = judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids));
     verdict.candidates.extend(approvals.candidates);
     verdict.target = approvals.target;
@@ -250,8 +286,8 @@ fn architect_workflows_verdict(
     verdict
 }
 
-/// 스크립트 `developer)` 절: `todo`이거나 `in_progress`인 작업 중 그 id로 lease가 없고, 선행 선언이
-/// 충족됐고, 다른 문서를 잡은 활성 lease와 겹치지 않는 것.
+/// 스크립트 `developer)` 절: `todo`, `in_progress`, 또는 `definition_error`가 아닌 `blocked` 작업 중
+/// 그 id로 lease가 없고, 선행 선언이 충족됐고, 다른 문서를 잡은 활성 lease와 겹치지 않는 것.
 ///
 /// 네 조건은 개발자 계약의 자격 조건 그대로다. 선언을 보지 않던 동안에는 의존 미충족 `todo`만 남은
 /// 저장소에서 스크립트가 1을, 이 모듈이 `true`를 냈다(SPEC-013 완료 조건 8).
@@ -259,17 +295,22 @@ fn architect_workflows_verdict(
 /// `in_progress`가 후보인 것은 죽은 세션이 남긴 작업을 다시 열기 위해서다(SPEC-035 R1). 그 작업을
 /// 덮는 미만료 lease가 없다는 것이 계약상 "그 세션은 살아 있지 않다"이므로, 살아 있는 세션의 작업은
 /// `lease_ids`가 그대로 막는다. 상태 집합만 넓어지고 나머지 세 조건은 곱해지는 그대로다.
-/// `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니므로 후보가 아니다.
+/// `blocked` 작업은 이제 에이전트가 운영하는 복구 레인이다. 작업 문서 자체가 틀린
+/// `definition_error`만 아키텍트가 가져가고, 나머지 분류와 미분류 과거 작업은 개발자가 다시
+/// 진단하고 구현을 이어 간다. 상태가 넓어져도 lease·선행·겹침 세 조건은 그대로 곱해진다.
 ///
-/// 후보가 아닌 작업은 목록에도 오르지 않는다. 스크립트도 `todo`·`in_progress`가 아닌 문서를 후보
-/// 행으로 만들지 않으므로, 그 문서에는 낼 제외 사유가 없다.
+/// 후보가 아닌 작업은 목록에도 오르지 않는다. 스크립트도 세 후보 상태 밖의 문서와
+/// `definition_error` 작업을 후보 행으로 만들지 않으므로, 그 문서에는 낼 제외 사유가 없다.
 ///
 /// 마지막 조건은 잡힌 lease가 있을 때만 개입한다. 활성 lease가 하나도 없으면 `overlap_blocked`가
 /// 비어 있어 판정이 이 조건이 없던 때와 같다(SPEC-032 R9).
 fn developer_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
     let mut verdict = RoleWorkVerdict::default();
     for task in by_file_name(&workflow.items.tasks) {
-        if task.status != "todo" && task.status != "in_progress" {
+        if task.status != "todo" && task.status != "in_progress" && task.status != "blocked" {
+            continue;
+        }
+        if task.status == "blocked" && workflow.definition_error_tasks.contains(&task.id) {
             continue;
         }
         if lease_ids.contains(&task.id) {
@@ -476,6 +517,17 @@ mod tests {
         .expect("write task");
     }
 
+    fn write_blocked_task(workflow_root: &Path, id: &str, blocked_kind: Option<&str>) {
+        let kind = blocked_kind
+            .map(|value| format!("blocked_kind: {value}\n"))
+            .unwrap_or_default();
+        fs::write(
+            workflow_root.join(format!("tasks/{id}.md")),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: blocked\nsource_spec_id: SPEC-001\n{kind}updated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+        )
+        .expect("write blocked task");
+    }
+
     /// 선행 선언을 가진 작업. `declaration`은 `depends_on:` 뒤에 그대로 놓이는 원문이라 형식 오류
     /// 시나리오도 같은 헬퍼가 쓴다. 계약대로 키는 열 0에서 시작한다(SPEC-013 R1).
     fn write_task_with_declaration(
@@ -632,6 +684,93 @@ mod tests {
             detail.architect.target_kind.as_deref(),
             Some("task_revision_request")
         );
+    }
+
+    #[test]
+    fn a_definition_error_block_is_direct_architect_work() {
+        let (root, workflow_root) = project();
+        write_blocked_task(&workflow_root, "TASK-001", Some("definition_error"));
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("TASK-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("blocked_task")
+        );
+        assert_eq!(candidate_lines(&detail.architect), ["eligible TASK-001"]);
+        assert_eq!(detail.developer.target, None);
+    }
+
+    #[test]
+    fn a_historical_revision_request_precedes_a_direct_definition_error_block() {
+        let (root, workflow_root) = project();
+        write_blocked_task(&workflow_root, "TASK-001", Some("definition_error"));
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-001",
+            "2026-08-02T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("REVISION-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("task_revision_request")
+        );
+    }
+
+    #[test]
+    fn a_leased_historical_request_keeps_its_definition_error_task_closed() {
+        let (root, workflow_root) = project();
+        write_blocked_task(&workflow_root, "TASK-001", Some("definition_error"));
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-001",
+            "2026-08-02T00:00:00Z",
+        );
+        write_lease(root.path(), "REVISION-001", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target, None);
+        assert_eq!(candidate_lines(&detail.architect), ["leased REVISION-001"]);
+    }
+
+    #[test]
+    fn a_leased_definition_error_block_does_not_hide_a_later_direct_correction() {
+        let (root, workflow_root) = project();
+        write_blocked_task(&workflow_root, "TASK-001", Some("definition_error"));
+        write_blocked_task(&workflow_root, "TASK-002", Some("definition_error"));
+        write_lease(root.path(), "TASK-001", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("TASK-002"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("blocked_task")
+        );
+        assert_eq!(
+            candidate_lines(&detail.architect),
+            ["leased TASK-001", "eligible TASK-002"]
+        );
+    }
+
+    #[test]
+    fn non_definition_and_legacy_blocks_are_developer_work() {
+        for blocked_kind in [Some("implementation_failure"), None] {
+            let (root, workflow_root) = project();
+            write_blocked_task(&workflow_root, "TASK-001", blocked_kind);
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(detail.architect.target, None, "{blocked_kind:?}");
+            assert_eq!(detail.developer.target.as_deref(), Some("TASK-001"));
+        }
     }
 
     #[test]
@@ -1294,18 +1433,18 @@ mod tests {
         assert!(!assert_matches_condition_script(root.path()).developer);
     }
 
-    /// 완료 조건 5. `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니다. lease가
-    /// 없든 만료됐든 대상이 아니다 — 이 요구가 상태 목록에 더한 것은 `in_progress` 하나뿐이다.
+    /// 미분류 `blocked`은 과거 문서까지 에이전트가 회수하도록 개발자 대상에 남는다. 만료된 lease는
+    /// 다른 상태와 마찬가지로 이 복구도 막지 않는다.
     #[test]
-    fn a_blocked_task_is_not_developer_work_with_or_without_an_expired_lease() {
+    fn a_legacy_blocked_task_is_developer_work_with_or_without_an_expired_lease() {
         let (root, workflow_root) = project();
         write_task(&workflow_root, "TASK-001", "blocked", None);
-        assert!(!assert_matches_condition_script(root.path()).developer);
+        assert!(assert_matches_condition_script(root.path()).developer);
 
         let (root, workflow_root) = project();
         write_task(&workflow_root, "TASK-001", "blocked", None);
         write_lease(root.path(), "TASK-001", &past());
-        assert!(!assert_matches_condition_script(root.path()).developer);
+        assert!(assert_matches_condition_script(root.path()).developer);
     }
 
     /// 세 역할이 보는 대상 각각에 만료된 lease가 있는 픽스처. 죽은 세션이 남긴 lease가 자격을
@@ -2067,11 +2206,13 @@ mod tests {
         let unsatisfied = HashSet::new();
         let overlapped = HashSet::new();
         let nondraft_sources = HashSet::new();
+        let definition_errors = HashSet::new();
         let workflows = [super::WorkflowInput {
             directory: "wf-demo",
             items: &items,
             approved_decisions: &approved,
             task_revision_requests: &[],
+            definition_error_tasks: &definition_errors,
             revision_requested_decisions: &[],
             unsatisfied_dependencies: &unsatisfied,
             overlap_blocked: &overlapped,

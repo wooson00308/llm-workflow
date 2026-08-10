@@ -118,85 +118,27 @@
 .blocked-task-empty strong { color: #5e3e38; font-size: 12px; }
 .blocked-task-empty p { margin-top: 7px; color: #777b74; font-size: 11px; line-height: 1.65; }
 
-.task-resume {
+.blocked-task-agent-notice {
   display: grid;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  padding: 13px;
-  border: 1px solid #dbd9d1;
+  gap: 6px;
+  padding: 11px 12px;
+  border: 1px solid #d5ded7;
+  border-left: 3px solid #66816c;
   border-radius: 11px;
-  background: #fbfaf6;
+  background: #f4f8f4;
   overflow-wrap: anywhere;
 }
 
-.task-resume h3 { margin: 0; color: #3d4a40; font-size: 12px; }
-.task-resume-guide { color: #777b74; font-size: 11px; line-height: 1.65; }
-
-.task-resume-facts {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 7px;
-  margin: 0;
-}
-
-.task-resume-facts dt { margin-bottom: 3px; color: #7b4b42; font-size: 10px; font-weight: 800; }
-.task-resume-facts dd { min-width: 0; margin: 0; color: #505650; font-size: 11px; line-height: 1.6; }
-
-.task-resume label { color: #5a5f58; font-size: 11px; font-weight: 750; }
-
-.task-resume textarea {
-  min-width: 0;
-  width: 100%;
-  min-height: 96px;
-  padding: 9px 10px;
-  border: 1px solid #d8d7d0;
-  border-radius: 9px;
-  color: #40453f;
-  background: #fff;
-  font: inherit;
-  font-size: 11px;
-  line-height: 1.6;
-  resize: vertical;
-}
-
-.task-resume textarea:focus-visible { outline: 3px solid rgba(59, 101, 76, .2); outline-offset: 1px; }
-.task-resume textarea:disabled { color: #8b8f86; background: #f3f2ec; }
-.task-resume-count { justify-self: end; color: #8b8f86; font-size: 10px; }
-
-.task-resume-warning {
-  padding: 8px 10px;
-  border-left: 3px solid #b0736a;
-  border-radius: 7px;
-  color: #6d4239;
-  background: #f7efec;
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.task-resume-failure {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 7px;
-  padding: 9px 10px;
-  border-left: 3px solid #a45a51;
-  border-radius: 7px;
-  background: #f8ecea;
-}
-
-.task-resume-failure p { color: #6d4239; font-size: 11px; line-height: 1.6; }
-.task-resume-failure button { justify-self: start; }
-.task-resume .stamp-button { justify-self: stretch; }
+.blocked-task-agent-notice strong { color: #34463a; font-size: 12px; }
+.blocked-task-agent-notice p { color: #626b64; font-size: 11px; line-height: 1.65; }
 
 @media (max-width: 980px) {
   .blocked-task-panel,
   .blocked-task-fields,
   .blocked-task-targets,
-  .task-resume,
-  .task-resume-facts,
-  .task-resume-failure {
+  .blocked-task-agent-notice {
     width: 100%;
     grid-template-columns: minmax(0, 1fr);
   }

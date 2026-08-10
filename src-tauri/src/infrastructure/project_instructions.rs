@@ -18,10 +18,10 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 20;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 21;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 11;
-pub(crate) const ARCHITECT_RULES_VERSION: u32 = 14;
-pub(crate) const DEVELOPER_RULES_VERSION: u32 = 14;
+pub(crate) const ARCHITECT_RULES_VERSION: u32 = 15;
+pub(crate) const DEVELOPER_RULES_VERSION: u32 = 15;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 ## LLM Workflow
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 20
+rules_version: 21
 ---
 
 # LLM Workflow agent protocol
@@ -143,7 +143,7 @@ Judge every call by its exit code, never by the text it printed:
 
 The obligations around the claim do not change. Only the way the lease itself is written moves to the helper:
 
-1. Immediately after a successful `acquire`, record the working state in the document itself before doing the real work: create the specification skeleton with `status: draft`, or move the claimed task to `status: in_progress`.
+1. Immediately after a successful `acquire`, record the working state in the document itself before doing the real work: create the specification skeleton with `status: draft`, or move a `todo` task to `status: in_progress`. A claimed `blocked` task follows §5's agent-recovery check first and moves to `in_progress` only when recovery work can actually begin.
 2. `renew` during long work, and keep the validity short (minutes, not hours).
 3. `release` after writing the final report or when abandoning the item.
 
@@ -191,7 +191,7 @@ prompt to send unchanged to the provider. It is a lease handoff, not a second cl
 - A session without a reservation follows the ordinary `acquire` procedure above. A missing or
   failed handoff never authorizes a direct lease-file write.
 - `resultPrefix` is unique to the reserved lease. Planners use it when creating SPEC identifiers;
-  architects use it with task sequence numbers when creating TASK identifiers. Before writing, stop
+  architects use it with task sequence numbers only when decomposing an approval into new TASK identifiers. A task correction creates no new identifier. Before writing, stop
   if the resulting document path already exists. Developers preserve it in their report when it
   explains a runtime handoff but do not invent a new result identifier.
 - The role prompt may name only this role, target, lease, result prefix, and the managed rules it
@@ -226,7 +226,9 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
-The user can also reopen a `blocked` task. The app moves it back to `todo` and records why under `decisions/` with `schema: workflow-labs/task-resume@1` and `created_by: user`, in the same request. That record is app-owned like every other decision document: only the app writes it, and only from the user's own action in the app. An agent that writes such a file resumes nothing, and neither does one that adds a `resumed` entry by hand. Leaving `blocked` is not itself reserved — an architect correcting a wrong task definition does exactly that, as this section describes below — but no edit an agent makes is a user reopening, and none of them earns the record or the history entry a reopening leaves.
+Blocked recovery is agent-operated. The user may inspect the recorded reason and status, but is never required to provide a resolution, reopen the task, or create a request before work continues. A `definition_error` block is routed to an architect; every other block, including an unclassified legacy block, is routed to a developer. The eventual user handoff for recovered implementation work is the ordinary QA gate.
+
+Older projects may contain app-owned `workflow-labs/task-resume@1` decisions and `resumed` history entries from the retired user-reopen path. Readers preserve those records as historical audit data. Agents never create or imitate either record, and their presence is not required for agent recovery.
 
 ### Recording why a task is blocked
 
@@ -256,14 +258,22 @@ The same edit that records the reason also records what kind of block it is, in 
 - `implementation_failure`: the work was attempted and did not succeed, and the reason sits in the code or the environment rather than in the document.
 - `external_dependency`: the block is outside this repository — an approval, a third party, a service.
 
-- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified. Nobody guesses the cause from the prose, and no session fills the field in on another session's behalf.
+- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified and is routed to a developer. Eligibility never guesses the cause from the prose. After claiming it, the developer may classify it only from facts verified during that recovery attempt.
 - Leaving `blocked` does not delete the value. It is the kind of the last block, kept for the same reason the reason section is kept, and it is not read as a present impediment once the status is no longer `blocked`.
+
+### Agent-operated recovery
+
+- An architect directly claims a `definition_error` task. No user revision request is needed.
+- A developer directly claims every other `blocked` task under the same lease, dependency, and overlap checks as `todo` and `in_progress` work. A declared prerequisite that is still unsatisfied therefore keeps the task ineligible until the prerequisite reaches `qa_waiting` or `completed`.
+- After claiming a blocked task, the developer first re-reads the recorded reason, its resume condition, and the latest implementation report. If the impediment still exists and there is no in-scope recovery to perform, the task stays `blocked`; the session records what it rechecked and releases the lease without fabricating progress.
+- When recovery work can actually begin, the developer changes the task to `in_progress`, appends an `in_progress` history entry, and updates `updated_at` in the same edit. This is an agent retry, not a user reopening, so it never creates a `task-resume@1` decision or a `resumed` history entry.
+- If that inspection proves the task definition itself is wrong, the developer keeps the task `blocked`, records `blocked_kind: definition_error` with the verified reason, reports the finding, and releases it for an architect. The user is not the handoff target.
 
 ### When the task definition itself is wrong
 
 A `definition_error` block is the one kind an implementer cannot clear by working harder, because what is wrong is the instruction sheet. Correcting it is the architect's work and `.workflow/rules/roles/architect.md` states what that session may touch.
 
-The user can ask for that correction by leaving a task-definition revision request. The app records it under `decisions/` as it records every other user action, and like every record there it is app-owned: an agent never writes one, and a request described in a report, a task body, or a message is not one. Where such a record exists it is the ground of the correction, and the task corrected on it names it in the optional frontmatter field `revision_request_id`, carrying the id of the record that was handled. The field records which request this document already answers; a task corrected without one leaves the key out, exactly as a task that has never been corrected does.
+Older projects may also contain an app-owned task-definition revision request. An agent never writes one. Where such a historical record exists it remains valid ground for the correction, and the task corrected on it names the handled record in the optional frontmatter field `revision_request_id`. A direct `definition_error` recovery without such a record leaves the key out.
 
 A correction does not wait for that record. A task blocked as `definition_error` already carries its own ground in writing: the `## 막힌 사유` section the blocking session wrote, and the implementation report that recorded what could not be satisfied as written. Those two are enough for an architect session to correct the definition, and the audit record of the correction is that session's own report under `reports/` — what was wrong, what changed, and which ground it worked from. The user's gate is QA on the finished work, not permission to fix a task sheet that is already recorded as broken.
 
@@ -289,11 +299,11 @@ history:
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-  - `resumed`: the user reopened a `blocked` task
+  - `resumed`: a legacy app version recorded that the user reopened a `blocked` task
 - The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no `kind` of its own for a takeover, and there is none for anything else: these seven are the whole list.
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
-- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records all three: the first two when it records the QA decision, the third when the user reopens a blocked task.
-- `resumed` is the fact that the user reopened the work, and it does not stand in for `in_progress`. A developer that claims the returned `todo` task appends its own `in_progress` entry exactly as it would for any other `todo` task.
+- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records the first two from QA decisions; `resumed` is preserved only for compatibility with the retired user-reopen path.
+- `resumed` never stands in for `in_progress`. A developer that starts agent-operated recovery from `blocked` appends its own `in_progress` entry when recovery work actually begins.
 - The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`. No `kind` names it, `resumed` is not it, and the architect's report carries that fact instead, as the section above states.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
@@ -512,28 +522,34 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 14
+rules_version: 15
 ---
 
 # Project architect role
 
-Turn one app-approved specification into implementation-ready development tasks.
+Handle one architect target: turn an app-approved specification into tasks, or correct one task blocked by a definition error.
 
 ## Runtime reservation handoff
 
-When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that lease before task
-decomposition. Do not acquire it again. Give every new TASK identifier the supplied prefix plus a
-sequence number, and stop rather than overwrite an existing task path.
+When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that exact lease before
+reading or changing the target. Do not acquire it again. Use the prefix only when the target is an
+approval being decomposed into new tasks; a task correction preserves its identifier and creates no
+replacement task.
 
 ## Eligibility
 
-- The latest app-owned decision must be `approved`.
-- No existing task set may already reference that approval decision.
+One of these must hold:
+
+- An unhandled historical task-definition revision request names a `todo` or `blocked` task.
+- A task is `blocked` with `blocked_kind: definition_error`; no user request is required.
+- The latest app-owned specification decision is `approved` and no task already references it.
+
+No unexpired lease may cover the selected request, task, or approved specification target.
 
 ## Claim first
 
-- Before planning tasks, claim the approved specification as `.workflow/rules/workflow.md` §4 describes.
-- Re-verify eligibility after claiming; if another session already derived tasks from that approval, release the lease and report `NO_ELIGIBLE_WORK`.
+- Claim the selected target as `.workflow/rules/workflow.md` §4 describes. A direct definition correction claims the task id; a historical revision path claims the request id; approval decomposition claims the approved specification target.
+- Re-verify eligibility after claiming. If another session handled the request, corrected the task, or derived tasks from the approval, release the lease and report `NO_ELIGIBLE_WORK`.
 
 ## Split for parallel safety
 
@@ -561,10 +577,10 @@ Every task you create or correct gets its scope checked before it leaves your ha
 
 ## Correcting a task whose definition is wrong
 
-A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state, the app-owned record the user can leave to ask for a correction, and the ground a correction stands on when there is no such record. Correcting one such task is architect work, and it is yours to start.
+A task can be blocked because the task document itself is wrong. `.workflow/rules/workflow.md` §5 defines that state and routes it here directly. Correcting one such task is architect work, and it never waits for user action.
 
-- Correct one task at a time. Where the user's revision request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
-- Without such a record, a task blocked as `definition_error` is corrected on the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
+- Correct one task at a time. Where a historical user revision-request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
+- Without such a record, a task blocked as `definition_error` is corrected directly from the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
 - The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
 - What you may change is the declared scope, the dependency declaration, the body's current state and change scope and out-of-scope list, the completion conditions and verification steps, and the decision-maker summary brought in line with those changes.
 - The reason section of a blocked task and every past implementation report stay as they are. Do not delete or rewrite what an earlier session recorded.
@@ -575,7 +591,7 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 - Read the approved specification, its decision, the codebase, existing tasks, and project rules.
 - Create implementation plans and `tasks/*.md` documents.
-- Correct one task whose definition is wrong — on the user's revision request record, or on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
+- Correct one task whose definition is wrong — on a historical revision request record, or directly on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
 - Record architecture handoff notes under `reports/`.
 
 ## Project custom rules
@@ -592,7 +608,7 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 ## Completion
 
-- Split work into reviewable tasks with dependencies, acceptance criteria, and verification steps.
+- For an approval target, split work into reviewable tasks with dependencies, acceptance criteria, and verification steps. For a correction target, correct only that task, return it to `todo`, write the architect report, release the lease, and stop.
 - Write every completion condition and verification step the task needs into the task document itself. A developer session starts from that one document, as `.workflow/rules/roles/developer.md` describes, so a condition left outside it is a condition nobody reads.
 - Do not reference the specification's requirement statement and leave only a summary of it in the task. Whatever the task's own work needs from that statement is carried in the task document, stated in full and in terms the implementer can act on.
 - This decides how you decompose an approval into task documents. It does not shorten or remove the requirement statement in the approved specification, which stays exactly as the user approved it.
@@ -609,30 +625,31 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 14
+rules_version: 15
 ---
 
 # Developer role
 
-Implement and verify one eligible development task, then hand it to the user for QA.
+Implement one eligible task or recover one agent-owned blocked task, verify the result, then hand finished work to the user for QA.
 
 ## Runtime reservation handoff
 
-When the runtime supplies `targetId` and `leaseId`, renew that exact lease before implementation and
-do not call `acquire` again. Keep the supplied result prefix in the handoff report when relevant;
-the runtime prompt never replaces this contract or adds provider-specific role instructions.
+When the runtime supplies `targetId` and `leaseId`, renew that exact lease before inspecting or
+implementing the task and do not call `acquire` again. Keep the supplied result prefix in the handoff
+report when relevant; the runtime prompt never replaces this contract or adds provider-specific role
+instructions.
 
 ## Eligibility
 
-- The task must be `todo` or `in_progress`, its dependencies must be satisfied, and its source decision must remain approved.
+- The task must be `todo`, `in_progress`, or `blocked` without `blocked_kind: definition_error`; its dependencies must be satisfied and its source decision must remain approved.
 - An `in_progress` task qualifies only while no unexpired lease covers it. A missing lease file and an expired one mean the same thing here, and `.workflow/rules/workflow.md` §4 is where "unexpired" is defined. Every other condition on this list holds for it exactly as it holds for a `todo` task; none of them is loosened because the task was already started.
-- A `blocked` task never qualifies, whatever its lease says. `blocked` is a state a session declared on purpose after hitting a real impediment, so it is not the trace of a session that stopped — a session that stopped leaves the state it was working in.
+- A non-definition `blocked` task qualifies only while no unexpired lease covers it. Missing-prerequisite declarations, overlapping work, and source approval are checked exactly as they are for the other states. A `definition_error` task belongs to the architect and never qualifies here.
 - No unexpired lease may cover work that overlaps the task's `scope_files`. "Overlapping work" below is that judgement.
 - If the task returned from user QA, read the latest `workflow-labs/qa-decision@1` comment and follow its test flow.
 
 ## Choose in this order
 
-- Take a resumable `in_progress` task before a `todo` task. Work that stopped has already been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it — satisfied dependencies count only `qa_waiting` and `completed`, so a task nobody resumes starves the ones behind it too.
+- Take a resumable `in_progress` task first, then an eligible `blocked` recovery, then a `todo` task. Work already attempted has been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it.
 - When the claim fails, move on to the next target in this order. When every target is already claimed, change no files and report `NO_ELIGIBLE_WORK`.
 - One session still processes exactly one task. The condition script and the app's pending-work display answer only whether work exists, never which work comes first, so do not read either as an order.
 
@@ -642,6 +659,14 @@ the runtime prompt never replaces this contract or adds provider-specific role i
 - Evaluate the stopped session's residue as `.workflow/rules/workflow.md` §4 requires, and report the split it asks for.
 - The body of the task document — its scope and its completion conditions — belongs to the architect, and a takeover does not edit it. What the stopped session failed to finish and what the task is defined to be are different things, and this line is what keeps them apart.
 - If the stopped session damaged that body, report it as an out-of-role finding and stop. Repairing it is not this role's work.
+
+## Recovering a blocked task
+
+- Read the `## 막힌 사유` section, its resume condition, `blocked_kind`, and the latest implementation report before changing the status or product files.
+- Recheck the recorded impediment from current repository and environment facts. If it still exists and there is no in-scope recovery to perform, leave the task and its history unchanged, report the recheck, release the lease, and stop. Never ask the user to reopen it or provide a resolution.
+- When recovery work can begin, move the task from `blocked` to `in_progress`, append an `in_progress` history entry, and update `updated_at` in the same edit. Do not append `resumed`; that value is historical compatibility for the retired user path.
+- Preserve the reason section as the last recorded block. If implementation fails again, replace it only with the reason that now holds and append a new `blocked` transition.
+- If verified facts show that the definition, scope, dependencies, or completion conditions are wrong, leave the task `blocked`, set `blocked_kind: definition_error`, update the structured reason and report, then release the lease. The architect is the next owner; the user is not.
 
 ## Satisfied dependencies
 
@@ -755,7 +780,7 @@ The `## 확인 동선` section is not one of these. It is written into the task 
 
 ## Completion
 
-- Claim the task as `.workflow/rules/workflow.md` §4 describes, move it to `in_progress` immediately, and only then implement and run relevant verification. A takeover finds the status already there and records the `history` entry alone.
+- Claim the task as `.workflow/rules/workflow.md` §4 describes. Move a `todo` task to `in_progress` immediately; a takeover records its new `in_progress` history entry; a `blocked` recovery moves only after the recovery check above says work can actually begin.
 - Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
 - When the task you are transitioning carries the structured summary §8 defines, bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them. Updating a fact is not an occasion to reshape the section.
 - A task whose summary is plain prose, or has no summary at all, stays that way. Do not convert an existing task into the structured form.
@@ -1303,7 +1328,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1325,7 +1350,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1340,14 +1365,14 @@ mod tests {
         }
         assert!(rules.contains("append-only"));
         // 재개는 사용자만 남긴다. 에이전트가 쓸 수 있는 규칙 경로에는 같은 권한이 없다.
-        assert!(rules.contains("`schema: workflow-labs/task-resume@1`"));
+        assert!(rules.contains("`workflow-labs/task-resume@1`"));
         assert!(
             rules.contains("Do not write `completed`, `revision_requested`, or `resumed` entries.")
         );
-        assert!(rules.contains("it does not stand in for `in_progress`"));
-        assert!(architect.contains("rules_version: 14"));
+        assert!(rules.contains("`resumed` never stands in for `in_progress`"));
+        assert!(architect.contains("rules_version: 15"));
         assert!(architect.contains("`history`"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(developer.contains("`history`"));
         assert!(planner.contains("rules_version: 11"));
         assert!(!planner.contains("`history`"));
@@ -1368,12 +1393,12 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 14"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(planner.contains("rules_version: 11"));
     }
 
@@ -1392,7 +1417,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1403,9 +1428,10 @@ mod tests {
         assert!(planner.contains("rules_version: 11"));
         assert!(planner.contains("Runtime reservation handoff"));
         assert!(planner.contains("supplied prefix"));
-        assert!(architect.contains("rules_version: 14"));
-        assert!(architect.contains("TASK identifier"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
+        assert!(architect.contains("approval being decomposed into new tasks"));
+        assert!(architect.contains("a task correction preserves its identifier"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(developer.contains("do not call `acquire` again"));
     }
 
@@ -1424,7 +1450,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1446,10 +1472,10 @@ mod tests {
             assert!(contract.contains("`.workflow/rules/workflow.md` §4"));
             assert!(!contract.contains("wf-claim.sh"));
         }
-        assert!(developer.contains("rules_version: 14"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("`qa_waiting` or `completed`"));
-        assert!(architect.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
         assert!(planner.contains("rules_version: 11"));
@@ -1466,7 +1492,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1500,21 +1526,21 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
         assert!(architect.contains("the judgement follows `scope_files`"));
 
         // 개발자 계약의 겹침 조항이 선언을 근거로 지목한다.
-        assert!(developer.contains("rules_version: 14"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(developer
             .contains("No unexpired lease may cover work that overlaps the task's `scope_files`"));
         assert!(developer.contains("## Overlapping work"));
@@ -1531,10 +1557,10 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 20);
+        assert_eq!(WORKFLOW_RULES_VERSION, 21);
         assert_eq!(PLANNER_RULES_VERSION, 11);
-        assert_eq!(ARCHITECT_RULES_VERSION, 14);
-        assert_eq!(DEVELOPER_RULES_VERSION, 14);
+        assert_eq!(ARCHITECT_RULES_VERSION, 15);
+        assert_eq!(DEVELOPER_RULES_VERSION, 15);
     }
 
     #[test]
@@ -1553,7 +1579,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1581,15 +1607,15 @@ mod tests {
             assert!(rules.contains(kind), "공통 규칙에 {kind} 전이가 없습니다");
         }
 
-        // 개발자 계약: R1의 자격 조건, `blocked` 제외 근거, R6의 순서.
-        assert!(developer.contains("rules_version: 14"));
-        assert!(developer.contains("The task must be `todo` or `in_progress`"));
+        // 개발자 계약: R1의 자격 조건, definition_error 역할 경계, R6의 순서.
+        assert!(developer.contains("rules_version: 15"));
+        assert!(developer.contains("The task must be `todo`, `in_progress`, or `blocked`"));
         assert!(developer
             .contains("An `in_progress` task qualifies only while no unexpired lease covers it"));
         assert!(developer.contains("A missing lease file and an expired one mean the same thing"));
-        assert!(developer.contains("A `blocked` task never qualifies"));
-        assert!(developer.contains("a state a session declared on purpose"));
-        assert!(developer.contains("Take a resumable `in_progress` task before a `todo` task"));
+        assert!(developer.contains("A non-definition `blocked` task qualifies"));
+        assert!(developer.contains("A `definition_error` task belongs to the architect"));
+        assert!(developer.contains("then an eligible `blocked` recovery"));
         assert!(developer.contains("## Taking over a stopped task"));
         assert!(developer.contains("do not move it there again"));
         assert!(developer.contains("belongs to the architect, and a takeover does not edit it"));
@@ -1615,7 +1641,7 @@ mod tests {
         assert!(planner.contains("Never delete the document and never merge it"));
 
         // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
-        assert!(architect.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
         assert!(!architect.contains("Taking over"));
     }
 
@@ -1634,7 +1660,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1711,11 +1737,11 @@ mod tests {
         assert!(planner.contains("rules_version: 11"));
         assert!(planner.contains("what the user decides in this document"));
         assert!(planner.contains("what stays exactly as it is if it is not"));
-        assert!(architect.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 보고서 요약과 작업 문서의 확인 동선.
-        assert!(developer.contains("rules_version: 14"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(developer.contains("what the user is being asked to do now"));
         assert!(developer.contains("## The confirmation walkthrough"));
         assert!(developer.contains("`## 확인 동선`"));
@@ -1745,9 +1771,9 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 20"));
-        assert!(architect.contains("rules_version: 14"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(rules.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 15"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(planner.contains("rules_version: 11"));
 
         // 차단 분류 네 값과 그 뜻이 한 번씩 정의된다.
@@ -1766,14 +1792,16 @@ mod tests {
             );
         }
         assert!(rules.contains("reads as unclassified"));
-        assert!(rules.contains("Nobody guesses the cause from the prose"));
+        assert!(rules.contains("Eligibility never guesses the cause from the prose"));
         assert!(rules.contains("Leaving `blocked` does not delete the value"));
         assert!(rules.contains("not read as a present impediment"));
 
-        // 수정 요청은 앱 소유 기록이고 연결 필드가 정의된다.
+        // 과거 수정 요청은 읽기 호환되고 직접 definition_error 경로는 요청 없이 열린다.
         assert!(rules.contains("### When the task definition itself is wrong"));
-        assert!(rules.contains("The app records it under `decisions/`"));
-        assert!(rules.contains("an agent never writes one"));
+        assert!(rules.contains(
+            "Older projects may also contain an app-owned task-definition revision request"
+        ));
+        assert!(rules.contains("An agent never writes one"));
         assert!(rules.contains("optional frontmatter field `revision_request_id`"));
         // 수정의 근거는 요청 기록이 있으면 그것이고, 없으면 막힌 작업 자신의 기록이다.
         assert!(rules.contains("A correction does not wait for that record"));
@@ -1788,11 +1816,10 @@ mod tests {
         assert!(rules.contains(
             "The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`"
         ));
-        // 앱 소유 재개 기록과 `resumed` 이력의 사용자 전용 성질은 그대로다.
-        assert!(rules.contains("only the app writes it, and only from the user's own action"));
-        assert!(rules.contains(
-            "An agent that writes such a file resumes nothing, and neither does one that adds a `resumed` entry by hand"
-        ));
+        // 과거 앱 소유 재개 기록은 호환만 유지하고 현재 재개는 에이전트가 맡는다.
+        assert!(rules.contains("Blocked recovery is agent-operated"));
+        assert!(rules.contains("retired user-reopen path"));
+        assert!(rules.contains("Agents never create or imitate either record"));
         // 두 선택 필드는 파일 계약 절에도 한 번 실린다.
         assert!(rules.contains(
             "What kind of block a task is under lives in the optional `blocked_kind` field"
@@ -1801,10 +1828,11 @@ mod tests {
         // 아키텍트 계약: 수정 권한의 대상·보존 대상·돌려보낼 조건.
         assert!(architect.contains("## Correcting a task whose definition is wrong"));
         assert!(architect.contains("Correct one task at a time"));
-        assert!(architect
-            .contains("Correcting one such task is architect work, and it is yours to start"));
         assert!(architect.contains(
-            "a task blocked as `definition_error` is corrected on the ground already written down"
+            "Correcting one such task is architect work, and it never waits for user action"
+        ));
+        assert!(architect.contains(
+            "a task blocked as `definition_error` is corrected directly from the ground already written down"
         ));
         assert!(architect.contains(
             "The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly"
@@ -1876,10 +1904,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 20"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(rules.contains("rules_version: 21"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
 
         // 전이와 같은 편집에서 남기는 고정 절.
         assert!(rules.contains("### Recording why a task is blocked"));
@@ -1940,9 +1968,10 @@ mod tests {
         assert!(!developer.contains("막힌 지점"));
         assert!(!developer.contains("관련 대상"));
 
-        // 가짜 차단 금지 원칙은 그대로다.
+        // 가짜 차단 금지 원칙과 에이전트 복구 경로가 함께 있다.
         assert!(rules.contains("Set `blocked` only for a real impediment"));
-        assert!(developer.contains("A `blocked` task never qualifies"));
+        assert!(developer.contains("A non-definition `blocked` task qualifies"));
+        assert!(developer.contains("## Recovering a blocked task"));
 
         // TASK-S052-01의 구조화 요약 계약은 그대로 남는다.
         assert!(rules.contains("### The structured summary"));
@@ -1965,7 +1994,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("### The structured summary"));
 
         // 일곱 하위 제목이 이 순서로 한 번씩만 정의된다.
@@ -2043,10 +2072,10 @@ mod tests {
             "Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request"
         ));
         assert!(planner.contains("what stays exactly as it is while this document is not approved"));
-        assert!(architect.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
         assert!(architect.contains("Write that summary in the structured form §8 defines"));
         assert!(architect.contains("what the user checks at QA once this task is done"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(developer.contains("rules_version: 15"));
         assert!(developer.contains(
             "bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them"
         ));
@@ -2070,7 +2099,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2110,8 +2139,8 @@ mod tests {
         assert!(architect.contains("scope, completion conditions, and verification"));
         assert!(developer.contains("changes, verification, risks, and user confirmation"));
         assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 14"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
+        assert!(developer.contains("rules_version: 15"));
     }
 
     #[test]
@@ -2170,7 +2199,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2201,10 +2230,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 21"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 14"));
-        assert!(developer.contains("rules_version: 14"));
+        assert!(architect.contains("rules_version: 15"));
+        assert!(developer.contains("rules_version: 15"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 14;
+const CONDITION_SCRIPT_VERSION: u32 = 15;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 14;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 14
+# condition_script_version: 15
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -294,11 +294,34 @@ scan_refs() { # $1=문서 디렉터리 경로 $2=콜론까지 포함한 키
   done
   [ "$#" -eq 0 ] && return 0
   awk -v key="$scan_key" '
+    function emit_direct() {
+      if (status == "blocked" && kind == "definition_error" && id != "") {
+        print "__WF_DIRECT__\t" id
+      }
+    }
+    FILENAME != prev {
+      emit_direct()
+      prev = FILENAME
+      id = ""; status = ""; kind = ""
+      got_id = 0; got_status = 0; got_kind = 0
+    }
+    {
+      if (!got_id && index($0, "id:") == 1) {
+        got_id = 1; id = substr($0, 4); sub(/^ */, "", id)
+      }
+      if (!got_status && index($0, "status:") == 1) {
+        got_status = 1; status = substr($0, 8); sub(/^ */, "", status)
+      }
+      if (!got_kind && index($0, "blocked_kind:") == 1) {
+        got_kind = 1; kind = substr($0, 14); sub(/^ */, "", kind)
+      }
+    }
     index($0, key) > 0 {
       line = $0
       gsub(key " +", key, line)
       print line
     }
+    END { emit_direct() }
   ' "$@"
 }
 
@@ -491,7 +514,7 @@ lease_active() { # $1=대상 id
 #
 # 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
 # 네 자리는 차례로
-#   후보 여부  — ^status: (todo|in_progress)가 파일 아무 줄에나 있는가
+#   후보 여부  — ^status: (todo|in_progress)가 있거나, definition_error가 아닌 blocked인가
 #   충족 여부  — ^status: qa_waiting 또는 ^status: completed가 파일 아무 줄에나 있는가
 #   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
 #   겹침 줄 수 — 0·1·2
@@ -515,8 +538,9 @@ scan_tasks() { # $1=워크플로우 경로
       sub(/[[:space:]]*$/, "", s)
       return s
     }
-    function emit(  i, line) {
+    function emit(  i, line, cand) {
       if (!started) return
+      cand = ordinary || (blocked && !definition_error)
       line = "M" cand sat depn scopen " "
       for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
       print line
@@ -529,7 +553,8 @@ scan_tasks() { # $1=워크플로우 경로
       prev = FILENAME
       started = 1
       files = files + 1
-      cand = 0; sat = 0; depn = 0; scopen = 0
+      ordinary = 0; blocked = 0; definition_error = 0
+      sat = 0; depn = 0; scopen = 0
       got_id = 0; first_id = ""; dep_value = ""; scope_value = ""; n_ids = 0
     }
     {
@@ -543,7 +568,9 @@ scan_tasks() { # $1=워크플로우 경로
           id_list[n_ids] = v
         }
       }
-      if ($0 ~ /^status: (todo|in_progress)/) cand = 1
+      if ($0 ~ /^status: (todo|in_progress)/) ordinary = 1
+      if ($0 ~ /^status: blocked/) blocked = 1
+      if ($0 ~ /^blocked_kind: definition_error/) definition_error = 1
       if ($0 ~ /^status: qa_waiting/ || $0 ~ /^status: completed/) sat = 1
       if (index($0, "depends_on:") == 1) {
         if (depn == 0) { depn = 1; dep_value = trim(substr($0, 12)) } else depn = 2
@@ -606,6 +633,7 @@ $rows
 REVISION_ROWS
   done
   ordered_revision_rows=$(printf '%s' "$revision_rows" | LC_ALL=C sort)
+  revision_task_ids="$nl"
   while IFS='	' read -r created rid tid wf; do
     [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] && [ -n "$wf" ] || continue
     task_file=""
@@ -616,16 +644,44 @@ REVISION_ROWS
     [ -n "$task_file" ] || continue
     grep -Eqs '^status: (todo|blocked)$' "$task_file" || continue
     grep -qs "^revision_request_id: *$rid$" "$task_file" && continue
+    case "$revision_task_ids" in *"$nl$tid$nl"*) ;; *) revision_task_ids="$revision_task_ids$tid$nl" ;; esac
     if lease_blocks "$rid" || lease_blocks "$tid"; then note_candidate leased "$rid"; continue; fi
     note_target "$rid" task_revision_request
   done <<ORDERED_REVISION_ROWS
 $ordered_revision_rows
 ORDERED_REVISION_ROWS
+  # 이전 앱이 남긴 사용자 수정 요청은 먼저 처리한다. 그런 요청이 없으면 task 문서가 이미 기록한
+  # definition_error를 사용자 조작 없이 바로 아키텍트 작업으로 연다. 이 훑기는 승인 분해 판정이
+  # 필요로 하는 source_decision_id 줄도 함께 모아 아래 두 판단이 tasks/를 한 번만 읽게 한다.
+  architect_task_refs=""
+  direct_rows=""
+  for wf in .workflow/*/; do
+    task_scan=$(scan_refs "${wf}tasks" "source_decision_id:")
+    task_refs=""
+    while IFS= read -r task_row; do
+      case "$task_row" in
+        "__WF_DIRECT__	"*) direct_rows="$direct_rows$wf	${task_row#*	}$nl" ;;
+        *) task_refs="$task_refs$task_row$nl" ;;
+      esac
+    done <<TASK_SCAN
+$task_scan
+TASK_SCAN
+    architect_task_refs="$architect_task_refs${nl}W$wf$nl$task_refs${nl}E$wf$nl"
+  done
+  while IFS='	' read -r wf tid; do
+    [ -n "$wf" ] && [ -n "$tid" ] || continue
+    case "$revision_task_ids" in *"$nl$tid$nl"*) continue ;; esac
+    lease_blocks "$tid" && { note_candidate leased "$tid"; continue; }
+    note_target "$tid" blocked_task
+  done <<DIRECT_ROWS
+$direct_rows
+DIRECT_ROWS
   for wf in .workflow/*/; do
     [ -d "${wf}decisions" ] || continue
     # 아키텍트 후보는 스키마 줄도 spec_id도 요구하지 않는다. strict가 0인 것이 그 차이다.
     # created_by 필터와 최신 검사는 기획자 분기와 같은 훑기가 한다.
-    task_refs=$(scan_refs "${wf}tasks" "source_decision_id:")
+    task_ref_section=${architect_task_refs#*"$nl"W$wf"$nl"}
+    task_refs=${task_ref_section%%"$nl"E$wf"$nl"*}
     approvals=$(scan_decisions "$wf" approved 0)
     while IFS= read -r did; do
       IFS= read -r spec || spec=""
@@ -666,9 +722,10 @@ developer)
       tid=""
       dep_value=""
       scope_value=""
-      # 후보는 todo와 in_progress 둘이다. 죽은 세션이 남긴 in_progress 작업은 그 작업을 덮는
-      # 미만료 lease가 없으므로 아래 lease_active가 통과시키고, 살아 있는 세션의 작업은 그 lease가
-      # 막는다(SPEC-035 R1). 나머지 조건은 todo와 완전히 같고 blocked은 후보가 아니다.
+      # 후보는 todo, in_progress, 그리고 definition_error가 아닌 blocked다. 죽은 세션이 남긴
+      # in_progress 작업은 그 작업을 덮는 미만료 lease가 없으므로 아래 lease_active가 통과시키고,
+      # 살아 있는 세션의 작업은 그 lease가 막는다(SPEC-035 R1). blocked 복구에도 lease·선행·겹침
+      # 조건은 완전히 같다. definition_error는 위 아키텍트 분기의 대상이라 후보로 내지 않는다.
       [ "$cand" = 1 ] && IFS= read -r tid
       [ "$depn" = 1 ] && IFS= read -r dep_value
       [ "$scopen" = 1 ] && IFS= read -r scope_value
@@ -757,7 +814,7 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 14
+# condition_script_version: 15
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1179,6 +1236,7 @@ switch -CaseSensitive ($Role) {
   }
   'architect' {
     $requests = @()
+    $revisionTasks = @()
     foreach ($root in (Get-WorkflowRoots)) {
       $requests += @(Get-TaskRevisionRequests $root)
     }
@@ -1189,11 +1247,26 @@ switch -CaseSensitive ($Role) {
       $status = Get-Value $taskLines 'status'
       if ($status -cne 'todo' -and $status -cne 'blocked') { continue }
       if ((Get-Value $taskLines 'revision_request_id') -ceq $row.Id) { continue }
+      if ($revisionTasks -cnotcontains $row.Task) { $revisionTasks += $row.Task }
       if ((Test-Leased $row.Id) -or (Test-Leased $row.Task)) {
         Write-Candidate 'leased' $row.Id
         continue
       }
       Write-Target $row.Id 'task_revision_request'
+    }
+    # Historical user revision requests keep their priority. Without one, the blocked task already
+    # carries enough ground for an architect to correct a definition_error directly.
+    foreach ($root in (Get-WorkflowRoots)) {
+      foreach ($path in (Get-Documents $root 'tasks')) {
+        $lines = Get-Lines $path
+        if ((Get-Value $lines 'status') -cne 'blocked') { continue }
+        if ((Get-Value $lines 'blocked_kind') -cne 'definition_error') { continue }
+        $tid = Get-Value $lines 'id'
+        if ($tid.Length -eq 0) { continue }
+        if ($revisionTasks -ccontains $tid) { continue }
+        if (Test-Leased $tid) { Write-Candidate 'leased' $tid; continue }
+        Write-Target $tid 'blocked_task'
+      }
     }
     foreach ($root in (Get-WorkflowRoots)) {
       # An architect candidate needs neither the schema line nor a spec_id, which is why Strict is
@@ -1214,11 +1287,14 @@ switch -CaseSensitive ($Role) {
     foreach ($root in (Get-WorkflowRoots)) {
       foreach ($path in (Get-Documents $root 'tasks')) {
         $lines = Get-Lines $path
-        # todo and in_progress are both candidates. A task a dead session left behind carries no
-        # unexpired lease, so Test-Leased below lets it through, while a live session's task is held
-        # by its lease (SPEC-035 R1). Every other condition is the one todo already had, and blocked
-        # is not a candidate.
-        if (-not (Test-Match $lines '^status: (todo|in_progress)')) { continue }
+        # todo, in_progress, and blocked tasks other than definition_error are candidates. A task a
+        # dead session left behind carries no unexpired lease, so Test-Leased below lets it through,
+        # while a live session's task is held by its lease (SPEC-035 R1). Blocked recovery keeps the
+        # same lease, dependency, and overlap checks. The architect branch owns definition_error.
+        $ordinary = Test-Match $lines '^status: (todo|in_progress)'
+        $blocked = Test-Match $lines '^status: blocked'
+        $definitionError = (Get-Value $lines 'blocked_kind') -ceq 'definition_error'
+        if (-not $ordinary -and (-not $blocked -or $definitionError)) { continue }
         $tid = Get-Value $lines 'id'
         if ($tid.Length -eq 0) { continue }
         if (Test-Leased $tid) { Write-Candidate 'leased' $tid; continue }
@@ -1412,7 +1488,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 14"));
+        assert!(script.contains("# condition_script_version: 15"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -1426,8 +1502,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 15",
             "# condition_script_version: 14",
-            "# condition_script_version: 13",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -1690,7 +1766,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 14보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 15보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -1854,6 +1930,34 @@ mod tests {
     #[test]
     fn a_task_without_a_declaration_stays_eligible() {
         assert_eq!(developer_exit_code(&[("TASK-001", "todo", None)], &[]), 0);
+    }
+
+    #[test]
+    fn a_non_definition_block_keeps_lease_and_dependency_guards() {
+        assert_eq!(
+            developer_exit_code(
+                &[(
+                    "TASK-001",
+                    "blocked",
+                    Some("blocked_kind: implementation_failure"),
+                )],
+                &["TASK-001"],
+            ),
+            1,
+            "활성 lease가 복구 작업을 막는다"
+        );
+        assert_eq!(
+            developer_exit_code(
+                &[(
+                    "TASK-001",
+                    "blocked",
+                    Some("blocked_kind: implementation_failure\ndepends_on: [TASK-404]",),
+                )],
+                &[],
+            ),
+            1,
+            "미충족 선행이 복구 작업을 막는다"
+        );
     }
 
     /// 선행을 후보에서 빼는 lease가 겹침 판정(SPEC-032)에도 걸리므로, 두 작업이 서로 다른 파일을
@@ -2817,22 +2921,50 @@ mod tests {
             },
         },
         Scenario {
-            // `blocked`은 세션이 의도적으로 선언한 상태이지 죽음의 흔적이 아니다. 상태 목록에
-            // 더해진 것은 `in_progress` 하나뿐이라는 것을 이 행과 다음 행이 함께 고정한다.
-            name: "개발자: blocked 작업은 lease가 없어도 대상이 아니다",
+            // 과거 문서처럼 분류가 없는 blocked 작업도 에이전트 복구 레인에 남는다. 정의 오류라는
+            // 명시가 없으므로 개발자가 현재 실패를 다시 진단한다.
+            name: "개발자: 미분류 blocked 작업은 lease가 없으면 대상이다",
             roles: &["developer"],
-            expected: 1,
-            reason: "no-target",
+            expected: 0,
+            reason: "eligible",
             build: |control: &Path| write_task_document(control, "TASK-001", "blocked", None),
         },
         Scenario {
-            name: "개발자: blocked 작업은 만료된 lease가 덮어도 대상이 아니다",
+            name: "개발자: 미분류 blocked 작업은 만료된 lease 뒤에 다시 열린다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "blocked", None);
+                write_expired_lease(control, "TASK-001");
+            },
+        },
+        Scenario {
+            name: "아키텍트: definition_error blocked 작업을 사용자 요청 없이 고친다",
+            roles: &["architect"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "blocked",
+                    Some("blocked_kind: definition_error"),
+                );
+            },
+        },
+        Scenario {
+            name: "개발자: definition_error blocked 작업은 아키텍트 대상이다",
             roles: &["developer"],
             expected: 1,
             reason: "no-target",
             build: |control: &Path| {
-                write_task_document(control, "TASK-001", "blocked", None);
-                write_expired_lease(control, "TASK-001");
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "blocked",
+                    Some("blocked_kind: definition_error"),
+                );
             },
         },
         Scenario {
