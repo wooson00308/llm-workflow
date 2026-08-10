@@ -250,7 +250,12 @@ describe("DevelopmentBoard blocked task detail", () => {
       const onReadTask = vi.fn().mockResolvedValue({ summary: item, body: blockedBody() });
       renderBoard(onReadTask, [item]);
 
-      fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
+      if (status === "qa_waiting") {
+        fireEvent.click(screen.getByRole("button", { name: "배포 준비 QA 시작" }));
+        fireEvent.click(screen.getByRole("button", { name: "문제 있는 단계 열기" }));
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
+      }
       await screen.findByRole("heading", { level: 1, name: "배포 준비" });
 
       expect(screen.queryByRole("heading", { level: 2, name: "진행이 막혔습니다" })).not.toBeInTheDocument();
