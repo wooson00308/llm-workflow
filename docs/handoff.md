@@ -1,49 +1,50 @@
 # 판 상태 핸드오프 (TL 스냅샷)
 
 > 다음 세션(코덱스 포함) 팔로업용 정본. 개발 로그 전체를 읽기 전에 이 파일을 먼저 본다.
-> 갱신: 2026-08-10 (blocked 자동 복구와 에이전트·기능 QA UX 직접 개선 완료).
+> 갱신: 2026-08-10 (blocked 자동 복구와 개발 QA·에이전트 UX 직접 개선 완료).
 
 ## 이번 세션의 핵심 결과
 
 1. blocked 레인의 빠진 실행 경로를 제품과 설치 규칙에 반영했다. `definition_error`는 architect, 나머지 blocked는 developer가 사용자 조작 없이 직접 선점한다. 사용자 해결 입력·재개 UI는 제거하고 과거 재개 기록 읽기만 호환용으로 유지했다. 보호 커밋은 `fcdaf1d`다.
-2. 대형 워크플로우 조회가 작업마다 모든 결정 YAML을 다시 읽던 병목을 workflow당 한 번의 스캔과 graph join으로 바꿨다. Rust 701건, 프런트 902건, Clippy·typecheck·build가 통과했다.
-3. 새 blocked 경로를 실제 `TASK-S051-11`에 적용했다. developer가 두 실패를 재현하고 범위 누락을 `definition_error`로 분류했으며, architect가 기존 ID와 이력을 보존한 채 작업 정의를 교정해 `todo`로 돌렸다. 두 번째 developer가 같은 구현을 이어받아 `qa_waiting`으로 마감했다. 사용자 재개 결정과 `resumed` 이력은 만들지 않았다.
-4. quota 회귀의 원인은 제품 파서가 아니라 테스트가 로컬 jobs.d를 격리하지 않은 것이었다. claude-heartbeat의 두 파서 검사에 임시 jobs.d를 지정했다. 보호 커밋은 `66af7b0`이다.
-5. workflow-labs의 Rust 8경로에는 현재 rustfmt가 만드는 결과만 반영했다. HEAD 원본을 rustfmt 표준 출력으로 변환한 결과와 각 작업 파일을 byte 비교해 모두 일치함을 TL이 재확인했다.
-6. 에이전트 화면은 정상 상태의 불필요한 갱신 행동, 세 역할 동시 폼과 반복 빈 목록을 정리했다. 개발 보드는 QA 작업 카드를 사용자에게 나열하지 않고, 개발이 모두 끝난 기획서만 기능 QA 세션으로 묶는다. 현재 SPEC-051은 직접 확인 4단계·자동 검증 3건인 세션 1개이고 todo가 남은 SPEC-055는 노출되지 않는다. 최신 debug 앱의 1180px 기본 창과 940px 최소 창에서 목록·상세·완료 영역을 직접 확인했다.
+2. 대형 워크플로우 조회가 작업마다 모든 결정 YAML을 다시 읽던 병목을 workflow당 한 번의 스캔과 graph join으로 바꿨다. Rust 701건, Clippy와 조건 스크립트 검사가 통과했다.
+3. 새 blocked 경로를 실제 `TASK-S051-11`에 적용했다. developer의 범위 누락 판정→architect 정의 교정→developer 재구현을 같은 작업에서 이어 갔고, 사용자 재개 결정과 `resumed` 이력은 만들지 않았다. quota 격리와 Rust 표준 포맷은 보호 커밋 `66af7b0`에 보존됐다.
+4. 개발 보드는 작업 카드를 사용자 QA 단위로 나열하지 않는다. 같은 기획서의 개발이 끝났을 때만 기능 QA 세션 하나로 묶고, 화면 확인 단계와 자동 검증 근거를 분리한다. 940px 최소 창에서도 한 흐름으로 읽힌다.
+5. 에이전트 화면은 작업과 설정을 분리했다. 기본 `작업` 탭은 새 세션과 진행 기록만, `설정` 탭은 역할 정책·도구 상태·기존 설정 가져오기만 보여준다. 빈 역할 표와 0 통계는 제거했고 역할 정책은 한 역할씩 편집한다.
+6. GitHub Actions의 요약→상세, Cursor·Copilot Agents·Devin의 세션 중심 구조를 참고했다. 최신 debug 앱의 1180px 기본 창과 940px 최소 창에서 작업·설정 탭을 직접 확인했고, 준비 완료 상태의 모순된 `확인 불가` 버전 문구도 제거했다.
 
 ## 현재 보드와 인수 기준
 
 - blocked 작업은 0건이다.
-- `TASK-S051-11`: qa_waiting. 런타임 전체 284건, 프런트 902건, Rust 본체 701건과 종단 17건, 포맷·Clippy·계약 fixture가 모두 통과했다. 실제 운영체제 서비스 smoke와 실제 Claude·Codex 로그인 확인만 사용자 QA/target CI에 남았다.
-- `TASK-S051-09`, `TASK-S051-10`: qa_waiting. 에이전트 설정과 실행 대시보드의 사용자 피드백을 반영한 최신 앱이 준비됐다.
-- `TASK-S055-04`: todo. 14개 완료 조건과 11개 값 경로 감사가 끝난 다음 developer 대상이다. 현재 정책과 충돌하는 “사용자 재개 조작 유지” 문구는 구현하지 않는다. 기존 저장·사건 구현을 재사용하고 남은 정의 수정 요청 UI와 활동 표시만 이어서 구현한다.
-- `TASK-S052-03`, `TASK-S052-04`: 이번 세션 중 앱의 사용자 QA로 completed가 됐다. 앱이 만든 두 QA 결정과 task 변경은 내용을 수정하지 않고 TASK-S051-11과 분리된 사용자 QA 보호 커밋으로 보존한다.
+- `TASK-S051-11`: qa_waiting. 로컬 자동 검사는 통과했다. 실제 3OS 서비스 smoke, 공식 runtime 산출물·bundle 양성 경로, 실제 Claude·Codex 로그인은 target CI 또는 사용자 환경 확인으로 남아 있다.
+- `TASK-S051-09`, `TASK-S051-10`: qa_waiting. 에이전트 설정과 실행 대시보드는 이번 직접 UX 개선을 반영한 최신 앱으로 확인할 수 있다.
+- `TASK-S055-04`: todo. 현재 정책과 충돌하는 “사용자 재개 조작 유지” 문구는 구현하지 않는다. 기존 저장·사건 구현을 재사용하고 남은 정의 수정 요청 UI와 활동 표시만 이어서 구현한다.
+- `TASK-S052-03`, `TASK-S052-04`: 앱 사용자 QA로 completed. 앱이 만든 QA 결정은 내용을 수정하지 않고 보호한다.
 - 활성 lease 없음. SPEC-009의 오래된 lease 파일은 만료된 잔여다.
 
 ## 다음 작업 순서
 
-1. `TASK-S055-04`를 developer 역할로 선점한다. ARCH-3의 11개 값 경로를 기준으로 현재 code와 takeover residue를 다시 대조하고, 이번 blocked UI 변경을 기준선으로 삼는다.
-2. 사용자 재개 UI를 되살리지 않는다. 기존 task revision request 저장·사건·백엔드를 다시 만들지 않고 남은 요청 작성 UI, 처리 결과, 활동 사건만 구현한다.
-3. 사용자는 개발 화면의 SPEC-051 기능 QA 세션에서 네 사용자 동선을 확인한다. 세션 완료는 연결된 QA 작업 전체를 함께 기록한다. 자동 검사 전용 항목만 근거로 접혀 있고 target CI 확인은 릴리스 계약 단계에 남아 있다. 에이전트가 QA 도장을 대리하지 않는다.
-4. 실제 빌드 앱으로 이 저장소를 다시 열어 첫 조회 CPU·응답성을 smoke 확인한다. 문제가 남으면 inspect 호출 주기와 프런트 재조회까지 계측한다.
+1. 사용자는 최신 debug 앱의 개발 화면에서 SPEC-051 기능 QA 세션을 확인한다. 에이전트가 QA 도장을 대리하지 않는다.
+2. `TASK-S055-04`를 developer 역할로 선점한다. 기존 11개 값 경로와 최신 blocked 정책을 기준선으로 삼고 사용자 재개 UI를 되살리지 않는다.
+3. TASK-S051-11의 공식 release 산출물·3OS 서비스 smoke는 로컬 arm64 debug 앱 확인과 구분한다. positive release path가 준비되기 전에는 fail-closed 계약을 약화하지 않는다.
+4. 큰 저장소 첫 조회 성능 문제가 다시 보이면 inspect 호출 주기와 프런트 재조회 횟수를 계측한다. 현재 에이전트 UX 변경은 읽기·실행 계약과 백엔드를 바꾸지 않았다.
 
 ## 검증
 
 - claude-heartbeat: quota 13 passed, runtime E2E 4 passed·실서비스 1 target-CI skip, 전체 284 passed·8 platform skip.
-- workflow-labs: 계약 정상 fixture와 불일치 3건 거절 통과, 프런트 최신 910 passed·typecheck·build 통과, Rust 본체 701 passed·종단 17 passed.
-- workflow-labs: `cargo fmt --check`, Clippy `-D warnings`, 양 저장소 `git diff --check` 통과.
-- Rust 8파일은 HEAD 원본을 rustfmt한 결과와 현재 파일의 byte 비교가 모두 일치한다.
+- workflow-labs Rust 기준선: 본체 701 passed·종단 17 passed, `cargo fmt --check`, Clippy `-D warnings`, 계약 fixture 통과.
+- workflow-labs 프런트 최신: 28파일·912 passed, typecheck·production build, Agents 집중 53 passed, `git diff --check` 통과.
+- 최신 debug macOS `.app`와 `.dmg` 번들 완료. 실제 앱 1180px·940px 작업/설정 화면 확인 완료.
 
 ## 작업 트리와 브랜치
 
-- workflow-labs: `claude/qa-batch-20260808`. TASK-S051-11 산출물과 Rust 포맷 변경, 앱이 만든 TASK-S052-03/04와 QA 결정 두 건을 서로 분리한 보호 커밋으로 보존한다.
+- workflow-labs: `claude/qa-batch-20260808`. 이번 에이전트 UX 변경과 최신 개발 기록·핸드오프를 마감 커밋으로 보호한다.
 - claude-heartbeat: `claude/agent-runtime-20260808`, HEAD `66af7b0`, clean.
 - main 병합·push는 하지 않았다. 릴리스 컷은 사용자 지시와 `docs/releasing.md` 절차를 따른다.
+- 최신 debug 앱은 `/Users/catze/project/workflow-labs/src-tauri/target/debug/bundle/macos/LLM Workflow.app`이며 에이전트 작업 화면에 열려 있다.
 
 ## 운영 가드레일
 
 - blocked 레인은 에이전트가 운영하며 사용자 해결 입력·재개 조작을 요구하지 않는다. 완성된 구현의 사용자 관문은 QA다.
-- 스펙 승인과 QA 도장은 사용자 전용이며 에이전트가 대리 기록하지 않는다. 역사적 재개 기록도 새로 만들지 않는다.
+- 스펙 승인과 QA 도장은 사용자 전용이며 에이전트가 대리 기록하지 않는다.
 - 이전 구현·보고·검사를 인수해서 남은 차이만 고친다. 같은 저장·사건·UI 경로를 새로 만들지 않는다.
 - workflow app-owned manifest, decision, runtime 상태와 사용자 동시 변경을 보호한다.

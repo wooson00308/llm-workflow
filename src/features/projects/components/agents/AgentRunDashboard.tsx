@@ -53,7 +53,6 @@ export function AgentRunDashboard({ actions, state }: Props) {
   const waitingCount = runs.filter(
     (run) => run.state === "queued" || run.state === "reserved",
   ).length;
-  const latestResult = [...recent].reverse()[0];
   const queueNeedsAttention = Boolean(state.queueError || queue?.unavailable);
 
   useEffect(() => {
@@ -86,8 +85,8 @@ export function AgentRunDashboard({ actions, state }: Props) {
     <section aria-label="에이전트 실행 대시보드" className="agent-run-dashboard">
       <header className="agent-run-heading">
         <div>
-          <h3>실행 계획과 큐</h3>
-          <p>역할을 고르고 계획을 확인한 뒤에만 유료 CLI 세션을 시작합니다.</p>
+          <h3>에이전트 작업</h3>
+          <p>새 작업을 시작하거나 진행 중인 세션을 확인합니다.</p>
         </div>
         {state.queueReading && !queue ? (
           <span className="agent-run-reading" role="status">실행 상태 확인 중</span>
@@ -103,69 +102,17 @@ export function AgentRunDashboard({ actions, state }: Props) {
         ) : null}
       </header>
 
-      <section aria-label="프로젝트 실행 현황" className="agent-run-summary">
-        <Summary label="새 배정" value={queue?.paused ? "일시 정지" : "활성"} />
-        <Summary label="실행 중" value={`${runningCount}건`} />
-        <Summary label="대기" value={`${waitingCount}건`} />
-        <Summary label="최근 결과" value={latestResult ? stateLabels[latestResult.state] : "없음"} />
-      </section>
-
       {queue?.unavailable && <p className="agent-error">상태를 읽을 수 없음: {queue.unavailable}</p>}
       {state.queueError && !queue?.unavailable && <p className="agent-error">{state.queueError}</p>}
 
-      <details className="agent-project-controls">
-        <summary>
-          <span>프로젝트 실행 제어</span>
-          <small>{queue?.paused ? "새 배정 일시 정지 중" : "새 배정 활성"}</small>
-        </summary>
-        <div className="agent-project-controls-content">
-          <p>현재 실행은 유지하고, 이 프로젝트의 새 에이전트 배정만 제어합니다.</p>
-          {queue?.paused ? (
-            <button
-              className="secondary-button"
-              disabled={state.pausing}
-              onClick={() => void actions.setProjectPaused(false)}
-              type="button"
-            >
-              새 배정 재개
-            </button>
-          ) : (
-            <button
-              className="secondary-button"
-              disabled={state.pausing}
-              onClick={() => setPauseArmed(true)}
-              type="button"
-            >
-              새 배정 일시 정지
-            </button>
-          )}
-          {pauseArmed && !queue?.paused && (
-            <div className="agent-control-preview" role="status">
-              <p>새 배정만 멈춥니다. 이미 실행 중인 항목과 다른 프로젝트의 상태는 유지됩니다.</p>
-              <div className="agent-plan-actions">
-                <button className="secondary-button" onClick={() => setPauseArmed(false)} type="button">
-                  돌아가기
-                </button>
-                <button
-                  className="stamp-button"
-                  disabled={state.pausing}
-                  onClick={() => {
-                    setPauseArmed(false);
-                    void actions.setProjectPaused(true);
-                  }}
-                  type="button"
-                >
-                  확인하고 일시 정지
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </details>
-
       <section aria-label="새 실행 설정" className="agent-run-builder">
-        <h4>새 실행 설정</h4>
-        <p>편집할 역할을 고르세요. 실행 방식과 상한은 위에서 저장한 역할 정책을 따릅니다.</p>
+        <header className="agent-run-builder-heading">
+          <div>
+            <span className="agent-section-kicker">NEW SESSION</span>
+            <h4>새 작업 시작</h4>
+          </div>
+          <p>역할 정책에 맞춰 실행 가능 여부를 먼저 확인합니다.</p>
+        </header>
         <div aria-label="설정할 역할" className="agent-run-role-tabs">
           {ROLE_ORDER.map((role) => (
             <button
@@ -185,7 +132,7 @@ export function AgentRunDashboard({ actions, state }: Props) {
             const policy = state.policy?.policy.roles[role];
             return (
               <fieldset key={role}>
-                <legend>{roleLabels[role]} 실행 요청</legend>
+                <legend>{roleLabels[role]}</legend>
                 <p className="agent-run-role-policy">
                   {policy?.provider ?? "provider 미정"} · {policy?.model ?? "기본 모델"} · {policy?.runMode === "continuous" ? "반복" : "한 번"} · 최대 {policy?.maxParallel ?? "-"}명
                 </p>
@@ -261,7 +208,7 @@ export function AgentRunDashboard({ actions, state }: Props) {
           }}
           type="button"
         >
-          {state.runPlanning ? "계획 확인 중" : "계획 확인"}
+          {state.runPlanning ? "확인 중" : "시작 가능 여부 확인"}
         </button>
       </section>
 
@@ -315,10 +262,24 @@ export function AgentRunDashboard({ actions, state }: Props) {
         </section>
       )}
 
-      <RoleStatusTable runs={runs} state={state} />
+      {(runs.length > 0 || queue?.paused) && (
+        <section aria-label="프로젝트 실행 현황" className="agent-run-summary">
+          <Summary label="새 배정" value={queue?.paused ? "일시 정지" : "활성"} />
+          <Summary label="실행 중" value={`${runningCount}건`} />
+          <Summary label="대기" value={`${waitingCount}건`} />
+        </section>
+      )}
       {active.length > 0 && <RunList actions={actions} runs={active} state={state} title="실행 중과 대기" />}
       {recent.length > 0 && <RunList actions={actions} runs={recent} state={state} title="최근 종료" />}
-      {runs.length === 0 && <p className="agent-run-empty-state">아직 실행 기록이 없습니다.</p>}
+      {queue && runs.length === 0 && (
+        <section aria-label="작업 현황" className="agent-run-empty-state">
+          <strong>아직 실행한 에이전트가 없습니다</strong>
+          <p>위에서 역할을 고르면 실행할 작업과 비용 경로를 먼저 확인할 수 있습니다.</p>
+        </section>
+      )}
+      {!queue && !queueNeedsAttention && !state.queueReading && (
+        <p className="agent-run-empty-state">실행 상태를 아직 읽지 못했습니다.</p>
+      )}
 
       {state.cancelPreview && (
         <section aria-label="취소 확인" className="agent-control-preview">
@@ -345,42 +306,62 @@ export function AgentRunDashboard({ actions, state }: Props) {
       )}
       {state.controlError && <p className="agent-error">{state.controlError}</p>}
       {state.logError && <p className="agent-error">{state.logError}</p>}
+
+      <details className="agent-project-controls">
+        <summary>
+          <span>새 작업 배정 제어</span>
+          <small>{queue?.paused ? "일시 정지 중" : "배정 활성"}</small>
+        </summary>
+        <div className="agent-project-controls-content">
+          <p>현재 실행은 유지하고, 이 프로젝트에 새로 배정되는 에이전트만 제어합니다.</p>
+          {queue?.paused ? (
+            <button
+              className="secondary-button"
+              disabled={state.pausing}
+              onClick={() => void actions.setProjectPaused(false)}
+              type="button"
+            >
+              새 배정 재개
+            </button>
+          ) : (
+            <button
+              className="secondary-button"
+              disabled={state.pausing}
+              onClick={() => setPauseArmed(true)}
+              type="button"
+            >
+              새 배정 일시 정지
+            </button>
+          )}
+          {pauseArmed && !queue?.paused && (
+            <div className="agent-control-preview" role="status">
+              <p>새 배정만 멈춥니다. 이미 실행 중인 항목과 다른 프로젝트의 상태는 유지됩니다.</p>
+              <div className="agent-plan-actions">
+                <button className="secondary-button" onClick={() => setPauseArmed(false)} type="button">
+                  돌아가기
+                </button>
+                <button
+                  className="stamp-button"
+                  disabled={state.pausing}
+                  onClick={() => {
+                    setPauseArmed(false);
+                    void actions.setProjectPaused(true);
+                  }}
+                  type="button"
+                >
+                  확인하고 일시 정지
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </details>
     </section>
   );
 }
 
 function Summary({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function RoleStatusTable({ runs, state }: { runs: AgentRunSummary[]; state: AgentRuntimeState }) {
-  return (
-    <section aria-label="역할별 실행 현황" className="agent-role-status">
-      <h4>역할별 현황</h4>
-      <table>
-        <thead><tr><th>역할</th><th>provider</th><th>model</th><th>실행 방식</th><th>최대</th><th>실행</th><th>대기</th><th>마지막 결과</th></tr></thead>
-        <tbody>
-          {ROLE_ORDER.map((role) => {
-            const policy = state.policy?.policy.roles[role];
-            const rows = runs.filter((run) => run.role === role);
-            const last = [...rows].reverse().find((run) => !activeStates.has(run.state));
-            return (
-              <tr key={role}>
-                <th data-label="역할">{roleLabels[role]}</th>
-                <td data-label="provider">{policy?.provider ?? "-"}</td>
-                <td data-label="model">{policy?.model ?? "기본"}</td>
-                <td data-label="실행 방식">{policy?.runMode === "continuous" ? "반복" : "한 번"}</td>
-                <td data-label="최대">{policy?.maxParallel ?? "-"}</td>
-                <td data-label="실행">{rows.filter((run) => run.state === "running").length}</td>
-                <td data-label="대기">{rows.filter((run) => run.state === "queued" || run.state === "reserved").length}</td>
-                <td data-label="마지막 결과">{last ? stateLabels[last.state] : "없음"}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </section>
-  );
 }
 
 function RunList({ actions, runs, state, title }: { actions: AgentRuntimeActions; runs: AgentRunSummary[]; state: AgentRuntimeState; title: string }) {

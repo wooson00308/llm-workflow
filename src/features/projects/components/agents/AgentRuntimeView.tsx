@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Icon } from "../../../../shared/ui/Icon";
 import type {
   AgentCompatibility,
@@ -196,10 +197,22 @@ interface Props {
  * 사용자가 누른 자리에서만 시작하고, 계획을 보여 준 뒤에만 적용 버튼이 열린다.
  */
 export function AgentRuntimeView({ actions, projectName, state }: Props) {
+  const [activeView, setActiveView] = useState<"work" | "settings">("work");
   const readiness = readinessOf(state);
   const pending = state.plan;
   const refreshNeeded = state.inspection === null || state.readError !== null;
   const providerAttention = state.policy?.providers.some((provider) => provider.status !== "ready") ?? false;
+  const versionFacts = state.inspection?.status
+    ? [
+        state.inspection.status.installedVersion
+          ? `설치 ${state.inspection.status.installedVersion}`
+          : null,
+        state.inspection.status.runningVersion
+          ? `실행 ${state.inspection.status.runningVersion}`
+          : null,
+        state.inspection.bundledVersion ? `앱 번들 ${state.inspection.bundledVersion}` : null,
+      ].filter((fact): fact is string => fact !== null)
+    : [];
 
   return (
     <section className="agents-view">
@@ -207,7 +220,7 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
         <div>
           <p className="eyebrow">AGENTS</p>
           <h1>에이전트</h1>
-          <p>{projectName}에서 어떤 역할을 어떤 도구로 돌릴지 정합니다.</p>
+          <p>{projectName}의 에이전트 작업을 시작하고 진행 상황을 확인합니다.</p>
         </div>
         {state.reading && refreshNeeded ? (
           <span className="agent-refresh-status" role="status">
@@ -226,18 +239,39 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
         )}
       </div>
 
-      <section aria-label="실행 환경 준비 상태" className={`agent-readiness tone-${readiness.tone}`}>
+      <div aria-label="에이전트 화면" className="agent-view-tabs" role="tablist">
+        <button
+          aria-controls="agent-work-panel"
+          aria-selected={activeView === "work"}
+          className={activeView === "work" ? "is-active" : undefined}
+          onClick={() => setActiveView("work")}
+          role="tab"
+          type="button"
+        >
+          작업
+        </button>
+        <button
+          aria-controls="agent-settings-panel"
+          aria-selected={activeView === "settings"}
+          className={activeView === "settings" ? "is-active" : undefined}
+          onClick={() => setActiveView("settings")}
+          role="tab"
+          type="button"
+        >
+          설정
+          {providerAttention && <span className="agent-tab-alert">확인 필요</span>}
+        </button>
+      </div>
+
+      <section
+        aria-label="실행 환경 준비 상태"
+        className={`agent-readiness tone-${readiness.tone} ${readiness.tone === "ready" ? "is-compact" : ""}`}
+      >
         <Icon name={readiness.tone === "ready" ? "spark" : "board"} />
         <div>
           <strong>{readiness.title}</strong>
           <p>{readiness.detail}</p>
-          {state.inspection?.status && (
-            <p className="agent-versions">
-              설치 {state.inspection.status.installedVersion ?? "확인 불가"} · 실행{" "}
-              {state.inspection.status.runningVersion ?? "확인 불가"} · 앱 번들{" "}
-              {state.inspection.bundledVersion ?? "확인 불가"}
-            </p>
-          )}
+          {versionFacts.length > 0 && <p className="agent-versions">{versionFacts.join(" · ")}</p>}
         </div>
         {readiness.operation && readiness.actionLabel && (
           <button
@@ -390,118 +424,139 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
         </section>
       )}
 
-      {state.policy && (
-        <details
-          aria-label="실행 도구 준비 상태"
-          className="agent-providers agent-secondary-section"
-          open={providerAttention}
-          role="region"
-        >
-          <summary>
-            <span>실행 도구</span>
-            <small>
-              {providerAttention
-                ? "확인이 필요한 도구가 있습니다"
-                : `${state.policy.providers.length}개 도구 준비됨`}
-            </small>
-          </summary>
-          <ul>
-            {state.policy.providers.map((provider) => (
-              <li key={provider.provider}>
-                <ProviderRow diagnosis={provider} />
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      {activeView === "work" ? (
+        <div className="agent-view-panel" id="agent-work-panel" role="tabpanel">
+          {state.policy ? (
+            <AgentRunDashboard actions={actions} state={state} />
+          ) : (
+            <p className="agent-empty">작업을 시작할 역할 정책을 아직 읽지 못했습니다.</p>
+          )}
+        </div>
+      ) : (
+        <div className="agent-view-panel agent-settings-panel" id="agent-settings-panel" role="tabpanel">
+          <header className="agent-settings-heading">
+            <h2>에이전트 설정</h2>
+            <p>역할별 실행 도구와 한도를 조정합니다. 작업 시작과 진행 기록은 작업 탭에 있습니다.</p>
+          </header>
 
-      {state.policy && <AgentRunDashboard actions={actions} state={state} />}
+          {state.policy ? (
+            <AgentRoleSettings
+              busy={state.reading}
+              executionAllowed={state.policy.executionAllowed}
+              onSave={actions.save}
+              saveError={state.saveError}
+              saving={state.saving}
+              snapshot={state.policy}
+            />
+          ) : (
+            <p className="agent-empty">이 프로젝트의 역할 정책을 아직 읽지 못했습니다.</p>
+          )}
 
-      <details
-        aria-label="기존 역할 잡 이전"
-        className="agent-migration agent-secondary-section"
-        open={state.migration !== null || state.migrationError !== null}
-        role="region"
-      >
-        <summary>
-          <span>기존 설정 가져오기</span>
-          <small>이전에 사용하던 역할 설정이 있을 때만 확인합니다</small>
-        </summary>
-        <div className="agent-secondary-content">
-          <p>기존 하트비트 역할 잡이 있으면 이 프로젝트의 역할 정책으로 옮길 수 있습니다.</p>
-          <button
-            className="secondary-button agent-compact-action"
-            disabled={state.migrationBusy}
-            onClick={() => void actions.previewMigration()}
-            type="button"
-          >
-            {state.migrationBusy ? "확인하는 중" : "이전할 설정 확인"}
-          </button>
-        {state.migrationError !== null && (
-          <p className="agent-error" role="status">
-            {state.migrationError}
-          </p>
-        )}
-        {state.migration && (
-          <div className="agent-migration-preview">
-            <strong>확인 전에는 아무것도 저장되지 않습니다</strong>
-            <ul>
-              {Object.entries(state.migration.proposed.roles).map(([role, value]) => (
-                <li key={role}>
-                  {role}: {value.provider} · {value.model ?? "기본 모델"} · 최대 {value.maxParallel}명
-                </li>
-              ))}
-            </ul>
-            {state.migration.untouchedRoles.length > 0 && (
-              <p>기존 잡이 없어 기본값으로 두는 역할: {state.migration.untouchedRoles.join(", ")}</p>
-            )}
-            {state.migration.unresolved.length > 0 && (
-              <div className="agent-migration-unresolved">
-                <strong>옮기지 못한 값</strong>
+          {state.policy && (
+            <details
+              aria-label="실행 도구 준비 상태"
+              className="agent-providers agent-secondary-section"
+              open={providerAttention}
+              role="region"
+            >
+              <summary>
+                <span>실행 도구 상태</span>
+                <small>
+                  {providerAttention
+                    ? "확인이 필요한 도구가 있습니다"
+                    : state.policy.providers.length > 0
+                      ? `${state.policy.providers.length}개 도구 확인됨`
+                      : "진단 기록 없음"}
+                </small>
+              </summary>
+              {state.policy.providers.length > 0 ? (
                 <ul>
-                  {state.migration.unresolved.map((entry, index) => (
-                    <li key={`${entry.role}:${entry.field}:${index}`}>
-                      {entry.role} · {entry.field} · {entry.value} · {entry.reason}
+                  {state.policy.providers.map((provider) => (
+                    <li key={provider.provider}>
+                      <ProviderRow diagnosis={provider} />
                     </li>
                   ))}
                 </ul>
-              </div>
-            )}
-            <p className="agent-migration-note">Dream은 이 이전 대상이 아닙니다.</p>
-            <div className="agent-plan-actions">
-              <button
-                className="secondary-button"
-                disabled={state.migrationBusy}
-                onClick={() => actions.dismissMigration()}
-                type="button"
-              >
-                취소
-              </button>
-              <button
-                className="stamp-button"
-                disabled={state.migrationBusy}
-                onClick={() => void actions.applyMigration()}
-                type="button"
-              >
-                이 내용으로 이전
-              </button>
-            </div>
-          </div>
-        )}
-        </div>
-      </details>
+              ) : (
+                <p className="agent-secondary-empty">확인된 실행 도구가 없습니다.</p>
+              )}
+            </details>
+          )}
 
-      {state.policy ? (
-        <AgentRoleSettings
-          busy={state.reading}
-          executionAllowed={state.policy.executionAllowed}
-          onSave={actions.save}
-          saveError={state.saveError}
-          saving={state.saving}
-          snapshot={state.policy}
-        />
-      ) : (
-        <p className="agent-empty">이 프로젝트의 역할 정책을 아직 읽지 못했습니다.</p>
+          <details
+            aria-label="기존 역할 잡 이전"
+            className="agent-migration agent-secondary-section"
+            open={state.migration !== null || state.migrationError !== null}
+            role="region"
+          >
+            <summary>
+              <span>기존 설정 가져오기</span>
+              <small>이전에 사용하던 역할 설정이 있을 때만 확인합니다</small>
+            </summary>
+            <div className="agent-secondary-content">
+              <p>기존 하트비트 역할 잡이 있으면 이 프로젝트의 역할 정책으로 옮길 수 있습니다.</p>
+              <button
+                className="secondary-button agent-compact-action"
+                disabled={state.migrationBusy}
+                onClick={() => void actions.previewMigration()}
+                type="button"
+              >
+                {state.migrationBusy ? "확인하는 중" : "이전할 설정 확인"}
+              </button>
+              {state.migrationError !== null && (
+                <p className="agent-error" role="status">
+                  {state.migrationError}
+                </p>
+              )}
+              {state.migration && (
+                <div className="agent-migration-preview">
+                  <strong>확인 전에는 아무것도 저장되지 않습니다</strong>
+                  <ul>
+                    {Object.entries(state.migration.proposed.roles).map(([role, value]) => (
+                      <li key={role}>
+                        {role}: {value.provider} · {value.model ?? "기본 모델"} · 최대 {value.maxParallel}명
+                      </li>
+                    ))}
+                  </ul>
+                  {state.migration.untouchedRoles.length > 0 && (
+                    <p>기존 잡이 없어 기본값으로 두는 역할: {state.migration.untouchedRoles.join(", ")}</p>
+                  )}
+                  {state.migration.unresolved.length > 0 && (
+                    <div className="agent-migration-unresolved">
+                      <strong>옮기지 못한 값</strong>
+                      <ul>
+                        {state.migration.unresolved.map((entry, index) => (
+                          <li key={`${entry.role}:${entry.field}:${index}`}>
+                            {entry.role} · {entry.field} · {entry.value} · {entry.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <p className="agent-migration-note">Dream은 이 이전 대상이 아닙니다.</p>
+                  <div className="agent-plan-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={state.migrationBusy}
+                      onClick={() => actions.dismissMigration()}
+                      type="button"
+                    >
+                      취소
+                    </button>
+                    <button
+                      className="stamp-button"
+                      disabled={state.migrationBusy}
+                      onClick={() => void actions.applyMigration()}
+                      type="button"
+                    >
+                      이 내용으로 이전
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </details>
+        </div>
       )}
     </section>
   );

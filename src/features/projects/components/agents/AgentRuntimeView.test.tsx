@@ -159,6 +159,10 @@ function renderView(
   return { ...view, actions };
 }
 
+function openSettings() {
+  fireEvent.click(screen.getByRole("tab", { name: /^설정/ }));
+}
+
 const updatePlan: AgentUpdatePlan = {
   planId: "plan-update-1",
   result: "ready",
@@ -253,6 +257,22 @@ const queue: AgentQueueSnapshot = {
 };
 
 describe("AgentRuntimeView 준비 상태", () => {
+  it("작업을 기본 화면으로 두고 정책과 도구는 설정 탭에만 모은다", () => {
+    renderView(state({ queue: { ...queue, runs: [] } }));
+
+    expect(screen.getByRole("tab", { name: "작업" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "새 작업 시작" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "에이전트 설정" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "실행 도구 준비 상태" })).not.toBeInTheDocument();
+
+    openSettings();
+
+    expect(screen.getByRole("tab", { name: "설정" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "에이전트 설정" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "새 작업 시작" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "실행 도구 준비 상태" })).toBeInTheDocument();
+  });
+
   it("정상 상태에서는 내부 하트비트 이름을 주 제목으로 쓰지 않는다", () => {
     renderView();
 
@@ -260,6 +280,21 @@ describe("AgentRuntimeView 준비 상태", () => {
     expect(screen.getByText("실행 환경이 준비됐습니다")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "업데이트 계획 보기" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "상태 다시 확인" })).not.toBeInTheDocument();
+  });
+
+  it("준비 상태에서 확인하지 못한 버전을 실패처럼 나열하지 않는다", () => {
+    renderView(
+      state({
+        inspection: inspection({
+          bundledVersion: null,
+          status: { ...inspection().status!, runningVersion: null },
+        }),
+      }),
+    );
+
+    const readiness = screen.getByRole("region", { name: "실행 환경 준비 상태" });
+    expect(within(readiness).getByText("설치 0.8.0")).toBeInTheDocument();
+    expect(within(readiness).queryByText(/확인 불가/)).not.toBeInTheDocument();
   });
 
   // 여섯 상태가 각각 다른 문구와 다음 행동을 갖는다(완료 조건 8).
@@ -316,6 +351,7 @@ describe("AgentRuntimeView 준비 상태", () => {
     ["billing_route_acknowledgement_required", "API 과금 경로 확인이 필요함"],
   ])("실행 도구 진단 %s를 고유한 문장으로 보여준다", (status, title) => {
     renderView(state({ policy: policy([{ provider: "claude", status, version: null }]) }));
+    openSettings();
 
     const providers = screen.getByRole("region", { name: "실행 도구 준비 상태" });
     expect(within(providers).getByText(title)).toBeInTheDocument();
@@ -323,6 +359,7 @@ describe("AgentRuntimeView 준비 상태", () => {
 
   it("모르는 진단 값은 숨기지 않고 그대로 보여준다", () => {
     renderView(state({ policy: policy([{ provider: "codex", status: "brand_new_word", version: null }]) }));
+    openSettings();
 
     expect(screen.getByText("brand_new_word")).toBeInTheDocument();
     expect(screen.getByText("앱이 모르는 상태입니다. 값을 그대로 보여드립니다.")).toBeInTheDocument();
@@ -330,6 +367,7 @@ describe("AgentRuntimeView 준비 상태", () => {
 
   it("로그인 안내에서 토큰 입력칸을 만들지 않는다", () => {
     renderView(state({ policy: policy([{ provider: "claude", status: "login_required", version: null }]) }));
+    openSettings();
 
     const providers = screen.getByRole("region", { name: "실행 도구 준비 상태" });
     expect(within(providers).queryByRole("textbox")).not.toBeInTheDocument();
@@ -438,6 +476,7 @@ describe("AgentRuntimeView 계획과 적용", () => {
 describe("AgentRuntimeView 마이그레이션", () => {
   it("미리보기 전에는 적용 버튼이 없고 확인해야 적용된다", async () => {
     const { rerender, actions } = renderView();
+    openSettings();
     expect(screen.queryByRole("button", { name: "이 내용으로 이전" })).not.toBeInTheDocument();
 
     rerender(
@@ -468,23 +507,27 @@ describe("AgentRuntimeView 마이그레이션", () => {
 });
 
 describe("AgentRuntimeView 역할 정책", () => {
-  it("세 역할을 고정 순서로 보여주고 초기값이 계약의 기본값이다", () => {
+  it("역할은 고정 순서 탭으로 두고 선택한 한 역할만 편집한다", () => {
     const { container } = renderView();
+    openSettings();
 
-    const cards = Array.from(container.querySelectorAll<HTMLElement>(".agent-role-card"));
-    expect(cards.map((card) => card.querySelector("h4")?.textContent)).toEqual([
+    const tabs = within(screen.getByRole("tablist", { name: "정책 역할 선택" })).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.querySelector("strong")?.textContent)).toEqual([
       "기획자",
       "아키텍트",
       "개발자",
     ]);
-    expect(container.querySelector(".agent-role-table")).not.toBeInTheDocument();
+    const cards = Array.from(container.querySelectorAll<HTMLElement>(".agent-role-card"));
+    expect(cards.map((card) => card.querySelector("h4")?.textContent)).toEqual(["기획자"]);
     expect(screen.getByLabelText("기획자 최대 인원")).toHaveValue(1);
+    expect(screen.queryByLabelText("개발자 최대 인원")).not.toBeInTheDocument();
     expect(screen.getByLabelText("프로젝트 상한")).toHaveValue(3);
     expect(screen.getByLabelText("기기 상한")).toHaveValue(16);
   });
 
   it("기기 상한은 16보다 높일 수 없다", () => {
     renderView();
+    openSettings();
     const device = screen.getByLabelText("기기 상한");
 
     fireEvent.change(device, { target: { value: "32" } });
@@ -496,6 +539,7 @@ describe("AgentRuntimeView 역할 정책", () => {
   // 런타임 설정 계약에 끄기 필드가 없다. 화면이 끄기를 성공처럼 보여주지 않는다.
   it("역할 사용 여부는 사실만 보여주고 조작을 열지 않는다", () => {
     const { container } = renderView();
+    openSettings();
 
     const card = container.querySelector<HTMLElement>(".agent-role-card");
     expect(within(card as HTMLElement).getByText("사용 중")).toBeInTheDocument();
@@ -509,9 +553,10 @@ describe("AgentRuntimeView 역할 정책", () => {
 
   it("첫 확인은 요약만 보여주고 두 번째 확인이 저장한다", async () => {
     const { actions } = renderView();
+    openSettings();
 
     fireEvent.change(screen.getByLabelText("기획자 모델"), { target: { value: "opus" } });
-    fireEvent.click(screen.getByRole("button", { name: "역할 정책 저장" }));
+    fireEvent.click(screen.getByRole("button", { name: "변경 내용 저장" }));
 
     expect(actions.save).not.toHaveBeenCalled();
     const summary = screen.getByText("이 내용으로 저장합니다").closest("div");
@@ -528,8 +573,9 @@ describe("AgentRuntimeView 역할 정책", () => {
 
   it("호환되지 않는 런타임에서는 저장을 막고 이유를 보여준다", () => {
     renderView(state({ policy: policy(undefined, { executionAllowed: false }) }));
+    openSettings();
 
-    expect(screen.getByRole("button", { name: "역할 정책 저장" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "변경 내용 저장" })).toBeDisabled();
     expect(screen.getByLabelText("기획자 실행 도구")).toBeDisabled();
     expect(
       screen.getByText("이 런타임에서는 설정을 저장할 수 없습니다. 위의 준비 상태를 먼저 해결해 주세요."),
@@ -538,6 +584,7 @@ describe("AgentRuntimeView 역할 정책", () => {
 
   it("저장 실패 사유를 그 자리에서 보여준다", () => {
     renderView(state({ saveError: "다른 저장이 먼저 반영됐습니다." }));
+    openSettings();
 
     expect(screen.getByText("다른 저장이 먼저 반영됐습니다.")).toBeInTheDocument();
   });
@@ -545,6 +592,7 @@ describe("AgentRuntimeView 역할 정책", () => {
   // 프로젝트를 바꾸면 훅이 스냅샷을 갈아 끼운다. 폼은 그 값으로 다시 서고 이전 편집이 남지 않는다.
   it("스냅샷이 바뀌면 편집 중이던 값이 새 프로젝트 값으로 바뀐다", () => {
     const { rerender, actions } = renderView();
+    openSettings();
     fireEvent.change(screen.getByLabelText("기획자 모델"), { target: { value: "opus" } });
 
     const next = policy();
@@ -609,7 +657,7 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     fireEvent.change(screen.getByLabelText("개발자 수동 대상"), {
       target: { value: "TASK-S051-01,TASK-S051-02" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "계획 확인" }));
+    fireEvent.click(screen.getByRole("button", { name: "시작 가능 여부 확인" }));
 
     await waitFor(() => expect(actions.planRun).toHaveBeenCalledTimes(1));
     expect(actions.planRun).toHaveBeenCalledWith(
@@ -627,7 +675,7 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
     const actions = actionsStub();
     renderView(state({ queue }), actions);
 
-    fireEvent.click(screen.getByText("프로젝트 실행 제어"));
+    fireEvent.click(screen.getByText("새 작업 배정 제어"));
     fireEvent.click(screen.getByRole("button", { name: "새 배정 일시 정지" }));
     expect(actions.setProjectPaused).not.toHaveBeenCalled();
     expect(screen.getByText(/이미 실행 중인 항목과 다른 프로젝트의 상태는 유지/)).toBeInTheDocument();
@@ -671,7 +719,8 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
   it("실행 기록이 없으면 중복된 빈 목록 대신 한 문장만 보여준다", () => {
     renderView(state({ queue: { ...queue, runs: [] } }));
 
-    expect(screen.getAllByText("아직 실행 기록이 없습니다.")).toHaveLength(1);
+    expect(screen.getAllByText("아직 실행한 에이전트가 없습니다")).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "역할별 실행 현황" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "실행 중과 대기" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "최근 종료" })).not.toBeInTheDocument();
   });
@@ -770,6 +819,7 @@ describe("AgentRuntimeView 경계", () => {
 
   it("실행 도구 선택지는 계약이 허용한 둘뿐이다", () => {
     renderView();
+    openSettings();
 
     const options = Array.from(
       screen.getByLabelText("기획자 실행 도구").querySelectorAll("option"),
