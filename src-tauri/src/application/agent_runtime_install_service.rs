@@ -16,8 +16,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::domain::agent_runtime::{
-    judge, Compatibility, RuntimeStatus, StageResult, UpdateApplication, UpdatePlan, UpdateStage,
-    SUPPORTED_API_MAJOR,
+    judge, Compatibility, RuntimeStatus, ServiceState, StageResult, UpdateApplication, UpdatePlan,
+    UpdateStage, SUPPORTED_API_MAJOR,
 };
 use crate::infrastructure::agent_runtime_package::{
     self, launcher_path, PackageFailure, RuntimeManifest,
@@ -58,6 +58,20 @@ pub struct InstallPlan {
     pub installed_version: Option<String>,
     /// 이 계획이 서비스 등록·재시작을 필요로 하는지.
     pub service_transition_required: bool,
+    /// 계획이 읽은 서비스 상태. 운영체제 등록물을 앱이 다시 해석하지 않는다.
+    pub service: Option<ServiceState>,
+    /// 적용 단계가 수행할 서비스 처분. 확인 불가를 `false`로 접지 않는다.
+    pub service_action: InstallServiceAction,
+}
+
+/// 설치 계획이 서비스에 수행할 수 있는 처분.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallServiceAction {
+    Register,
+    AlreadyManaged,
+    MigrationRequired,
+    Unknown,
 }
 
 /// 적용 결과. 단계 이름은 런타임 계약의 것을 쓰고 앱이 새 이름을 만들지 않는다.
@@ -151,22 +165,37 @@ impl<'a> AgentRuntimeInstallService<'a> {
 
     /// 설치 계획을 만든다. 검증까지만 하고 파일은 만들지 않는다.
     pub fn plan_install(&self, caller: &dyn RuntimeCaller) -> Result<InstallPlan, InstallFailure> {
+        let bundled = LauncherCaller::new(self.resource_executable());
+        self.plan_install_with(caller, &bundled)
+    }
+
+    fn plan_install_with(
+        &self,
+        caller: &dyn RuntimeCaller,
+        bundled: &dyn RuntimeCaller,
+    ) -> Result<InstallPlan, InstallFailure> {
         let manifest = self.manifest()?;
         agent_runtime_package::verify(self.resource, &manifest).map_err(InstallFailure::Package)?;
         let destination = self.version_directory(&manifest);
-        let inspection = self.inspect(caller);
-        let installed_version = inspection
-            .status
+        let status = self.install_status(caller, bundled).ok();
+        let installed_version = status
             .as_ref()
             .and_then(|status| status.installed_version.clone());
-        let service_transition_required = inspection
-            .status
-            .as_ref()
-            .map(|status| status.service.registered == Some(true))
-            .unwrap_or(false);
+        let service_action = self.service_action(status.as_ref());
+        let service_transition_required = match service_action {
+            InstallServiceAction::AlreadyManaged => {
+                status.as_ref().and_then(|status| status.service.running) != Some(true)
+            }
+            _ => true,
+        };
 
         Ok(InstallPlan {
-            plan_id: self.fingerprint(&manifest, installed_version.as_deref()),
+            plan_id: self.fingerprint(
+                &manifest,
+                installed_version.as_deref(),
+                service_action,
+                status.as_ref().map(|status| &status.service),
+            ),
             bundled_version: manifest.runtime_version.clone(),
             target: manifest.target.clone(),
             version_directory: destination.display().to_string(),
@@ -174,6 +203,8 @@ impl<'a> AgentRuntimeInstallService<'a> {
             already_installed: destination.is_dir(),
             installed_version,
             service_transition_required,
+            service: status.map(|status| status.service),
+            service_action,
         })
     }
 
@@ -184,16 +215,33 @@ impl<'a> AgentRuntimeInstallService<'a> {
         plan_id: &str,
         confirmed: bool,
     ) -> Result<InstallApplication, InstallFailure> {
+        let bundled = LauncherCaller::new(self.resource_executable());
+        self.apply_install_with(caller, &bundled, plan_id, confirmed)
+    }
+
+    fn apply_install_with(
+        &self,
+        caller: &dyn RuntimeCaller,
+        bundled: &dyn RuntimeCaller,
+        plan_id: &str,
+        confirmed: bool,
+    ) -> Result<InstallApplication, InstallFailure> {
         if !confirmed {
             return Err(InstallFailure::ConfirmationRequired);
         }
         let manifest = self.manifest()?;
-        let inspection = self.inspect(caller);
-        let installed_version = inspection
-            .status
+        let status = self.install_status(caller, bundled).ok();
+        let installed_version = status
             .as_ref()
             .and_then(|status| status.installed_version.clone());
-        if self.fingerprint(&manifest, installed_version.as_deref()) != plan_id {
+        let service_action = self.service_action(status.as_ref());
+        if self.fingerprint(
+            &manifest,
+            installed_version.as_deref(),
+            service_action,
+            status.as_ref().map(|status| &status.service),
+        ) != plan_id
+        {
             return Err(InstallFailure::StalePlan);
         }
         let destination =
@@ -225,15 +273,84 @@ impl<'a> AgentRuntimeInstallService<'a> {
             }
         }
 
-        // 서비스 등록은 launcher가 생긴 뒤에만 가능하다. 실패해도 설치본은 남으므로 전체 실패가
-        // 아니라 남은 단계로 알린다 — 사용자가 서비스만 다시 걸면 된다.
-        match agent_runtime_process::install_service(caller) {
-            Ok(_) => stages.push(stage(UpdateStage::ServiceTransition, "ok", None)),
-            Err(failure) => {
+        // 계획에서 읽은 서비스 처분만 실행한다. 등록된 서비스를 다시 등록하면 중복 데몬 안전장치가
+        // 뒤늦게 실패하므로, 등록 없음에서만 `install-service`를 호출한다.
+        match service_action {
+            InstallServiceAction::Register => {
+                match agent_runtime_process::install_service(caller) {
+                    Ok(_) => stages.push(stage(UpdateStage::ServiceTransition, "ok", None)),
+                    Err(failure) => {
+                        stages.push(stage(
+                            UpdateStage::ServiceTransition,
+                            "failed",
+                            Some(failure.message()),
+                        ));
+                        return Ok(partial(
+                            plan_id,
+                            &manifest.runtime_version,
+                            &destination,
+                            stages,
+                        ));
+                    }
+                }
+            }
+            InstallServiceAction::AlreadyManaged
+                if status.as_ref().and_then(|status| status.service.running) == Some(true) =>
+            {
+                stages.push(stage(
+                    UpdateStage::ServiceTransition,
+                    "skipped",
+                    Some(
+                        "관리형 서비스가 이미 실행 중이어서 등록을 반복하지 않았습니다".to_owned(),
+                    ),
+                ));
+            }
+            InstallServiceAction::AlreadyManaged => {
                 stages.push(stage(
                     UpdateStage::ServiceTransition,
                     "failed",
-                    Some(failure.message()),
+                    Some(
+                        "관리형 서비스가 등록되어 있지만 실행 상태가 아닙니다. 기존 등록은 유지했으며 새 복구 계획이 필요합니다"
+                            .to_owned(),
+                    ),
+                ));
+                return Ok(partial(
+                    plan_id,
+                    &manifest.runtime_version,
+                    &destination,
+                    stages,
+                ));
+            }
+            InstallServiceAction::MigrationRequired => {
+                let service = status.as_ref().map(|status| &status.service);
+                let label = service
+                    .map(|service| service.label.as_str())
+                    .unwrap_or("알 수 없음");
+                let executable = service
+                    .map(|service| service.executable.as_str())
+                    .unwrap_or("알 수 없음");
+                stages.push(stage(
+                    UpdateStage::ServiceTransition,
+                    "failed",
+                    Some(format!(
+                        "기존 서비스 {label} ({executable})를 유지했습니다. 중복 등록하지 말고 기존 역할 잡 이전 미리보기 뒤 별도 서비스 전환 계획을 확인하세요"
+                    )),
+                ));
+                return Ok(partial(
+                    plan_id,
+                    &manifest.runtime_version,
+                    &destination,
+                    stages,
+                ));
+            }
+            InstallServiceAction::Unknown => {
+                stages.push(stage(
+                    UpdateStage::ServiceTransition,
+                    "failed",
+                    Some(
+                        "서비스 등록 상태를 확인하지 못해 변경하지 않았습니다. 다시 읽은 뒤 새 계획을 만드세요"
+                            .to_owned(),
+                    ),
                 ));
                 return Ok(partial(
                     plan_id,
@@ -316,14 +433,76 @@ impl<'a> AgentRuntimeInstallService<'a> {
             .join(&manifest.runtime_version)
     }
 
-    /// 계획이 가정한 사실의 지문. 번들 버전과 target, 그리고 지금 설치된 버전을 묶는다.
-    fn fingerprint(&self, manifest: &RuntimeManifest, installed: Option<&str>) -> String {
+    fn resource_executable(&self) -> PathBuf {
+        self.resource.join(if cfg!(windows) {
+            "heartbeat.exe"
+        } else {
+            "heartbeat"
+        })
+    }
+
+    /// stable launcher가 아직 없을 때만 번들 실행 파일로 읽기 전용 기기 조회를 다시 시도한다.
+    fn install_status(
+        &self,
+        caller: &dyn RuntimeCaller,
+        bundled: &dyn RuntimeCaller,
+    ) -> Result<RuntimeStatus, RuntimeCallFailure> {
+        match agent_runtime_process::inspect(caller, self.install_root) {
+            Err(RuntimeCallFailure::NotFound { .. }) => {
+                agent_runtime_process::inspect(bundled, self.install_root)
+            }
+            result => result,
+        }
+    }
+
+    fn service_action(&self, status: Option<&RuntimeStatus>) -> InstallServiceAction {
+        let Some(service) = status.map(|status| &status.service) else {
+            return InstallServiceAction::Unknown;
+        };
+        match service.registered {
+            Some(false) => InstallServiceAction::Register,
+            Some(true)
+                if service.executable == launcher_path(self.install_root).display().to_string() =>
+            {
+                InstallServiceAction::AlreadyManaged
+            }
+            Some(true) => InstallServiceAction::MigrationRequired,
+            None => InstallServiceAction::Unknown,
+        }
+    }
+
+    /// 계획이 가정한 사실의 지문. 서비스 신원이 바뀌면 파일을 쓰기 전에 오래된 계획을 거절한다.
+    fn fingerprint(
+        &self,
+        manifest: &RuntimeManifest,
+        installed: Option<&str>,
+        service_action: InstallServiceAction,
+        service: Option<&ServiceState>,
+    ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(manifest.runtime_version.as_bytes());
         hasher.update(b"\0");
         hasher.update(manifest.target.as_bytes());
         hasher.update(b"\0");
         hasher.update(installed.unwrap_or("none").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(format!("{service_action:?}").as_bytes());
+        if let Some(service) = service {
+            for value in [
+                service.platform.as_str(),
+                service.label.as_str(),
+                service.executable.as_str(),
+            ] {
+                hasher.update(b"\0");
+                hasher.update(value.as_bytes());
+            }
+            hasher.update(b"\0");
+            hasher.update(format!("{:?}", service.result).as_bytes());
+            hasher.update(b"\0");
+            hasher.update(format!("{:?}", service.registered).as_bytes());
+            hasher.update(b"\0");
+            hasher.update(format!("{:?}", service.running).as_bytes());
+        }
         format!("{:x}", hasher.finalize())[..32].to_owned()
     }
 }
@@ -362,7 +541,7 @@ mod tests {
     use serde_json::json;
     use tempfile::{tempdir, TempDir};
 
-    use super::{AgentRuntimeInstallService, InstallFailure};
+    use super::{AgentRuntimeInstallService, InstallFailure, InstallServiceAction};
     use crate::domain::agent_runtime::{Compatibility, ServiceResult};
     use crate::infrastructure::agent_runtime_package::tests::bundled;
     use crate::infrastructure::agent_runtime_package::{host_target, VERSIONS_DIRECTORY};
@@ -397,6 +576,20 @@ mod tests {
             1,
             service_body("registered", json!(true), json!(true)),
         )
+    }
+
+    fn status_with_service(
+        version: &str,
+        result: &str,
+        registered: serde_json::Value,
+        running: serde_json::Value,
+        label: &str,
+        executable: &str,
+    ) -> serde_json::Value {
+        let mut service = service_body(result, registered, running);
+        service["label"] = json!(label);
+        service["executable"] = json!(executable);
+        status_body(json!(version), json!(null), 1, service)
     }
 
     #[test]
@@ -453,6 +646,61 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_launcher_uses_the_bundled_runtime_to_plan_a_foreign_service() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let caller = FakeCaller::new(vec![Err(RuntimeCallFailure::NotFound {
+            looked: root.path().join("bin/heartbeat"),
+        })]);
+        let bundled = answering(vec![status_with_service(
+            "0.8.0",
+            "registered",
+            json!(true),
+            json!(false),
+            "com.catze.dream-heartbeat",
+            "/legacy/dream-heartbeat",
+        )]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+
+        let plan = service.plan_install_with(&caller, &bundled).expect("plan");
+
+        assert_eq!(plan.service_action, InstallServiceAction::MigrationRequired);
+        assert!(plan.service_transition_required);
+        let service = plan.service.expect("service state");
+        assert_eq!(service.label, "com.catze.dream-heartbeat");
+        assert_eq!(service.executable, "/legacy/dream-heartbeat");
+        assert!(!root.path().join(VERSIONS_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn the_serialized_plan_keeps_the_service_identity_and_disposition() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let caller = answering(vec![status_with_service(
+            "0.8.0",
+            "registered",
+            json!(true),
+            json!(false),
+            "com.catze.dream-heartbeat",
+            "/legacy/dream-heartbeat",
+        )]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+
+        let plan = service.plan_install(&caller).expect("plan");
+        let serialized = serde_json::to_value(plan).expect("serialized plan");
+
+        assert_eq!(serialized["serviceAction"], json!("migration_required"));
+        assert_eq!(
+            serialized["service"]["label"],
+            json!("com.catze.dream-heartbeat")
+        );
+        assert_eq!(
+            serialized["service"]["executable"],
+            json!("/legacy/dream-heartbeat")
+        );
+    }
+
+    #[test]
     fn applying_without_a_confirmation_changes_nothing() {
         let resource = bundled("0.9.0");
         let root = install_root();
@@ -484,6 +732,47 @@ mod tests {
         assert!(!root.path().join(VERSIONS_DIRECTORY).exists());
     }
 
+    #[test]
+    fn a_service_identity_change_makes_the_plan_stale_before_writing() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let caller = FakeCaller::new(vec![
+            Err(RuntimeCallFailure::NotFound {
+                looked: root.path().join("bin/heartbeat"),
+            }),
+            Err(RuntimeCallFailure::NotFound {
+                looked: root.path().join("bin/heartbeat"),
+            }),
+        ]);
+        let bundled = answering(vec![
+            status_with_service(
+                "0.8.0",
+                "registered",
+                json!(true),
+                json!(false),
+                "com.catze.dream-heartbeat",
+                "/legacy/one",
+            ),
+            status_with_service(
+                "0.8.0",
+                "registered",
+                json!(true),
+                json!(false),
+                "com.catze.dream-heartbeat",
+                "/legacy/two",
+            ),
+        ]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+        let plan = service.plan_install_with(&caller, &bundled).expect("plan");
+
+        let failure = service
+            .apply_install_with(&caller, &bundled, &plan.plan_id, true)
+            .expect_err("stale plan");
+
+        assert_eq!(failure, InstallFailure::StalePlan);
+        assert!(!root.path().join(VERSIONS_DIRECTORY).exists());
+    }
+
     /// 처음 설치의 세 단계가 계약 이름 그대로 나오는지 본다. 스크립트가 실행돼야 launcher 전환이
     /// 성립하므로 unix에서만 돈다.
     #[cfg(unix)]
@@ -493,9 +782,17 @@ mod tests {
 
         let resource = bundled("0.9.0");
         let root = install_root();
+        let not_registered = status_with_service(
+            "0.8.0",
+            "not_registered",
+            json!(false),
+            json!(false),
+            "",
+            "",
+        );
         let caller = answering(vec![
-            installed_status("0.8.0"),
-            installed_status("0.8.0"),
+            not_registered.clone(),
+            not_registered,
             json!({"outcome": "success"}),
         ]);
         let service = AgentRuntimeInstallService::new(resource.path(), root.path());
@@ -526,6 +823,111 @@ mod tests {
             .join("0.9.0")
             .join("heartbeat")
             .is_file());
+        assert_eq!(caller.calls.borrow()[2].0, vec!["install-service"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_service_is_preserved_and_never_re_registered() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let caller = FakeCaller::new(vec![
+            Err(RuntimeCallFailure::NotFound {
+                looked: root.path().join("bin/heartbeat"),
+            }),
+            Err(RuntimeCallFailure::NotFound {
+                looked: root.path().join("bin/heartbeat"),
+            }),
+        ]);
+        let foreign = status_with_service(
+            "0.8.0",
+            "registered",
+            json!(true),
+            json!(false),
+            "com.catze.dream-heartbeat",
+            "/legacy/dream-heartbeat",
+        );
+        let bundled = answering(vec![foreign.clone(), foreign]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+        let plan = service.plan_install_with(&caller, &bundled).expect("plan");
+
+        let applied = service
+            .apply_install_with(&caller, &bundled, &plan.plan_id, true)
+            .expect("application");
+
+        assert_eq!(applied.result, "partial_success");
+        let transition = applied.stages.last().expect("service stage");
+        assert_eq!(transition.status, "failed");
+        assert!(transition
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("com.catze.dream-heartbeat")));
+        assert_eq!(caller.calls.borrow().len(), 2);
+        assert!(!caller
+            .calls
+            .borrow()
+            .iter()
+            .any(|(arguments, _)| arguments == &["install-service"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_service_state_changes_no_registration() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let missing = || RuntimeCallFailure::NotFound {
+            looked: root.path().join("bin/heartbeat"),
+        };
+        let caller = FakeCaller::new(vec![Err(missing()), Err(missing())]);
+        let bundled = FakeCaller::new(vec![Err(missing()), Err(missing())]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+        let plan = service.plan_install_with(&caller, &bundled).expect("plan");
+
+        let applied = service
+            .apply_install_with(&caller, &bundled, &plan.plan_id, true)
+            .expect("application");
+
+        assert_eq!(plan.service_action, InstallServiceAction::Unknown);
+        assert!(plan.service_transition_required);
+        assert_eq!(applied.result, "partial_success");
+        assert!(applied
+            .stages
+            .last()
+            .and_then(|stage| stage.detail.as_deref())
+            .is_some_and(|detail| detail.contains("확인하지 못해 변경하지 않았습니다")));
+        assert_eq!(caller.calls.borrow().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_already_running_managed_service_is_not_registered_twice() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let launcher = root.path().join("bin/heartbeat").display().to_string();
+        let managed = status_with_service(
+            "0.8.0",
+            "registered",
+            json!(true),
+            json!(true),
+            "com.claude-heartbeat",
+            &launcher,
+        );
+        let caller = answering(vec![managed.clone(), managed]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+        let plan = service.plan_install(&caller).expect("plan");
+
+        let applied = service
+            .apply_install(&caller, &plan.plan_id, true)
+            .expect("application");
+
+        assert_eq!(plan.service_action, InstallServiceAction::AlreadyManaged);
+        assert!(!plan.service_transition_required);
+        assert_eq!(applied.result, "success");
+        assert_eq!(
+            applied.stages.last().expect("service stage").status,
+            "skipped"
+        );
+        assert_eq!(caller.calls.borrow().len(), 2);
     }
 
     /// launcher 전환이 실패하면 설치본은 남기고 전체 성공으로 표시하지 않는다.

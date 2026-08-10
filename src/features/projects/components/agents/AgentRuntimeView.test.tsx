@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  AgentInstallPlan,
   AgentPolicySnapshot,
   AgentProviderDiagnosis,
   AgentQueueSnapshot,
@@ -174,6 +175,24 @@ const updatePlan: AgentUpdatePlan = {
   service,
 };
 
+const installPlan: AgentInstallPlan = {
+  planId: "plan-install-1",
+  bundledVersion: "0.9.0",
+  target: "macos-universal",
+  versionDirectory: "/runtime/versions/0.9.0",
+  launcher: "/runtime/bin/heartbeat",
+  alreadyInstalled: false,
+  installedVersion: null,
+  serviceTransitionRequired: true,
+  service: {
+    ...service,
+    running: false,
+    label: "com.catze.dream-heartbeat",
+    executable: "/Users/tester/.pyenv/bin/dream-heartbeat",
+  },
+  serviceAction: "migration_required",
+};
+
 const runPlan: AgentRunPlan = {
   planId: "run-plan-1",
   projectId: "prj_1",
@@ -330,6 +349,58 @@ describe("AgentRuntimeView 계획과 적용", () => {
     expect(within(plan).getByText(/그 세션이 끊길 수 있습니다/)).toBeInTheDocument();
     expect(within(plan).getByText(/workflow-labs, other/)).toBeInTheDocument();
     expect(within(plan).getByRole("button", { name: "이 계획을 적용" })).toBeInTheDocument();
+  });
+
+  it("다른 기존 서비스는 적용 전에 신원과 보존 방법을 보여준다", () => {
+    const { actions } = renderView(state({ plan: { kind: "install", plan: installPlan } }));
+
+    const plan = screen.getByRole("region", { name: "확인 대기 중인 계획" });
+    expect(within(plan).getByText("기존 서비스 이전 필요")).toBeInTheDocument();
+    expect(
+      within(plan).getByText(
+        "com.catze.dream-heartbeat · /Users/tester/.pyenv/bin/dream-heartbeat",
+      ),
+    ).toBeInTheDocument();
+    expect(within(plan).getByText(/삭제·중지·덮어쓰기·중복 등록하지 않습니다/)).toBeInTheDocument();
+    expect(within(plan).getByText(/‘기존 역할 잡 이전’에서 이전 미리보기/)).toBeInTheDocument();
+    expect(actions.apply).not.toHaveBeenCalled();
+  });
+
+  it("확인 불가 서비스는 변경하지 않고 새 계획이 필요하다고 알린다", () => {
+    renderView(
+      state({
+        plan: {
+          kind: "install",
+          plan: { ...installPlan, service: null, serviceAction: "unknown" },
+        },
+      }),
+    );
+
+    const plan = screen.getByRole("region", { name: "확인 대기 중인 계획" });
+    expect(within(plan).getByText("서비스 상태 확인 필요")).toBeInTheDocument();
+    expect(within(plan).getByText("확인 불가 · 확인 불가")).toBeInTheDocument();
+    expect(within(plan).getByText(/서비스는 변경하지 않습니다/)).toBeInTheDocument();
+    expect(within(plan).getByText(/다시 읽은 뒤 새 계획/)).toBeInTheDocument();
+  });
+
+  it("미등록 상태는 새 서비스를 한 번 등록한다고 구분한다", () => {
+    renderView(
+      state({
+        plan: {
+          kind: "install",
+          plan: {
+            ...installPlan,
+            service: { ...service, registered: false, running: false, label: "", executable: "" },
+            serviceAction: "register",
+          },
+        },
+      }),
+    );
+
+    const plan = screen.getByRole("region", { name: "확인 대기 중인 계획" });
+    expect(within(plan).getByText("새 서비스 등록")).toBeInTheDocument();
+    expect(within(plan).getByText("등록된 서비스 없음")).toBeInTheDocument();
+    expect(within(plan).getByText(/새 서비스를 한 번 등록합니다/)).toBeInTheDocument();
   });
 
   it("적용은 사용자가 누를 때만 불린다", async () => {

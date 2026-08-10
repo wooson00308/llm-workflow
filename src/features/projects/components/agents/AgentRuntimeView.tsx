@@ -1,6 +1,8 @@
 import { Icon } from "../../../../shared/ui/Icon";
 import type {
   AgentCompatibility,
+  AgentInstallPlan,
+  AgentInstallServiceAction,
   AgentProviderDiagnosis,
   AgentRuntimeActions,
   AgentRuntimeOperation,
@@ -49,6 +51,40 @@ const providerDiagnoses: Record<string, { title: string; action: string }> = {
     action: "구독이 아닌 API 과금으로 실행될 수 있습니다. 도구 쪽에서 과금 경로를 확인해 주세요.",
   },
 };
+
+const installServiceActionLabels: Record<AgentInstallServiceAction, string> = {
+  register: "새 서비스 등록",
+  already_managed: "관리 중인 서비스 유지",
+  migration_required: "기존 서비스 이전 필요",
+  unknown: "서비스 상태 확인 필요",
+};
+
+function serviceFact(value: string | null | undefined, fallback = "확인 불가") {
+  return value?.trim() ? value : fallback;
+}
+
+function triState(value: boolean | null | undefined) {
+  if (value === true) return "예";
+  if (value === false) return "아니요";
+  return "확인 불가";
+}
+
+function installServiceGuidance(plan: AgentInstallPlan) {
+  const label = serviceFact(plan.service?.label);
+  const executable = serviceFact(plan.service?.executable);
+  switch (plan.serviceAction) {
+    case "register":
+      return "등록된 서비스가 없어 런타임 파일과 stable launcher를 설치한 뒤 새 서비스를 한 번 등록합니다.";
+    case "already_managed":
+      return plan.service?.running === true
+        ? "stable launcher를 가리키는 관리형 서비스가 이미 실행 중입니다. 기존 등록을 유지하고 중복 등록하지 않습니다."
+        : "stable launcher를 가리키는 관리형 서비스가 등록돼 있지만 실행 중이 아닙니다. 기존 등록을 유지하고 등록을 반복하지 않으며, 적용 뒤 다시 읽어 복구 계획을 확인합니다.";
+    case "migration_required":
+      return `기존 서비스 ${label} (${executable})를 그대로 유지합니다. 이 계획은 런타임 파일과 launcher만 놓고 서비스를 삭제·중지·덮어쓰기·중복 등록하지 않습니다. 아래 ‘기존 역할 잡 이전’에서 이전 미리보기를 확인하세요.`;
+    case "unknown":
+      return "서비스 상태를 확인하지 못해 서비스는 변경하지 않습니다. 이 계획은 런타임 파일과 launcher만 놓고 서비스 단계를 남기며, 다시 읽은 뒤 새 계획을 만들어야 합니다.";
+  }
+}
 
 /**
  * 기기 상태에서 준비 영역의 문구와 버튼을 정한다.
@@ -238,8 +274,26 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
                   <dd>{pending.plan.versionDirectory}</dd>
                 </div>
                 <div>
-                  <dt>서비스 등록</dt>
+                  <dt>서비스 전환</dt>
                   <dd>{pending.plan.serviceTransitionRequired ? "필요함" : "필요 없음"}</dd>
+                </div>
+                <div>
+                  <dt>처리 방법</dt>
+                  <dd>{installServiceActionLabels[pending.plan.serviceAction]}</dd>
+                </div>
+                <div>
+                  <dt>서비스 신원</dt>
+                  <dd>
+                    {pending.plan.serviceAction === "register"
+                      ? "등록된 서비스 없음"
+                      : `${serviceFact(pending.plan.service?.label)} · ${serviceFact(pending.plan.service?.executable)}`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>등록 / 실행</dt>
+                  <dd>
+                    {triState(pending.plan.service?.registered)} / {triState(pending.plan.service?.running)}
+                  </dd>
                 </div>
               </>
             ) : (
@@ -270,6 +324,18 @@ export function AgentRuntimeView({ actions, projectName, state }: Props) {
               </>
             )}
           </dl>
+          {pending.kind === "install" && (
+            <p
+              className={
+                pending.plan.serviceAction === "migration_required" ||
+                pending.plan.serviceAction === "unknown"
+                  ? "agent-blocked-note"
+                  : "agent-migration-note"
+              }
+            >
+              {installServiceGuidance(pending.plan)}
+            </p>
+          )}
           <div className="agent-plan-actions">
             <button
               className="secondary-button"

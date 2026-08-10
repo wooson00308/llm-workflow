@@ -1177,6 +1177,13 @@ export interface AgentRuntimeInspection {
   installRoot: string;
 }
 
+/** 설치 계획이 서비스에 수행할 처분. 확인 불가를 등록 불필요로 접지 않는다. */
+export type AgentInstallServiceAction =
+  | "register"
+  | "already_managed"
+  | "migration_required"
+  | "unknown";
+
 export interface AgentInstallPlan {
   planId: string;
   bundledVersion: string;
@@ -1186,6 +1193,10 @@ export interface AgentInstallPlan {
   alreadyInstalled: boolean;
   installedVersion: string | null;
   serviceTransitionRequired: boolean;
+  /** 계획을 만들 때 런타임이 읽은 서비스 사실. null은 조회 자체가 불가능했다는 뜻이다. */
+  service: AgentServiceState | null;
+  /** 적용이 실제로 수행할 서비스 처분. 계획 확인 화면이 이 값을 숨기지 않는다. */
+  serviceAction: AgentInstallServiceAction;
 }
 
 export interface AgentStageResult {

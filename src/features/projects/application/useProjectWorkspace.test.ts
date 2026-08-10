@@ -285,6 +285,8 @@ const agentInstallPlan: AgentInstallPlan = {
   alreadyInstalled: false,
   installedVersion: null,
   serviceTransitionRequired: true,
+  service: agentService,
+  serviceAction: "already_managed",
 };
 
 const agentInstallApplication: AgentInstallApplication = {

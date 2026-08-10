@@ -70,12 +70,23 @@ impl RuntimeCallFailure {
             RuntimeCallFailure::NotStarted { reason } => {
                 format!("런타임을 실행하지 못했습니다: {reason}")
             }
-            RuntimeCallFailure::OffContract { code, stderr, .. } => format!(
-                "런타임 응답이 계약 밖입니다(코드 {}): {}",
-                code.map(|value| value.to_string())
-                    .unwrap_or_else(|| "없음".to_owned()),
-                stderr.trim()
-            ),
+            RuntimeCallFailure::OffContract {
+                code,
+                stdout,
+                stderr,
+            } => {
+                let detail = if stderr.trim().is_empty() {
+                    stdout.trim()
+                } else {
+                    stderr.trim()
+                };
+                format!(
+                    "런타임 응답이 계약 밖입니다(코드 {}): {}",
+                    code.map(|value| value.to_string())
+                        .unwrap_or_else(|| "없음".to_owned()),
+                    detail
+                )
+            }
         }
     }
 }
@@ -124,6 +135,15 @@ impl RuntimeCaller for LauncherCaller {
             });
         }
         let mut command = Command::new(&self.launcher);
+        if let Some(parent) = self.launcher.parent() {
+            let mut paths = vec![parent.to_path_buf()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(joined) = std::env::join_paths(paths) {
+                command.env("PATH", joined);
+            }
+        }
         command
             .args(arguments)
             .stdin(if request.is_some() {
@@ -456,6 +476,8 @@ fn off_contract(captured: &Captured) -> RuntimeCallFailure {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::fs;
     use std::path::PathBuf;
 
     use pretty_assertions::assert_eq;
@@ -724,5 +746,36 @@ pub(crate) mod tests {
                 stderr: "boom".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn a_nonzero_command_uses_stdout_when_stderr_is_empty() {
+        let failure = RuntimeCallFailure::OffContract {
+            code: Some(1),
+            stdout: "기존 서비스를 유지했습니다".to_owned(),
+            stderr: String::new(),
+        };
+
+        assert_eq!(
+            failure.message(),
+            "런타임 응답이 계약 밖입니다(코드 1): 기존 서비스를 유지했습니다"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launcher_prepends_its_directory_to_the_runtime_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let launcher = directory.path().join("heartbeat");
+        fs::write(&launcher, "#!/bin/sh\ncommand -v heartbeat\n").expect("launcher");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let caller = super::LauncherCaller::new(launcher.clone());
+
+        let captured = caller.call(&["install-service"], None).expect("call");
+
+        assert_eq!(captured.code, Some(0));
+        assert_eq!(captured.stdout.trim(), launcher.display().to_string());
     }
 }
