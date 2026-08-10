@@ -51,26 +51,38 @@ pub enum CancelOutcome {
 pub enum RunFailure {
     Runtime(RuntimeCallFailure),
     /// 런타임이 다른 프로젝트의 값을 돌려줬다.
-    ProjectMismatch { requested: String, answered: String },
+    ProjectMismatch {
+        requested: String,
+        answered: String,
+    },
     /// 계획이 더 이상 유효하지 않다. 새 계획이 필요하다.
-    PlanRejected { reason: String },
+    PlanRejected {
+        reason: String,
+    },
     /// 이 런타임의 계약이 앱의 지원 범위 밖이다.
     Incompatible(Compatibility),
     /// 응답이 계약의 모양이 아니다.
-    OffContract { detail: String },
+    OffContract {
+        detail: String,
+    },
 }
 
 impl RunFailure {
     pub fn message(&self) -> String {
         match self {
             RunFailure::Runtime(failure) => failure.message(),
-            RunFailure::ProjectMismatch { requested, answered } => format!(
+            RunFailure::ProjectMismatch {
+                requested,
+                answered,
+            } => format!(
                 "런타임이 다른 프로젝트({answered})의 값을 돌려줬습니다. 요청은 {requested}입니다."
             ),
             RunFailure::PlanRejected { reason } => {
                 format!("계획이 더 이상 유효하지 않습니다({reason}). 새 계획을 읽어 주세요.")
             }
-            RunFailure::Incompatible(_) => "이 런타임은 앱이 지원하는 계약 범위 밖입니다.".to_owned(),
+            RunFailure::Incompatible(_) => {
+                "이 런타임은 앱이 지원하는 계약 범위 밖입니다.".to_owned()
+            }
             RunFailure::OffContract { detail } => {
                 format!("런타임 응답이 계약의 모양이 아닙니다: {detail}")
             }
@@ -264,7 +276,12 @@ mod tests {
         }})
     }
 
-    fn run_row(run: &str, project: &str, state: &str, remaining: serde_json::Value) -> serde_json::Value {
+    fn run_row(
+        run: &str,
+        project: &str,
+        state: &str,
+        remaining: serde_json::Value,
+    ) -> serde_json::Value {
         json!({
             "runId": run, "projectId": project, "role": "developer", "provider": "claude",
             "state": state, "targetId": "TASK-1", "startedAt": "2026-08-08T10:00:00Z",
@@ -421,7 +438,9 @@ mod tests {
     fn a_retry_links_the_previous_run() {
         let mut row = run_row("run-2", "p1", "running", json!([]));
         row["previousRunId"] = json!("run-1");
-        let caller = FakeCaller::new(vec![Ok(envelope(json!({"run": row, "previousRunId": "run-1"})))]);
+        let caller = FakeCaller::new(vec![Ok(envelope(
+            json!({"run": row, "previousRunId": "run-1"}),
+        ))]);
 
         let run = AgentRuntimeRunService
             .retry(&caller, "p1", "run-1", &Compatibility::Compatible)
@@ -448,7 +467,9 @@ mod tests {
 
         for (arguments, _) in caller.calls.borrow().iter() {
             assert!(!arguments.iter().any(|value| value == "once"));
-            assert!(!arguments.iter().any(|value| value == "claude" || value == "codex"));
+            assert!(!arguments
+                .iter()
+                .any(|value| value == "claude" || value == "codex"));
             assert_eq!(arguments[0], "agent");
         }
     }

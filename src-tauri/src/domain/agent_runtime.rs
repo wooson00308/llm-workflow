@@ -98,10 +98,7 @@ pub enum Compatibility {
     },
     /// 디스크의 버전과 도는 버전이 다르다. 디스크만 새 버전인 상태를 정상으로 표시하지 않는다.
     #[serde(rename_all = "camelCase")]
-    RestartRequired {
-        installed: String,
-        running: String,
-    },
+    RestartRequired { installed: String, running: String },
     /// 판정에 필요한 값을 읽지 못했다. 모름은 호환도 불호환도 아니다.
     #[serde(rename_all = "camelCase")]
     Undetermined { reason: String },
@@ -239,7 +236,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        judge, Compatibility, ServiceResult, ServiceState, RuntimeStatus, SUPPORTED_API_MAJOR,
+        judge, Compatibility, RuntimeStatus, ServiceResult, ServiceState, SUPPORTED_API_MAJOR,
     };
 
     fn service() -> ServiceState {
@@ -395,7 +392,11 @@ pub enum PolicyRejection {
     #[serde(rename_all = "camelCase")]
     UnsupportedRunMode { role: String, run_mode: String },
     #[serde(rename_all = "camelCase")]
-    RoleLimitExceeded { role: String, found: u32, limit: u32 },
+    RoleLimitExceeded {
+        role: String,
+        found: u32,
+        limit: u32,
+    },
     #[serde(rename_all = "camelCase")]
     ProjectLimitExceeded { found: u32, limit: u32 },
     #[serde(rename_all = "camelCase")]
@@ -418,7 +419,8 @@ pub fn validate_policy(policy: &ProjectPolicy) -> Result<(), PolicyRejection> {
             expected: POLICY_ROLES.iter().map(|role| (*role).to_owned()).collect(),
         });
     }
-    if policy.project_max_parallel == 0 || policy.project_max_parallel > policy.device_max_parallel {
+    if policy.project_max_parallel == 0 || policy.project_max_parallel > policy.device_max_parallel
+    {
         return Err(PolicyRejection::ProjectLimitExceeded {
             found: policy.project_max_parallel,
             limit: policy.device_max_parallel,
@@ -459,7 +461,11 @@ pub fn validate_policy(policy: &ProjectPolicy) -> Result<(), PolicyRejection> {
                 field: "maxPer".to_owned(),
             });
         }
-        if value.model.as_ref().is_some_and(|model| model.trim().is_empty()) {
+        if value
+            .model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
             return Err(PolicyRejection::InvalidValue {
                 role: role.clone(),
                 field: "model".to_owned(),

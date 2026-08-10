@@ -19,9 +19,7 @@ use crate::application::agent_runtime_install_service::{
 use crate::application::agent_runtime_run_service::{
     AgentRuntimeRunService, CancelOutcome, RoleSlotRequest, RunFailure,
 };
-use crate::application::agent_runtime_status_service::{
-    AgentRuntimeStatusService, StatusFailure,
-};
+use crate::application::agent_runtime_status_service::{AgentRuntimeStatusService, StatusFailure};
 use crate::application::heartbeat_service::HeartbeatService;
 use crate::domain::agent_runtime::{
     Compatibility, ProjectPolicy, QueueSnapshot, RunLogPage, RunPlan, RunStartOutcome, RunSummary,

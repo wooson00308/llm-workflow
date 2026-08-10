@@ -93,7 +93,11 @@ pub struct Captured {
 /// 검사는 런타임을 실제로 띄우지 않고 계약 응답만 흉내 내야 한다. 등록 없음·권한 부족·확인 불가처럼
 /// 기기에서 재현할 수 없는 상태가 검사 대상이라 이 갈래가 필요하다.
 pub trait RuntimeCaller {
-    fn call(&self, arguments: &[&str], request: Option<&Value>) -> Result<Captured, RuntimeCallFailure>;
+    fn call(
+        &self,
+        arguments: &[&str],
+        request: Option<&Value>,
+    ) -> Result<Captured, RuntimeCallFailure>;
 }
 
 /// 설치된 launcher를 실제로 띄우는 구현.
@@ -109,7 +113,11 @@ impl LauncherCaller {
 }
 
 impl RuntimeCaller for LauncherCaller {
-    fn call(&self, arguments: &[&str], request: Option<&Value>) -> Result<Captured, RuntimeCallFailure> {
+    fn call(
+        &self,
+        arguments: &[&str],
+        request: Option<&Value>,
+    ) -> Result<Captured, RuntimeCallFailure> {
         if !self.launcher.is_file() {
             return Err(RuntimeCallFailure::NotFound {
                 looked: self.launcher.clone(),
@@ -126,13 +134,18 @@ impl RuntimeCaller for LauncherCaller {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = command.spawn().map_err(|error| RuntimeCallFailure::NotStarted {
-            reason: error.to_string(),
-        })?;
-        if let Some(request) = request {
-            let mut stdin = child.stdin.take().ok_or_else(|| RuntimeCallFailure::NotStarted {
-                reason: "표준 입력을 열지 못했습니다".to_owned(),
+        let mut child = command
+            .spawn()
+            .map_err(|error| RuntimeCallFailure::NotStarted {
+                reason: error.to_string(),
             })?;
+        if let Some(request) = request {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| RuntimeCallFailure::NotStarted {
+                    reason: "표준 입력을 열지 못했습니다".to_owned(),
+                })?;
             let body = request.to_string();
             stdin
                 .write_all(body.as_bytes())
@@ -341,7 +354,11 @@ pub fn set_project_paused(
     paused: bool,
 ) -> Result<Value, RuntimeCallFailure> {
     let request = project_envelope(project_id);
-    let arguments = if paused { PROJECT_PAUSE } else { PROJECT_RESUME };
+    let arguments = if paused {
+        PROJECT_PAUSE
+    } else {
+        PROJECT_RESUME
+    };
     let captured = caller.call(&arguments, Some(&request))?;
     decode_envelope(&captured)
 }
@@ -361,7 +378,10 @@ pub fn read_run_log(
 }
 
 /// 프로젝트의 큐와 실행 상태를 읽는다.
-pub fn read_state(caller: &dyn RuntimeCaller, project_id: &str) -> Result<Value, RuntimeCallFailure> {
+pub fn read_state(
+    caller: &dyn RuntimeCaller,
+    project_id: &str,
+) -> Result<Value, RuntimeCallFailure> {
     let request = project_envelope(project_id);
     let captured = caller.call(&STATE_READ, Some(&request))?;
     decode_envelope(&captured)
@@ -377,7 +397,12 @@ fn project_envelope(project_id: &str) -> Value {
 }
 
 /// 계약이 정한 요청 봉투. 값은 앱이 아는 경로와 식별자뿐이다.
-fn envelope(install_root: &Path, version_dir: &Path, plan_id: Option<&str>, confirmed: bool) -> Value {
+fn envelope(
+    install_root: &Path,
+    version_dir: &Path,
+    plan_id: Option<&str>,
+    confirmed: bool,
+) -> Value {
     let mut request = json!({
         "apiVersion": API_VERSION,
         "requestId": uuid::Uuid::new_v4().to_string(),
@@ -395,7 +420,9 @@ fn envelope(install_root: &Path, version_dir: &Path, plan_id: Option<&str>, conf
 ///
 /// 봉투의 `outcome`으로 성공을 판정하지 않는다. 부분 성공과 실패도 앱이 그대로 보여 줄 사실이고,
 /// 그 사실은 `data` 안에 단계별로 들어 있다. 여기서 실패로 접으면 어느 단계까지 갔는지가 사라진다.
-fn decode_envelope<T: for<'de> Deserialize<'de>>(captured: &Captured) -> Result<T, RuntimeCallFailure> {
+fn decode_envelope<T: for<'de> Deserialize<'de>>(
+    captured: &Captured,
+) -> Result<T, RuntimeCallFailure> {
     let Ok(value) = serde_json::from_str::<Value>(first_line(&captured.stdout)) else {
         return Err(off_contract(captured));
     };
@@ -412,7 +439,10 @@ fn decode<T: for<'de> Deserialize<'de>>(captured: &Captured) -> Result<T, Runtim
 
 /// 계약은 표준 출력에 JSON 한 줄을 약속한다. 뒤에 붙은 것은 응답이 아니다.
 fn first_line(stdout: &str) -> &str {
-    stdout.lines().find(|line| !line.trim().is_empty()).unwrap_or("")
+    stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
 }
 
 fn off_contract(captured: &Captured) -> RuntimeCallFailure {
@@ -461,7 +491,11 @@ pub(crate) mod tests {
     }
 
     impl RuntimeCaller for FakeCaller {
-        fn call(&self, arguments: &[&str], request: Option<&Value>) -> Result<Captured, RuntimeCallFailure> {
+        fn call(
+            &self,
+            arguments: &[&str],
+            request: Option<&Value>,
+        ) -> Result<Captured, RuntimeCallFailure> {
             self.calls.borrow_mut().push((
                 arguments.iter().map(|value| (*value).to_owned()).collect(),
                 request.cloned(),
@@ -489,7 +523,12 @@ pub(crate) mod tests {
         })
     }
 
-    pub(crate) fn status_body(installed: Value, running: Value, api_major: u32, service: Value) -> Value {
+    pub(crate) fn status_body(
+        installed: Value,
+        running: Value,
+        api_major: u32,
+        service: Value,
+    ) -> Value {
         json!({
             "schemaVersion": 1,
             "result": "ok",

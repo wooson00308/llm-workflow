@@ -196,8 +196,9 @@ impl<'a> AgentRuntimeInstallService<'a> {
         if self.fingerprint(&manifest, installed_version.as_deref()) != plan_id {
             return Err(InstallFailure::StalePlan);
         }
-        let destination = agent_runtime_package::install(self.resource, self.install_root, &manifest)
-            .map_err(InstallFailure::Package)?;
+        let destination =
+            agent_runtime_package::install(self.resource, self.install_root, &manifest)
+                .map_err(InstallFailure::Package)?;
         let mut stages = vec![stage(UpdateStage::VersionInstall, "ok", None)];
 
         // 새로 설치한 실행 파일 자신이 launcher를 만든다. 처음 설치에는 부를 launcher가 없다.
@@ -210,8 +211,17 @@ impl<'a> AgentRuntimeInstallService<'a> {
         match agent_runtime_process::activate(&bootstrap, self.install_root, &destination) {
             Ok(_) => stages.push(stage(UpdateStage::LauncherSwitch, "ok", None)),
             Err(failure) => {
-                stages.push(stage(UpdateStage::LauncherSwitch, "failed", Some(failure.message())));
-                return Ok(partial(plan_id, &manifest.runtime_version, &destination, stages));
+                stages.push(stage(
+                    UpdateStage::LauncherSwitch,
+                    "failed",
+                    Some(failure.message()),
+                ));
+                return Ok(partial(
+                    plan_id,
+                    &manifest.runtime_version,
+                    &destination,
+                    stages,
+                ));
             }
         }
 
@@ -220,8 +230,17 @@ impl<'a> AgentRuntimeInstallService<'a> {
         match agent_runtime_process::install_service(caller) {
             Ok(_) => stages.push(stage(UpdateStage::ServiceTransition, "ok", None)),
             Err(failure) => {
-                stages.push(stage(UpdateStage::ServiceTransition, "failed", Some(failure.message())));
-                return Ok(partial(plan_id, &manifest.runtime_version, &destination, stages));
+                stages.push(stage(
+                    UpdateStage::ServiceTransition,
+                    "failed",
+                    Some(failure.message()),
+                ));
+                return Ok(partial(
+                    plan_id,
+                    &manifest.runtime_version,
+                    &destination,
+                    stages,
+                ));
             }
         }
 
@@ -264,8 +283,14 @@ impl<'a> AgentRuntimeInstallService<'a> {
             }
         }
         let version_dir = self.version_directory(&manifest);
-        agent_runtime_process::apply_update(caller, self.install_root, &version_dir, plan_id, confirmed)
-            .map_err(InstallFailure::Runtime)
+        agent_runtime_process::apply_update(
+            caller,
+            self.install_root,
+            &version_dir,
+            plan_id,
+            confirmed,
+        )
+        .map_err(InstallFailure::Runtime)
     }
 
     /// launcher나 서비스 등록만 어긋난 경우를 되돌린다.
@@ -483,7 +508,11 @@ mod tests {
         assert_eq!(applied.result, "success");
         assert_eq!(applied.installed_version.as_deref(), Some("0.9.0"));
         assert_eq!(
-            applied.stages.iter().map(|stage| stage.stage).collect::<Vec<_>>(),
+            applied
+                .stages
+                .iter()
+                .map(|stage| stage.stage)
+                .collect::<Vec<_>>(),
             vec![
                 UpdateStage::VersionInstall,
                 UpdateStage::LauncherSwitch,

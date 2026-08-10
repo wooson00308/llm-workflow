@@ -24,7 +24,10 @@ impl StatusFailure {
     pub fn message(&self) -> String {
         match self {
             StatusFailure::Runtime(failure) => failure.message(),
-            StatusFailure::ProjectMismatch { requested, answered } => format!(
+            StatusFailure::ProjectMismatch {
+                requested,
+                answered,
+            } => format!(
                 "런타임이 다른 프로젝트({answered})의 값을 돌려줬습니다. 요청은 {requested}입니다."
             ),
             StatusFailure::Incompatible(_) => {
@@ -69,11 +72,14 @@ impl AgentRuntimeStatusService {
         if let Some(foreign) = runs.iter().find(|run| run.project_id != project_id) {
             return unavailable(
                 project_id,
-                &format!("런타임이 다른 프로젝트({})의 행을 함께 돌려줬습니다", foreign.project_id),
+                &format!(
+                    "런타임이 다른 프로젝트({})의 행을 함께 돌려줬습니다",
+                    foreign.project_id
+                ),
             );
         }
-        let providers = agent_runtime_process::diagnose_providers(caller, project_id)
-            .unwrap_or_default();
+        let providers =
+            agent_runtime_process::diagnose_providers(caller, project_id).unwrap_or_default();
         QueueSnapshot {
             project_id: project_id.to_owned(),
             paused: state
@@ -197,8 +203,14 @@ mod tests {
     #[test]
     fn every_contract_state_survives_the_round_trip() {
         let names = [
-            "reserved", "queued", "running", "paused",
-            "succeeded", "failed", "cancelled", "recovery_required",
+            "reserved",
+            "queued",
+            "running",
+            "paused",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "recovery_required",
         ];
         let rows: Vec<serde_json::Value> = names
             .iter()
@@ -217,7 +229,10 @@ mod tests {
         assert_eq!(snapshot.runs[7].state, RunState::RecoveryRequired);
         assert!(snapshot.unavailable.is_none());
         assert_eq!(snapshot.runs[0].role, "developer");
-        assert_eq!(snapshot.runs[0].started_at.as_deref(), Some("2026-08-08T10:00:00Z"));
+        assert_eq!(
+            snapshot.runs[0].started_at.as_deref(),
+            Some("2026-08-08T10:00:00Z")
+        );
     }
 
     #[test]
@@ -239,7 +254,10 @@ mod tests {
         let snapshot = AgentRuntimeStatusService.inspect(
             &caller,
             "p1",
-            &Compatibility::UnsupportedApiMajor { found: 9, supported: 1 },
+            &Compatibility::UnsupportedApiMajor {
+                found: 9,
+                supported: 1,
+            },
         );
 
         assert!(snapshot.unavailable.is_some());
@@ -251,7 +269,10 @@ mod tests {
         let caller = FakeCaller::new(vec![Ok(envelope(state(
             "p1",
             false,
-            vec![row("run-1", "p1", "running"), row("run-2", "other", "running")],
+            vec![
+                row("run-1", "p1", "running"),
+                row("run-2", "other", "running"),
+            ],
         )))]);
 
         let snapshot = AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible);
@@ -263,8 +284,14 @@ mod tests {
     #[test]
     fn pausing_one_project_reports_only_that_project() {
         let caller = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": {"projectId": "p1", "paused": true}}))),
-            Ok(envelope(state("p1", true, vec![row("run-1", "p1", "running")]))),
+            Ok(envelope(
+                json!({"configuration": {"projectId": "p1", "paused": true}}),
+            )),
+            Ok(envelope(state(
+                "p1",
+                true,
+                vec![row("run-1", "p1", "running")],
+            ))),
             Ok(envelope(json!({"providers": []}))),
         ]);
 
@@ -276,7 +303,10 @@ mod tests {
         assert_eq!(snapshot.project_id, "p1");
         // 일시 정지는 새 배정만 막는다. 돌던 실행은 그대로 목록에 있다.
         assert_eq!(snapshot.runs[0].state, RunState::Running);
-        assert_eq!(caller.calls.borrow()[0].0, vec!["agent", "project", "pause"]);
+        assert_eq!(
+            caller.calls.borrow()[0].0,
+            vec!["agent", "project", "pause"]
+        );
     }
 
     #[test]

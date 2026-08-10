@@ -152,15 +152,22 @@ impl AgentRuntimeConfigService {
         }
         validate_policy(policy).map_err(ConfigFailure::Rejected)?;
 
-        let current = self.read(caller, &policy.project_id, &policy.working_directory, compatibility.clone())?;
+        let current = self.read(
+            caller,
+            &policy.project_id,
+            &policy.working_directory,
+            compatibility.clone(),
+        )?;
         if current.revision != baseline_revision {
             return Err(ConfigFailure::Stale(Box::new(current)));
         }
         if current.stored && current.policy.project_id != policy.project_id {
-            return Err(ConfigFailure::Rejected(PolicyRejection::ProjectIdMismatch {
-                requested: policy.project_id.clone(),
-                actual: current.policy.project_id.clone(),
-            }));
+            return Err(ConfigFailure::Rejected(
+                PolicyRejection::ProjectIdMismatch {
+                    requested: policy.project_id.clone(),
+                    actual: current.policy.project_id.clone(),
+                },
+            ));
         }
         if current.stored && current.policy.working_directory != policy.working_directory {
             return Err(ConfigFailure::Rejected(
@@ -172,7 +179,12 @@ impl AgentRuntimeConfigService {
         }
         agent_runtime_process::write_configuration(caller, &to_runtime(policy))
             .map_err(ConfigFailure::Runtime)?;
-        self.read(caller, &policy.project_id, &policy.working_directory, compatibility)
+        self.read(
+            caller,
+            &policy.project_id,
+            &policy.working_directory,
+            compatibility,
+        )
     }
 
     /// 기존 역할 잡에서 새 정책을 제안한다. 아무것도 쓰지 않는다.
@@ -184,7 +196,8 @@ impl AgentRuntimeConfigService {
     ) -> MigrationPreview {
         let mut proposed = default_policy(project_id, working_directory);
         let mut unresolved = Vec::new();
-        let mut untouched: Vec<String> = POLICY_ROLES.iter().map(|role| (*role).to_owned()).collect();
+        let mut untouched: Vec<String> =
+            POLICY_ROLES.iter().map(|role| (*role).to_owned()).collect();
 
         for job in jobs {
             let Some(policy) = proposed.roles.get_mut(&job.role) else {
@@ -206,7 +219,11 @@ impl AgentRuntimeConfigService {
                 Some(_) => unresolved.push(unresolvable(job, "interval", job.interval.as_deref())),
                 None => {}
             }
-            match job.max_per.as_deref().map(|value| value.trim().parse::<u32>()) {
+            match job
+                .max_per
+                .as_deref()
+                .map(|value| value.trim().parse::<u32>())
+            {
                 Some(Ok(limit)) if limit > 0 => policy.max_per = Some(limit),
                 Some(_) => unresolved.push(unresolvable(job, "maxPer", job.max_per.as_deref())),
                 None => {}
@@ -238,8 +255,11 @@ impl AgentRuntimeConfigService {
         request: &MigrationRequest,
         compatibility: Compatibility,
     ) -> Result<PolicySnapshot, ConfigFailure> {
-        let preview =
-            self.migration_preview(&request.project_id, &request.working_directory, &request.jobs);
+        let preview = self.migration_preview(
+            &request.project_id,
+            &request.working_directory,
+            &request.jobs,
+        );
         if preview.preview_id != request.preview_id {
             return Err(ConfigFailure::StalePreview);
         }
@@ -450,7 +470,13 @@ mod tests {
         json!({"providers": [{"provider": "claude", "status": "login_required", "version": null}]})
     }
 
-    fn job(role: &str, interval: Option<&str>, max_per: Option<&str>, model: Option<&str>, timeout: Option<&str>) -> ManagedRoleJob {
+    fn job(
+        role: &str,
+        interval: Option<&str>,
+        max_per: Option<&str>,
+        model: Option<&str>,
+        timeout: Option<&str>,
+    ) -> ManagedRoleJob {
         ManagedRoleJob {
             role: role.to_owned(),
             interval: interval.map(str::to_owned),
@@ -464,7 +490,9 @@ mod tests {
     #[test]
     fn a_stored_configuration_comes_back_field_for_field() {
         let caller = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(diagnostics())),
         ]);
 
@@ -475,7 +503,10 @@ mod tests {
         assert!(snapshot.stored);
         assert_eq!(snapshot.policy.project_id, "p1");
         assert_eq!(snapshot.policy.roles["architect"].provider, "codex");
-        assert_eq!(snapshot.policy.roles["architect"].model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            snapshot.policy.roles["architect"].model.as_deref(),
+            Some("gpt-5")
+        );
         assert_eq!(snapshot.policy.roles["architect"].run_mode, "continuous");
         assert_eq!(snapshot.policy.roles["architect"].interval_seconds, 600);
         assert_eq!(snapshot.policy.roles["architect"].max_per, Some(4));
@@ -502,11 +533,15 @@ mod tests {
     #[test]
     fn two_projects_never_mix_their_values() {
         let first = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(diagnostics())),
         ]);
         let second = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": configuration("p2", "/p2", 3)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p2", "/p2", 3)}),
+            )),
             Ok(envelope(diagnostics())),
         ]);
 
@@ -527,9 +562,13 @@ mod tests {
     #[test]
     fn a_save_on_a_stale_revision_writes_nothing_and_returns_the_current_value() {
         let caller = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(diagnostics())),
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 3)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 3)}),
+            )),
             Ok(envelope(diagnostics())),
         ]);
         let read = AgentRuntimeConfigService
@@ -537,7 +576,12 @@ mod tests {
             .expect("snapshot");
 
         let failure = AgentRuntimeConfigService
-            .save(&caller, &read.policy, &read.revision, Compatibility::Compatible)
+            .save(
+                &caller,
+                &read.policy,
+                &read.revision,
+                Compatibility::Compatible,
+            )
             .expect_err("refused");
 
         match failure {
@@ -577,7 +621,10 @@ mod tests {
                 &caller,
                 &policy,
                 "any",
-                Compatibility::UnsupportedApiMajor { found: 9, supported: 1 },
+                Compatibility::UnsupportedApiMajor {
+                    found: 9,
+                    supported: 1,
+                },
             )
             .expect_err("refused");
 
@@ -605,12 +652,20 @@ mod tests {
     #[test]
     fn a_matching_revision_writes_once_and_returns_the_saved_value() {
         let caller = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(diagnostics())),
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(diagnostics())),
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(diagnostics())),
         ]);
         let read = AgentRuntimeConfigService
@@ -618,7 +673,12 @@ mod tests {
             .expect("snapshot");
 
         let saved = AgentRuntimeConfigService
-            .save(&caller, &read.policy, &read.revision, Compatibility::Compatible)
+            .save(
+                &caller,
+                &read.policy,
+                &read.revision,
+                Compatibility::Compatible,
+            )
             .expect("saved");
 
         assert_eq!(saved.policy.roles["developer"].max_parallel, 2);
@@ -628,13 +688,25 @@ mod tests {
             .iter()
             .map(|(arguments, _)| arguments.join(" "))
             .collect();
-        assert_eq!(commands.iter().filter(|value| value.contains("write")).count(), 1);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|value| value.contains("write"))
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn the_migration_preview_keeps_every_legacy_value_or_lists_it() {
         let jobs = vec![
-            job("planner", Some("30m"), Some("4"), Some("sonnet"), Some("15m")),
+            job(
+                "planner",
+                Some("30m"),
+                Some("4"),
+                Some("sonnet"),
+                Some("15m"),
+            ),
             job("developer", Some("이상한값"), Some("셋"), None, None),
         ];
 
@@ -642,7 +714,10 @@ mod tests {
 
         assert_eq!(preview.proposed.roles["planner"].interval_seconds, 1800);
         assert_eq!(preview.proposed.roles["planner"].max_per, Some(4));
-        assert_eq!(preview.proposed.roles["planner"].model.as_deref(), Some("sonnet"));
+        assert_eq!(
+            preview.proposed.roles["planner"].model.as_deref(),
+            Some("sonnet")
+        );
         assert_eq!(preview.proposed.roles["planner"].provider, "claude");
         assert_eq!(preview.untouched_roles, vec!["architect".to_owned()]);
         let listed: Vec<(&str, &str)> = preview
@@ -652,7 +727,11 @@ mod tests {
             .collect();
         assert_eq!(
             listed,
-            vec![("timeout", "15m"), ("interval", "이상한값"), ("maxPer", "셋")]
+            vec![
+                ("timeout", "15m"),
+                ("interval", "이상한값"),
+                ("maxPer", "셋")
+            ]
         );
     }
 
@@ -684,7 +763,9 @@ mod tests {
     #[test]
     fn provider_diagnostics_ride_along_without_changing_the_stored_values() {
         let caller = FakeCaller::new(vec![
-            Ok(envelope(json!({"configuration": configuration("p1", "/p1", 2)}))),
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
             Ok(envelope(json!({"providers": [
                 {"provider": "claude", "status": "executable_missing", "version": null},
                 {"provider": "codex", "status": "unsupported_version", "version": "0.1"},

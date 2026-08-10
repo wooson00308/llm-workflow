@@ -179,8 +179,11 @@ pub fn install(
         }
         fs::copy(&source, &target).map_err(write_failed)?;
     }
-    fs::copy(resource.join(MANIFEST_NAME), staging.path().join(MANIFEST_NAME))
-        .map_err(write_failed)?;
+    fs::copy(
+        resource.join(MANIFEST_NAME),
+        staging.path().join(MANIFEST_NAME),
+    )
+    .map_err(write_failed)?;
     restore_executable_bits(staging.path(), manifest)?;
 
     let staged = staging.keep();
@@ -195,7 +198,10 @@ pub fn install(
 
 /// 실행 파일의 실행 권한을 되돌린다. `fs::copy`가 모드를 옮기지만 명시해 두는 편이 안전하다.
 #[cfg(unix)]
-fn restore_executable_bits(staged: &Path, manifest: &RuntimeManifest) -> Result<(), PackageFailure> {
+fn restore_executable_bits(
+    staged: &Path,
+    manifest: &RuntimeManifest,
+) -> Result<(), PackageFailure> {
     use std::os::unix::fs::PermissionsExt;
 
     for entry in &manifest.files {
@@ -213,13 +219,20 @@ fn restore_executable_bits(staged: &Path, manifest: &RuntimeManifest) -> Result<
 }
 
 #[cfg(not(unix))]
-fn restore_executable_bits(_staged: &Path, _manifest: &RuntimeManifest) -> Result<(), PackageFailure> {
+fn restore_executable_bits(
+    _staged: &Path,
+    _manifest: &RuntimeManifest,
+) -> Result<(), PackageFailure> {
     Ok(())
 }
 
 /// 설치된 launcher가 있어야 할 자리. 런타임이 만드는 이름과 같다.
 pub fn launcher_path(install_root: &Path) -> PathBuf {
-    let name = if cfg!(windows) { "heartbeat.cmd" } else { "heartbeat" };
+    let name = if cfg!(windows) {
+        "heartbeat.cmd"
+    } else {
+        "heartbeat"
+    };
     install_root.join("bin").join(name)
 }
 
@@ -308,7 +321,10 @@ pub(crate) mod tests {
 
         let installed = install(resource.path(), root.path(), &manifest).expect("install");
 
-        assert_eq!(installed, root.path().join(VERSIONS_DIRECTORY).join("0.9.0"));
+        assert_eq!(
+            installed,
+            root.path().join(VERSIONS_DIRECTORY).join("0.9.0")
+        );
         assert!(installed.join("heartbeat").is_file());
         assert!(installed.join("_internal/runtime.bin").is_file());
         assert!(installed.join(MANIFEST_NAME).is_file());
@@ -335,7 +351,12 @@ pub(crate) mod tests {
     #[test]
     fn a_foreign_target_never_reaches_verification() {
         let resource = tempdir().expect("temporary directory");
-        write_resource(resource.path(), "0.9.0", "other-target", SUPPORTED_API_MAJOR);
+        write_resource(
+            resource.path(),
+            "0.9.0",
+            "other-target",
+            SUPPORTED_API_MAJOR,
+        );
 
         let failure = read_manifest(resource.path()).expect_err("refused");
 
@@ -351,7 +372,12 @@ pub(crate) mod tests {
     #[test]
     fn an_incompatible_api_major_is_refused_before_the_target_is_even_read() {
         let resource = tempdir().expect("temporary directory");
-        write_resource(resource.path(), "0.9.0", host_target(), SUPPORTED_API_MAJOR + 1);
+        write_resource(
+            resource.path(),
+            "0.9.0",
+            host_target(),
+            SUPPORTED_API_MAJOR + 1,
+        );
 
         let failure = read_manifest(resource.path()).expect_err("refused");
 
@@ -380,7 +406,10 @@ pub(crate) mod tests {
 
         assert!(matches!(failure, PackageFailure::VerificationFailed { .. }));
         assert!(previous.join("heartbeat").is_file());
-        assert_eq!(entries(&root.path().join(VERSIONS_DIRECTORY)), vec!["0.9.0"]);
+        assert_eq!(
+            entries(&root.path().join(VERSIONS_DIRECTORY)),
+            vec!["0.9.0"]
+        );
     }
 
     #[test]
