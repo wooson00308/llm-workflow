@@ -81,6 +81,21 @@ function policy(
     providers,
     executionAllowed: true,
     compatibility: { kind: "compatible" },
+    deviceCapacity: {
+      observed: true,
+      configuredMaxParallel: 16,
+      effectiveMaxParallel: 16,
+      recommendedMaxParallel: 8,
+      logicalCpuCount: 10,
+      totalMemoryBytes: 17179869184,
+      reservedMemoryBytes: 4294967296,
+      estimatedMemoryPerAgentBytes: 1610612736,
+      activeRuns: 2,
+      projects: [
+        { projectId: "prj_1", projectName: "workflow-labs", projectMaxParallel: 3, activeRuns: 1 },
+        { projectId: "prj_2", projectName: "other", projectMaxParallel: 4, activeRuns: 1 },
+      ],
+    },
     ...overrides,
   };
 }
@@ -543,19 +558,62 @@ describe("AgentRuntimeView 역할 정책", () => {
     expect(cards.map((card) => card.querySelector("h4")?.textContent)).toEqual(["기획자"]);
     expect(screen.getByLabelText("기획자 최대 인원")).toHaveValue(1);
     expect(screen.queryByLabelText("개발자 최대 인원")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("프로젝트 상한")).toHaveValue(3);
-    expect(screen.getByLabelText("기기 상한")).toHaveValue(16);
+    expect(screen.getByLabelText("프로젝트 동시 실행")).toHaveValue(3);
+    expect(screen.getByLabelText("기기 전체 동시 실행")).toHaveValue(16);
+    expect(screen.getByText("이 기기 권장 8명")).toBeInTheDocument();
+    expect(screen.getByText("7명")).toBeInTheDocument();
+    expect(screen.getByText("2명")).toBeInTheDocument();
+    expect(screen.getByText("1개 · 최대 합 4명")).toBeInTheDocument();
   });
 
-  it("기기 상한은 16보다 높일 수 없다", () => {
-    renderView();
+  it("권장값보다 높여도 막지 않고 영향과 프로젝트별 설정 합을 보여준다", async () => {
+    const { actions } = renderView();
     openSettings();
-    const device = screen.getByLabelText("기기 상한");
+    const device = screen.getByLabelText("기기 전체 동시 실행");
 
-    fireEvent.change(device, { target: { value: "32" } });
+    fireEvent.change(device, { target: { value: "48" } });
+    fireEvent.change(screen.getByLabelText("프로젝트 동시 실행"), { target: { value: "6" } });
 
-    expect(device).toHaveValue(16);
-    expect(device).toHaveAttribute("max", "16");
+    expect(device).toHaveValue(48);
+    expect(device).not.toHaveAttribute("max");
+    expect(screen.getByText(/권장값보다 40명 높습니다/)).toBeInTheDocument();
+    expect(screen.getByText("10명")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "변경 내용 저장" }));
+    await waitFor(() => expect(actions.save).toHaveBeenCalledTimes(1));
+    expect((actions.save as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
+      deviceMaxParallel: 48,
+      projectMaxParallel: 6,
+    });
+  });
+
+  it("처음 설정하는 프로젝트는 기기 사양 권장값으로 시작한다", () => {
+    const fresh = policy();
+    fresh.stored = false;
+    fresh.policy.deviceMaxParallel = 8;
+    fresh.deviceCapacity.configuredMaxParallel = null;
+    fresh.deviceCapacity.effectiveMaxParallel = 8;
+    fresh.deviceCapacity.recommendedMaxParallel = 8;
+    renderView(state({ policy: fresh }));
+    openSettings();
+
+    expect(screen.getByLabelText("기기 전체 동시 실행")).toHaveValue(8);
+    expect(screen.queryByText(/권장값보다 .* 높습니다/)).not.toBeInTheDocument();
+  });
+
+  it("구형 런타임의 호환 기본값은 기기 권장값이나 전체 배정 현황인 척하지 않는다", () => {
+    const legacy = policy();
+    legacy.deviceCapacity.observed = false;
+    legacy.deviceCapacity.logicalCpuCount = null;
+    legacy.deviceCapacity.totalMemoryBytes = null;
+    legacy.deviceCapacity.projects = [];
+    renderView(state({ policy: legacy }));
+    openSettings();
+
+    expect(screen.getByText("기기 사양 확인 전")).toBeInTheDocument();
+    expect(screen.queryByText(/이 기기 권장/)).not.toBeInTheDocument();
+    expect(screen.queryByText("프로젝트별 설정 합")).not.toBeInTheDocument();
+    expect(screen.getByText(/값은 제한 없이 저장할 수 있고/)).toBeInTheDocument();
   });
 
   // 런타임 설정 계약에 끄기 필드가 없다. 화면이 끄기를 성공처럼 보여주지 않는다.
@@ -672,7 +730,7 @@ describe("AgentRuntimeView 실행 계획과 큐", () => {
 
     const confirmation = screen.getByRole("region", { name: "실행 준비" });
     expect(within(confirmation).getByText("2개 세션 시작 가능")).toBeInTheDocument();
-    expect(within(confirmation).getByText(/남음 4개/)).toBeInTheDocument();
+    expect(within(confirmation).getByText(/4자리 남음/)).toBeInTheDocument();
     expect(within(confirmation).getByText(/TASK-S051-01, TASK-S051-02/)).toBeInTheDocument();
     expect(within(confirmation).queryByText("prj_1")).not.toBeInTheDocument();
     expect(within(confirmation).queryByText(runPlan.expiresAt)).not.toBeInTheDocument();

@@ -36,6 +36,34 @@ pub struct PolicySnapshot {
     /// 이 런타임에서 실행을 열어도 되는지.
     pub execution_allowed: bool,
     pub compatibility: Compatibility,
+    /// 런타임이 한 번만 관리하는 기기 전체 용량과 프로젝트별 사용 현황.
+    pub device_capacity: DeviceCapacity,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCapacity {
+    /// 새 런타임이 기기 사양과 전체 프로젝트 현황을 직접 읽어 준 값인지.
+    /// 거짓이면 아래 값은 구형 런타임 호환을 위한 현재 설정값이며 권장값으로 광고하지 않는다.
+    pub observed: bool,
+    pub configured_max_parallel: Option<u32>,
+    pub effective_max_parallel: u32,
+    pub recommended_max_parallel: u32,
+    pub logical_cpu_count: Option<u32>,
+    pub total_memory_bytes: Option<u64>,
+    pub reserved_memory_bytes: Option<u64>,
+    pub estimated_memory_per_agent_bytes: Option<u64>,
+    pub active_runs: u32,
+    pub projects: Vec<DeviceProjectCapacity>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceProjectCapacity {
+    pub project_id: String,
+    pub project_name: String,
+    pub project_max_parallel: u32,
+    pub active_runs: u32,
 }
 
 /// 마이그레이션 미리보기. 확인 전에는 아무것도 쓰지 않는다.
@@ -119,22 +147,30 @@ impl AgentRuntimeConfigService {
         working_directory: &str,
         compatibility: Compatibility,
     ) -> Result<PolicySnapshot, ConfigFailure> {
-        let stored = agent_runtime_process::read_configuration(caller, project_id)
+        let runtime_read = agent_runtime_process::read_configuration(caller, project_id)
             .map_err(ConfigFailure::Runtime)?;
         let providers = agent_runtime_process::diagnose_providers(caller, project_id)
             // 진단을 읽지 못하는 것은 설정을 읽지 못한 것과 다르다. 설정은 그대로 보이고 진단만 빈다.
             .unwrap_or_default();
-        let (policy, is_stored) = match stored.as_ref() {
+        let stored = runtime_read.configuration;
+        let (mut policy, is_stored) = match stored.as_ref() {
             Some(value) => (from_runtime(value, working_directory), true),
             None => (default_policy(project_id, working_directory), false),
         };
+        let device_capacity = device_capacity_from_runtime(
+            runtime_read.device_capacity.as_ref(),
+            policy.device_max_parallel,
+        );
+        // 새 프로젝트도 고정 16이 아니라 이 기기의 자동 권장값으로 시작한다.
+        policy.device_max_parallel = device_capacity.effective_max_parallel;
         Ok(PolicySnapshot {
-            revision: revision_of(stored.as_ref()),
+            revision: revision_of(stored.as_ref(), runtime_read.device_capacity.as_ref()),
             execution_allowed: compatibility.allows_execution(),
             compatibility,
             policy,
             stored: is_stored,
             providers,
+            device_capacity,
         })
     }
 
@@ -332,11 +368,22 @@ fn to_runtime(policy: &ProjectPolicy) -> Value {
 }
 
 /// 읽은 설정의 지문. 런타임 계약에 revision 필드가 없어 앱이 읽은 내용에서 만든다.
-fn revision_of(stored: Option<&Value>) -> String {
+fn revision_of(stored: Option<&Value>, device_capacity: Option<&Value>) -> String {
     let mut hasher = Sha256::new();
     match stored {
         Some(value) => hasher.update(canonical(value).as_bytes()),
         None => hasher.update(b"absent"),
+    }
+    for key in ["configuredMaxParallel", "effectiveMaxParallel"] {
+        hasher.update(b"\0");
+        hasher.update(key.as_bytes());
+        hasher.update(
+            device_capacity
+                .and_then(|value| value.get(key))
+                .unwrap_or(&Value::Null)
+                .to_string()
+                .as_bytes(),
+        );
     }
     format!("{:x}", hasher.finalize())[..32].to_owned()
 }
@@ -392,6 +439,44 @@ fn number_at(value: Option<&Value>, key: &str) -> Option<u32> {
     value?.get(key)?.as_u64().map(|found| found as u32)
 }
 
+fn u64_at(value: Option<&Value>, key: &str) -> Option<u64> {
+    value?.get(key)?.as_u64()
+}
+
+fn device_capacity_from_runtime(value: Option<&Value>, legacy_limit: u32) -> DeviceCapacity {
+    let recommended = number_at(value, "recommendedMaxParallel").unwrap_or(legacy_limit);
+    let effective = number_at(value, "effectiveMaxParallel").unwrap_or(legacy_limit);
+    let projects = value
+        .and_then(|found| found.get("projects"))
+        .and_then(Value::as_array)
+        .map(|projects| {
+            projects
+                .iter()
+                .map(|project| DeviceProjectCapacity {
+                    project_id: string_at(Some(project), "projectId").unwrap_or_default(),
+                    project_name: string_at(Some(project), "projectName")
+                        .unwrap_or_else(|| "이름 없는 프로젝트".to_owned()),
+                    project_max_parallel: number_at(Some(project), "projectMaxParallel")
+                        .unwrap_or(1),
+                    active_runs: number_at(Some(project), "activeRuns").unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    DeviceCapacity {
+        observed: value.is_some(),
+        configured_max_parallel: number_at(value, "configuredMaxParallel"),
+        effective_max_parallel: effective,
+        recommended_max_parallel: recommended,
+        logical_cpu_count: number_at(value, "logicalCpuCount"),
+        total_memory_bytes: u64_at(value, "totalMemoryBytes"),
+        reserved_memory_bytes: u64_at(value, "reservedMemoryBytes"),
+        estimated_memory_per_agent_bytes: u64_at(value, "estimatedMemoryPerAgentBytes"),
+        active_runs: number_at(value, "activeRuns").unwrap_or(0),
+        projects,
+    }
+}
+
 fn unresolvable(job: &ManagedRoleJob, field: &str, value: Option<&str>) -> UnresolvedValue {
     UnresolvedValue {
         role: job.role.clone(),
@@ -420,7 +505,9 @@ mod tests {
 
     use super::{AgentRuntimeConfigService, ConfigFailure};
     use crate::application::heartbeat_service::ManagedRoleJob;
-    use crate::domain::agent_runtime::{Compatibility, PolicyRejection};
+    use crate::domain::agent_runtime::{
+        Compatibility, PolicyRejection, DEFAULT_DEVICE_MAX_PARALLEL,
+    };
     use crate::infrastructure::agent_runtime_process::tests::FakeCaller;
     use crate::infrastructure::agent_runtime_process::Captured;
 
@@ -528,6 +615,54 @@ mod tests {
         assert!(!snapshot.stored);
         assert_eq!(snapshot.policy.project_max_parallel, 3);
         assert_eq!(snapshot.policy.roles["developer"].max_parallel, 1);
+    }
+
+    #[test]
+    fn a_fresh_project_starts_from_the_hardware_recommendation_without_a_fixed_ceiling() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(json!({
+                "configuration": null,
+                "deviceCapacity": {
+                    "configuredMaxParallel": null,
+                    "effectiveMaxParallel": 6,
+                    "recommendedMaxParallel": 6,
+                    "logicalCpuCount": 8,
+                    "totalMemoryBytes": 17179869184_u64,
+                    "reservedMemoryBytes": 4294967296_u64,
+                    "estimatedMemoryPerAgentBytes": 1610612736_u64,
+                    "activeRuns": 0,
+                    "projects": [],
+                }
+            }))),
+            Ok(envelope(diagnostics())),
+        ]);
+
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "fresh", "/fresh", Compatibility::Compatible)
+            .expect("snapshot");
+
+        assert_eq!(snapshot.policy.device_max_parallel, 6);
+        assert!(snapshot.device_capacity.observed);
+        assert_eq!(snapshot.device_capacity.recommended_max_parallel, 6);
+        assert_eq!(snapshot.device_capacity.configured_max_parallel, None);
+    }
+
+    #[test]
+    fn an_older_runtime_fallback_is_not_presented_as_observed_hardware_capacity() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(json!({"configuration": null}))),
+            Ok(envelope(diagnostics())),
+        ]);
+
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "fresh", "/fresh", Compatibility::Compatible)
+            .expect("snapshot");
+
+        assert!(!snapshot.device_capacity.observed);
+        assert_eq!(
+            snapshot.policy.device_max_parallel,
+            DEFAULT_DEVICE_MAX_PARALLEL
+        );
     }
 
     #[test]

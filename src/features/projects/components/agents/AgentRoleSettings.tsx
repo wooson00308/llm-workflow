@@ -37,11 +37,13 @@ const runModes = [
   { value: "once", label: "한 번" },
 ] as const;
 
-/** 기기 상한의 상한. 첫 릴리스는 낮추기만 제공한다. */
-export const DEVICE_MAX_PARALLEL_CEILING = 16;
-
 function providerLabel(provider: string) {
   return providers.find((candidate) => candidate.value === provider)?.label ?? provider;
+}
+
+function memoryLabel(bytes: number | null) {
+  if (bytes === null) return "메모리 정보 없음";
+  return `${Math.round(bytes / 1024 / 1024 / 1024)}GB 메모리`;
 }
 
 interface Props {
@@ -58,8 +60,8 @@ interface Props {
  * 프로젝트 하나의 역할 정책을 편집한다.
  *
  * 폼의 초기값은 백엔드가 준 스냅샷이고, 저장은 읽을 때 받은 revision과 함께 나간다. 값의 기본치와
- * 허용 범위는 런타임 계약이 정하므로 이 화면이 다시 정하지 않는다 — 기기 상한의 천장 하나만 화면이
- * 막는다(첫 릴리스는 낮추기만 제공한다).
+ * 허용 범위는 런타임 계약이 정한다. 기기 권장값은 사양에서 계산하지만 사용자의 선택을 막는 상한으로
+ * 쓰지 않는다.
  */
 export function AgentRoleSettings({
   busy,
@@ -80,6 +82,21 @@ export function AgentRoleSettings({
 
   const locked = saving || busy || !executionAllowed;
   const hasChanges = !snapshot.stored || JSON.stringify(draft) !== JSON.stringify(snapshot.policy);
+  const roleLimits = ROLE_ORDER.map((role) => ({
+    label: roleLabels[role],
+    value: draft.roles[role]?.maxParallel ?? 0,
+  }));
+  const roleLimitTotal = roleLimits.reduce((sum, role) => sum + role.value, 0);
+  const otherProjects = snapshot.deviceCapacity.projects.filter(
+    (project) => project.projectId !== draft.projectId,
+  );
+  const otherProjectLimitTotal = otherProjects.reduce(
+    (sum, project) => sum + project.projectMaxParallel,
+    0,
+  );
+  const allProjectLimitTotal = otherProjectLimitTotal + draft.projectMaxParallel;
+  const aboveRecommendation = snapshot.deviceCapacity.observed
+    && draft.deviceMaxParallel > snapshot.deviceCapacity.recommendedMaxParallel;
 
   function editRole(role: string, change: Partial<AgentRolePolicy>) {
     setDraft((current) => ({
@@ -200,7 +217,9 @@ export function AgentRoleSettings({
                   disabled={locked}
                   id={`agent-max-parallel-${role}`}
                   min={1}
-                  onChange={(event) => editRole(role, { maxParallel: Number(event.target.value) })}
+                  onChange={(event) =>
+                    editRole(role, { maxParallel: Math.max(1, Number(event.target.value)) })
+                  }
                   type="number"
                   value={value.maxParallel}
                 />
@@ -245,45 +264,95 @@ export function AgentRoleSettings({
         );
       })()}
 
-      <section aria-label="동시 실행 한도" className="agent-limits">
+      <section aria-label="동시 실행 용량" className="agent-capacity">
         <header>
-          <h4>동시 실행 한도</h4>
-          <p>동시에 실행할 수 있는 에이전트 수를 제한합니다.</p>
+          <div>
+            <h4>동시 실행 용량</h4>
+            <p>권장값을 시작점으로 쓰고, 이 기기와 프로젝트에 맞게 직접 조정할 수 있습니다.</p>
+          </div>
+          <span className="agent-capacity-recommendation">
+            {snapshot.deviceCapacity.observed
+              ? `이 기기 권장 ${snapshot.deviceCapacity.recommendedMaxParallel}명`
+              : "기기 사양 확인 전"}
+          </span>
         </header>
-        <label htmlFor="agent-project-max">
-          <span>이 프로젝트</span>
-          <input
-            aria-label="프로젝트 상한"
-            disabled={locked}
-            id="agent-project-max"
-            min={1}
-            onChange={(event) => editPolicy({ projectMaxParallel: Number(event.target.value) })}
-            type="number"
-            value={draft.projectMaxParallel}
-          />
-        </label>
-        <label htmlFor="agent-device-max">
-          <span>이 기기 전체</span>
-          <input
-            aria-label="기기 상한"
-            disabled={locked}
-            id="agent-device-max"
-            max={DEVICE_MAX_PARALLEL_CEILING}
-            min={1}
-            onChange={(event) =>
-              editPolicy({
-                deviceMaxParallel: Math.min(
-                  DEVICE_MAX_PARALLEL_CEILING,
-                  Number(event.target.value),
-                ),
-              })
-            }
-            type="number"
-            value={draft.deviceMaxParallel}
-          />
-        </label>
-        <p className="agent-limits-note">
-          기기 전체는 최대 {DEVICE_MAX_PARALLEL_CEILING}명이며, 실제 실행 수는 두 한도를 모두 넘지 않습니다.
+        <div className="agent-capacity-controls">
+          <label htmlFor="agent-device-max">
+            <span>이 기기 전체</span>
+            <div className="agent-capacity-input">
+              <input
+                aria-label="기기 전체 동시 실행"
+                disabled={locked}
+                id="agent-device-max"
+                min={1}
+                onChange={(event) =>
+                  editPolicy({ deviceMaxParallel: Math.max(1, Number(event.target.value)) })
+                }
+                type="number"
+                value={draft.deviceMaxParallel}
+              />
+              <span>명</span>
+            </div>
+            <small>
+              {snapshot.deviceCapacity.observed
+                ? `논리 CPU ${snapshot.deviceCapacity.logicalCpuCount ?? "-"}개 · ${memoryLabel(snapshot.deviceCapacity.totalMemoryBytes)}`
+                : "현재 저장값을 유지합니다. 새 런타임에서 사양 기반 권장값을 계산합니다."}
+            </small>
+          </label>
+          <label htmlFor="agent-project-max">
+            <span>이 프로젝트</span>
+            <div className="agent-capacity-input">
+              <input
+                aria-label="프로젝트 동시 실행"
+                disabled={locked}
+                id="agent-project-max"
+                min={1}
+                onChange={(event) =>
+                  editPolicy({ projectMaxParallel: Math.max(1, Number(event.target.value)) })
+                }
+                type="number"
+                value={draft.projectMaxParallel}
+              />
+              <span>명</span>
+            </div>
+            <small>역할별 최대 합 {roleLimitTotal}명</small>
+          </label>
+        </div>
+
+        {snapshot.deviceCapacity.observed ? (
+          <div className="agent-capacity-allocation">
+            <div>
+              <span>프로젝트별 설정 합</span>
+              <strong>{allProjectLimitTotal}명</strong>
+            </div>
+            <div>
+              <span>현재 실행·대기</span>
+              <strong>{snapshot.deviceCapacity.activeRuns}명</strong>
+            </div>
+            <div>
+              <span>다른 프로젝트</span>
+              <strong>{otherProjects.length}개 · 최대 합 {otherProjectLimitTotal}명</strong>
+            </div>
+          </div>
+        ) : (
+          <p className="agent-capacity-observation-note">
+            현재 런타임은 다른 프로젝트의 배정과 사용량을 제공하지 않습니다. 값은 제한 없이 저장할 수 있고, 런타임 업데이트 후 비교 정보가 표시됩니다.
+          </p>
+        )}
+
+        <ul aria-label="역할별 최대 인원" className="agent-capacity-roles">
+          {roleLimits.map((role) => (
+            <li key={role.label}><span>{role.label}</span><strong>{role.value}명</strong></li>
+          ))}
+        </ul>
+
+        {aboveRecommendation && (
+          <p className="agent-capacity-warning" role="status">
+            권장값보다 {draft.deviceMaxParallel - snapshot.deviceCapacity.recommendedMaxParallel}명 높습니다. 저장은 막지 않지만 앱 반응 저하, 메모리 압박, CLI 사용량 증가는 사용자가 감수해야 합니다.
+          </p>
+        )}
+        <p className="agent-capacity-note">
+          프로젝트별 숫자는 예약 인원이 아니라 각각의 최대치입니다. 여러 프로젝트가 동시에 실행되면 기기 전체 빈자리를 나눠 사용합니다.
         </p>
       </section>
 

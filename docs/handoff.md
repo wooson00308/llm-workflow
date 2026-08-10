@@ -1,7 +1,7 @@
 # 판 상태 핸드오프 (TL 스냅샷)
 
 > 다음 세션(코덱스 포함) 팔로업용 정본. 개발 로그 전체를 읽기 전에 이 파일을 먼저 본다.
-> 갱신: 2026-08-10 (blocked 자동 복구와 개발 QA·에이전트 최초 설정/실행 UX 직접 개선 완료).
+> 갱신: 2026-08-10 (blocked 자동 복구와 개발 QA·에이전트 설정/실행·기기 용량 UX 직접 개선 완료).
 
 ## 이번 세션의 핵심 결과
 
@@ -12,6 +12,7 @@
 5. 에이전트 화면은 작업과 설정을 분리했다. 저장된 정책이 없으면 내부 `project_not_configured` 오류나 빈 실행 폼 대신 최초 설정 하나만 안내한다. 설정 저장 전에는 실행 계획 API를 부르지 않는다.
 6. 실행 시작 조건은 선택 역할 입력이 바뀔 때 읽기 전용으로 자동 확인한다. 화면에서 고른 한 역할만 계획 요청에 보내며 실제 실행은 `에이전트 시작` 전까지 일어나지 않는다. 수동 확인·계획 취소 버튼과 내부 project id·만료 시각·6열 계획 표는 제거했다.
 7. 모델은 주관식이 아니라 공급자별 선택지다. 저장은 변경이 있을 때 한 번만 누르며, 좁은 창에서는 전체 창이 아닌 에이전트 본문 폭 기준으로 4열→2열→1열 재배치된다. 동시 실행 한도는 두 필드가 같은 라벨·입력 구조를 쓰고 기기 상한 설명은 공통 안내로 분리해 기준선을 맞췄다.
+8. 고정 16명 상한을 제거했다. 새 런타임은 논리 CPU·메모리로 기기 권장값을 제안하지만 사용자는 제한 없이 재정의한다. 기기 값은 프로젝트별 사본이 아니라 SQLite singleton 하나이며, 앱은 다른 프로젝트 설정 합과 현재 사용량을 함께 보여 준다. 구형 런타임의 16 호환값은 권장값으로 광고하지 않는다.
 
 ## 현재 보드와 인수 기준
 
@@ -31,17 +32,17 @@
 
 ## 검증
 
-- claude-heartbeat: quota 13 passed, runtime E2E 4 passed·실서비스 1 target-CI skip, 전체 284 passed·8 platform skip.
-- workflow-labs Rust 최신: 본체 710 passed, `cargo fmt --check`, Clippy `-D warnings`, 런타임 계약 검증 통과.
-- workflow-labs 프런트 최신: 28파일·917 passed, typecheck·production build, Agents 집중 58 passed, `git diff --check` 통과.
+- claude-heartbeat 최신: 전체 288 passed·8 platform skip, 변경 파일 Ruff 통과.
+- workflow-labs Rust 최신: 본체 713 passed·종단 17 passed, `cargo fmt --check`, Clippy `-D warnings`, 런타임 계약 검증 통과.
+- workflow-labs 프런트 최신: 28파일·919 passed, typecheck·production build, `git diff --check` 통과.
 - 최신 debug macOS `.app`와 `.dmg` 번들 완료. 실제 앱 최초 설정·모델 선택, 940px 최소 창의 본문 기준 2열 재배치와 동시 실행 한도 필드 정렬을 확인했다.
 
 ## 작업 트리와 브랜치
 
-- workflow-labs: `claude/qa-batch-20260808`. 이번 에이전트 UX 변경과 최신 개발 기록·핸드오프를 마감 커밋으로 보호한다.
-- claude-heartbeat: `claude/agent-runtime-20260808`, HEAD `66af7b0`, clean.
+- workflow-labs: `claude/qa-batch-20260808`. 이번 기기 용량 UX 변경과 최신 개발 기록·핸드오프를 마감 커밋으로 보호한다.
+- claude-heartbeat: 기기 전역 용량·사양 권장 계약 변경을 별도 마감 커밋으로 보호한다.
 - main 병합·push는 하지 않았다. 릴리스 컷은 사용자 지시와 `docs/releasing.md` 절차를 따른다.
-- 최신 debug 앱은 `/Users/catze/project/workflow-labs/src-tauri/target/debug/bundle/macos/LLM Workflow.app`이며 에이전트 설정 화면에 열려 있다. 정책 저장과 에이전트 시작은 수행하지 않았다.
+- 최신 debug 앱은 `/Users/catze/project/workflow-labs/src-tauri/target/debug/bundle/macos/LLM Workflow.app`이며 940px 에이전트 설정 화면에 열려 있다. 정책 저장과 에이전트 시작은 수행하지 않았다.
 
 ## 운영 가드레일
 

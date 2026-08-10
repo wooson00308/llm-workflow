@@ -272,8 +272,14 @@ export function AgentRunDashboard({ actions, onOpenSettings, state }: Props) {
             <strong>{totalGranted}개 세션 시작 가능</strong>
           </header>
           <dl>
-            <div><dt>프로젝트 여유</dt><dd>상한 {state.policy?.policy.projectMaxParallel ?? "-"}개 · 남음 {plan.projectRemaining}개</dd></div>
-            <div><dt>기기 여유</dt><dd>상한 {state.policy?.policy.deviceMaxParallel ?? "-"}개 · 남음 {plan.deviceRemaining}개</dd></div>
+            <div>
+              <dt>프로젝트 자리</dt>
+              <dd>최대 {state.policy?.policy.projectMaxParallel ?? "-"}명 · 지금 {Math.max(0, (state.policy?.policy.projectMaxParallel ?? plan.projectRemaining) - plan.projectRemaining)}명 사용 · {plan.projectRemaining}자리 남음</dd>
+            </div>
+            <div>
+              <dt>기기 공유 자리</dt>
+              <dd>전체 {state.policy?.policy.deviceMaxParallel ?? "-"}명 · 지금 {state.policy?.deviceCapacity.activeRuns ?? 0}명 사용 · {plan.deviceRemaining}자리 남음</dd>
+            </div>
           </dl>
           <ul className="agent-run-plan-roles">
             {plan.roles.map((role) => (

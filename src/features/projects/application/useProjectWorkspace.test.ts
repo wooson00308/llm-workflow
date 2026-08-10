@@ -352,6 +352,18 @@ const agentPolicy: AgentPolicySnapshot = {
   providers: [{ provider: "claude", status: "ready", version: "1.2.3" }],
   executionAllowed: true,
   compatibility: { kind: "compatible" },
+  deviceCapacity: {
+    observed: true,
+    configuredMaxParallel: 16,
+    effectiveMaxParallel: 16,
+    recommendedMaxParallel: 8,
+    logicalCpuCount: 10,
+    totalMemoryBytes: 17179869184,
+    reservedMemoryBytes: 4294967296,
+    estimatedMemoryPerAgentBytes: 1610612736,
+    activeRuns: 0,
+    projects: [],
+  },
 };
 
 const agentMigration: AgentMigrationPreview = {

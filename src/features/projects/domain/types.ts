@@ -1267,6 +1267,28 @@ export interface AgentProjectPolicy {
   roles: Record<string, AgentRolePolicy>;
 }
 
+export interface AgentDeviceProjectCapacity {
+  projectId: string;
+  projectName: string;
+  projectMaxParallel: number;
+  activeRuns: number;
+}
+
+/** 기기 사양에서 계산한 권장값과 사용자가 정한 전역값. 권장값은 실행을 막는 상한이 아니다. */
+export interface AgentDeviceCapacity {
+  /** 런타임이 기기 사양과 전체 프로젝트 사용량을 직접 관측했는지. */
+  observed: boolean;
+  configuredMaxParallel: number | null;
+  effectiveMaxParallel: number;
+  recommendedMaxParallel: number;
+  logicalCpuCount: number | null;
+  totalMemoryBytes: number | null;
+  reservedMemoryBytes: number | null;
+  estimatedMemoryPerAgentBytes: number | null;
+  activeRuns: number;
+  projects: AgentDeviceProjectCapacity[];
+}
+
 /**
  * provider 하나의 준비 상태. 런타임이 답한 값을 그대로 싣는다 — 계약이 정한 여섯 값 밖이 오면
  * 화면은 그 문자열을 숨기지 않고 그대로 보여준다.
@@ -1286,6 +1308,7 @@ export interface AgentPolicySnapshot {
   providers: AgentProviderDiagnosis[];
   executionAllowed: boolean;
   compatibility: AgentCompatibility;
+  deviceCapacity: AgentDeviceCapacity;
 }
 
 /** 옮기지 못한 값 하나. 조용히 버리지 않고 그대로 남긴다. */

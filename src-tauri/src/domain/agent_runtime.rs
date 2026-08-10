@@ -236,7 +236,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        judge, Compatibility, RuntimeStatus, ServiceResult, ServiceState, SUPPORTED_API_MAJOR,
+        default_policy, judge, validate_policy, Compatibility, RuntimeStatus, ServiceResult,
+        ServiceState, SUPPORTED_API_MAJOR,
     };
 
     fn service() -> ServiceState {
@@ -334,6 +335,15 @@ mod tests {
 
         assert_eq!(decoded, ServiceResult::Unrecognized);
     }
+
+    #[test]
+    fn project_capacity_may_exceed_the_current_device_choice() {
+        let mut policy = default_policy("project", "/project");
+        policy.project_max_parallel = 48;
+        policy.device_max_parallel = 4;
+
+        assert_eq!(validate_policy(&policy), Ok(()));
+    }
 }
 
 // --- 프로젝트별 역할 정책 -------------------------------------------------
@@ -398,7 +408,7 @@ pub enum PolicyRejection {
         limit: u32,
     },
     #[serde(rename_all = "camelCase")]
-    ProjectLimitExceeded { found: u32, limit: u32 },
+    InvalidProjectLimit { found: u32 },
     #[serde(rename_all = "camelCase")]
     InvalidValue { role: String, field: String },
     /// 런타임 설정 계약에 역할을 끄는 필드가 없다. 조용히 켠 채로 저장하지 않고 거절한다.
@@ -419,11 +429,9 @@ pub fn validate_policy(policy: &ProjectPolicy) -> Result<(), PolicyRejection> {
             expected: POLICY_ROLES.iter().map(|role| (*role).to_owned()).collect(),
         });
     }
-    if policy.project_max_parallel == 0 || policy.project_max_parallel > policy.device_max_parallel
-    {
-        return Err(PolicyRejection::ProjectLimitExceeded {
+    if policy.project_max_parallel == 0 {
+        return Err(PolicyRejection::InvalidProjectLimit {
             found: policy.project_max_parallel,
-            limit: policy.device_max_parallel,
         });
     }
     for (role, value) in &policy.roles {

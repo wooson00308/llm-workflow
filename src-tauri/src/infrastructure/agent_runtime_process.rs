@@ -273,14 +273,20 @@ fn succeeded(captured: Captured) -> Result<Captured, RuntimeCallFailure> {
     }
 }
 
-/// 프로젝트 하나의 저장된 설정을 읽는다. 아무것도 쓰지 않는다.
+/// 프로젝트 설정과 기기 전체 용량을 한 번에 읽는다. 아무것도 쓰지 않는다.
 ///
 /// 설정이 없는 프로젝트도 오류가 아니다. 런타임은 `configuration`을 null로 답하고, 그것이 "아직
 /// 저장한 적 없음"의 정규 표현이다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeConfigurationRead {
+    pub configuration: Option<Value>,
+    pub device_capacity: Option<Value>,
+}
+
 pub fn read_configuration(
     caller: &dyn RuntimeCaller,
     project_id: &str,
-) -> Result<Option<Value>, RuntimeCallFailure> {
+) -> Result<RuntimeConfigurationRead, RuntimeCallFailure> {
     let request = json!({
         "apiVersion": API_VERSION,
         "requestId": uuid::Uuid::new_v4().to_string(),
@@ -288,9 +294,14 @@ pub fn read_configuration(
     });
     let captured = caller.call(&CONFIG_READ, Some(&request))?;
     let data: Value = decode_envelope(&captured)?;
-    Ok(match data.get("configuration") {
+    let configuration = match data.get("configuration") {
         None | Some(Value::Null) => None,
         Some(value) => Some(value.clone()),
+    };
+    Ok(RuntimeConfigurationRead {
+        configuration,
+        // 0.8.0 초기 런타임은 이 값을 싣지 않는다. 앱은 저장된 정책의 값으로 호환 표시한다.
+        device_capacity: data.get("deviceCapacity").cloned(),
     })
 }
 
