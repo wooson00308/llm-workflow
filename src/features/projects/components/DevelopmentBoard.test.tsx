@@ -1008,7 +1008,7 @@ describe("DevelopmentBoard", () => {
     expect(screen.queryByText("작업자가 작업자에게 쓴 본문입니다.")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
-    expect(screen.getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
+    expect(await screen.findByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
     expect(screen.getByText("이 작업이 끝나면 평문이 먼저 열립니다.")).toBeInTheDocument();
   });
 
