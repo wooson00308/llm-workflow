@@ -1,11 +1,78 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path, sync::Mutex};
+
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::application::project_service::ProjectService;
 use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
     SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
+    TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
 };
+
+#[derive(Default)]
+pub struct ProjectWatchers(Mutex<HashMap<String, RecommendedWatcher>>);
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectChanged {
+    watch_id: String,
+    path: String,
+}
+
+#[tauri::command]
+pub fn watch_project(
+    app: AppHandle,
+    watchers: State<'_, ProjectWatchers>,
+    path: String,
+) -> Result<String, String> {
+    let workflow = Path::new(&path)
+        .join(".workflow")
+        .canonicalize()
+        .map_err(|error| format!("워크플로우 감시 경로를 열 수 없습니다: {error}"))?;
+    if !workflow.is_dir() {
+        return Err("워크플로우 감시 경로가 디렉터리가 아닙니다".to_owned());
+    }
+    let watch_id = uuid::Uuid::new_v4().to_string();
+    let event_watch_id = watch_id.clone();
+    let event_path = path.clone();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if result.is_ok() {
+            let _ = app.emit(
+                "workflow-project-changed",
+                ProjectChanged {
+                    watch_id: event_watch_id.clone(),
+                    path: event_path.clone(),
+                },
+            );
+        }
+    })
+    .map_err(|error| format!("워크플로우 감시를 시작하지 못했습니다: {error}"))?;
+    watcher
+        .watch(&workflow, RecursiveMode::Recursive)
+        .map_err(|error| format!("워크플로우 감시를 시작하지 못했습니다: {error}"))?;
+    watchers
+        .0
+        .lock()
+        .map_err(|_| "워크플로우 감시 상태 잠금이 손상됐습니다".to_owned())?
+        .insert(watch_id.clone(), watcher);
+    Ok(watch_id)
+}
+
+#[tauri::command]
+pub fn unwatch_project(
+    watchers: State<'_, ProjectWatchers>,
+    watch_id: String,
+) -> Result<(), String> {
+    watchers
+        .0
+        .lock()
+        .map_err(|_| "워크플로우 감시 상태 잠금이 손상됐습니다".to_owned())?
+        .remove(&watch_id);
+    Ok(())
+}
 
 #[tauri::command]
 pub fn inspect_project(path: String) -> Result<ProjectSummary, String> {
@@ -146,6 +213,25 @@ pub fn confirm_task_qa_batch(
 ) -> Result<TaskQaBatchResult, String> {
     ProjectService::default()
         .confirm_task_qa_batch(Path::new(&path), &workflow_directory, &file_names, &comment)
+        .map_err(|error| error.to_string())
+}
+
+/// 막힌 작업 재개. 사용자가 앱 화면에서 해결 근거를 적고 누르는 조작만 이 명령에 도달한다.
+#[tauri::command]
+pub fn resume_task(path: String, request: TaskResumeRequest) -> Result<TaskResumeResult, String> {
+    ProjectService::default()
+        .resume_task(Path::new(&path), &request)
+        .map_err(|error| error.to_string())
+}
+
+/// 작업 정의 수정 요청 저장. 사용자가 앱 화면에서 이유를 적고 누르는 조작만 이 명령에 도달한다.
+#[tauri::command]
+pub fn record_task_revision_request(
+    path: String,
+    request: TaskRevisionRequestInput,
+) -> Result<TaskRevisionRequestResult, String> {
+    ProjectService::default()
+        .record_task_revision_request(Path::new(&path), &request)
         .map_err(|error| error.to_string())
 }
 

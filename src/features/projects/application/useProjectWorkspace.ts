@@ -5,7 +5,6 @@ import type {
   CustomRulesDraft,
   CustomRulesPreview,
   CustomRulesState,
-  DreamJobRequest,
   HeartbeatRunFailure,
   HeartbeatServiceOperation,
   HeartbeatServiceOutcome,
@@ -18,7 +17,6 @@ import type {
   IntegrationsState,
   ManagedAssetsState,
   ManagedAssetSyncTrigger,
-  ManagedDreamJob,
   ManagedRoleJob,
   ProjectGateway,
   ProjectSummary,
@@ -29,6 +27,13 @@ import type {
   SpecDecisionOutcome,
   TaskQaBatchEntry,
   TaskQaOutcome,
+  TaskResumeOutcome,
+  TaskRevisionRequestOutcome,
+  AgentProjectPolicy,
+  AgentRuntimeActions,
+  AgentRuntimeOperation,
+  AgentRuntimeState,
+  AgentRoleSlotRequest,
 } from "../domain/types";
 
 interface Dependencies {
@@ -132,6 +137,42 @@ function failureFrom(reason: unknown, jobName: string): HeartbeatRunFailure {
   };
 }
 
+/** 프로젝트를 열기 전과 닫은 뒤의 에이전트 상태. 프로젝트가 바뀌면 이 값으로 되돌린다. */
+const emptyAgentRuntime: AgentRuntimeState = {
+  inspection: null,
+  policy: null,
+  reading: false,
+  readError: null,
+  planning: null,
+  plan: null,
+  planError: null,
+  applying: false,
+  application: null,
+  applyError: null,
+  migration: null,
+  migrationBusy: false,
+  migrationError: null,
+  saving: false,
+  saveError: null,
+  runPlan: null,
+  runRequests: [],
+  runPlanning: false,
+  runStarting: false,
+  runError: null,
+  queue: null,
+  queueReading: false,
+  queueError: null,
+  pausing: false,
+  cancelPreview: null,
+  cancelResult: null,
+  retryPreview: null,
+  controllingRunId: null,
+  controlError: null,
+  logs: {},
+  readingLogRunId: null,
+  logError: null,
+};
+
 export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() =>
@@ -153,6 +194,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     error: null,
     writeError: null,
   });
+  const [agentViewActive, setAgentViewActive] = useState(false);
   // 실행 상태는 조회·쓰기 상태와 따로 둔다. 한 객체에 담으면 잡 설정 저장의 통째 교체가 진행 중
   // 표시를 지우고, 프로젝트를 닫는 것이 실행을 취소한 것처럼 보인다(R3).
   const [heartbeatRuns, setHeartbeatRuns] = useState<HeartbeatRunState>({
@@ -193,6 +235,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const checkingVersions = useRef(false);
   const controllingService = useRef(false);
   const activeProjectPath = useRef<string | null>(null);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeState>(
+    emptyAgentRuntime,
+  );
   const customRulesReadRequest = useRef(0);
   const customRulesPreviewRequest = useRef(0);
   const customRulesSaveRequest = useRef(0);
@@ -205,6 +250,513 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       }
     },
     [recentStore],
+  );
+
+  /**
+   * 기기 상태와 이 프로젝트의 정책을 읽는다. 읽기 명령 둘만 부르므로 화면 진입과 새로고침에서
+   * 불러도 아무것도 쓰지 않는다(R14). 계획과 적용 결과는 지우지 않는다 — 조회가 진행 표시를
+   * 덮으면 다른 메뉴를 다녀온 사용자가 자기 조작의 결과를 잃는다.
+   */
+  const readAgentRuntime = useCallback(
+    async (path: string, projectId: string | null) => {
+      setAgentRuntime((current) => ({ ...current, reading: true, readError: null }));
+      try {
+        const inspection = await gateway.inspectAgentRuntime();
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({ ...current, inspection }));
+        // 정책은 프로젝트 식별자가 있어야 읽는다. 초기화되지 않은 폴더에는 정책 자체가 없다.
+        if (!projectId) {
+          setAgentRuntime((current) => ({
+            ...current,
+            policy: null,
+            reading: false,
+          }));
+          return;
+        }
+        try {
+          const policy = await gateway.readAgentRuntimePolicy(projectId, path);
+          if (activeProjectPath.current !== path) return;
+          setAgentRuntime((current) => ({
+            ...current,
+            policy,
+            reading: false,
+          }));
+        } catch (reason) {
+          if (activeProjectPath.current !== path) return;
+          setAgentRuntime((current) => ({
+            ...current,
+            reading: false,
+            readError: messageFrom(reason),
+          }));
+        }
+      } catch (reason) {
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          reading: false,
+          readError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  /** 런타임의 영속 큐를 읽는다. 프로젝트를 바꾸면 늦게 온 이전 응답은 버린다. */
+  const readAgentRuns = useCallback(
+    async (path: string, projectId: string, silent = false) => {
+      if (!silent) {
+        setAgentRuntime((current) => ({ ...current, queueReading: true, queueError: null }));
+      }
+      try {
+        const queue = await gateway.inspectAgentRuns(projectId);
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          queue,
+          queueReading: false,
+          queueError: queue.unavailable,
+        }));
+      } catch (reason) {
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          queueReading: false,
+          queueError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  const planAgentRun = useCallback(
+    async (requests: AgentRoleSlotRequest[]) => {
+      if (!project?.projectId) return;
+      setAgentRuntime((current) => ({
+        ...current,
+        runPlanning: true,
+        runPlan: null,
+        runRequests: requests,
+        runError: null,
+      }));
+      try {
+        const runPlan = await gateway.planAgentRun(project.projectId, requests);
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({ ...current, runPlanning: false, runPlan }));
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          runPlanning: false,
+          runPlan: null,
+          runError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway, project?.projectId, project?.rootPath],
+  );
+
+  const cancelAgentRunPlan = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, runPlan: null, runError: null }));
+  }, []);
+
+  const startAgentRun = useCallback(async () => {
+    const plan = agentRuntime.runPlan;
+    if (!plan || !project?.projectId) return false;
+    setAgentRuntime((current) => ({ ...current, runStarting: true, runError: null }));
+    try {
+      await gateway.startAgentRun(project.projectId, plan.planId, true);
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        runStarting: false,
+        runPlan: null,
+      }));
+      await readAgentRuns(project.rootPath, project.projectId);
+      return true;
+    } catch (reason) {
+      if (activeProjectPath.current !== project.rootPath) return false;
+      const message = messageFrom(reason);
+      const stale = /계획|stale|revision|expired|만료/i.test(message);
+      if (stale && agentRuntime.runRequests.length > 0) {
+        try {
+          const runPlan = await gateway.planAgentRun(
+            project.projectId,
+            agentRuntime.runRequests,
+          );
+          if (activeProjectPath.current !== project.rootPath) return false;
+          setAgentRuntime((current) => ({
+            ...current,
+            runStarting: false,
+            runPlan,
+            runError: "계획이 변경되었습니다. 최신 계획을 다시 확인해 주세요.",
+          }));
+          return false;
+        } catch (refreshReason) {
+          setAgentRuntime((current) => ({
+            ...current,
+            runStarting: false,
+            runPlan: null,
+            runError: messageFrom(refreshReason),
+          }));
+          return false;
+        }
+      }
+      setAgentRuntime((current) => ({
+        ...current,
+        runStarting: false,
+        runPlan: null,
+        runError: message,
+      }));
+      return false;
+    }
+  }, [agentRuntime.runPlan, agentRuntime.runRequests, gateway, project, readAgentRuns]);
+
+  const setAgentProjectPaused = useCallback(
+    async (paused: boolean) => {
+      if (!project?.projectId) return false;
+      setAgentRuntime((current) => ({ ...current, pausing: true, controlError: null }));
+      try {
+        const queue = paused
+          ? await gateway.pauseAgentProject(project.projectId)
+          : await gateway.resumeAgentProject(project.projectId);
+        if (activeProjectPath.current !== project.rootPath) return false;
+        setAgentRuntime((current) => ({ ...current, pausing: false, queue }));
+        return true;
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return false;
+        setAgentRuntime((current) => ({
+          ...current,
+          pausing: false,
+          controlError: messageFrom(reason),
+        }));
+        return false;
+      }
+    },
+    [gateway, project],
+  );
+
+  const previewAgentRunCancel = useCallback(
+    async (runId: string) => {
+      if (!project?.projectId) return;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: runId,
+        cancelPreview: null,
+        cancelResult: null,
+        controlError: null,
+      }));
+      try {
+        const outcome = await gateway.cancelAgentRun(project.projectId, runId, false);
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          controllingRunId: null,
+          cancelPreview: outcome.kind === "preview" ? outcome.preview : null,
+          cancelResult: outcome.kind === "preview" ? null : outcome,
+        }));
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          controllingRunId: null,
+          controlError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway, project],
+  );
+
+  const dismissAgentRunCancel = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, cancelPreview: null }));
+  }, []);
+
+  const confirmAgentRunCancel = useCallback(async () => {
+    const preview = agentRuntime.cancelPreview;
+    if (!preview || !project?.projectId) return false;
+    setAgentRuntime((current) => ({
+      ...current,
+      controllingRunId: preview.runId,
+      controlError: null,
+    }));
+    try {
+      const outcome = await gateway.cancelAgentRun(project.projectId, preview.runId, true);
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        cancelPreview: null,
+        cancelResult: outcome,
+      }));
+      await readAgentRuns(project.rootPath, project.projectId);
+      return outcome.kind === "applied";
+    } catch (reason) {
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        controlError: messageFrom(reason),
+      }));
+      return false;
+    }
+  }, [agentRuntime.cancelPreview, gateway, project, readAgentRuns]);
+
+  const previewAgentRunRetry = useCallback((runId: string) => {
+    setAgentRuntime((current) => ({
+      ...current,
+      retryPreview: current.queue?.runs.find((run) => run.runId === runId) ?? null,
+      controlError: null,
+    }));
+  }, []);
+
+  const dismissAgentRunRetry = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, retryPreview: null }));
+  }, []);
+
+  const confirmAgentRunRetry = useCallback(async () => {
+    const previous = agentRuntime.retryPreview;
+    if (!previous || !project?.projectId) return false;
+    setAgentRuntime((current) => ({
+      ...current,
+      controllingRunId: previous.runId,
+      controlError: null,
+    }));
+    try {
+      const next = await gateway.retryAgentRun(project.projectId, previous.runId);
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        retryPreview: null,
+        queue: current.queue
+          ? { ...current.queue, runs: [...current.queue.runs, next] }
+          : current.queue,
+      }));
+      await readAgentRuns(project.rootPath, project.projectId);
+      return true;
+    } catch (reason) {
+      if (activeProjectPath.current !== project.rootPath) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        controllingRunId: null,
+        controlError: messageFrom(reason),
+      }));
+      return false;
+    }
+  }, [agentRuntime.retryPreview, gateway, project, readAgentRuns]);
+
+  const readAgentRunLog = useCallback(
+    async (runId: string) => {
+      if (!project?.projectId) return;
+      const cursor = agentRuntime.logs[runId]?.nextCursor ?? 0;
+      setAgentRuntime((current) => ({
+        ...current,
+        readingLogRunId: runId,
+        logError: null,
+      }));
+      try {
+        const page = await gateway.readAgentRunLog(project.projectId, runId, cursor);
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => {
+          const previous = current.logs[runId];
+          return {
+            ...current,
+            readingLogRunId: null,
+            logs: {
+              ...current.logs,
+              [runId]: {
+                ...page,
+                events: [...(previous?.events ?? []), ...page.events],
+              },
+            },
+          };
+        });
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          readingLogRunId: null,
+          logError: messageFrom(reason),
+        }));
+      }
+    },
+    [agentRuntime.logs, gateway, project],
+  );
+
+  /** 계획을 만든다. 세 조작 모두 계획 단계에서는 아무것도 쓰지 않는다. */
+  const planAgentRuntime = useCallback(
+    async (operation: AgentRuntimeOperation) => {
+      setAgentRuntime((current) => ({
+        ...current,
+        planning: operation,
+        planError: null,
+        applyError: null,
+      }));
+      try {
+        const plan =
+          operation === "install"
+            ? { kind: "install" as const, plan: await gateway.planAgentRuntimeInstall() }
+            : {
+                kind: operation,
+                plan: await gateway.planAgentRuntimeUpdate(),
+              };
+        setAgentRuntime((current) => ({ ...current, planning: null, plan }));
+      } catch (reason) {
+        setAgentRuntime((current) => ({
+          ...current,
+          planning: null,
+          plan: null,
+          planError: messageFrom(reason),
+        }));
+      }
+    },
+    [gateway],
+  );
+
+  const cancelAgentRuntimePlan = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, plan: null, planError: null }));
+  }, []);
+
+  /**
+   * 확인 대기 중인 계획을 적용한다. 계획이 없으면 아무것도 부르지 않는다.
+   *
+   * 백엔드가 오래된 계획이라고 거절하면 사유를 남기고 같은 조작의 계획을 다시 만든다. 사용자가 본
+   * 계획과 실제로 적용될 계획이 다른 채로 버튼만 다시 열리지 않게 하는 자리다.
+   */
+  const applyAgentRuntimePlan = useCallback(async () => {
+    const pending = agentRuntime.plan;
+    if (!pending) return false;
+    setAgentRuntime((current) => ({ ...current, applying: true, applyError: null }));
+    try {
+      const application =
+        pending.kind === "install"
+          ? {
+              kind: "install" as const,
+              result: await gateway.applyAgentRuntimeInstall(pending.plan.planId, true),
+            }
+          : {
+              kind: pending.kind,
+              result:
+                pending.kind === "update"
+                  ? await gateway.applyAgentRuntimeUpdate(pending.plan.planId, true)
+                  : await gateway.repairAgentRuntime(pending.plan.planId, true),
+            };
+      setAgentRuntime((current) => ({
+        ...current,
+        applying: false,
+        plan: null,
+        application,
+      }));
+      if (project) {
+        await readAgentRuntime(project.rootPath, project.projectId);
+      }
+      return true;
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        applying: false,
+        plan: null,
+        applyError: messageFrom(reason),
+      }));
+      await planAgentRuntime(pending.kind);
+      return false;
+    }
+  }, [agentRuntime.plan, gateway, planAgentRuntime, project, readAgentRuntime]);
+
+  /** 기존 역할 잡에서 새 정책을 제안받는다. 파일을 읽기만 한다. */
+  const previewAgentRuntimeMigration = useCallback(async () => {
+    if (!project?.projectId) return;
+    const path = project.rootPath;
+    const projectId = project.projectId;
+    setAgentRuntime((current) => ({
+      ...current,
+      migrationBusy: true,
+      migrationError: null,
+    }));
+    try {
+      const migration = await gateway.previewAgentRuntimeMigration(path, projectId);
+      setAgentRuntime((current) => ({ ...current, migrationBusy: false, migration }));
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        migrationBusy: false,
+        migrationError: messageFrom(reason),
+      }));
+    }
+  }, [gateway, project?.projectId, project?.rootPath]);
+
+  const dismissAgentRuntimeMigration = useCallback(() => {
+    setAgentRuntime((current) => ({ ...current, migration: null, migrationError: null }));
+  }, []);
+
+  /** 확인받은 미리보기를 적용한다. 미리보기 식별자와 읽을 때 받은 revision이 함께 나간다. */
+  const applyAgentRuntimeMigration = useCallback(async () => {
+    const preview = agentRuntime.migration;
+    const revision = agentRuntime.policy?.revision;
+    if (!preview || revision === undefined || !project?.projectId) return false;
+    setAgentRuntime((current) => ({
+      ...current,
+      migrationBusy: true,
+      migrationError: null,
+    }));
+    try {
+      const policy = await gateway.applyAgentRuntimeMigration(
+        project.rootPath,
+        project.projectId,
+        preview.previewId,
+        revision,
+      );
+      setAgentRuntime((current) => ({
+        ...current,
+        migrationBusy: false,
+        migration: null,
+        policy,
+      }));
+      await readAgentRuntime(project.rootPath, project.projectId);
+      return true;
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        migrationBusy: false,
+        migrationError: messageFrom(reason),
+      }));
+      return false;
+    }
+  }, [
+    agentRuntime.migration,
+    agentRuntime.policy?.revision,
+    gateway,
+    project,
+    project?.projectId,
+    project?.rootPath,
+    readAgentRuntime,
+  ]);
+
+  /**
+   * 정책을 저장한다. 읽을 때 받은 revision을 그대로 실어 보내고, 경합으로 거절되면 사유를 남긴 뒤
+   * 최신 값을 다시 읽는다. 폼을 조용히 덮지 않고 무엇이 달라졌는지 사용자가 볼 수 있게 한다.
+   */
+  const saveAgentRuntimePolicy = useCallback(
+    async (policy: AgentProjectPolicy) => {
+      const revision = agentRuntime.policy?.revision;
+      if (revision === undefined) return false;
+      setAgentRuntime((current) => ({ ...current, saving: true, saveError: null }));
+      try {
+        const saved = await gateway.saveAgentRuntimePolicy(policy, revision);
+        setAgentRuntime((current) => ({ ...current, saving: false, policy: saved }));
+        return true;
+      } catch (reason) {
+        setAgentRuntime((current) => ({
+          ...current,
+          saving: false,
+          saveError: messageFrom(reason),
+        }));
+        if (project) {
+          await readAgentRuntime(project.rootPath, project.projectId);
+        }
+        return false;
+      }
+    },
+    [agentRuntime.policy?.revision, gateway, project, readAgentRuntime],
   );
 
   const resetCustomRules = useCallback(() => {
@@ -306,6 +858,10 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         if (syncTrigger === "project_open") {
           activeProjectPath.current = next.rootPath;
           resetCustomRules();
+          // 이전 프로젝트의 정책과 계획이 새 프로젝트 화면에 남지 않게 통째로 되돌린다(R5).
+          setAgentRuntime(emptyAgentRuntime);
+          void readAgentRuntime(next.rootPath, next.projectId);
+          if (next.projectId) void readAgentRuns(next.rootPath, next.projectId);
         }
         setProject(next);
         remember(next);
@@ -335,6 +891,8 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     },
     [
       gateway,
+      readAgentRuntime,
+      readAgentRuns,
       readCustomRules,
       remember,
       resetCustomRules,
@@ -695,6 +1253,82 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   /**
+   * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. QA 기록과 다른 통로다.
+   *
+   * 실패 사유를 돌려주는 값에도 담는다. 재개 영역은 입력을 유지한 채 그 자리에서 사유를 보여 주고
+   * 다음 행동을 묻는데, 다음 호출이 덮는 전역 문구만으로는 그 자리를 채울 수 없다.
+   */
+  const resumeTask = useCallback(
+    async (
+      workflowDirectory: string,
+      fileName: string,
+      expectedUpdatedAt: string,
+      resolution: string,
+      requestId: string,
+    ): Promise<TaskResumeOutcome> => {
+      if (!project) return { ok: false, message: "열린 프로젝트가 없습니다." };
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await gateway.resumeTask(project.rootPath, {
+          workflowDirectory,
+          fileName,
+          expectedUpdatedAt,
+          resolution,
+          requestId,
+        });
+        // 부분 저장으로 끝난 결과도 지금의 사실이다. 요약을 갱신해 다음 조회가 옛 상태를 보여 주지
+        // 않게 하고, 성공 여부 판정은 화면이 `status`로 한다.
+        setProject(result.summary);
+        return { ok: true, result };
+      } catch (reason) {
+        const message = messageFrom(reason);
+        setError(message);
+        return { ok: false, message };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
+  /**
+   * 작업 정의 수정 요청을 앱 소유 기록으로 남긴다. 거절 사유는 입력 영역이 그대로 보여 줄 수 있도록
+   * 반환값에도 담고, 성공 응답의 프로젝트 요약은 즉시 반영한다.
+   */
+  const recordTaskRevisionRequest = useCallback(
+    async (
+      workflowDirectory: string,
+      fileName: string,
+      expectedUpdatedAt: string,
+      reason: string,
+      requestId: string,
+    ): Promise<TaskRevisionRequestOutcome> => {
+      if (!project) return { ok: false, message: "열린 프로젝트가 없습니다." };
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await gateway.recordTaskRevisionRequest(project.rootPath, {
+          workflowDirectory,
+          fileName,
+          expectedUpdatedAt,
+          reason,
+          requestId,
+        });
+        setProject(result.summary);
+        return { ok: true, result };
+      } catch (reason) {
+        const message = messageFrom(reason);
+        setError(message);
+        return { ok: false, message };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
+  /**
    * 일괄 확인은 앱 호출 한 번이다. 건별 실패는 돌려주는 배열에 담기고 전역 에러로 올라가지 않는다 —
    * 전역 문구는 다음 호출이 덮는 자리라 건별 보고를 담지 못한다. `null`은 호출 자체가 실패한 것이다.
    */
@@ -796,18 +1430,10 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, writeIntegration],
   );
 
-  const installDreamJob = useCallback(
-    (dream: DreamJobRequest, baseline: ManagedDreamJob | null) =>
-      writeIntegration("dream", (path) =>
-        gateway.installDreamJob(path, dream, baseline),
-      ),
-    [gateway, writeIntegration],
-  );
-
-  // 연동 카드가 받는 쓰기 액션 묶음. 연동이 늘면 여기에 항목이 하나 더 붙는다.
+  // 기존 역할 잡 이전을 위한 임시 호환 통로. 전용 연동 화면에서는 더 이상 노출하지 않는다.
   const integrationActions = useMemo<IntegrationActions>(
-    () => ({ installHeartbeatJobs, installDreamJob }),
-    [installDreamJob, installHeartbeatJobs],
+    () => ({ installHeartbeatJobs }),
+    [installHeartbeatJobs],
   );
 
   // 잡 하나를 지금 한 번 실행한다. 사용자가 누른 자리에서만 불린다 — 조회 주기와 프로젝트 열기
@@ -1021,15 +1647,100 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   useEffect(() => {
-    if (!project?.initialized) return;
+    if (!project?.initialized || !gateway.watchProject) return;
     const path = project.rootPath;
-    void readIntegrations(path);
-    const timer = window.setInterval(() => {
-      void inspect(path, true);
-      void readIntegrations(path);
-    }, 2_500);
+    let disposed = false;
+    let stop: (() => Promise<void>) | null = null;
+    let debounce: number | null = null;
+    void gateway.watchProject(path, () => {
+      if (debounce !== null) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => void inspect(path, true), 500);
+    }).then((cleanup) => {
+      if (disposed) void cleanup();
+      else stop = cleanup;
+    }).catch(() => {
+      // 런타임 dispatcher의 안전 확인 주기가 남아 있다. 화면은 수동 새로고침도 제공한다.
+    });
+    return () => {
+      disposed = true;
+      if (debounce !== null) window.clearTimeout(debounce);
+      if (stop) void stop();
+    };
+  }, [gateway, inspect, project?.initialized, project?.rootPath]);
+
+  const hasActiveAgentRun = agentRuntime.queue?.runs.some((run) =>
+    ["reserved", "queued", "running", "paused"].includes(run.state)
+  ) ?? false;
+
+  useEffect(() => {
+    if (!project?.initialized || !project.projectId || (!agentViewActive && !hasActiveAgentRun)) return;
+    const path = project.rootPath;
+    const projectId = project.projectId;
+    void readAgentRuns(path, projectId, true);
+    const timer = window.setInterval(() => void readAgentRuns(path, projectId, true), 2_500);
     return () => window.clearInterval(timer);
-  }, [inspect, readIntegrations, project?.initialized, project?.rootPath]);
+  }, [agentViewActive, hasActiveAgentRun, project?.initialized, project?.projectId, project?.rootPath, readAgentRuns]);
+
+  const agentRuntimeActions: AgentRuntimeActions = useMemo(
+    () => ({
+      refresh: async () => {
+        if (!project) return;
+        await Promise.all([
+          readAgentRuntime(project.rootPath, project.projectId),
+          project.projectId
+            ? readAgentRuns(project.rootPath, project.projectId)
+            : Promise.resolve(),
+        ]);
+      },
+      setViewActive: setAgentViewActive,
+      plan: planAgentRuntime,
+      cancelPlan: cancelAgentRuntimePlan,
+      apply: applyAgentRuntimePlan,
+      previewMigration: previewAgentRuntimeMigration,
+      applyMigration: applyAgentRuntimeMigration,
+      dismissMigration: dismissAgentRuntimeMigration,
+      save: saveAgentRuntimePolicy,
+      planRun: planAgentRun,
+      cancelRunPlan: cancelAgentRunPlan,
+      startRun: startAgentRun,
+      refreshRuns: async () => {
+        if (project?.projectId) {
+          await readAgentRuns(project.rootPath, project.projectId);
+        }
+      },
+      setProjectPaused: setAgentProjectPaused,
+      previewCancel: previewAgentRunCancel,
+      dismissCancel: dismissAgentRunCancel,
+      confirmCancel: confirmAgentRunCancel,
+      previewRetry: previewAgentRunRetry,
+      dismissRetry: dismissAgentRunRetry,
+      confirmRetry: confirmAgentRunRetry,
+      readRunLog: readAgentRunLog,
+    }),
+    [
+      applyAgentRuntimeMigration,
+      applyAgentRuntimePlan,
+      cancelAgentRuntimePlan,
+      cancelAgentRunPlan,
+      confirmAgentRunCancel,
+      confirmAgentRunRetry,
+      dismissAgentRuntimeMigration,
+      dismissAgentRunCancel,
+      dismissAgentRunRetry,
+      planAgentRuntime,
+      planAgentRun,
+      previewAgentRuntimeMigration,
+      previewAgentRunCancel,
+      previewAgentRunRetry,
+      project,
+      readAgentRuntime,
+      readAgentRunLog,
+      readAgentRuns,
+      saveAgentRuntimePolicy,
+      setAgentProjectPaused,
+      startAgentRun,
+    ],
+  );
 
   return {
     project,
@@ -1050,7 +1761,11 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     readIdea,
     recordTaskQa,
     confirmTaskQaBatch,
+    resumeTask,
+    recordTaskRevisionRequest,
     decideSpec,
+    agentRuntime,
+    agentRuntimeActions,
     refresh,
     migrate,
     // 진행 중인 실행은 여기서 비우지 않는다. 잡 이름에 프로젝트 slug가 들어 있어 다른 프로젝트의
@@ -1058,6 +1773,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     closeProject: () => {
       activeProjectPath.current = null;
       resetCustomRules();
+      setAgentRuntime(emptyAgentRuntime);
       setProject(null);
       setError(null);
       setManagedAssets({

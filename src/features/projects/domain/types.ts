@@ -90,6 +90,22 @@ export interface TaskOverlapBlock {
   sharedFiles: string[];
 }
 
+/** 작업 문서의 `scope_files` 선언을 원문 계약대로 읽은 결과. */
+export interface TaskScopeDeclaration {
+  status: "declared" | "absent" | "malformed";
+  /** `declared`에서는 원문 순서의 경로이고, 나머지 두 상태에서는 비어 있다. */
+  files: string[];
+}
+
+/** 작업 하나에 남은 정의 수정 요청. `handled`는 작업이 이 요청 id를 직접 연결했을 때만 참이다. */
+export interface TaskRevisionRequest {
+  id: string;
+  previousUpdatedAt: string;
+  reason: string;
+  createdAt: string;
+  handled: boolean;
+}
+
 export interface TaskDocument {
   summary: WorkflowItemSummary;
   body: string;
@@ -99,6 +115,10 @@ export interface TaskDocument {
   dependencyFormatError?: boolean;
   /** 착수를 막고 있는 활성 lease와 그 근거. 비어 있으면 막히지 않은 것이다. */
   overlapBlocks?: TaskOverlapBlock[];
+  /** 현재 파일 범위 선언. 예전 테스트 리터럴은 값이 없을 수 있으므로 화면은 부재로 다룬다. */
+  scopeDeclaration?: TaskScopeDeclaration;
+  /** 생성 시각 순서의 정의 수정 요청 목록. */
+  revisionRequests?: TaskRevisionRequest[];
 }
 
 export interface IdeaDocument {
@@ -128,6 +148,63 @@ export interface TaskQaBatchResult {
   results: TaskQaBatchEntry[];
 }
 
+/**
+ * 막힌 작업을 사용자 판단으로 다시 여는 요청. 화면이 읽은 값을 그대로 싣는다.
+ *
+ * `expectedUpdatedAt`은 사용자가 화면에서 확인한 문서 갱신 시각이고 백엔드가 문자 단위로 대조한다.
+ * `requestId`는 같은 조작을 한 번만 기록하기 위한 값이라 재시도에서 같은 값을 다시 보낸다.
+ */
+export interface TaskResumeRequest {
+  workflowDirectory: string;
+  fileName: string;
+  expectedUpdatedAt: string;
+  resolution: string;
+  requestId: string;
+}
+
+/** 재개 요청의 결말. 상태 전이와 감사 기록 중 하나만 남은 결과는 `resumed`가 아니다. */
+export type TaskResumeStatus = "resumed" | "recovery_required";
+
+/** 되돌리지 못하고 남은 파일과 사용자가 해야 할 행동. `recovery_required`에서만 온다. */
+export interface TaskResumeRecovery {
+  createdPaths: string[];
+  reason: string;
+  action: string;
+}
+
+export interface TaskResumeResult {
+  status: TaskResumeStatus;
+  summary: ProjectSummary;
+  recovery: TaskResumeRecovery | null;
+}
+
+/** 잘못 분해된 작업을 고쳐 달라는 사용자 요청. 화면에서 확인한 값을 그대로 보낸다. */
+export interface TaskRevisionRequestInput {
+  workflowDirectory: string;
+  fileName: string;
+  expectedUpdatedAt: string;
+  reason: string;
+  requestId: string;
+}
+
+export interface TaskRevisionRequestResult {
+  status: "recorded" | "already_pending";
+  summary: ProjectSummary;
+  request: TaskRevisionRequest | null;
+}
+
+export type TaskRevisionRequestOutcome =
+  | { ok: true; result: TaskRevisionRequestResult }
+  | { ok: false; message: string };
+
+/**
+ * 재개 호출 하나의 결말. 실패 사유를 재개 영역 안에서 읽어야 하므로 전역 오류 문구 하나로 접지
+ * 않는다 — 사용자는 입력을 유지한 채 그 자리에서 다음 행동을 정한다.
+ */
+export type TaskResumeOutcome =
+  | { ok: true; result: TaskResumeResult }
+  | { ok: false; message: string };
+
 export interface AgentLeaseSummary {
   leaseId: string;
   agent: string;
@@ -146,6 +223,23 @@ export interface PendingRoleWork {
   developer: boolean;
 }
 
+export interface WorkCandidateVerdict {
+  id: string;
+  verdict: string;
+}
+
+export interface RoleWorkVerdict {
+  target: string | null;
+  targetKind: string | null;
+  candidates: WorkCandidateVerdict[];
+}
+
+export interface PendingRoleWorkDetail {
+  planner: RoleWorkVerdict;
+  architect: RoleWorkVerdict;
+  developer: RoleWorkVerdict;
+}
+
 export interface ProjectSummary {
   rootPath: string;
   initialized: boolean;
@@ -156,6 +250,8 @@ export interface ProjectSummary {
   workflows: WorkflowSummary[];
   /** 값이 없으면 "대기 물량을 모른다"이고, 모르는 상태에서는 경고하지 않는다. */
   pendingWork?: PendingRoleWork;
+  /** 현재 워크플로 판정의 전체 후보. 메인 화면은 eligible만, 상세 화면은 제외 사유까지 쓴다. */
+  pendingDetail?: PendingRoleWorkDetail;
 }
 
 export type ManagedAssetSyncStatus =
@@ -894,10 +990,6 @@ export interface IntegrationActions {
     roles: RoleJobRequest[],
     baseline: ManagedRoleJob[],
   ): Promise<boolean>;
-  installDreamJob(
-    dream: DreamJobRequest,
-    baseline: ManagedDreamJob | null,
-  ): Promise<boolean>;
 }
 
 export interface RecentProject {
@@ -909,6 +1001,11 @@ export interface RecentProject {
 export interface ProjectGateway {
   chooseDirectory(): Promise<string | null>;
   inspect(path: string): Promise<ProjectSummary>;
+  /** `.workflow` 변경 알림만 받고, 실제 프로젝트 해석은 기존 inspect가 한 번 수행한다. */
+  watchProject?(
+    path: string,
+    onChanged: () => void,
+  ): Promise<() => Promise<void>>;
   synchronizeManagedAssets(path: string): Promise<ManagedAssetSyncResult>;
   readCustomRules(path: string): Promise<CustomRulesDocument>;
   prepareCustomRulesPreview(
@@ -961,6 +1058,18 @@ export interface ProjectGateway {
     fileNames: string[],
     comment: string,
   ): Promise<TaskQaBatchResult>;
+  /**
+   * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. QA 결정과 다른 통로다 — 두 조작은
+   * 남기는 기록도 뜻도 다르므로 `recordTaskQa`를 재사용하지 않는다.
+   *
+   * 사용자가 근거를 적고 확인한 자리에서만 부른다. 조회 주기가 이 메서드를 부르는 경로는 없다.
+   */
+  resumeTask(path: string, request: TaskResumeRequest): Promise<TaskResumeResult>;
+  /** 작업 문서는 건드리지 않고 앱 소유 정의 수정 요청 기록만 남긴다. */
+  recordTaskRevisionRequest(
+    path: string,
+    request: TaskRevisionRequestInput,
+  ): Promise<TaskRevisionRequestResult>;
   migrate(path: string): Promise<ProjectSummary>;
   /** 연동 조회는 이 메서드 하나다. 연동이 늘어나도 메서드를 늘리지 않는다. */
   inspectIntegrations(path: string): Promise<IntegrationsSnapshot>;
@@ -972,12 +1081,6 @@ export interface ProjectGateway {
     path: string,
     roles: RoleJobRequest[],
     baseline: ManagedRoleJob[],
-  ): Promise<IntegrationsSnapshot>;
-  /** 역할 잡과 같은 규칙이다. 관리 블록에 dream 잡이 없던 상태는 `null`이다. */
-  installDreamJob(
-    path: string,
-    dream: DreamJobRequest,
-    baseline: ManagedDreamJob | null,
   ): Promise<IntegrationsSnapshot>;
   /**
    * 역할 잡 하나를 지금 한 번 실행한다. 어떤 파일도 쓰지 않으므로 스냅샷을 돌려주지 않는다.
@@ -1018,6 +1121,473 @@ export interface ProjectGateway {
   controlHeartbeatService(
     operation: HeartbeatServiceOperation,
   ): Promise<HeartbeatServiceControlResult>;
+  /**
+   * 에이전트 런타임의 기기 상태를 읽는다. 읽기 전용이라 자동 조회에서 불러도 되고, 이 호출로 런타임
+   * 파일이나 서비스 등록물이 바뀌지 않는다.
+   */
+  inspectAgentRuntime(): Promise<AgentRuntimeInspection>;
+  /** 설치 계획. 아무것도 쓰지 않는다. 사용자가 계획을 본 뒤에만 적용을 부른다. */
+  planAgentRuntimeInstall(): Promise<AgentInstallPlan>;
+  /**
+   * 계획 하나를 적용한다. `confirmed`가 참일 때만 쓰고, 계획 식별자가 최신이 아니면 백엔드가
+   * 거절한다. 사용자가 누른 자리에서만 부른다.
+   */
+  applyAgentRuntimeInstall(planId: string, confirmed: boolean): Promise<AgentInstallApplication>;
+  planAgentRuntimeUpdate(): Promise<AgentUpdatePlan>;
+  applyAgentRuntimeUpdate(planId: string, confirmed: boolean): Promise<AgentUpdateApplication>;
+  /** 복구는 업데이트와 같은 계획·적용 짝을 쓴다. 결과 모양도 같다. */
+  repairAgentRuntime(planId: string, confirmed: boolean): Promise<AgentUpdateApplication>;
+  /** 프로젝트 하나의 역할 정책과 provider 진단을 읽는다. 읽기 전용이다. */
+  readAgentRuntimePolicy(
+    projectId: string,
+    workingDirectory: string,
+  ): Promise<AgentPolicySnapshot>;
+  /**
+   * 정책을 저장한다. 읽을 때 받은 `revision`을 그대로 실어 보내며, 그사이 다른 저장이 있었으면
+   * 백엔드가 거절한다.
+   */
+  saveAgentRuntimePolicy(
+    policy: AgentProjectPolicy,
+    baselineRevision: string,
+  ): Promise<AgentPolicySnapshot>;
+  /** 기존 역할 잡에서 새 정책을 제안한다. 파일을 읽기만 한다. */
+  previewAgentRuntimeMigration(
+    path: string,
+    projectId: string,
+  ): Promise<AgentMigrationPreview>;
+  /** 확인받은 미리보기를 적용한다. 미리보기 식별자와 revision이 모두 맞아야 쓴다. */
+  applyAgentRuntimeMigration(
+    path: string,
+    projectId: string,
+    previewId: string,
+    baselineRevision: string,
+  ): Promise<AgentPolicySnapshot>;
+  planAgentRun(projectId: string, roles: AgentRoleSlotRequest[]): Promise<AgentRunPlan>;
+  startAgentRun(
+    projectId: string,
+    planId: string,
+    confirmed: boolean,
+  ): Promise<AgentRunStartOutcome>;
+  cancelAgentRun(
+    projectId: string,
+    runId: string,
+    confirmed: boolean,
+  ): Promise<AgentCancelOutcome>;
+  retryAgentRun(projectId: string, runId: string): Promise<AgentRunSummary>;
+  inspectAgentRuns(projectId: string): Promise<AgentQueueSnapshot>;
+  pauseAgentProject(projectId: string): Promise<AgentQueueSnapshot>;
+  resumeAgentProject(projectId: string): Promise<AgentQueueSnapshot>;
+  readAgentRunLog(
+    projectId: string,
+    runId: string,
+    cursor: number,
+  ): Promise<AgentRunLogPage>;
+}
+
+/**
+ * 에이전트 런타임 계약의 값들. 필드 이름과 값 어휘는 백엔드가 런타임 응답에서 그대로 옮긴 것이고,
+ * 화면은 그 값을 해석해 문장으로 옮기기만 한다. 앱이 새 상태를 만들지 않는다.
+ */
+export interface AgentServiceState {
+  platform: string;
+  result: string;
+  /** 참·거짓·null 세 값이다. null은 확인하지 못했다는 뜻이며 실행 중으로 올리지 않는다. */
+  registered: boolean | null;
+  running: boolean | null;
+  label: string | null;
+  executable: string | null;
+  recoverable: boolean | null;
+  checkedAt: string;
+  evidence: string[];
+}
+
+export interface AgentRuntimeStatus {
+  result: string;
+  checkedAt: string;
+  runtimeVersion: string | null;
+  /** 디스크의 버전. */
+  installedVersion: string | null;
+  /** 지금 도는 서비스에서 읽은 버전. 셋은 서로 다른 사실이다. */
+  runningVersion: string | null;
+  apiMajor: number;
+  target: string;
+  installResult: string;
+  recoverable: boolean | null;
+  service: AgentServiceState;
+}
+
+/** 호환 판정. 사유마다 사용자가 할 다음 행동이 다르므로 값이 나뉜다. */
+export type AgentCompatibility =
+  | { kind: "compatible" }
+  | { kind: "unsupportedApiMajor"; found: number; supported: number }
+  | { kind: "versionOutOfRange"; found: string; minimum: string; maximum: string }
+  | { kind: "restartRequired"; installed: string; running: string }
+  | { kind: "undetermined"; reason: string };
+
+export interface AgentRuntimeInspection {
+  bundledVersion: string | null;
+  status: AgentRuntimeStatus | null;
+  compatibility: AgentCompatibility;
+  /** 설정 저장과 실행 진입을 열어도 되는지. 모름과 재시작 필요는 둘 다 거짓이다. */
+  executionAllowed: boolean;
+  /** 런타임을 부르지 못한 사유. 화면은 이 값을 그대로 보여준다. */
+  unavailable: string | null;
+  installRoot: string;
+}
+
+/** 설치 계획이 서비스에 수행할 처분. 확인 불가를 등록 불필요로 접지 않는다. */
+export type AgentInstallServiceAction =
+  | "register"
+  | "already_managed"
+  | "migration_required"
+  | "unknown";
+
+export interface AgentInstallPlan {
+  planId: string;
+  bundledVersion: string;
+  target: string;
+  versionDirectory: string;
+  launcher: string;
+  alreadyInstalled: boolean;
+  installedVersion: string | null;
+  serviceTransitionRequired: boolean;
+  /** 계획을 만들 때 런타임이 읽은 서비스 사실. null은 조회 자체가 불가능했다는 뜻이다. */
+  service: AgentServiceState | null;
+  /** 적용이 실제로 수행할 서비스 처분. 계획 확인 화면이 이 값을 숨기지 않는다. */
+  serviceAction: AgentInstallServiceAction;
+}
+
+export interface AgentStageResult {
+  /** 런타임 계약이 정한 단계 이름. 계약 밖 이름은 `unrecognized`로 온다. */
+  stage: string;
+  status: string;
+  detail: string | null;
+}
+
+export interface AgentInstallApplication {
+  planId: string;
+  result: string;
+  installedVersion: string | null;
+  versionDirectory: string | null;
+  stages: AgentStageResult[];
+  detail: string | null;
+}
+
+export interface AgentUpdatePlan {
+  planId: string;
+  result: string;
+  targetVersion: string | null;
+  target: string;
+  manifestVerified: boolean;
+  launcherSwitchRequired: boolean;
+  serviceTransitionRequired: boolean;
+  recoverableOnFailure: boolean;
+  installedVersion: string | null;
+  runningVersion: string | null;
+  /** 지금 도는 실행 수와 영향받는 프로젝트. 런타임이 센 값이고 앱이 따로 세지 않는다. */
+  activeRuns: number;
+  projects: string[];
+  service: AgentServiceState;
+}
+
+export interface AgentUpdateApplication {
+  planId: string;
+  result: string;
+  stages: AgentStageResult[];
+  runnableVersion: string | null;
+  recoveryActions: string[];
+  detail: string | null;
+}
+
+/** 역할 하나의 정책. 이름은 화면이 쓰는 이름이고 저장할 때 백엔드가 런타임 계약 이름으로 옮긴다. */
+export interface AgentRolePolicy {
+  /**
+   * 런타임 설정 계약에 대응 필드가 없어 거짓으로는 저장되지 않는다. 백엔드가 저장 전에 거절하므로
+   * 화면은 끄기를 성공으로 보여주지 않는다.
+   */
+  enabled: boolean;
+  provider: string;
+  /** 빈 값이면 각 CLI의 기본 모델을 쓴다. 앱이 임의 모델명을 넣지 않는다. */
+  model: string | null;
+  runMode: string;
+  maxParallel: number;
+  intervalSeconds: number;
+  /** 실행 한도. 없으면 한도를 두지 않는다. */
+  maxPer: number | null;
+}
+
+export interface AgentProjectPolicy {
+  projectId: string;
+  workingDirectory: string;
+  projectMaxParallel: number;
+  deviceMaxParallel: number;
+  automationEnabled?: boolean;
+  /** 역할 이름으로 찾는다. 세 역할이 모두 있어야 저장된다. */
+  roles: Record<string, AgentRolePolicy>;
+}
+
+export interface AgentDeviceProjectCapacity {
+  projectId: string;
+  projectName: string;
+  projectMaxParallel: number;
+  activeRuns: number;
+}
+
+/** 기기 사양에서 계산한 권장값과 사용자가 정한 전역값. 권장값은 실행을 막는 상한이 아니다. */
+export interface AgentDeviceCapacity {
+  /** 런타임이 기기 사양과 전체 프로젝트 사용량을 직접 관측했는지. */
+  observed: boolean;
+  configuredMaxParallel: number | null;
+  effectiveMaxParallel: number;
+  recommendedMaxParallel: number;
+  logicalCpuCount: number | null;
+  totalMemoryBytes: number | null;
+  reservedMemoryBytes: number | null;
+  estimatedMemoryPerAgentBytes: number | null;
+  activeRuns: number;
+  projects: AgentDeviceProjectCapacity[];
+}
+
+/**
+ * provider 하나의 준비 상태. 런타임이 답한 값을 그대로 싣는다 — 계약이 정한 여섯 값 밖이 오면
+ * 화면은 그 문자열을 숨기지 않고 그대로 보여준다.
+ */
+export interface AgentProviderDiagnosis {
+  provider: string;
+  status: string;
+  version: string | null;
+}
+
+export interface AgentPolicySnapshot {
+  policy: AgentProjectPolicy;
+  /** 저장된 설정이 없으면 기본값 제안이고 이 값이 거짓이다. */
+  stored: boolean;
+  /** 저장 요청에 그대로 실어 보낼 값. 읽은 뒤 누가 바꿨는지를 이 값으로 판정한다. */
+  revision: string;
+  providers: AgentProviderDiagnosis[];
+  executionAllowed: boolean;
+  compatibility: AgentCompatibility;
+  deviceCapacity: AgentDeviceCapacity;
+}
+
+/** 옮기지 못한 값 하나. 조용히 버리지 않고 그대로 남긴다. */
+export interface AgentUnresolvedValue {
+  role: string;
+  field: string;
+  value: string;
+  reason: string;
+}
+
+export interface AgentMigrationPreview {
+  previewId: string;
+  proposed: AgentProjectPolicy;
+  unresolved: AgentUnresolvedValue[];
+  /** 기존 잡이 없어 손대지 않은 역할. */
+  untouchedRoles: string[];
+}
+
+export interface AgentRoleSlotRequest {
+  role: string;
+  slots: number;
+  /** 비어 있으면 자동 배정이고, 값이 있으면 런타임이 같은 안전 규칙으로 수동 대상을 검사한다. */
+  targets: string[];
+}
+
+export interface AgentRoleRunPlan {
+  role: string;
+  provider: string;
+  executionMode: string;
+  requested: number;
+  granted: number;
+  excluded: string[];
+  manualTargets: string[];
+  targetId?: string | null;
+  candidates?: WorkCandidateVerdict[];
+  verdict?: string;
+  diagnostic: unknown;
+}
+
+export interface AgentRunPlan {
+  planId: string;
+  projectId: string;
+  revision: string;
+  expiresAt: string;
+  deviceRemaining: number;
+  projectRemaining: number;
+  billingRouteRisk: boolean;
+  limits: unknown;
+  roles: AgentRoleRunPlan[];
+}
+
+export type AgentRunStatus =
+  | "reserved"
+  | "queued"
+  | "running"
+  | "paused"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "recovery_required"
+  | "unrecognized";
+
+export interface AgentRunSummary {
+  runId: string;
+  projectId: string;
+  role: string;
+  provider: string;
+  state: AgentRunStatus;
+  targetId: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  failureStage: string | null;
+  reason: string | null;
+  remaining: string[];
+  previousRunId: string | null;
+}
+
+export interface AgentRunStartOutcome {
+  started: AgentRunSummary[];
+  failures: unknown[];
+  waiting?: unknown[];
+}
+
+export interface AgentCancelPreview {
+  runId: string;
+  targetId: string | null;
+  leaseId: string | null;
+  pid: number | null;
+  processLiveness: string;
+  childProcesses: number;
+  cleanup: string[];
+}
+
+export type AgentCancelOutcome =
+  | { kind: "preview"; preview: AgentCancelPreview }
+  | { kind: "applied"; run: AgentRunSummary }
+  | { kind: "partial"; run: AgentRunSummary; remaining: string[] };
+
+export interface AgentRunLogPage {
+  runId: string;
+  events: unknown[];
+  nextCursor: number;
+}
+
+export interface AgentQueueSnapshot {
+  projectId: string;
+  paused: boolean;
+  automation?: AgentAutomationSnapshot;
+  runs: AgentRunSummary[];
+  errors: unknown[];
+  providers: unknown[];
+  unavailable: string | null;
+}
+
+export interface AgentAutomationRoleState {
+  role: string;
+  status: "watching" | "waiting" | "running" | "attention" | string;
+  nextPollAt: string | null;
+  lastCheckAt: string | null;
+  lastResult: string | null;
+  lastAssignedAt: string | null;
+}
+
+export interface AgentWatcherState {
+  status: "watching" | "degraded" | "stopped" | string;
+  lastEventAt: string | null;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface AgentAutomationSnapshot {
+  enabled: boolean;
+  roles: AgentAutomationRoleState[];
+  watcher: AgentWatcherState | null;
+  dispatcherRunning: boolean;
+}
+
+/** 앱이 대신 실행하는 런타임 조작 셋. 셋 다 계획을 먼저 보여주고 확인받은 뒤에만 적용한다. */
+export type AgentRuntimeOperation = "install" | "update" | "repair";
+
+/** 확인 대기 중인 계획 하나. 종류에 따라 적용이 부르는 명령과 보여줄 값이 다르다. */
+export type AgentRuntimePlan =
+  | { kind: "install"; plan: AgentInstallPlan }
+  | { kind: "update"; plan: AgentUpdatePlan }
+  | { kind: "repair"; plan: AgentUpdatePlan };
+
+/** 마지막 적용의 결과. 조회 주기가 지우지 않는다. */
+export type AgentRuntimeApplication =
+  | { kind: "install"; result: AgentInstallApplication }
+  | { kind: "update"; result: AgentUpdateApplication }
+  | { kind: "repair"; result: AgentUpdateApplication };
+
+/**
+ * 에이전트 화면의 수명. 주인이 훅인 이유는 연동 상태와 같다 — 화면은 조건부 렌더라 다른 메뉴를
+ * 다녀오면 언마운트되고, 화면이 들고 있으면 진행 표시가 그때 사라진다.
+ */
+export interface AgentRuntimeState {
+  inspection: AgentRuntimeInspection | null;
+  policy: AgentPolicySnapshot | null;
+  reading: boolean;
+  /** 조회 실패 사유. 쓰기 실패와 다른 자리에 둔다. */
+  readError: string | null;
+  /** 지금 계획을 만드는 중인 조작. 없으면 null이다. */
+  planning: AgentRuntimeOperation | null;
+  /** 확인 대기 중인 계획. 이 값이 없으면 적용 버튼이 열리지 않는다. */
+  plan: AgentRuntimePlan | null;
+  planError: string | null;
+  applying: boolean;
+  application: AgentRuntimeApplication | null;
+  applyError: string | null;
+  migration: AgentMigrationPreview | null;
+  migrationBusy: boolean;
+  migrationError: string | null;
+  saving: boolean;
+  saveError: string | null;
+  runPlan: AgentRunPlan | null;
+  runRequests: AgentRoleSlotRequest[];
+  runPlanning: boolean;
+  runStarting: boolean;
+  runError: string | null;
+  queue: AgentQueueSnapshot | null;
+  queueReading: boolean;
+  queueError: string | null;
+  pausing: boolean;
+  cancelPreview: AgentCancelPreview | null;
+  cancelResult: AgentCancelOutcome | null;
+  retryPreview: AgentRunSummary | null;
+  controllingRunId: string | null;
+  controlError: string | null;
+  logs: Record<string, AgentRunLogPage>;
+  readingLogRunId: string | null;
+  logError: string | null;
+}
+
+export interface AgentRuntimeActions {
+  /** 기기 상태와 이 프로젝트의 정책을 다시 읽는다. 읽기 명령만 부른다. */
+  refresh(): Promise<void>;
+  /** 짧은 실행 상태 조회를 에이전트 화면이 보일 때만 유지한다. */
+  setViewActive?(active: boolean): void;
+  /** 계획을 만든다. 아무것도 쓰지 않는다. */
+  plan(operation: AgentRuntimeOperation): Promise<void>;
+  cancelPlan(): void;
+  /** 확인 대기 중인 계획을 적용한다. 계획이 없으면 아무것도 하지 않는다. */
+  apply(): Promise<boolean>;
+  previewMigration(): Promise<void>;
+  applyMigration(): Promise<boolean>;
+  dismissMigration(): void;
+  save(policy: AgentProjectPolicy): Promise<boolean>;
+  planRun(requests: AgentRoleSlotRequest[]): Promise<void>;
+  cancelRunPlan(): void;
+  startRun(): Promise<boolean>;
+  refreshRuns(): Promise<void>;
+  setProjectPaused(paused: boolean): Promise<boolean>;
+  previewCancel(runId: string): Promise<void>;
+  dismissCancel(): void;
+  confirmCancel(): Promise<boolean>;
+  previewRetry(runId: string): void;
+  dismissRetry(): void;
+  confirmRetry(): Promise<boolean>;
+  readRunLog(runId: string): Promise<void>;
 }
 
 export interface RecentProjectStore {

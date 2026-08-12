@@ -358,7 +358,7 @@ describe("ActivityView 최근 활동", () => {
   });
 
   // 같은 사실을 두 화면이 다른 말로 부르지 않게 라벨 정의를 개발 화면과 공유한다.
-  it("names task transitions with the development timeline's six labels", () => {
+  it("names task transitions and definition revision events with the development timeline labels", () => {
     renderFeed(workflowWith({
       tasks: [recorded("TASK-001", "첫 작업", eventKinds.map((entry, index) => ({
         kind: entry.kind,
@@ -367,7 +367,8 @@ describe("ActivityView 최근 활동", () => {
     }));
 
     expect(marks()).toEqual([...eventKinds].reverse().map((entry) => entry.label));
-    expect(marks()).toEqual(["반려", "완료", "QA 대기", "막힘", "시작", "생성"]);
+    // 사용자 재개는 QA 반려와 다른 이름으로 선다. 둘 다 작업을 준비 상태로 되돌리지만 다른 사실이다.
+    expect(marks()).toEqual(["아키텍트 수정", "정의 수정 요청", "사용자 재개", "반려", "완료", "QA 대기", "막힘", "시작", "생성"]);
   });
 
   it("shows approval, revision request and rejection from specification decisions", () => {

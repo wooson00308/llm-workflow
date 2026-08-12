@@ -61,13 +61,7 @@ pub struct ProjectSummary {
     pub active_leases: Vec<AgentLeaseSummary>,
     pub workflows: Vec<WorkflowSummary>,
     pub pending_work: PendingRoleWork,
-    /// 넓어진 판정 그대로(SPEC-049 R1). `pending_work`는 이 값에서 파생하므로 둘이 갈라질 수 없다.
-    ///
-    /// 직렬화에서 빠지므로 화면에 나가는 payload의 모양은 이 필드가 생기기 전과 같다. 화면에 대상과
-    /// 제외 사유를 노출하는 일은 SPEC-049의 이번 범위가 아니고, 그래서 프런트엔드 타입도 그대로다.
-    /// 필드를 여기 두는 것은 조건 스크립트와의 대조가 화면이 쓰는 그 배선을 그대로 지나야 하기
-    /// 때문이다 — 판정만 따로 부르는 두 번째 경로를 만들면 대조가 배선을 고정하지 못한다.
-    #[serde(skip)]
+    /// 역할별 전체 후보와 판정. 화면은 이 값을 워크플로 항목과 조인해 사람용 대기열을 만든다.
     pub pending_detail: PendingRoleWorkDetail,
 }
 
@@ -81,7 +75,8 @@ pub struct PendingRoleWork {
 }
 
 /// 세 역할의 넓어진 판정(SPEC-049 R1). 역할마다 대상 문서와 후보별 제외 사유를 함께 답한다.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingRoleWorkDetail {
     pub planner: RoleWorkVerdict,
     pub architect: RoleWorkVerdict,
@@ -100,10 +95,14 @@ impl PendingRoleWorkDetail {
 }
 
 /// 역할 하나의 판정 결과.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleWorkVerdict {
     /// 그 역할이 집어야 하는 문서의 id. 대상이 없으면 `None`이다.
     pub target: Option<String>,
+    /// 고른 대상의 종류. 현재는 아키텍트 판정이 승인 결정과 작업 정의 수정 요청을
+    /// 구분할 때만 채우며, 대상이 없으면 `None`이다.
+    pub target_kind: Option<String>,
     /// 판정한 후보를 판정한 차례대로 담는다. 대상을 찾은 자리에서 판정이 멈추므로 그 뒤의 후보는
     /// 목록에 없다. 대상이 없을 때 이 목록은 그 역할이 본 후보 전부다.
     pub candidates: Vec<WorkCandidate>,
@@ -124,12 +123,24 @@ impl RoleWorkVerdict {
             id: id.to_owned(),
             verdict: ELIGIBLE.to_owned(),
         });
-        self.target = Some(id.to_owned());
+        if self.target.is_none() {
+            self.target = Some(id.to_owned());
+        }
+    }
+
+    /// 종류가 있는 대상을 고르고 그 후보를 `eligible`로 기록한다.
+    pub fn select_kind(&mut self, id: &str, kind: &str) {
+        let selected = self.target.is_none();
+        self.select(id);
+        if selected {
+            self.target_kind = Some(kind.to_owned());
+        }
     }
 }
 
 /// 후보 하나와 그 후보에 내려진 판정.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkCandidate {
     pub id: String,
     /// 대상이면 [`ELIGIBLE`], 아니면 제외 사유 코드. 조건 스크립트가 내는 코드와 같은 어휘를 쓴다.
@@ -268,6 +279,23 @@ pub struct TaskOverlapBlock {
     pub shared_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskScopeStatus {
+    Declared,
+    Absent,
+    Malformed,
+}
+
+/// 작업 상세가 현재 `scope_files` 선언을 추측 없이 보여 주기 위한 값.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskScopeDeclaration {
+    pub status: TaskScopeStatus,
+    /// 선언에 적힌 순서와 문자열 그대로다. 부재·형식 오류에서는 비어 있다.
+    pub files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDocument {
@@ -281,6 +309,10 @@ pub struct TaskDocument {
     /// 이 작업의 착수를 막고 있는 활성 lease와 그 근거(SPEC-032 R7). 비어 있으면 막히지 않은
     /// 것이다. 자기 자신을 잡은 lease는 담지 않는다 — 그것은 겹침이 아니라 자기 선점이다.
     pub overlap_blocks: Vec<TaskOverlapBlock>,
+    /// 정상 목록, 선언 부재, 형식 오류를 서로 다른 상태로 싣는다.
+    pub scope_declaration: TaskScopeDeclaration,
+    /// 이 작업에 남은 사용자 수정 요청. 생성 시각 오름차순이고, 요청이 없으면 비어 있다.
+    pub revision_requests: Vec<TaskRevisionRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -322,6 +354,98 @@ pub struct TaskQaBatchEntry {
     pub recorded: bool,
     /// 실패 사유. 성공이면 `None`.
     pub message: Option<String>,
+}
+
+/// 잘못 분해된 작업을 고쳐 달라는 사용자 요청(SPEC-055 R2). 앱 UI의 사용자 조작만 이 요청을 만든다.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRevisionRequestInput {
+    pub workflow_directory: String,
+    pub file_name: String,
+    /// 사용자가 화면에서 확인한 작업 문서의 `updated_at` 원문. 문자 단위로 같아야 기록한다.
+    pub expected_updated_at: String,
+    /// 사용자가 적은 요청 이유. 앱은 이 문장을 대신 지어내지 않는다.
+    pub reason: String,
+    /// 같은 요청을 한 번만 기록하기 위한 요청 식별자. 재시도는 같은 값을 다시 보낸다.
+    pub request_id: String,
+}
+
+/// 요청 저장의 결말. 새 기록을 만든 경우와 이미 있는 미처리 요청 때문에 만들지 않은 경우를 가른다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRevisionRequestStatus {
+    /// 이번 호출이 기록을 남겼거나, 같은 요청 식별자의 기록이 이미 있어 그것을 그대로 돌려준다.
+    Recorded,
+    /// 같은 작업에 아직 처리되지 않은 요청이 있어 새 기록을 만들지 않았다.
+    AlreadyPending,
+}
+
+/// 작업 하나에 남은 수정 요청 한 건. 조회가 생성 시각 순서로 싣는다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRevisionRequest {
+    pub id: String,
+    /// 요청 당시 사용자가 확인한 작업 갱신 시각.
+    pub previous_updated_at: String,
+    /// 사용자가 적은 이유 원문.
+    pub reason: String,
+    pub created_at: String,
+    /// 작업 문서가 이 요청의 id를 연결하고 있는가. 앱은 다른 근거로 처리 여부를 추측하지 않는다.
+    pub handled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRevisionRequestResult {
+    pub status: TaskRevisionRequestStatus,
+    /// 요청 저장 뒤 다시 계산한 프로젝트 요약.
+    pub summary: ProjectSummary,
+    /// 이번에 남았거나 이미 남아 있던 요청. 판정에 걸려 아무것도 쓰지 않은 경우에도 현재 사실을 싣는다.
+    pub request: Option<TaskRevisionRequest>,
+}
+
+/// 막힌 작업을 사용자 판단으로 다시 여는 요청(SPEC-054 R8). 앱 UI의 사용자 조작만 이 요청을 만든다.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResumeRequest {
+    pub workflow_directory: String,
+    pub file_name: String,
+    /// 사용자가 화면에서 확인한 작업 문서의 `updated_at` 원문. 문자 단위로 같아야 재개한다.
+    pub expected_updated_at: String,
+    /// 사용자가 입력한 해결 근거. 앱은 이 문장을 대신 지어내지 않는다.
+    pub resolution: String,
+    /// 같은 재개를 한 번만 기록하기 위한 요청 식별자. 재시도는 같은 값을 다시 보낸다.
+    pub request_id: String,
+}
+
+/// 재개 요청의 결말. 두 기록 중 하나만 남은 결과는 `Resumed`가 아니다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskResumeStatus {
+    /// 상태 전이와 감사 기록이 함께 남았다. 같은 요청 식별자의 재시도도 이 값이다.
+    Resumed,
+    /// 감사 기록만 남고 작업 문서 교체가 실패했으며 되돌리기까지 실패했다. 사용자가 손으로
+    /// 치워야 할 파일이 있으므로 `recovery`를 함께 싣는다.
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResumeResult {
+    pub status: TaskResumeStatus,
+    /// 재개 뒤 다시 계산한 프로젝트 요약. 개발자 자격 판정도 이 값에서 다시 나온다.
+    pub summary: ProjectSummary,
+    /// `RecoveryRequired`에서만 채운다.
+    pub recovery: Option<TaskResumeRecovery>,
+}
+
+/// 되돌리지 못하고 남은 파일과 사용자가 해야 할 행동.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResumeRecovery {
+    pub created_paths: Vec<String>,
+    pub reason: String,
+    pub action: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

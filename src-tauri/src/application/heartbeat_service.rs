@@ -186,6 +186,38 @@ pub struct RoleJobRequest {
     pub timeout: Option<String>,
 }
 
+/// 기존 앱 소유 역할 잡을 전환할 때 쓰는 닫힌 요청 목록.
+///
+/// `enabled=false`면 세 역할 모두 제거하고, 참이면 읽어 둔 값만 정확히 복원한다. Dream과 외부 잡은
+/// 이 목록에 들어오지 않으므로 전환 성공·rollback 어느 쪽에서도 수정되지 않는다.
+pub fn migration_role_requests(managed: &[ManagedRoleJob], enabled: bool) -> Vec<RoleJobRequest> {
+    HeartbeatRole::ALL
+        .iter()
+        .map(|role| {
+            let name = role.as_argument();
+            let stored = managed.iter().find(|job| job.role == name);
+            RoleJobRequest {
+                role: name.to_owned(),
+                enabled: enabled && stored.is_some(),
+                interval: stored.and_then(|job| job.interval.clone()),
+                max_per: stored.and_then(|job| {
+                    job.max_per.as_ref().map(|value| {
+                        if value == "unlimited" {
+                            MaxPerRequest::Unlimited
+                        } else {
+                            MaxPerRequest::Limit {
+                                value: value.clone(),
+                            }
+                        }
+                    })
+                }),
+                model: stored.and_then(|job| job.model.clone()),
+                timeout: stored.and_then(|job| job.timeout.clone()),
+            }
+        })
+        .collect()
+}
+
 /// 저장 요청이 정하는 실행 한도(R3). 필드가 `None`이면 "이번 편집에서 지정하지 않음"이라 파일 값이
 /// 이긴다. 지정한 경우는 이 둘 중 하나다.
 ///
@@ -211,6 +243,7 @@ impl From<MaxPerRequest> for MaxPer {
 /// 표현한다. 이 요청에는 역할 잡 값이 들어가지 않는다.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // 앱 API에서는 폐기했지만 기존 잡 보존·역호환 검증이 이 계약을 계속 사용한다.
 pub struct DreamJobRequest {
     pub enabled: bool,
     pub interval: Option<String>,
@@ -453,6 +486,7 @@ impl HeartbeatService {
     ///
     /// `baseline`은 화면이 읽은 시점의 dream 잡이다. 역할 잡 설치와 같은 규칙으로 대조하고, 대조
     /// 범위는 dream 잡 하나뿐이다(R3).
+    #[allow(dead_code)] // Tauri 노출은 제거했다. 기존 잡 문서 역호환 테스트만 유지한다.
     pub fn install_dream(
         &self,
         project_root: &Path,
@@ -584,6 +618,7 @@ fn block_dream_settings(block: Option<&ManagedDreamJob>) -> PartialSettings {
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 fn preserved_role_jobs(
     document: &str,
     slug: &str,
@@ -621,6 +656,7 @@ fn preserved_dream_job(
 }
 
 /// 이번 요청이 정하는 dream 잡. 기준은 관리 블록의 값이고 요청이 지정한 필드만 그 위에 덮는다.
+#[allow(dead_code)]
 fn requested_dream_job(
     dream: &DreamJobRequest,
     document: &str,
@@ -989,7 +1025,10 @@ mod tests {
 
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{heartbeat_dream, job_quota, managed_role_jobs, update_guide, HeartbeatService};
+    use super::{
+        heartbeat_dream, job_quota, managed_role_jobs, migration_role_requests, update_guide,
+        HeartbeatService, ManagedRoleJob, MaxPerRequest,
+    };
     use crate::domain::project::{
         HeartbeatSetupStage, HeartbeatSetupState, HeartbeatSetupStep, IntegrationInstallation,
         JobQuota,
@@ -1106,6 +1145,42 @@ mod tests {
         assert_eq!(jobs[0].interval.as_deref(), Some("20m"));
         assert_eq!(jobs[0].max_per.as_deref(), Some("6/24h"));
         assert_eq!(jobs[0].model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn migration_requests_disable_only_roles_and_restore_the_exact_editable_values() {
+        let jobs = vec![ManagedRoleJob {
+            role: "developer".to_owned(),
+            interval: Some("20m".to_owned()),
+            max_per: Some("6/24h".to_owned()),
+            model: Some("opus".to_owned()),
+            timeout: Some("30m".to_owned()),
+            app_owned_drift: vec!["notify".to_owned()],
+        }];
+
+        let disabled = migration_role_requests(&jobs, false);
+        assert_eq!(disabled.len(), 3);
+        assert!(disabled.iter().all(|request| !request.enabled));
+
+        let restored = migration_role_requests(&jobs, true);
+        let developer = restored
+            .iter()
+            .find(|request| request.role == "developer")
+            .expect("developer request");
+        assert!(developer.enabled);
+        assert_eq!(developer.interval.as_deref(), Some("20m"));
+        assert_eq!(developer.model.as_deref(), Some("opus"));
+        assert_eq!(developer.timeout.as_deref(), Some("30m"));
+        assert_eq!(
+            developer.max_per,
+            Some(MaxPerRequest::Limit {
+                value: "6/24h".to_owned(),
+            })
+        );
+        assert!(restored
+            .iter()
+            .filter(|request| request.role != "developer")
+            .all(|request| !request.enabled));
     }
 
     /// 마커가 하던 범위 제한을 잡 이름 대조가 대신한다. 이름이 이 프로젝트의 역할 잡과 다르면

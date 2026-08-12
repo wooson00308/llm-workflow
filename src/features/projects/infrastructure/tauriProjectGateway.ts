@@ -1,6 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  AgentInstallApplication,
+  AgentInstallPlan,
+  AgentMigrationPreview,
+  AgentCancelOutcome,
+  AgentPolicySnapshot,
+  AgentProjectPolicy,
+  AgentQueueSnapshot,
+  AgentRoleSlotRequest,
+  AgentRunLogPage,
+  AgentRunPlan,
+  AgentRunStartOutcome,
+  AgentRunSummary,
+  AgentRuntimeInspection,
+  AgentUpdateApplication,
+  AgentUpdatePlan,
   CustomRulesDocument,
   CustomRulesDraft,
   CustomRulesPreview,
@@ -18,6 +34,10 @@ import type {
   SpecDocument,
   TaskDocument,
   TaskQaBatchResult,
+  TaskResumeRequest,
+  TaskResumeResult,
+  TaskRevisionRequestInput,
+  TaskRevisionRequestResult,
 } from "../domain/types";
 
 export const tauriProjectGateway: ProjectGateway = {
@@ -32,6 +52,26 @@ export const tauriProjectGateway: ProjectGateway = {
 
   inspect(path) {
     return invoke<ProjectSummary>("inspect_project", { path });
+  },
+
+  async watchProject(path, onChanged) {
+    let activeWatchId: string | null = null;
+    const unlisten = await listen<{ watchId: string; path: string }>(
+      "workflow-project-changed",
+      (event) => {
+        if (event.payload.path === path && event.payload.watchId === activeWatchId) onChanged();
+      },
+    );
+    try {
+      activeWatchId = await invoke<string>("watch_project", { path });
+    } catch (error) {
+      unlisten();
+      throw error;
+    }
+    return async () => {
+      unlisten();
+      if (activeWatchId) await invoke("unwatch_project", { watchId: activeWatchId });
+    };
   },
 
   synchronizeManagedAssets(path) {
@@ -123,6 +163,14 @@ export const tauriProjectGateway: ProjectGateway = {
     });
   },
 
+  resumeTask(path, request: TaskResumeRequest) {
+    return invoke<TaskResumeResult>("resume_task", { path, request });
+  },
+
+  recordTaskRevisionRequest(path, request: TaskRevisionRequestInput) {
+    return invoke<TaskRevisionRequestResult>("record_task_revision_request", { path, request });
+  },
+
   migrate(path) {
     return invoke<ProjectSummary>("migrate_project", { path });
   },
@@ -135,14 +183,6 @@ export const tauriProjectGateway: ProjectGateway = {
     return invoke<IntegrationsSnapshot>("install_heartbeat_jobs", {
       path,
       roles,
-      baseline,
-    });
-  },
-
-  installDreamJob(path, dream, baseline) {
-    return invoke<IntegrationsSnapshot>("install_dream_job", {
-      path,
-      dream,
       baseline,
     });
   },
@@ -174,5 +214,110 @@ export const tauriProjectGateway: ProjectGateway = {
     return invoke<HeartbeatServiceControlResult>("control_heartbeat_service", {
       operation,
     });
+  },
+
+  // 아래 열 개가 에이전트 런타임 계약이다. 앞의 넷은 읽기와 계획이라 아무것도 쓰지 않고, 나머지는
+  // 사용자가 확인한 자리에서만 불린다. 인자는 식별자와 앱이 이미 들고 있는 값뿐이다.
+  inspectAgentRuntime() {
+    return invoke<AgentRuntimeInspection>("inspect_agent_runtime");
+  },
+
+  planAgentRuntimeInstall() {
+    return invoke<AgentInstallPlan>("plan_agent_runtime_install");
+  },
+
+  applyAgentRuntimeInstall(planId, confirmed) {
+    return invoke<AgentInstallApplication>("apply_agent_runtime_install", {
+      planId,
+      confirmed,
+    });
+  },
+
+  planAgentRuntimeUpdate() {
+    return invoke<AgentUpdatePlan>("plan_agent_runtime_update");
+  },
+
+  applyAgentRuntimeUpdate(planId, confirmed) {
+    return invoke<AgentUpdateApplication>("apply_agent_runtime_update", {
+      planId,
+      confirmed,
+    });
+  },
+
+  repairAgentRuntime(planId, confirmed) {
+    return invoke<AgentUpdateApplication>("repair_agent_runtime", {
+      planId,
+      confirmed,
+    });
+  },
+
+  readAgentRuntimePolicy(projectId, workingDirectory) {
+    return invoke<AgentPolicySnapshot>("read_agent_runtime_policy", {
+      projectId,
+      workingDirectory,
+    });
+  },
+
+  saveAgentRuntimePolicy(policy: AgentProjectPolicy, baselineRevision) {
+    return invoke<AgentPolicySnapshot>("save_agent_runtime_policy", {
+      policy,
+      baselineRevision,
+    });
+  },
+
+  previewAgentRuntimeMigration(path, projectId) {
+    return invoke<AgentMigrationPreview>("preview_agent_runtime_migration", {
+      path,
+      projectId,
+    });
+  },
+
+  applyAgentRuntimeMigration(path, projectId, previewId, baselineRevision) {
+    return invoke<AgentPolicySnapshot>("apply_agent_runtime_migration", {
+      path,
+      projectId,
+      previewId,
+      baselineRevision,
+    });
+  },
+
+  planAgentRun(projectId, roles: AgentRoleSlotRequest[]) {
+    return invoke<AgentRunPlan>("plan_agent_run", { projectId, roles });
+  },
+
+  startAgentRun(projectId, planId, confirmed) {
+    return invoke<AgentRunStartOutcome>("start_agent_run", {
+      projectId,
+      planId,
+      confirmed,
+    });
+  },
+
+  cancelAgentRun(projectId, runId, confirmed) {
+    return invoke<AgentCancelOutcome>("cancel_agent_run", {
+      projectId,
+      runId,
+      confirmed,
+    });
+  },
+
+  retryAgentRun(projectId, runId) {
+    return invoke<AgentRunSummary>("retry_agent_run", { projectId, runId });
+  },
+
+  inspectAgentRuns(projectId) {
+    return invoke<AgentQueueSnapshot>("inspect_agent_runs", { projectId });
+  },
+
+  pauseAgentProject(projectId) {
+    return invoke<AgentQueueSnapshot>("pause_agent_project", { projectId });
+  },
+
+  resumeAgentProject(projectId) {
+    return invoke<AgentQueueSnapshot>("resume_agent_project", { projectId });
+  },
+
+  readAgentRunLog(projectId, runId, cursor) {
+    return invoke<AgentRunLogPage>("read_agent_run_log", { projectId, runId, cursor });
   },
 };

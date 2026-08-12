@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SpecDocument, TaskEvent, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { SpecWorkspace } from "./SpecWorkspace";
@@ -45,6 +46,47 @@ const otherWithSummary: SpecDocument = {
     "다른 문서의 본문입니다.",
   ].join("\n"),
 };
+
+function structuredSpec({ includeRisk = true, incomplete = false } = {}): SpecDocument {
+  return {
+    summary: { ...document.summary, fileName: "SPEC-052.md", id: "SPEC-052" },
+    body: [
+      "# 구조화된 승인 기획",
+      "",
+      "## 결정권자 요약",
+      "",
+      "### 제안",
+      "",
+      "기획 승인 화면에 결정 보드를 둔다.",
+      "",
+      "### 현재",
+      "",
+      "평문 요약에서 판단 근거가 섞여 있다.",
+      "",
+      "### 변경 후",
+      "",
+      "승인할 변화와 유지 영역을 나눠 읽는다.",
+      "",
+      "### 사용자 결과",
+      "",
+      "승인 전에 변화의 범위를 빠르게 확인한다.",
+      "",
+      "### 영향 범위",
+      "",
+      "- 변경: 기획서의 기본 요약 화면",
+      ...(incomplete ? [] : ["- 유지: 승인 기록과 원문 Markdown"]),
+      ...(includeRisk ? ["", "### 비용과 위험", "", "불완전한 문서는 기존 요약으로 열린다."] : []),
+      "",
+      "### 결정 요청",
+      "",
+      "이 구조와 기존 승인 조작을 함께 승인할지 판단한다.",
+      "",
+      "## 기획 내용",
+      "",
+      "원문 마지막에서 승인 범위를 다시 설명한다.",
+    ].join("\n"),
+  };
+}
 
 function derivedTask(id: string, status: string, sourceSpecId: string | null): WorkflowItemSummary {
   return {
@@ -220,6 +262,79 @@ describe("SpecWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "원문 전문 보기" }));
     expect(screen.getByText("작업자가 작업자에게 쓴 본문입니다.")).toBeInTheDocument();
     expect(screen.getByText("이 기획이 승인되면 평문이 먼저 열립니다.")).toBeInTheDocument();
+  });
+
+  it("keeps a structured decision board, source, and approval callback in one keyboard flow", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(true);
+    render(
+      <SpecWorkspace
+        busy={false}
+        document={structuredSpec()}
+        loading={false}
+        onDecision={onDecision}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    const board = screen.getByRole("region", { name: "결정 보드" });
+    expect(within(board).getAllByRole("heading").map((heading) => heading.textContent)).toEqual([
+      "결정 보드", "제안", "현재", "변경 후", "사용자 결과", "영향 범위", "비용과 위험", "결정 요청",
+    ]);
+    expect(within(board).getByText("이 구조와 기존 승인 조작을 함께 승인할지 판단한다.")).toBeInTheDocument();
+    expect(within(board).getByText("승인 기록과 원문 Markdown")).toBeInTheDocument();
+    for (const name of ["승인 도장 찍기", "수정 요청", "기획서 폐기"]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+    expect(onDecision).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: /SPEC-001/ }).focus();
+    await user.tab();
+    const sourceToggle = screen.getByRole("button", { name: "원문 전문 보기" });
+    expect(sourceToggle).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("heading", { name: "결정권자 요약" })).toBeInTheDocument();
+    expect(screen.getByText("원문 마지막에서 승인 범위를 다시 설명한다.")).toBeInTheDocument();
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: "승인 도장 찍기" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onDecision).toHaveBeenCalledWith("approved", ""));
+  });
+
+  it("omits an absent risk and falls back from an incomplete structured spec without inventing values", () => {
+    const onDecision = vi.fn();
+    const view = render(
+      <SpecWorkspace
+        busy={false}
+        document={structuredSpec({ includeRisk: false })}
+        loading={false}
+        onDecision={onDecision}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "결정 보드" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "비용과 위험" })).not.toBeInTheDocument();
+    expect(onDecision).not.toHaveBeenCalled();
+
+    view.rerender(
+      <SpecWorkspace
+        busy={false}
+        document={structuredSpec({ incomplete: true })}
+        loading={false}
+        onDecision={onDecision}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+    expect(screen.queryByRole("region", { name: "결정 보드" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "제안" })).toBeInTheDocument();
+    expect(screen.queryByText(/빠진|오류|보완/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "승인 도장 찍기" })).toBeInTheDocument();
   });
 
   it("starts at the summary again when another document is opened in the same place", () => {

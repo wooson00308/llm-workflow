@@ -4,6 +4,7 @@ use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
     SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
+    TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
 };
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
@@ -125,6 +126,22 @@ impl ProjectService {
     ) -> Result<TaskQaBatchResult, ProjectError> {
         self.repository
             .confirm_task_qa_batch(root, workflow_directory, file_names, comment)
+    }
+
+    pub fn resume_task(
+        &self,
+        root: &Path,
+        request: &TaskResumeRequest,
+    ) -> Result<TaskResumeResult, ProjectError> {
+        self.repository.resume_task(root, request)
+    }
+
+    pub fn record_task_revision_request(
+        &self,
+        root: &Path,
+        request: &TaskRevisionRequestInput,
+    ) -> Result<TaskRevisionRequestResult, ProjectError> {
+        self.repository.record_task_revision_request(root, request)
     }
 
     pub fn migrate(&self, root: &Path) -> Result<ProjectSummary, ProjectError> {

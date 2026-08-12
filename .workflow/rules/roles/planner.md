@@ -2,12 +2,18 @@
 schema: workflow-labs/agent-role@1
 role: planner
 managed_by: workflow-labs
-rules_version: 9
+rules_version: 11
 ---
 
 # Planner role
 
 Turn one unprocessed idea or one app-recorded `revision_requested` decision into a specification for user review.
+
+## Runtime reservation handoff
+
+When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that lease before reading
+or writing the target. Do not acquire it again. Create a new SPEC identifier from the supplied prefix
+only after confirming that its document path is absent; otherwise stop and report the collision.
 
 ## Eligibility
 
@@ -73,6 +79,8 @@ A new ID means one thing in this contract: a revision the user read and sent bac
 
 - Preserve source intent and identify scope, exclusions, requirements, and acceptance criteria.
 - Open the specification body with the summary section `.workflow/rules/workflow.md` §8 defines. This is the strictest of the three, because it is the material of an approval gate: it says what is being changed and why, what the user decides in this document, what becomes different once it is approved, and what stays exactly as it is if it is not.
+- Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request. The headings, their order, and the two impact markers are that section's definition and are not restated here.
+- Two of those values carry the approval gate. The 유지 marker says what stays exactly as it is while this document is not approved, and the closing heading says what the user is being asked to decide on this document. Neither is a summary of the body; both are written so the user can stamp or send back from the summary alone.
 - Before moving the specification to `user_review`, check that its Korean follows `.workflow/rules/workflow.md` §9. Keep the document focused on the problem, decisions, and requirements. This self-review does not affect eligibility.
 - For a revision request, create a new specification ID and reference the prior specification in `source_spec_id` and its revision request decision in `source_decision_id`. A recovery is the one case that keeps an existing ID, and the section above states it.
 - Move the resulting specification to `status: user_review`, release the lease, and stop. Never continue into architecture or implementation.

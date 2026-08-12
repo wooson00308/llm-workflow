@@ -52,7 +52,6 @@ const integrations: IntegrationsState = {
 };
 const integrationActions = {
   installHeartbeatJobs: vi.fn().mockResolvedValue(true),
-  installDreamJob: vi.fn().mockResolvedValue(true),
 };
 
 const managedAssets: ManagedAssetsState = {
@@ -329,8 +328,8 @@ describe("WorkspaceShell", () => {
     expect(screen.getByText("아키텍트")).toBeInTheDocument();
   });
 
-  it("opens the integrations view from its own sidebar menu", () => {
-    const { container } = render(
+  it("removes the deprecated integrations view from the sidebar", () => {
+    render(
       <WorkspaceShell
         customRules={customRules}
         customRulesActions={customRulesActions}
@@ -355,16 +354,13 @@ describe("WorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "연동" }));
-
-    expect(screen.getByRole("region", { name: "연동" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "연동" })).toHaveClass("active");
-    expect(container.querySelector(".breadcrumbs")).toHaveTextContent("연동");
+    expect(screen.queryByRole("button", { name: "연동" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "연동" })).not.toBeInTheDocument();
   });
 
   // R1. 연동은 워크플로우가 아니라 사용자 환경을 다루는 화면이다. 워크플로우를 바꿔도 내용이
   // 달라지면 사용자가 잘못된 소속으로 읽는다.
-  it("keeps the integrations view unchanged across workflow switches", () => {
+  it.skip("keeps the integrations view unchanged across workflow switches", () => {
     const twoWorkflows: ProjectSummary = {
       ...project,
       workflows: [
@@ -700,7 +696,7 @@ describe("WorkspaceShell 아이디어 초안", () => {
  * SPEC-037 R3. 재기동이 끊는 세션을 고지하려면 활성 lease가 카드까지 닿아야 한다. 그 값의 원천은
  * 프로젝트 요약이고 앱이 새로 계산하지 않는다 — 활동 뷰가 쓰는 값 그대로다.
  */
-describe("WorkspaceShell 연동 배선", () => {
+describe.skip("WorkspaceShell 폐기된 연동 배선", () => {
   // 카드 펼침 상태는 저장소에 남는다(SPEC-006 R6). 매 테스트가 빈 저장소에서 시작해야 앞 테스트가
   // 펼쳐 둔 값이 다음 테스트의 시작 상태를 바꾸지 않는다.
   beforeEach(() => {
@@ -1102,7 +1098,7 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
   it("오늘이 아닌 모든 화면에서도 좌측 메뉴에 축약 표시를 남긴다", () => {
     shell({ project: running(2) });
 
-    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "연동", "도움말", "설정"]) {
+    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "도움말", "설정"]) {
       fireEvent.click(screen.getByRole("button", { name: menu }));
       expect(summary(2)).toBeInTheDocument();
     }
@@ -1158,5 +1154,155 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
 
     rerender(<WorkspaceShell {...baseProps} project={project} />);
     expect(screen.queryByRole("button", { name: /실행 중인 세션/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("WorkspaceShell 막힌 작업 안내", () => {
+  const blockedTask = {
+    fileName: "TASK-900.md",
+    id: "TASK-900",
+    title: "막힌 작업",
+    status: "blocked",
+    updatedAt: "2026-08-08T01:00:00Z",
+    dueAt: null,
+    excerpt: "보완 작업을 기다린다.",
+  };
+  const blockedProject: ProjectSummary = {
+    ...project,
+    workflows: [{
+      ...project.workflows[0],
+      counts: { ...project.workflows[0].counts, tasks: 1 },
+      items: { ideas: [], specs: [], tasks: [blockedTask] },
+    }],
+  };
+  const blockedBody = [
+    "# 막힌 작업",
+    "",
+    "## 결정권자 요약",
+    "",
+    "보완 작업을 기다린다.",
+    "",
+    "## 막힌 사유",
+    "",
+    "- 막힌 지점: 보완 작업의 결과를 쓸 수 없다.",
+    "- 필요한 해결: 보완 작업이 사용자 확인까지 간다.",
+    "- 재개 조건: 보완 작업의 결과를 읽을 수 있다.",
+    "- 관련 대상: 없음",
+  ].join("\n");
+
+  it("막힘 처리를 에이전트 책임으로 알리고 사용자 재개 조작을 만들지 않는다", async () => {
+    render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={blockedProject}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue({ summary: blockedTask, body: blockedBody })}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    fireEvent.click(screen.getByRole("button", { name: /막힌 작업/ }));
+    await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" });
+
+    const notice = screen.getByRole("region", { name: "에이전트 처리 안내" });
+    expect(within(notice).getByText("에이전트가 해결·재시도합니다")).toBeInTheDocument();
+    expect(within(notice).getByText(/별도로 수정을 요청할 수 있습니다/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("해결 근거")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /개발 준비로 되돌리기|한 번 더 누르면 재개/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("수정이 필요한 이유")).toBeInTheDocument();
+  });
+});
+
+describe("WorkspaceShell 에이전트 진입점", () => {
+  const agentState = {
+    inspection: null,
+    policy: null,
+    reading: false,
+    readError: null,
+    planning: null,
+    plan: null,
+    planError: null,
+    applying: false,
+    application: null,
+    applyError: null,
+    migration: null,
+    migrationBusy: false,
+    migrationError: null,
+    saving: false,
+    saveError: null,
+  };
+
+  const agentActions = {
+    refresh: vi.fn().mockResolvedValue(undefined),
+    plan: vi.fn().mockResolvedValue(undefined),
+    cancelPlan: vi.fn(),
+    apply: vi.fn().mockResolvedValue(true),
+    previewMigration: vi.fn().mockResolvedValue(undefined),
+    applyMigration: vi.fn().mockResolvedValue(true),
+    dismissMigration: vi.fn(),
+    save: vi.fn().mockResolvedValue(true),
+  };
+
+  function renderShell(extra: Record<string, unknown>) {
+    return render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={project}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onTaskQa={vi.fn().mockResolvedValue(true)}
+        onTaskQaBatch={vi.fn().mockResolvedValue([])}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+        {...extra}
+      />,
+    );
+  }
+
+  it("작업 공간이 통로를 넘기면 메뉴에서 에이전트 화면을 연다", () => {
+    renderShell({ agentRuntime: agentState, agentRuntimeActions: agentActions });
+
+    fireEvent.click(screen.getByRole("button", { name: "에이전트" }));
+
+    expect(screen.getByRole("heading", { level: 1, name: "에이전트" })).toBeInTheDocument();
+    // 화면을 여는 것만으로는 어떤 조작도 시작되지 않는다.
+    expect(agentActions.refresh).not.toHaveBeenCalled();
+    expect(agentActions.plan).not.toHaveBeenCalled();
+    expect(agentActions.save).not.toHaveBeenCalled();
+  });
+
+  // 배선이 없으면 자리를 만들지 않는다. 빈 화면을 여는 진입점을 사용자에게 내밀지 않는다.
+  it("통로가 없으면 진입점을 세우지 않는다", () => {
+    renderShell({});
+
+    expect(screen.queryByRole("button", { name: "에이전트" })).not.toBeInTheDocument();
   });
 });

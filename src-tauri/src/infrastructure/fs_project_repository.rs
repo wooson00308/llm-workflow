@@ -10,12 +10,15 @@ use uuid::Uuid;
 
 use crate::domain::project::{
     AgentLease, AgentLeaseSummary, CustomRulesDocument, CustomRulesDraft, CustomRulesPreview,
-    IdeaDocument, ManagedAssetSyncResult, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
+    IdeaDocument, ManagedAssetState, ManagedAssetStatus, ManagedAssetSyncResult,
+    ManagedAssetSyncStatus, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
     ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult, SchemaCompatibility,
     SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState, TaskDocument,
     TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
-    WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
-    WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
+    TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
+    TaskScopeDeclaration, TaskScopeStatus, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
+    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 use crate::infrastructure::custom_rules::{
     prepare_custom_rules_preview, read_custom_rules, save_custom_rules, CustomRulesError,
@@ -25,7 +28,13 @@ use crate::infrastructure::managed_project_assets::{
     validate_managed_project_assets, ManagedProjectAssetsError,
 };
 use crate::infrastructure::project_write_lock::{ProjectWriteLock, ProjectWriteLockError};
-use crate::infrastructure::role_eligibility::{pending_role_work, WorkflowInput};
+use crate::infrastructure::reservation_helper::{
+    install_reservation_helper, plan_reservation_helper, validate_reservation_helper,
+    RESERVATION_HELPER_VERSION,
+};
+use crate::infrastructure::role_eligibility::{
+    pending_role_work, TaskRevisionRequestCandidate, WorkflowInput,
+};
 
 const CONTROL_DIRECTORY: &str = ".workflow";
 const PROJECT_MANIFEST: &str = "project.yml";
@@ -35,14 +44,26 @@ const MIGRATION_LOCK_FILE: &str = "migration.lock";
 const WORKFLOW_DIRECTORIES: [&str; 6] =
     ["ideas", "specs", "decisions", "tasks", "reports", "state"];
 /// 개발 작업 `history` 항목의 `kind`로 인정하는 값. 이 밖의 값은 항목째 버린다.
-const TASK_EVENT_KINDS: [&str; 6] = [
+const TASK_EVENT_KINDS: [&str; 7] = [
     "created",
     "in_progress",
     "blocked",
     "qa_waiting",
     "completed",
     "revision_requested",
+    "resumed",
 ];
+/// 사용자가 막힌 작업을 다시 연 사실을 남기는 앱 소유 감사 기록의 스키마(SPEC-054 R9).
+/// 기획서 결정·QA 결정과 다른 식별자이므로 두 판정 어디에도 섞이지 않는다.
+const TASK_RESUME_SCHEMA: &str = "workflow-labs/task-resume@1";
+/// 사용자가 잘못 분해된 작업을 고쳐 달라고 남긴 요청 기록의 스키마(SPEC-055 R2). 기획서 결정·QA 결정·
+/// 재개 기록과 다른 식별자이므로 네 기록이 서로의 판정에 섞이지 않는다.
+const TASK_REVISION_REQUEST_SCHEMA: &str = "workflow-labs/task-revision-request@1";
+/// 확인 동선 절의 제목. 앱이 설치하는 개발자 계약이 고정한 문자열과 문자 단위로 같다. 이 파일은 그
+/// 문자열을 읽기만 하고 규칙 문언을 정하지 않는다(SPEC-056 R4).
+const TASK_WALKTHROUGH_HEADING: &str = "## 확인 동선";
+/// 카드 미리보기에 담기는 글자 수. 발췌와 확인 동선 미리보기가 같은 한도를 쓴다(SPEC-056 R7).
+const EXCERPT_LIMIT: usize = 160;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -72,6 +93,34 @@ pub enum ProjectError {
     TaskNotAwaitingQa,
     #[error("개발 수정 요청에는 코멘트를 입력해 주세요.")]
     QaCommentRequired,
+    #[error("막힌 상태인 개발 작업만 재개할 수 있습니다.")]
+    TaskNotBlocked,
+    #[error("작업 문서가 그사이 변경되었습니다. 문서를 다시 열어 확인한 뒤 재개해 주세요.")]
+    TaskResumeStale,
+    #[error("외부 LLM이 이 작업을 선점하고 있습니다. 선점이 끝난 뒤 다시 시도해 주세요.")]
+    TaskResumeLeased,
+    #[error("이전 재개 기록과 작업 상태가 어긋납니다. 작업 문서를 확인해 주세요.")]
+    TaskResumeInconsistent,
+    #[error("작업 문서의 프론트매터를 읽지 못해 재개를 기록하지 않았습니다.")]
+    TaskResumeUnreadable,
+    #[error("재개 근거를 입력해 주세요.")]
+    ResumeResolutionRequired,
+    #[error("재개 근거는 2,000자 이하여야 합니다.")]
+    ResumeResolutionTooLong,
+    #[error("재개 요청 식별자를 입력해 주세요.")]
+    ResumeRequestIdRequired,
+    #[error("막힌 작업과 아직 선점되지 않은 개발 준비 작업에만 수정을 요청할 수 있습니다.")]
+    TaskNotRevisable,
+    #[error("외부 LLM이 이 작업을 선점하고 있습니다. 선점이 끝난 뒤 다시 시도해 주세요.")]
+    TaskRevisionLeased,
+    #[error("작업 문서가 그사이 변경되었습니다. 문서를 다시 열어 확인한 뒤 요청해 주세요.")]
+    TaskRevisionStale,
+    #[error("수정 요청 이유를 입력해 주세요.")]
+    RevisionReasonRequired,
+    #[error("수정 요청 이유는 2,000자 이하여야 합니다.")]
+    RevisionReasonTooLong,
+    #[error("수정 요청 식별자를 입력해 주세요.")]
+    RevisionRequestIdRequired,
     #[error("프로젝트에 등록되지 않은 워크플로우입니다.")]
     UnknownWorkflow,
     #[error("워크플로우 디렉터리 경로가 안전하지 않습니다: {0}")]
@@ -136,7 +185,7 @@ impl FileSystemProjectRepository {
         validate_workflow_name(workflow_name)?;
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
-        validate_managed_project_assets(&root, &control_root)?;
+        validate_all_managed_project_assets(&root, &control_root)?;
         ensure_managed_control_root(&control_root)?;
 
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -161,7 +210,7 @@ impl FileSystemProjectRepository {
             }
         };
 
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
 
         let id = format!("wf_{}", &compact_uuid()[..8]);
         let directory = format!("{}--{}", slugify(workflow_name), id);
@@ -270,7 +319,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&manifest_path)?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        Ok(synchronize_managed_project_assets(&root, &control_root)?)
+        synchronize_all_managed_project_assets(&root, &control_root)
     }
 
     pub fn read_custom_rules(&self, root: &Path) -> Result<CustomRulesDocument, ProjectError> {
@@ -332,14 +381,23 @@ impl FileSystemProjectRepository {
         // `inspect`의 2.5초 주기와 다르고, 목록 payload는 이 값을 싣지 않는다(SPEC-013 R5).
         let graph = task_dependency_graph(&tasks_root);
         let (dependencies, dependency_format_error) = task_dependencies(&summary.id, &graph);
+        let scope_declaration = task_scope_declaration(&summary.id, &graph);
         // 겹침 근거는 미만료 lease를 읽어야 나온다. 자격 판정이 쓰는 읽기 그대로다.
         let overlap_blocks = task_overlap_blocks(&summary.id, &graph, &lease_ids(&control_root));
+        // 처리 여부는 작업이 연결한 요청 id 하나로만 갈린다(SPEC-055 R10). 다른 근거로 추측하지 않는다.
+        let revision_requests = read_task_revision_requests(
+            &workflow_root,
+            &summary.id,
+            handled_revision_request_id(&task_path).as_deref(),
+        );
         Ok(TaskDocument {
             summary,
             body,
             dependencies,
             dependency_format_error,
             overlap_blocks,
+            scope_declaration,
+            revision_requests,
         })
     }
 
@@ -382,7 +440,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         let spec_path = safe_markdown_file(&workflow_root.join("specs"), file_name)?;
         let (mut spec, _) = read_markdown_document(&spec_path, "draft")?;
@@ -433,7 +491,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         record_one_task_qa(&workflow_root, file_name, &outcome, comment)?;
 
@@ -461,7 +519,7 @@ impl FileSystemProjectRepository {
         let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
         validate_workflow_directories(&control_root, &project)?;
         require_current_schema(project.schema_version)?;
-        install_managed_project_assets(&root, &control_root)?;
+        install_all_managed_project_assets(&root, &control_root)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
 
         let results = file_names
@@ -497,6 +555,96 @@ impl FileSystemProjectRepository {
                 read_active_leases(&control_root)?,
             ),
             results,
+        })
+    }
+
+    /// 막힌 작업을 사용자 판단으로 `todo`로 되돌리고 그 사실을 감사 기록으로 남긴다(SPEC-054 R8).
+    /// 상태 전이와 감사 기록은 한 요청에서 함께 남으며, 하나만 남은 결과를 성공으로 돌려주지 않는다.
+    pub fn resume_task(
+        &self,
+        root: &Path,
+        request: &TaskResumeRequest,
+    ) -> Result<TaskResumeResult, ProjectError> {
+        self.resume_task_with(root, request, |path| fs::remove_file(path))
+    }
+
+    /// 되돌리기를 인자로 받는 본체. 되돌리기 실패는 파일 권한만으로 재현되지 않기 때문이다 —
+    /// 감사 기록을 쓸 수 있는 디렉터리는 그 파일을 지울 수도 있어서, 복구 분기는 이 인자로만
+    /// 검사할 수 있다. 명령 경로는 언제나 `fs::remove_file`을 넘긴다.
+    fn resume_task_with(
+        &self,
+        root: &Path,
+        request: &TaskResumeRequest,
+        remove: impl Fn(&Path) -> std::io::Result<()>,
+    ) -> Result<TaskResumeResult, ProjectError> {
+        validate_task_resume(request)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        // 관리 자산 설치가 스스로 쓰기 잠금을 잡으므로 이 명령의 잠금보다 앞에 둔다. 기존
+        // migration lock이 있으면 여기서 이미 실패하고 어떤 문서도 쓰지 않는다.
+        install_all_managed_project_assets(&root, &control_root)?;
+        let workflow_root =
+            registered_workflow_root(&control_root, &project, &request.workflow_directory)?;
+
+        let recovery = {
+            let _lock = ProjectWriteLock::acquire(&control_root)?;
+            resume_one_task(&control_root, &workflow_root, request, remove)?
+        };
+
+        Ok(TaskResumeResult {
+            status: if recovery.is_some() {
+                TaskResumeStatus::RecoveryRequired
+            } else {
+                TaskResumeStatus::Resumed
+            },
+            summary: summary_from_manifest(
+                &root,
+                project,
+                SchemaCompatibility::Current,
+                read_active_leases(&control_root)?,
+            ),
+            recovery,
+        })
+    }
+
+    /// 사용자가 남긴 작업 정의 수정 요청을 앱 소유 기록으로 저장한다(SPEC-055 R2·R3).
+    ///
+    /// 이 명령은 작업 문서를 쓰지 않는다. 요청 문서 한 건을 만들거나 아무것도 만들지 않으며, 그래서
+    /// 두 문서가 반쯤 남는 결과 자체가 생기지 않는다. 작업 본문을 고치는 일은 아키텍트 몫이다.
+    pub fn record_task_revision_request(
+        &self,
+        root: &Path,
+        request: &TaskRevisionRequestInput,
+    ) -> Result<TaskRevisionRequestResult, ProjectError> {
+        validate_task_revision_request(request)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        // 관리 자산 설치가 스스로 쓰기 잠금을 잡으므로 이 명령의 잠금보다 앞에 둔다. 기존
+        // migration lock이 있으면 여기서 이미 실패하고 어떤 문서도 쓰지 않는다.
+        install_all_managed_project_assets(&root, &control_root)?;
+        let workflow_root =
+            registered_workflow_root(&control_root, &project, &request.workflow_directory)?;
+
+        let (status, recorded) = {
+            let _lock = ProjectWriteLock::acquire(&control_root)?;
+            record_one_task_revision_request(&control_root, &workflow_root, request)?
+        };
+
+        Ok(TaskRevisionRequestResult {
+            status,
+            summary: summary_from_manifest(
+                &root,
+                project,
+                SchemaCompatibility::Current,
+                read_active_leases(&control_root)?,
+            ),
+            request: recorded,
         })
     }
 
@@ -592,6 +740,74 @@ fn current_project_control_root(root: &Path) -> Result<PathBuf, ProjectError> {
     validate_workflow_directories(&control_root, &project)?;
     require_current_schema(project.schema_version)?;
     Ok(control_root)
+}
+
+/// 기존 관리 자산과 예약 도구를 함께 검사한다. 예약 도구는 같은 공용 설치 규약을 쓰되, 현재 동기화
+/// 결과 타입을 바꾸지 않기 위해 이 경계에서 한 자산으로 합류한다.
+fn validate_all_managed_project_assets(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<(), ProjectError> {
+    validate_managed_project_assets(project_root, control_root)?;
+    validate_reservation_helper(control_root).map_err(reservation_asset_error)
+}
+
+/// 문서를 쓰는 기존 경로도 예약 도구를 빠뜨리지 않게 한 곳으로 모은다.
+fn install_all_managed_project_assets(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<(), ProjectError> {
+    // 예약 자산의 미래 버전·비관리 파일은 기존 자산을 바꾸기 전에 막는다.
+    validate_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    install_managed_project_assets(project_root, control_root)?;
+    install_reservation_helper(control_root).map_err(reservation_asset_error)
+}
+
+/// 설정 화면의 수동 동기화 결과에 예약 도구도 명시한다. 공용 동기화가 충돌 또는 재시도를 돌려주면
+/// 새 자산을 따로 쓰지 않아 부분 갱신을 만들지 않는다.
+fn synchronize_all_managed_project_assets(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<ManagedAssetSyncResult, ProjectError> {
+    let reservation = plan_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    let mut result = synchronize_managed_project_assets(project_root, control_root)?;
+    if !matches!(
+        result.status,
+        ManagedAssetSyncStatus::Current | ManagedAssetSyncStatus::Updated
+    ) {
+        return Ok(result);
+    }
+
+    let updated = reservation.replacement.is_some();
+    let installed_version = if updated {
+        Some(RESERVATION_HELPER_VERSION)
+    } else {
+        reservation.installed_version
+    };
+    install_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    result.assets.push(ManagedAssetState {
+        id: "reservation_helper".to_owned(),
+        label: "예약 헬퍼".to_owned(),
+        status: if updated {
+            ManagedAssetStatus::Updated
+        } else {
+            ManagedAssetStatus::Current
+        },
+        installed_version,
+        provided_version: Some(RESERVATION_HELPER_VERSION),
+        reason: None,
+    });
+    if updated {
+        result.status = ManagedAssetSyncStatus::Updated;
+        result.updated_assets.push("reservation_helper".to_owned());
+    }
+    Ok(result)
+}
+
+fn reservation_asset_error(
+    error: crate::infrastructure::managed_script::ManagedScriptError,
+) -> ProjectError {
+    ProjectError::ManagedProjectAssets(ManagedProjectAssetsError::Conflict(error.to_string()))
 }
 
 fn ensure_managed_control_root(control_root: &Path) -> Result<(), ProjectError> {
@@ -784,6 +1000,8 @@ fn summary_from_manifest(
                 directory: &entry.directory,
                 items: &workflow.items,
                 approved_decisions: &workflow.approved_decisions,
+                task_revision_requests: &workflow.task_revision_requests,
+                definition_error_tasks: &workflow.definition_error_tasks,
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
                 overlap_blocked: &workflow.overlap_blocked,
@@ -827,6 +1045,11 @@ struct PreparedWorkflow {
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: approved` 결정의 `(결정 id, spec_id)`
     /// (SPEC-028 R4).
     approved_decisions: Vec<(String, String)>,
+    /// 아키텍트 판정이 보는 작업 정의 수정 요청. 요청 기록과 대상 작업을 한번 읽은
+    /// 결과로 조립한다.
+    task_revision_requests: Vec<TaskRevisionRequestCandidate>,
+    /// 현재 `definition_error`로 막힌 작업 id. 작업 문서를 훑을 때 함께 읽는다.
+    definition_error_tasks: HashSet<String>,
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
     revision_requested_decisions: Vec<String>,
     /// 선행 선언이 미충족인 작업의 id(SPEC-013 R2).
@@ -848,16 +1071,28 @@ impl PreparedWorkflow {
         // 쓰지만(`WorkflowItemSummary`에 필드를 더하지 않는다 — TASK-037) 같은 읽기에서 나온다.
         let (decisions, qa_events) = read_decision_documents(&root);
         let (tasks, graph) = read_task_documents(&root.join("tasks"));
-        let (items, nondraft_spec_sources) =
+        let (mut items, nondraft_spec_sources) =
             workflow_items(&root, &decisions, &qa_events, tasks, leases);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
+        let revision_records = read_all_revision_request_records(&root);
+        merge_task_revision_events(&revision_records, &graph, &mut items.tasks);
+        let task_revision_requests = task_revision_request_candidates(&revision_records, &graph);
+        let definition_error_tasks = graph
+            .iter()
+            .filter(|(_, node)| {
+                node.status == "blocked" && node.blocked_kind.as_deref() == Some("definition_error")
+            })
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
         let unsatisfied_dependencies = unsatisfied_dependency_task_ids(&graph);
         let overlap_blocked = overlap_blocked_task_ids(&graph, lease_target_ids);
         Self {
             root,
             items,
             approved_decisions,
+            task_revision_requests,
+            definition_error_tasks,
             revision_requested_decisions,
             unsatisfied_dependencies,
             overlap_blocked,
@@ -995,6 +1230,286 @@ fn record_one_task_qa(
     write_text_atomically(&task_path, &updated)?;
 
     Ok(task.id)
+}
+
+fn validate_task_resume(request: &TaskResumeRequest) -> Result<(), ProjectError> {
+    let resolution = request.resolution.trim();
+    if resolution.is_empty() {
+        return Err(ProjectError::ResumeResolutionRequired);
+    }
+    if resolution.chars().count() > 2_000 {
+        return Err(ProjectError::ResumeResolutionTooLong);
+    }
+    if request.request_id.trim().is_empty() {
+        return Err(ProjectError::ResumeRequestIdRequired);
+    }
+    Ok(())
+}
+
+/// 쓰기 잠금 아래의 판정과 커밋. 판정에 걸리면 작업 문서도 `decisions/`도 그대로 두고, 커밋이
+/// 반만 성공하면 되돌린다. 되돌리기까지 실패했을 때만 복구 정보를 낸다.
+fn resume_one_task(
+    control_root: &Path,
+    workflow_root: &Path,
+    request: &TaskResumeRequest,
+    remove: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<Option<TaskResumeRecovery>, ProjectError> {
+    let task_path = safe_markdown_file(&workflow_root.join("tasks"), &request.file_name)?;
+    let (task, _) = read_markdown_document(&task_path, "todo")?;
+
+    // 같은 요청이 이미 성공했으면 새 기록을 만들지 않고 그 성공을 그대로 돌려준다. 기록이 있는데
+    // 상태가 `todo`가 아니면 두 결과가 어긋난 것이므로 성공으로 추측하지 않는다.
+    if task_resume_recorded(workflow_root, &task.id, request.request_id.trim()) {
+        if task.status != "todo" {
+            return Err(ProjectError::TaskResumeInconsistent);
+        }
+        return Ok(None);
+    }
+    if task.status != "blocked" {
+        return Err(ProjectError::TaskNotBlocked);
+    }
+    if task.updated_at.as_deref() != Some(request.expected_updated_at.as_str()) {
+        return Err(ProjectError::TaskResumeStale);
+    }
+    // 소유자가 누구든 대상을 덮은 미만료 lease가 있으면 거절한다. lease 파일은 읽기만 한다.
+    if lease_ids(control_root).contains(&task.id) {
+        return Err(ProjectError::TaskResumeLeased);
+    }
+
+    let resumed_at = Utc::now().to_rfc3339();
+    let audit_id = format!("RESUME-{}", compact_uuid()[..8].to_uppercase());
+    let audit_path = workflow_root
+        .join("decisions")
+        .join(format!("{audit_id}.md"));
+    let audit = format!(
+        "---\nschema: {TASK_RESUME_SCHEMA}\nid: {audit_id}\ntask_id: {}\noutcome: resumed\nrequest_id: {}\nprevious_updated_at: {}\ncreated_by: user\ncreated_at: {resumed_at}\n---\n\n{}\n",
+        yaml_scalar(&task.id),
+        yaml_scalar(request.request_id.trim()),
+        yaml_scalar(&request.expected_updated_at),
+        request.resolution.trim()
+    );
+    let source = fs::read_to_string(&task_path)?;
+    let updated = update_task_frontmatter(&source, "todo", &resumed_at, "resumed")
+        .map_err(|_| ProjectError::TaskResumeUnreadable)?;
+
+    // 감사 기록을 먼저 만들고 작업 문서를 교체한다. 교체가 실패하면 되돌릴 것이 방금 만든 파일
+    // 하나뿐이라 사용자 문서를 다시 쓰다 깨뜨릴 자리가 없다.
+    write_text_atomically(&audit_path, &audit)?;
+    let Err(error) = write_text_atomically(&task_path, &updated) else {
+        return Ok(None);
+    };
+    match remove(&audit_path) {
+        Ok(()) => Err(error),
+        Err(removal) => Ok(Some(TaskResumeRecovery {
+            created_paths: vec![audit_path.display().to_string()],
+            reason: format!("{error}; {removal}"),
+            action: "남은 재개 감사 기록 파일을 지운 뒤 재개를 다시 시도해 주세요.".to_owned(),
+        })),
+    }
+}
+
+fn validate_task_revision_request(request: &TaskRevisionRequestInput) -> Result<(), ProjectError> {
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        return Err(ProjectError::RevisionReasonRequired);
+    }
+    if reason.chars().count() > 2_000 {
+        return Err(ProjectError::RevisionReasonTooLong);
+    }
+    if request.request_id.trim().is_empty() {
+        return Err(ProjectError::RevisionRequestIdRequired);
+    }
+    Ok(())
+}
+
+/// 쓰기 잠금 아래의 판정과 기록. 판정에 걸리면 어떤 파일도 쓰지 않는다.
+///
+/// 판정 순서는 재개 기록과 같다. 같은 요청 식별자의 기록이 이미 있으면 그것을 그대로 돌려주고, 그다음
+/// 상태와 선점과 갱신 시각을 확인한 뒤, 마지막으로 미처리 요청이 있는지 본다.
+fn record_one_task_revision_request(
+    control_root: &Path,
+    workflow_root: &Path,
+    request: &TaskRevisionRequestInput,
+) -> Result<(TaskRevisionRequestStatus, Option<TaskRevisionRequest>), ProjectError> {
+    let task_path = safe_markdown_file(&workflow_root.join("tasks"), &request.file_name)?;
+    let (task, _) = read_markdown_document(&task_path, "todo")?;
+    let handled = handled_revision_request_id(&task_path);
+    let records = read_revision_request_records(workflow_root, &task.id);
+    let handled_of = |entry: &TaskRevisionRequest| handled.as_deref() == Some(entry.id.as_str());
+
+    // 같은 요청이 이미 기록됐으면 새 문서를 만들지 않고 그 기록을 그대로 돌려준다.
+    if let Some(record) = records
+        .iter()
+        .find(|record| record.request_id == request.request_id.trim())
+    {
+        return Ok((
+            TaskRevisionRequestStatus::Recorded,
+            Some(TaskRevisionRequest {
+                handled: handled_of(&record.entry),
+                ..record.entry.clone()
+            }),
+        ));
+    }
+    // 요청을 만들 수 있는 상태는 막힘과 개발 준비 둘뿐이다. 나머지 상태에서는 아직 정의를 고칠 때가
+    // 아니거나 이미 결과를 판단하는 중이다.
+    if task.status != "blocked" && task.status != "todo" {
+        return Err(ProjectError::TaskNotRevisable);
+    }
+    // 소유자가 누구든 대상을 덮은 미만료 lease가 있으면 거절한다. lease 파일은 읽기만 한다.
+    if lease_ids(control_root).contains(&task.id) {
+        return Err(ProjectError::TaskRevisionLeased);
+    }
+    if task.updated_at.as_deref() != Some(request.expected_updated_at.as_str()) {
+        return Err(ProjectError::TaskRevisionStale);
+    }
+    // 미처리 요청이 하나라도 있으면 두 번째 요청을 만들지 않고 그 요청을 그대로 돌려준다.
+    if let Some(record) = records.iter().find(|record| !handled_of(&record.entry)) {
+        return Ok((
+            TaskRevisionRequestStatus::AlreadyPending,
+            Some(record.entry.clone()),
+        ));
+    }
+
+    let created_at = Utc::now().to_rfc3339();
+    let request_document_id = format!("REVISION-{}", compact_uuid()[..8].to_uppercase());
+    let document = format!(
+        "---\nschema: {TASK_REVISION_REQUEST_SCHEMA}\nid: {request_document_id}\ntask_id: {}\nrequest_id: {}\nprevious_updated_at: {}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
+        yaml_scalar(&task.id),
+        yaml_scalar(request.request_id.trim()),
+        yaml_scalar(&request.expected_updated_at),
+        request.reason.trim()
+    );
+    write_text_atomically(
+        &workflow_root
+            .join("decisions")
+            .join(format!("{request_document_id}.md")),
+        &document,
+    )?;
+
+    Ok((
+        TaskRevisionRequestStatus::Recorded,
+        Some(TaskRevisionRequest {
+            id: request_document_id,
+            previous_updated_at: request.expected_updated_at.clone(),
+            reason: request.reason.trim().to_owned(),
+            created_at,
+            handled: false,
+        }),
+    ))
+}
+
+/// 작업 문서가 연결한 수정 요청 id. 프론트매터의 선택 필드 하나가 그 값이고, 없으면 `None`이다.
+fn handled_revision_request_id(task_path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(task_path).ok()?;
+    let (metadata, _) = split_frontmatter(&contents.replace("\r\n", "\n"));
+    yaml_text(metadata.as_ref(), "revision_request_id")
+}
+
+/// 결정 디렉터리에서 읽은 수정 요청 한 건. 화면에 나가는 값과 재시도 판정에만 쓰는 요청 식별자를
+/// 함께 든다. 요청 식별자는 사용자에게 보여줄 값이 아니라 같은 조작을 알아보는 값이다.
+struct RevisionRequestRecord {
+    task_id: String,
+    request_id: String,
+    entry: TaskRevisionRequest,
+}
+
+/// 워크플로우의 수정 요청을 한 번의 결정 디렉터리 순회로 읽는다. 앱이 쓴 기록만 세고, 형식이
+/// 어긋난 문서는 그 파일만 건너뛴다(SPEC-055 R10). `handled`는 여기서 채우지 않고 부르는 쪽이
+/// 연결 id로 정한다.
+///
+/// 프로젝트 조회는 이 결과를 작업 그래프와 한 번만 접는다. 작업마다 `decisions/`를 다시 훑으면
+/// 작업 수와 결정 수의 곱만큼 파일을 읽게 되므로, 큰 워크플로우에서는 이 함수만 호출해야 한다.
+fn read_all_revision_request_records(workflow_root: &Path) -> Vec<RevisionRequestRecord> {
+    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
+        return Vec::new();
+    };
+    let mut records: Vec<RevisionRequestRecord> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("md")
+        })
+        .filter_map(|path| {
+            let contents = fs::read_to_string(&path).ok()?;
+            let (metadata, body) = split_frontmatter(&contents.replace("\r\n", "\n"));
+            let metadata = metadata.as_ref();
+            if yaml_text(metadata, "schema").as_deref() != Some(TASK_REVISION_REQUEST_SCHEMA)
+                || yaml_text(metadata, "created_by").as_deref() != Some("user")
+            {
+                return None;
+            }
+            let created_at = yaml_text(metadata, "created_at")?;
+            parse_event_instant(&created_at)?;
+            Some(RevisionRequestRecord {
+                task_id: yaml_text(metadata, "task_id")?,
+                request_id: yaml_text(metadata, "request_id")?,
+                entry: TaskRevisionRequest {
+                    id: yaml_text(metadata, "id")?,
+                    previous_updated_at: yaml_text(metadata, "previous_updated_at")?,
+                    reason: body.trim().to_owned(),
+                    created_at,
+                    handled: false,
+                },
+            })
+        })
+        .collect();
+    records.sort_by(|left, right| {
+        parse_event_instant(&left.entry.created_at)
+            .cmp(&parse_event_instant(&right.entry.created_at))
+            .then_with(|| left.entry.id.cmp(&right.entry.id))
+            .then_with(|| left.task_id.cmp(&right.task_id))
+    });
+    records
+}
+
+/// 한 작업의 수정 요청만 생성 시각 순서로 읽는다. 단건 조회·쓰기 경로는 전체 결정 디렉터리를 한 번
+/// 읽은 뒤 이 작업에 속한 기록만 남긴다.
+fn read_revision_request_records(
+    workflow_root: &Path,
+    task_id: &str,
+) -> Vec<RevisionRequestRecord> {
+    read_all_revision_request_records(workflow_root)
+        .into_iter()
+        .filter(|record| record.task_id == task_id)
+        .collect()
+}
+
+/// 조회에 실리는 목록. 작업이 연결한 요청 id 하나가 처리 완료를 정하고 나머지는 미처리다.
+fn read_task_revision_requests(
+    workflow_root: &Path,
+    task_id: &str,
+    handled_id: Option<&str>,
+) -> Vec<TaskRevisionRequest> {
+    read_revision_request_records(workflow_root, task_id)
+        .into_iter()
+        .map(|record| TaskRevisionRequest {
+            handled: handled_id == Some(record.entry.id.as_str()),
+            ..record.entry
+        })
+        .collect()
+}
+
+/// 같은 작업에 같은 요청 식별자의 성공 재개 기록이 이미 있는가. 앱이 쓴 기록만 센다.
+fn task_resume_recorded(workflow_root: &Path, task_id: &str, request_id: &str) -> bool {
+    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            return false;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            return false;
+        };
+        let (metadata, _) = split_frontmatter(&contents.replace("\r\n", "\n"));
+        let metadata = metadata.as_ref();
+        yaml_text(metadata, "schema").as_deref() == Some(TASK_RESUME_SCHEMA)
+            && yaml_text(metadata, "created_by").as_deref() == Some("user")
+            && yaml_text(metadata, "outcome").as_deref() == Some("resumed")
+            && yaml_text(metadata, "task_id").as_deref() == Some(task_id)
+            && yaml_text(metadata, "request_id").as_deref() == Some(request_id)
+    })
 }
 
 /// 실패한 건의 작업 id. 문서를 읽지 못하면 `None`이고, 파일 이름에서 추정하지 않는다.
@@ -1422,11 +1937,19 @@ fn markdown_summary(
     let source_spec_id = yaml_text(metadata, "source_spec_id");
     let source_decision_id = yaml_text(metadata, "source_decision_id");
     let events = read_task_events(metadata);
+    let status = yaml_text(metadata, "status").unwrap_or_else(|| default_status.to_owned());
+    // QA 대기 카드에는 개발자가 쓴 확인 동선의 첫 문단을 싣는다(SPEC-056 R1). 이미 읽어 둔 같은
+    // 본문에서 값을 하나 더 뽑을 뿐이라 조회가 파일을 더 열지 않는다. 절이 없거나 첫 문단이 비어
+    // 있으면 지금까지의 발췌 그대로다 — 없는 사실을 카드에서 지적하거나 대신 문장을 만들지 않는다.
+    let excerpt = (status == "qa_waiting")
+        .then(|| walkthrough_preview(body))
+        .flatten()
+        .unwrap_or_else(|| markdown_excerpt(body));
     WorkflowItemSummary {
         file_name,
         id: yaml_text(metadata, "id").unwrap_or(fallback_id),
         title,
-        status: yaml_text(metadata, "status").unwrap_or_else(|| default_status.to_owned()),
+        status,
         updated_at,
         due_at,
         source_spec_id,
@@ -1434,7 +1957,7 @@ fn markdown_summary(
         // 아이디어 판정(`derive_idea_states`)만 이 값을 채운다.
         stalled_spec_ids: Vec::new(),
         events,
-        excerpt: markdown_excerpt(body),
+        excerpt,
     }
 }
 
@@ -1590,6 +2113,8 @@ fn parse_scope_declaration(frontmatter: &str) -> ScopeDeclaration {
 /// 판정에 필요한 값만 담은 작업 문서 하나. 한 번의 읽기에서 셋이 함께 나온다.
 struct TaskNode {
     status: String,
+    revision_request_id: Option<String>,
+    blocked_kind: Option<String>,
     dependencies: DependencyDeclaration,
     scope: ScopeDeclaration,
 }
@@ -1636,6 +2161,8 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
         let frontmatter = frontmatter_source(&normalized).unwrap_or_default();
         graph.entry(summary.id.clone()).or_insert(TaskNode {
             status: summary.status.clone(),
+            revision_request_id: yaml_text(metadata.as_ref(), "revision_request_id"),
+            blocked_kind: yaml_text(metadata.as_ref(), "blocked_kind"),
             dependencies: parse_dependency_declaration(frontmatter),
             scope: parse_scope_declaration(frontmatter),
         });
@@ -1643,6 +2170,69 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
     }
     sort_markdown_summaries(&mut summaries);
     (summaries, graph)
+}
+
+/// 작업 정의 수정 요청과 대상 작업의 현재 값을 아키텍트 판정용 레코드로 접는다.
+fn task_revision_request_candidates(
+    records: &[RevisionRequestRecord],
+    graph: &HashMap<String, TaskNode>,
+) -> Vec<TaskRevisionRequestCandidate> {
+    // 호출자가 결정 디렉터리를 한 번 읽은 결과를 받는다. 레코드가 이미 후보와 같은 순서로
+    // 정렬돼 있으므로 HashMap인 작업 그래프의 순회 순서도 결과에 새어 나오지 않는다.
+    records
+        .iter()
+        .filter_map(|record| {
+            let node = graph.get(&record.task_id)?;
+            Some(TaskRevisionRequestCandidate {
+                handled: node.revision_request_id.as_deref() == Some(record.entry.id.as_str()),
+                id: record.entry.id.clone(),
+                task_id: record.task_id.clone(),
+                created_at: record.entry.created_at.clone(),
+                task_status: node.status.clone(),
+            })
+        })
+        .collect()
+}
+
+/// 목록에 정의 수정 요청과 아키텍트 처리 사실을 기존 작업 사건과 함께 싣는다.
+fn merge_task_revision_events(
+    records: &[RevisionRequestRecord],
+    graph: &HashMap<String, TaskNode>,
+    tasks: &mut [WorkflowItemSummary],
+) {
+    for task in tasks {
+        let Some(node) = graph.get(&task.id) else {
+            continue;
+        };
+        let mut seen = task
+            .events
+            .iter()
+            .filter_map(|event| Some((event.kind.clone(), parse_event_instant(&event.at)?)))
+            .collect::<HashSet<_>>();
+        for record in records.iter().filter(|record| record.task_id == task.id) {
+            if let Some(instant) = parse_event_instant(&record.entry.created_at) {
+                let kind = "task_revision_requested".to_owned();
+                if seen.insert((kind.clone(), instant)) {
+                    task.events.push(TaskEvent {
+                        kind,
+                        at: record.entry.created_at.clone(),
+                    });
+                }
+            }
+            if node.revision_request_id.as_deref() == Some(record.entry.id.as_str()) {
+                if let Some(at) = task.updated_at.clone() {
+                    if let Some(instant) = parse_event_instant(&at) {
+                        let kind = "task_revision_applied".to_owned();
+                        if seen.insert((kind.clone(), instant)) {
+                            task.events.push(TaskEvent { kind, at });
+                        }
+                    }
+                }
+            }
+        }
+        task.events
+            .sort_by_key(|event| parse_event_instant(&event.at));
+    }
 }
 
 /// 작업 하나의 선언을 판정해 상세 payload에 실을 값으로 만든다. 순서는 선언에 적힌 그대로다 —
@@ -1663,6 +2253,26 @@ fn task_dependencies(
         ),
         Some(DependencyDeclaration::Malformed) => (Vec::new(), true),
         Some(DependencyDeclaration::Absent) | None => (Vec::new(), false),
+    }
+}
+
+fn task_scope_declaration(
+    task_id: &str,
+    graph: &HashMap<String, TaskNode>,
+) -> TaskScopeDeclaration {
+    match graph.get(task_id).map(|node| &node.scope) {
+        Some(ScopeDeclaration::Declared(files)) => TaskScopeDeclaration {
+            status: TaskScopeStatus::Declared,
+            files: files.clone(),
+        },
+        Some(ScopeDeclaration::Malformed) => TaskScopeDeclaration {
+            status: TaskScopeStatus::Malformed,
+            files: Vec::new(),
+        },
+        Some(ScopeDeclaration::Absent) | None => TaskScopeDeclaration {
+            status: TaskScopeStatus::Absent,
+            files: Vec::new(),
+        },
     }
 }
 
@@ -1859,11 +2469,63 @@ fn markdown_excerpt(body: &str) -> String {
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");
-    let mut excerpt: String = joined.chars().take(160).collect();
-    if joined.chars().count() > 160 {
-        excerpt.push('…');
+    clip_excerpt(&joined)
+}
+
+/// 카드에 담기는 길이로 자른다. 넘치면 말줄임표를 붙인다. 발췌와 확인 동선 미리보기가 이 규칙 하나를
+/// 함께 쓰므로 두 값의 잘림이 갈라지지 않는다.
+fn clip_excerpt(value: &str) -> String {
+    let mut clipped: String = value.chars().take(EXCERPT_LIMIT).collect();
+    if value.chars().count() > EXCERPT_LIMIT {
+        clipped.push('…');
     }
-    excerpt
+    clipped
+}
+
+/// 확인 동선 절의 첫 문단을 카드 미리보기 문장으로 만든다(SPEC-056 R2·R5·R6).
+///
+/// 제목은 계약이 정한 문자열과 문자 단위로 같을 때만 절로 인정하고, 철자·깊이·앞뒤 공백이 다른 제목을
+/// 보완하지 않는다. 코드 울타리 안의 같은 줄은 제목으로 세지 않는다. 첫 문단은 제목 아래 빈 줄을 지나
+/// 처음 만나는 빈 줄 앞까지이고, 여러 줄이면 한 줄로 이어 붙인다. 값은 문서에 적힌 그대로이며 요약하거나
+/// 다시 쓰지 않는다. 절이 없거나 문단이 비어 있으면 `None`이고, 그때 부르는 쪽이 기존 발췌로 되돌아간다.
+fn walkthrough_preview(body: &str) -> Option<String> {
+    let mut lines = body.lines();
+    let mut fenced = false;
+    loop {
+        let line = lines.next()?;
+        if is_code_fence(line) {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced && line == TASK_WALKTHROUGH_HEADING {
+            break;
+        }
+    }
+
+    let mut paragraph: Vec<&str> = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // 제목과 문단 사이의 빈 줄은 지나가고, 문단이 시작된 뒤의 빈 줄에서 멈춘다.
+            if paragraph.is_empty() {
+                continue;
+            }
+            break;
+        }
+        // 다음 절의 제목이나 코드 울타리를 문장으로 싣지 않는다. 여기서 멈추면 문단은 비어 있고,
+        // 그 결과 카드는 기존 발췌를 그대로 보여준다.
+        if trimmed.starts_with('#') || is_code_fence(line) {
+            break;
+        }
+        paragraph.push(trimmed);
+    }
+
+    (!paragraph.is_empty()).then(|| clip_excerpt(&paragraph.join(" ")))
+}
+
+fn is_code_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
 /// QA 결정 문서 하나를 전이 이벤트로 읽는다. 결정 문서는 앱 소유라 여기서는 읽기만 한다.
@@ -1881,6 +2543,24 @@ fn qa_decision_event(metadata: Option<&serde_yaml::Value>) -> Option<(String, Ta
         task_id,
         TaskEvent {
             kind: kind.to_owned(),
+            at,
+        },
+    ))
+}
+
+/// 재개 감사 기록 하나를 전이 이벤트로 읽는다. 작업 문서 이력의 `resumed` 항목과 같은 사실이므로
+/// 같은 타임라인에 실리고, 두 원천에 함께 있으면 시각 비교로 한 번만 남는다.
+fn task_resume_event(metadata: Option<&serde_yaml::Value>) -> Option<(String, TaskEvent)> {
+    let task_id = yaml_text(metadata, "task_id")?;
+    let at = yaml_text(metadata, "created_at")?;
+    DateTime::parse_from_rfc3339(&at).ok()?;
+    if yaml_text(metadata, "outcome").as_deref() != Some("resumed") {
+        return None;
+    }
+    Some((
+        task_id,
+        TaskEvent {
+            kind: "resumed".to_owned(),
             at,
         },
     ))
@@ -1990,6 +2670,11 @@ fn read_decision_documents(
             }
             Some("workflow-labs/qa-decision@1") => {
                 if let Some((task_id, event)) = qa_decision_event(metadata.as_ref()) {
+                    events.entry(task_id).or_default().push(event);
+                }
+            }
+            Some(TASK_RESUME_SCHEMA) => {
+                if let Some((task_id, event)) = task_resume_event(metadata.as_ref()) {
                     events.entry(task_id).or_default().push(event);
                 }
             }
@@ -2221,23 +2906,26 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        apply_latest_decision, latest_spec_decisions, lease_ids, normalize_spec_status,
-        overlap_blocked_task_ids, parse_scope_declaration, read_markdown_document,
-        read_spec_decisions, slugify, task_dependency_graph, update_task_frontmatter,
-        validate_decision, validate_task_qa, FileSystemProjectRepository, ProjectError,
-        ProjectSummary, ScopeDeclaration,
+        apply_latest_decision, latest_spec_decisions, lease_ids, markdown_excerpt,
+        normalize_spec_status, overlap_blocked_task_ids, parse_scope_declaration,
+        read_all_revision_request_records, read_markdown_document, read_spec_decisions, slugify,
+        task_dependency_graph, task_revision_request_candidates, update_task_frontmatter,
+        validate_decision, validate_task_qa, walkthrough_preview, FileSystemProjectRepository,
+        ProjectError, ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
         CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
         ManagedAssetSyncStatus, PendingRoleWork, SaveCustomRulesRequest, SaveCustomRulesStatus,
         SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
-        WorkflowItemSummary,
+        TaskResumeRequest, TaskResumeStatus, TaskRevisionRequest, TaskRevisionRequestInput,
+        TaskRevisionRequestStatus, TaskScopeStatus, WorkflowItemSummary,
     };
     // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
     use crate::infrastructure::claim_helper::claim_helper_path;
     use crate::infrastructure::heartbeat_condition::install_condition_script;
     use crate::infrastructure::heartbeat_condition::test_support::run_condition;
     use crate::infrastructure::project_write_lock::ProjectWriteLock;
+    use crate::infrastructure::reservation_helper::reservation_helper_path;
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -2299,7 +2987,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, &old).expect("old rules");
         let modified = fs::metadata(&rules)
             .and_then(|metadata| metadata.modified())
@@ -2327,7 +3015,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, old).expect("old rules");
 
         let result = repository
@@ -2338,7 +3026,7 @@ mod tests {
         assert!(result.updated_assets.contains(&"workflow_rules".to_owned()));
         assert!(fs::read_to_string(rules)
             .expect("updated rules")
-            .contains("rules_version: 14"));
+            .contains("rules_version: 21"));
     }
 
     #[test]
@@ -2411,7 +3099,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, old_rules).expect("old managed rules");
 
         repository.inspect(root.path()).expect("inspect project");
@@ -3023,8 +3711,6 @@ mod tests {
     /// 그 파일의 대조 헬퍼는 자기 테스트 모듈 안에 있어 다른 모듈에서 부를 수 없다.
     #[test]
     fn a_closed_idea_is_not_planner_work_in_either_judgement() {
-        use std::process::Command;
-
         let root = tempdir().expect("temp project");
         let repository = FileSystemProjectRepository;
         let project = repository
@@ -3061,15 +3747,12 @@ mod tests {
             ("architect", inspected.pending_work.architect),
             ("developer", inspected.pending_work.developer),
         ] {
-            let code = Command::new("sh")
-                .arg(".workflow/rules/wf-eligible.sh")
-                .arg(role)
-                .current_dir(root.path())
-                .status()
-                .expect("run condition script")
-                .code()
-                .expect("exit code");
-            assert_eq!(app_flag, code == 0, "{role} 판정이 조건 스크립트와 다르다");
+            let run = run_condition(root.path(), role);
+            assert_eq!(
+                app_flag,
+                run.code == 0,
+                "{role} 판정이 조건 스크립트와 다르다"
+            );
         }
     }
 
@@ -3622,7 +4305,7 @@ mod tests {
         let architect = root.path().join(".workflow/rules/roles/architect.md");
         let old_architect = fs::read_to_string(&architect)
             .expect("architect")
-            .replace("rules_version: 9", "rules_version: 8");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&architect, old_architect).expect("old architect");
 
         let confirmed = repository
@@ -3646,7 +4329,7 @@ mod tests {
         );
         assert!(fs::read_to_string(architect)
             .expect("architect updated on QA")
-            .contains("rules_version: 9"));
+            .contains("rules_version: 15"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
@@ -4205,7 +4888,7 @@ mod tests {
         let developer = root.path().join(".workflow/rules/roles/developer.md");
         let old_developer = fs::read_to_string(&developer)
             .expect("developer")
-            .replace("rules_version: 10", "rules_version: 9");
+            .replace("rules_version: 15", "rules_version: 14");
         fs::write(&developer, old_developer).expect("old developer");
 
         let result = repository
@@ -4224,7 +4907,7 @@ mod tests {
         assert!(result.results.iter().all(|entry| entry.recorded));
         assert!(fs::read_to_string(developer)
             .expect("developer updated on batch QA")
-            .contains("rules_version: 10"));
+            .contains("rules_version: 15"));
         assert_eq!(
             result
                 .results
@@ -4705,7 +5388,7 @@ mod tests {
         let rules = root.path().join(".workflow/rules/workflow.md");
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 14", "rules_version: 13");
+            .replace("rules_version: 21", "rules_version: 20");
         fs::write(&rules, old_rules).expect("old rules");
 
         let decided = repository
@@ -4722,7 +5405,7 @@ mod tests {
         assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
         assert!(fs::read_to_string(rules)
             .expect("rules updated on decision")
-            .contains("rules_version: 14"));
+            .contains("rules_version: 21"));
         assert_eq!(
             fs::read_to_string(spec_path).expect("original spec"),
             source
@@ -5519,6 +6202,35 @@ mod tests {
             .expect("claim helper");
         assert!(helper.contains("# managed_by: workflow-labs"));
         assert!(helper.contains("# claim_helper_version: 1"));
+        let reservation =
+            fs::read_to_string(reservation_helper_path(&root.path().join(".workflow")))
+                .expect("reservation helper");
+        assert!(reservation.contains("# managed_by: workflow-labs"));
+        assert!(reservation.contains("# reservation_helper_version: 1"));
+    }
+
+    #[test]
+    fn sync_refuses_to_overwrite_a_future_reservation_helper() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let helper = reservation_helper_path(&root.path().join(".workflow"));
+        let future = fs::read_to_string(&helper)
+            .expect("reservation helper")
+            .replace(
+                "# reservation_helper_version: 1",
+                "# reservation_helper_version: 999",
+            );
+        fs::write(&helper, &future).expect("future reservation helper");
+
+        let error = repository
+            .synchronize_managed_assets(root.path())
+            .expect_err("future reservation helper must stay untouched");
+
+        assert!(matches!(error, ProjectError::ManagedProjectAssets(_)));
+        assert_eq!(fs::read_to_string(helper).expect("future helper"), future);
     }
 
     #[test]
@@ -6081,6 +6793,37 @@ mod tests {
                 "{frontmatter:?}의 판정이 다르다"
             );
         }
+    }
+
+    #[test]
+    fn task_detail_preserves_scope_declaration_states_and_path_order() {
+        let (root, directory) = dependency_workflow();
+        for (id, declaration) in [
+            ("TASK-LIST", "scope_files: [src/z.rs, src/a.rs]\n"),
+            ("TASK-EMPTY", "scope_files: []\n"),
+            ("TASK-ABSENT", ""),
+            ("TASK-BROKEN", "scope_files:\n  - src/a.rs\n"),
+        ] {
+            write_task_document(root.path(), &directory, id, "todo", declaration);
+        }
+
+        let listed = read_task_document(root.path(), &directory, "TASK-LIST.md").scope_declaration;
+        assert_eq!(listed.status, TaskScopeStatus::Declared);
+        assert_eq!(listed.files, vec!["src/z.rs", "src/a.rs"]);
+
+        let empty = read_task_document(root.path(), &directory, "TASK-EMPTY.md").scope_declaration;
+        assert_eq!(empty.status, TaskScopeStatus::Declared);
+        assert!(empty.files.is_empty());
+
+        let absent =
+            read_task_document(root.path(), &directory, "TASK-ABSENT.md").scope_declaration;
+        assert_eq!(absent.status, TaskScopeStatus::Absent);
+        assert!(absent.files.is_empty());
+
+        let malformed =
+            read_task_document(root.path(), &directory, "TASK-BROKEN.md").scope_declaration;
+        assert_eq!(malformed.status, TaskScopeStatus::Malformed);
+        assert!(malformed.files.is_empty());
     }
 
     /// SPEC-032 완료 조건 2. 선행 관계가 없는 두 작업이라도 같은 파일을 선언하면 하나가 잡힌 동안
@@ -6740,6 +7483,1289 @@ mod tests {
         assert_eq!(
             declared_dependencies(root.path(), &directory, "TASK-001.md"),
             vec![dependency("no-id-task", TaskDependencyState::Satisfied)]
+        );
+    }
+
+    /// 재개 대상이 되는 막힌 작업. 알 수 없는 프론트매터 필드와 막힌 사유 절을 함께 담아
+    /// 재개가 그것들을 보존하는지 같은 문서에서 확인한다.
+    fn blocked_task(root: &Path, directory: &str, extra: &str) -> PathBuf {
+        let path = root
+            .join(".workflow")
+            .join(directory)
+            .join("tasks")
+            .join("TASK-900.md");
+        fs::write(
+            &path,
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: TASK-900\ntitle: 막힌 작업\nstatus: blocked\nsource_spec_id: SPEC-900\nsource_decision_id: DECISION-900\nowner: 나\n{extra}updated_at: 2026-08-01T00:00:00Z\nhistory:\n  - {{ at: 2026-07-31T00:00:00Z, kind: created }}\n  - {{ at: 2026-07-31T01:00:00Z, kind: in_progress }}\n  - {{ at: 2026-07-31T02:00:00Z, kind: blocked }}\n---\n\n# 막힌 작업\n\n## 막힌 사유\n\n외부 API 규격이 확정되지 않았다.\n"
+            ),
+        )
+        .expect("write blocked task");
+        path
+    }
+
+    fn resume_request(
+        directory: &str,
+        expected_updated_at: &str,
+        request_id: &str,
+    ) -> TaskResumeRequest {
+        TaskResumeRequest {
+            workflow_directory: directory.to_owned(),
+            file_name: "TASK-900.md".to_owned(),
+            expected_updated_at: expected_updated_at.to_owned(),
+            resolution: "외부 API 규격이 확정돼 남은 구현을 진행할 수 있다.".to_owned(),
+            request_id: request_id.to_owned(),
+        }
+    }
+
+    fn resume_audits(root: &Path, directory: &str) -> Vec<String> {
+        fs::read_dir(root.join(".workflow").join(directory).join("decisions"))
+            .expect("decisions")
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .filter(|text| text.contains("schema: workflow-labs/task-resume@1"))
+            .collect()
+    }
+
+    /// 프론트매터 값 하나를 원문에서 뽑는다. 앱이 값을 따옴표로 감쌀 수 있으므로 감싼 문자를 벗긴다.
+    fn audit_field(audit: &str, key: &str) -> String {
+        audit
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+            .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
+            .unwrap_or_else(|| panic!("감사 기록에 {key}가 없습니다"))
+    }
+
+    /// 작업과 결정 디렉터리의 원문 전부. 거절된 요청이 아무것도 바꾸지 않았음을 이 값으로 대조한다.
+    fn task_and_decision_files(root: &Path, directory: &str) -> BTreeMap<String, String> {
+        let workflow_root = root.join(".workflow").join(directory);
+        let mut files = BTreeMap::new();
+        for sub in ["tasks", "decisions"] {
+            let Ok(entries) = fs::read_dir(workflow_root.join(sub)) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let contents = fs::read_to_string(entry.path()).expect("document");
+                files.insert(
+                    format!("{sub}/{}", entry.file_name().to_string_lossy()),
+                    contents,
+                );
+            }
+        }
+        files
+    }
+
+    /// 막힌 작업 하나를 가진 프로젝트. 재개 검사가 모두 이 자리에서 시작한다.
+    fn blocked_project() -> (TempDir, String, PathBuf) {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let path = blocked_task(root.path(), &directory, "");
+        (root, directory, path)
+    }
+
+    #[test]
+    fn task_resume_records_the_transition_and_the_audit_together() {
+        let (root, directory, path) = blocked_project();
+
+        let result = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("resume task");
+
+        assert_eq!(result.status, TaskResumeStatus::Resumed);
+        assert_eq!(result.recovery, None);
+
+        let audits = resume_audits(root.path(), &directory);
+        assert_eq!(audits.len(), 1);
+        let audit = &audits[0];
+        let resumed_at = audit_field(audit, "created_at");
+        assert_eq!(audit_field(audit, "task_id"), "TASK-900");
+        assert_eq!(audit_field(audit, "outcome"), "resumed");
+        assert_eq!(audit_field(audit, "request_id"), "req-1");
+        assert_eq!(
+            audit_field(audit, "previous_updated_at"),
+            "2026-08-01T00:00:00Z"
+        );
+        assert_eq!(audit_field(audit, "created_by"), "user");
+        assert!(audit.starts_with("---\nschema: workflow-labs/task-resume@1\n"));
+        assert!(audit.contains("외부 API 규격이 확정돼 남은 구현을 진행할 수 있다."));
+
+        // 상태와 이력, 갱신 시각이 감사 기록과 같은 시각으로 함께 남는다.
+        let task = fs::read_to_string(&path).expect("task");
+        assert!(task.contains("status: todo"));
+        assert!(task.contains(&format!("updated_at: {resumed_at}")));
+        assert!(task.contains(&format!("- {{ at: {resumed_at}, kind: resumed }}")));
+        // 기존 스키마·본문·이전 이력·알 수 없는 필드가 그대로 남는다.
+        assert!(task.contains("schema: workflow-labs/task@1"));
+        assert!(task.contains("owner: 나"));
+        assert!(task.contains("- { at: 2026-07-31T02:00:00Z, kind: blocked }"));
+        assert!(task.contains("## 막힌 사유\n\n외부 API 규격이 확정되지 않았다."));
+        // 프로젝트 규격은 재개로 바뀌지 않는다.
+        assert!(
+            fs::read_to_string(root.path().join(".workflow/project.yml"))
+                .expect("manifest")
+                .contains("schema_version: 1")
+        );
+
+        // 이력과 감사 기록에 같은 사실이 있어도 활동 payload에는 한 번만 실린다.
+        assert_eq!(
+            task_events(&result.summary, "TASK-900")
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>(),
+            vec!["created", "in_progress", "blocked", "resumed"]
+        );
+    }
+
+    #[test]
+    fn task_resume_writes_nothing_when_the_updated_at_is_stale() {
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-07-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("stale updated_at");
+
+        assert!(matches!(error, ProjectError::TaskResumeStale));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_writes_nothing_when_the_task_is_not_blocked() {
+        let (root, directory, path) = blocked_project();
+        let source = fs::read_to_string(&path).expect("task");
+        fs::write(&path, source.replace("status: blocked", "status: todo")).expect("todo task");
+        let before = task_and_decision_files(root.path(), &directory);
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("already resumed");
+
+        assert!(matches!(error, ProjectError::TaskNotBlocked));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_writes_nothing_while_a_lease_covers_the_task() {
+        let (root, directory, _) = blocked_project();
+        write_lease(
+            root.path(),
+            "TASK-900.yml",
+            &format!(
+                "schema_version: 1\nlease_id: lease-1\nagent: other\ntask_id: TASK-900\nheartbeat_at: 2026-08-01T00:00:00Z\nexpires_at: {}\n",
+                (Utc::now() + Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%SZ")
+            ),
+        );
+        let before = task_and_decision_files(root.path(), &directory);
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("leased task");
+
+        assert!(matches!(error, ProjectError::TaskResumeLeased));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+        assert!(root
+            .path()
+            .join(".workflow/.runtime/leases/TASK-900.yml")
+            .is_file());
+    }
+
+    #[test]
+    fn task_resume_writes_nothing_while_a_migration_lock_exists() {
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let _lock = ProjectWriteLock::acquire(&root.path().join(".workflow")).expect("lock");
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("migration lock");
+
+        assert!(matches!(
+            error,
+            ProjectError::ManagedProjectAssets(_) | ProjectError::ProjectWriteLock(_)
+        ));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_writes_nothing_for_an_unsafe_file_name_or_an_unknown_workflow() {
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let repository = FileSystemProjectRepository;
+
+        let mut unsafe_file = resume_request(&directory, "2026-08-01T00:00:00Z", "req-1");
+        unsafe_file.file_name = "../tasks/TASK-900.md".to_owned();
+        assert!(matches!(
+            repository.resume_task(root.path(), &unsafe_file),
+            Err(ProjectError::UnsafeDocumentFile(_))
+        ));
+
+        let mut unknown = resume_request("없는-워크플로우", "2026-08-01T00:00:00Z", "req-1");
+        unknown.file_name = "TASK-900.md".to_owned();
+        assert!(matches!(
+            repository.resume_task(root.path(), &unknown),
+            Err(ProjectError::UnknownWorkflow)
+        ));
+
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_writes_nothing_under_a_future_project_schema() {
+        let (root, directory, _) = blocked_project();
+        let manifest = root.path().join(".workflow/project.yml");
+        let source = fs::read_to_string(&manifest).expect("manifest");
+        fs::write(
+            &manifest,
+            source.replace("schema_version: 1", "schema_version: 2"),
+        )
+        .expect("future manifest");
+        let before = task_and_decision_files(root.path(), &directory);
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("future schema");
+
+        assert!(matches!(error, ProjectError::FutureSchema));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_requires_a_resolution_and_a_request_id() {
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let repository = FileSystemProjectRepository;
+
+        let mut empty = resume_request(&directory, "2026-08-01T00:00:00Z", "req-1");
+        empty.resolution = "   ".to_owned();
+        assert!(matches!(
+            repository.resume_task(root.path(), &empty),
+            Err(ProjectError::ResumeResolutionRequired)
+        ));
+
+        let mut long = resume_request(&directory, "2026-08-01T00:00:00Z", "req-1");
+        long.resolution = "가".repeat(2_001);
+        assert!(matches!(
+            repository.resume_task(root.path(), &long),
+            Err(ProjectError::ResumeResolutionTooLong)
+        ));
+
+        let mut blank_id = resume_request(&directory, "2026-08-01T00:00:00Z", " ");
+        blank_id.request_id = " ".to_owned();
+        assert!(matches!(
+            repository.resume_task(root.path(), &blank_id),
+            Err(ProjectError::ResumeRequestIdRequired)
+        ));
+
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_records_one_history_entry_and_one_audit_for_a_repeated_request() {
+        let (root, directory, path) = blocked_project();
+        let repository = FileSystemProjectRepository;
+        let request = resume_request(&directory, "2026-08-01T00:00:00Z", "req-1");
+
+        let first = repository
+            .resume_task(root.path(), &request)
+            .expect("first resume");
+        let after_first = fs::read_to_string(&path).expect("task");
+        let second = repository
+            .resume_task(root.path(), &request)
+            .expect("repeated resume");
+
+        assert_eq!(first.status, TaskResumeStatus::Resumed);
+        assert_eq!(second.status, TaskResumeStatus::Resumed);
+        assert_eq!(resume_audits(root.path(), &directory).len(), 1);
+        assert_eq!(fs::read_to_string(&path).expect("task"), after_first);
+        assert_eq!(
+            fs::read_to_string(&path)
+                .expect("task")
+                .matches("kind: resumed")
+                .count(),
+            1
+        );
+    }
+
+    /// 더블 클릭처럼 같은 요청이 동시에 두 번 도착하는 경우. 쓰기 잠금이 한쪽을 물리므로 한쪽은
+    /// 실패하거나, 잠금을 이어받아 이미 기록된 성공을 그대로 돌려받는다. 어느 쪽이든 기록은 한 건이다.
+    #[test]
+    fn task_resume_records_one_audit_for_two_concurrent_requests() {
+        let (root, directory, path) = blocked_project();
+        let request = resume_request(&directory, "2026-08-01T00:00:00Z", "req-1");
+
+        let results = std::thread::scope(|scope| {
+            let first =
+                scope.spawn(|| FileSystemProjectRepository.resume_task(root.path(), &request));
+            let second =
+                scope.spawn(|| FileSystemProjectRepository.resume_task(root.path(), &request));
+            [first.join().expect("first"), second.join().expect("second")]
+        });
+
+        assert!(results.iter().any(Result::is_ok), "한쪽은 성공해야 한다");
+        assert_eq!(resume_audits(root.path(), &directory).len(), 1);
+        assert_eq!(
+            fs::read_to_string(&path)
+                .expect("task")
+                .matches("kind: resumed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn task_resume_does_not_guess_success_when_the_record_and_the_status_disagree() {
+        let (root, directory, _) = blocked_project();
+        // 감사 기록만 남고 작업 교체 전에 세션이 죽은 상태. 상태는 아직 `blocked`다.
+        write_decision(
+            root.path(),
+            &directory,
+            "RESUME-DEADBEEF.md",
+            "---\nschema: workflow-labs/task-resume@1\nid: RESUME-DEADBEEF\ntask_id: TASK-900\noutcome: resumed\nrequest_id: req-1\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: 2026-08-02T00:00:00Z\n---\n\n먼저 남은 기록\n",
+        );
+        let before = task_and_decision_files(root.path(), &directory);
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("inconsistent residue");
+
+        assert!(matches!(error, ProjectError::TaskResumeInconsistent));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn task_resume_leaves_the_original_when_the_audit_cannot_be_written() {
+        let (root, directory, _) = blocked_project();
+        let decisions = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("decisions");
+        fs::remove_dir_all(&decisions).expect("remove decisions");
+        let before = task_and_decision_files(root.path(), &directory);
+
+        let error = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("audit write failure");
+
+        assert!(matches!(error, ProjectError::Io(_)));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+        assert!(!decisions.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_resume_removes_the_audit_when_the_task_cannot_be_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let tasks = root.path().join(".workflow").join(&directory).join("tasks");
+        fs::set_permissions(&tasks, fs::Permissions::from_mode(0o555)).expect("read-only tasks");
+
+        let error = FileSystemProjectRepository.resume_task(
+            root.path(),
+            &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+        );
+
+        fs::set_permissions(&tasks, fs::Permissions::from_mode(0o755)).expect("restore tasks");
+        assert!(error.is_err());
+        assert!(resume_audits(root.path(), &directory).is_empty());
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_resume_reports_recovery_when_the_rollback_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, directory, path) = blocked_project();
+        let original = fs::read_to_string(&path).expect("task");
+        let tasks = root.path().join(".workflow").join(&directory).join("tasks");
+        fs::set_permissions(&tasks, fs::Permissions::from_mode(0o555)).expect("read-only tasks");
+
+        let result = FileSystemProjectRepository.resume_task_with(
+            root.path(),
+            &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "되돌리기 실패",
+                ))
+            },
+        );
+
+        fs::set_permissions(&tasks, fs::Permissions::from_mode(0o755)).expect("restore tasks");
+        let result = result.expect("recovery result");
+        assert_eq!(result.status, TaskResumeStatus::RecoveryRequired);
+        let recovery = result.recovery.expect("recovery detail");
+        let audits = resume_audits(root.path(), &directory);
+        assert_eq!(audits.len(), 1);
+        assert_eq!(recovery.created_paths.len(), 1);
+        assert!(recovery.created_paths[0].contains("RESUME-"));
+        assert!(recovery.reason.contains("되돌리기 실패"));
+        assert!(!recovery.action.is_empty());
+        // 작업 문서는 원본 그대로이고, 다음 조회가 이 상태를 완료로 읽지 않는다.
+        assert_eq!(fs::read_to_string(&path).expect("task"), original);
+        assert_eq!(
+            result.summary.workflows[0]
+                .items
+                .tasks
+                .iter()
+                .find(|task| task.id == "TASK-900")
+                .expect("task summary")
+                .status,
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn task_resume_keeps_the_dependent_closed_and_opens_blocked_prerequisite_recovery() {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        blocked_task(root.path(), &directory, "depends_on: [TASK-800]\n");
+        // 선행이 `blocked`이므로 재개 뒤에도 TASK-900에는 충족되지 않는다. blocked 레인은 이제
+        // 에이전트 소유이므로 미분류 선행 TASK-800 자체가 개발자 복구 대상으로 열린다.
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("tasks/TASK-800.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-800\ntitle: 선행 작업\nstatus: blocked\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n선행\n",
+        )
+        .expect("write dependency");
+
+        let result = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("resume task");
+
+        assert_eq!(
+            result.summary.workflows[0]
+                .items
+                .tasks
+                .iter()
+                .find(|task| task.id == "TASK-900")
+                .expect("task summary")
+                .status,
+            "todo"
+        );
+        assert_eq!(result.summary.pending_work.developer, true);
+        assert_eq!(
+            result.summary.pending_detail.developer.target.as_deref(),
+            Some("TASK-800")
+        );
+    }
+
+    /// 재개를 모르던 기존 QA 경로가 새 이력과 감사 문서를 만났을 때. 원문을 지우지도, 기존 결정으로
+    /// 오인하지도 않는다.
+    #[test]
+    fn task_resume_records_survive_the_existing_qa_path() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let path = qa_waiting_task(
+            root.path(),
+            &directory,
+            "TASK-900.md",
+            "schema: workflow-labs/task@1\nid: TASK-900\ntitle: 재개된 작업\nstatus: qa_waiting\nupdated_at: 2026-08-03T00:00:00Z\nhistory:\n  - { at: 2026-08-01T00:00:00Z, kind: blocked }\n  - { at: 2026-08-02T00:00:00Z, kind: resumed }\n  - { at: 2026-08-03T00:00:00Z, kind: qa_waiting }\n",
+        );
+        let audit = "---\nschema: workflow-labs/task-resume@1\nid: RESUME-DEADBEEF\ntask_id: TASK-900\noutcome: resumed\nrequest_id: req-1\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: 2026-08-02T00:00:00Z\n---\n\n규격이 확정됐다\n";
+        write_decision(root.path(), &directory, "RESUME-DEADBEEF.md", audit);
+
+        let summary = repository
+            .record_task_qa(
+                root.path(),
+                &directory,
+                "TASK-900.md",
+                TaskQaOutcome::Confirmed,
+                "확인했습니다.",
+            )
+            .expect("record qa");
+
+        let task = fs::read_to_string(&path).expect("task");
+        assert!(task.contains("- { at: 2026-08-02T00:00:00Z, kind: resumed }"));
+        assert!(task.contains("status: completed"));
+        assert_eq!(
+            fs::read_to_string(
+                root.path()
+                    .join(".workflow")
+                    .join(&directory)
+                    .join("decisions/RESUME-DEADBEEF.md")
+            )
+            .expect("audit"),
+            audit
+        );
+        assert_eq!(
+            task_events(&summary, "TASK-900")
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>(),
+            vec!["blocked", "resumed", "qa_waiting", "completed"]
+        );
+    }
+
+    #[test]
+    fn a_resume_audit_does_not_reach_the_spec_or_qa_judgements() {
+        let (root, directory, _) = blocked_project();
+        write_spec_with_status(root.path(), &directory, "SPEC-900", "user_review");
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-900.md",
+            &spec_decision(
+                "DECISION-900",
+                "SPEC-900",
+                "approved",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
+
+        let result = FileSystemProjectRepository
+            .resume_task(
+                root.path(),
+                &resume_request(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("resume task");
+
+        let spec = result.summary.workflows[0]
+            .items
+            .specs
+            .iter()
+            .find(|item| item.id == "SPEC-900")
+            .expect("spec summary");
+        assert_eq!(spec.status, "approved");
+        assert_eq!(
+            spec.events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["approved"]
+        );
+        // 재개 기록은 작업 이벤트로만 읽히고 QA 결정 자리를 차지하지 않는다.
+        assert_eq!(
+            task_events(&result.summary, "TASK-900")
+                .into_iter()
+                .filter(|(kind, _)| kind == "completed" || kind == "revision_requested")
+                .count(),
+            0
+        );
+    }
+
+    /// 미리보기 검사가 함께 쓰는 문서 하나. 본문을 그대로 받아 쓰므로 절의 모양을 검사마다 바꿀 수 있다.
+    fn preview_task(root: &Path, directory: &str, id: &str, status: &str, body: &str) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("tasks")
+                .join(format!("{id}.md")),
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 미리보기 대상\nstatus: {status}\nupdated_at: 2026-08-08T00:00:00Z\n---\n\n{body}"
+            ),
+        )
+        .expect("write preview task");
+    }
+
+    /// 목록에 실린 그 문서의 카드 미리보기.
+    fn preview_of(project: &ProjectSummary, id: &str) -> String {
+        project.workflows[0]
+            .items
+            .tasks
+            .iter()
+            .chain(project.workflows[0].items.specs.iter())
+            .chain(project.workflows[0].items.ideas.iter())
+            .find(|item| item.id == id)
+            .expect("summary")
+            .excerpt
+            .clone()
+    }
+
+    fn walkthrough_body(section: &str) -> String {
+        format!("# 미리보기 대상\n\n## 결정권자 요약\n\n요약 문장이 먼저 온다.\n\n{section}")
+    }
+
+    #[test]
+    fn a_qa_waiting_card_previews_the_first_paragraph_of_the_walkthrough() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+
+        // 화면이 있는 작업, 화면이 없는 작업, 확인 동선이 없는 대기 작업, 대기가 아닌 작업.
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-700",
+            "qa_waiting",
+            &walkthrough_body(
+                "## 확인 동선\n\n개발 화면에서 막힘 열의 카드를 열고\n오른쪽 패널의 재개 영역을 확인한다.\n\n1. 근거를 입력한다.\n",
+            ),
+        );
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-701",
+            "qa_waiting",
+            &walkthrough_body(
+                "## 확인 동선\n\n이 작업에는 눈으로 볼 화면이 없다. 자동 검사로 닫았고 확인 도장은 그 수치를 신뢰한다는 뜻이다.\n",
+            ),
+        );
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-702",
+            "qa_waiting",
+            "# 미리보기 대상\n\n## 결정권자 요약\n\n확인 동선 절이 없는 대기 작업이다.\n",
+        );
+        preview_task(
+            root.path(),
+            &directory,
+            "TASK-703",
+            "todo",
+            &walkthrough_body("## 확인 동선\n\n아직 대기가 아니므로 카드에는 실리지 않는다.\n"),
+        );
+
+        let project = repository.inspect(root.path()).expect("inspect project");
+
+        assert_eq!(
+            preview_of(&project, "TASK-700"),
+            "개발 화면에서 막힘 열의 카드를 열고 오른쪽 패널의 재개 영역을 확인한다."
+        );
+        assert_eq!(
+            preview_of(&project, "TASK-701"),
+            "이 작업에는 눈으로 볼 화면이 없다. 자동 검사로 닫았고 확인 도장은 그 수치를 신뢰한다는 뜻이다."
+        );
+        // 절이 없는 대기 작업과 대기가 아닌 작업은 기존 발췌 그대로다.
+        assert_eq!(
+            preview_of(&project, "TASK-702"),
+            "확인 동선 절이 없는 대기 작업이다."
+        );
+        assert_eq!(
+            preview_of(&project, "TASK-703"),
+            "요약 문장이 먼저 온다. 아직 대기가 아니므로 카드에는 실리지 않는다."
+        );
+    }
+
+    #[test]
+    fn ideas_and_specs_keep_their_previews() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        // 상태 값이 `qa_waiting`인 아이디어·기획서는 없지만, 있어도 카드가 바뀌지 않는다는 것을
+        // 같은 본문으로 확인한다.
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("ideas/IDEA-700.md"),
+            format!(
+                "---\nschema: workflow-labs/idea@1\nid: IDEA-700\ntitle: 아이디어\nupdated_at: 2026-08-08T00:00:00Z\n---\n\n{}",
+                walkthrough_body("## 확인 동선\n\n아이디어에는 이 규칙이 닿지 않는다.\n")
+            ),
+        )
+        .expect("write idea");
+        fs::write(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("specs/SPEC-700.md"),
+            format!(
+                "---\nschema: workflow-labs/spec@1\nid: SPEC-700\ntitle: 기획서\nstatus: user_review\nupdated_at: 2026-08-08T00:00:00Z\n---\n\n{}",
+                walkthrough_body("## 확인 동선\n\n기획서에도 닿지 않는다.\n")
+            ),
+        )
+        .expect("write spec");
+
+        let project = repository.inspect(root.path()).expect("inspect project");
+
+        assert_eq!(
+            preview_of(&project, "IDEA-700"),
+            "요약 문장이 먼저 온다. 아이디어에는 이 규칙이 닿지 않는다."
+        );
+        assert_eq!(
+            preview_of(&project, "SPEC-700"),
+            "요약 문장이 먼저 온다. 기획서에도 닿지 않는다."
+        );
+    }
+
+    #[test]
+    fn only_the_exact_heading_counts_as_the_walkthrough() {
+        let excerpt_of = |section: &str| {
+            let body = walkthrough_body(section);
+            (walkthrough_preview(&body), markdown_excerpt(&body))
+        };
+
+        // 철자, 제목 깊이, 앞뒤 공백이 다른 제목은 보완하지 않는다.
+        for section in [
+            "## 확인동선\n\n붙여 쓴 제목이다.\n",
+            "### 확인 동선\n\n깊이가 다르다.\n",
+            "##  확인 동선\n\n제목 안의 공백이 다르다.\n",
+            "## 확인 동선 \n\n뒤에 공백이 붙었다.\n",
+            "## 확인 동선입니다\n\n제목이 더 길다.\n",
+        ] {
+            assert_eq!(
+                excerpt_of(section).0,
+                None,
+                "{section}에서 절로 인정됐습니다"
+            );
+        }
+
+        // 코드 울타리 안의 같은 문자열은 제목이 아니다.
+        let fenced = walkthrough_body("```markdown\n## 확인 동선\n\n예시 안의 문장이다.\n```\n");
+        assert_eq!(walkthrough_preview(&fenced), None);
+    }
+
+    #[test]
+    fn an_empty_walkthrough_section_falls_back_to_the_excerpt() {
+        // 절 뒤에 곧바로 다음 제목이 오는 경우와 코드 울타리가 오는 경우 모두 문단이 없다.
+        for section in [
+            "## 확인 동선\n\n## 다음 절\n\n다음 절의 문장이다.\n",
+            "## 확인 동선\n\n```sh\ncargo test\n```\n",
+            "## 확인 동선\n",
+        ] {
+            let body = walkthrough_body(section);
+            assert_eq!(walkthrough_preview(&body), None, "{section}");
+        }
+    }
+
+    #[test]
+    fn a_long_walkthrough_paragraph_is_clipped_like_the_excerpt() {
+        let long = "가".repeat(200);
+        let body = walkthrough_body(&format!("## 확인 동선\n\n{long}\n"));
+        let preview = walkthrough_preview(&body).expect("preview");
+
+        assert_eq!(preview.chars().count(), 161);
+        assert!(preview.ends_with('…'));
+        assert_eq!(
+            preview.chars().take(160).collect::<String>(),
+            long.chars().take(160).collect::<String>()
+        );
+        // 기존 발췌와 같은 한도를 쓴다.
+        assert_eq!(markdown_excerpt(&long).chars().count(), 161);
+    }
+
+    /// 미리보기는 이미 읽어 둔 본문 문자열 하나로 만들어진다. 이 함수가 파일 경로를 받지 않는다는 것이
+    /// 조회가 파일을 더 열지 않는다는 뜻이다.
+    #[test]
+    fn the_walkthrough_preview_reads_only_the_body_it_is_given() {
+        let body = walkthrough_body("## 확인 동선\n\n한 줄짜리 문단이다.\n");
+        assert_eq!(
+            walkthrough_preview(&body),
+            Some("한 줄짜리 문단이다.".to_owned())
+        );
+    }
+
+    fn revision_input(
+        directory: &str,
+        expected_updated_at: &str,
+        request_id: &str,
+    ) -> TaskRevisionRequestInput {
+        TaskRevisionRequestInput {
+            workflow_directory: directory.to_owned(),
+            file_name: "TASK-900.md".to_owned(),
+            expected_updated_at: expected_updated_at.to_owned(),
+            reason: "완료 조건이 선언 범위 밖 파일을 요구한다.".to_owned(),
+            request_id: request_id.to_owned(),
+        }
+    }
+
+    fn revision_documents(root: &Path, directory: &str) -> Vec<String> {
+        fs::read_dir(root.join(".workflow").join(directory).join("decisions"))
+            .expect("decisions")
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .filter(|text| text.contains("schema: workflow-labs/task-revision-request@1"))
+            .collect()
+    }
+
+    fn set_task_status(path: &Path, status: &str) {
+        let source = fs::read_to_string(path).expect("task");
+        fs::write(
+            path,
+            source.replace("status: blocked", &format!("status: {status}")),
+        )
+        .expect("rewrite status");
+    }
+
+    fn read_task_requests(root: &Path, directory: &str) -> Vec<TaskRevisionRequest> {
+        FileSystemProjectRepository
+            .read_task(root, directory, "TASK-900.md")
+            .expect("read task")
+            .revision_requests
+    }
+
+    #[test]
+    fn a_revision_request_is_recorded_without_touching_the_task() {
+        let (root, directory, path) = blocked_project();
+        let before = fs::read_to_string(&path).expect("task");
+
+        let result = FileSystemProjectRepository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("record request");
+
+        assert_eq!(result.status, TaskRevisionRequestStatus::Recorded);
+        let documents = revision_documents(root.path(), &directory);
+        assert_eq!(documents.len(), 1);
+        let document = &documents[0];
+        assert_eq!(audit_field(document, "task_id"), "TASK-900");
+        assert_eq!(audit_field(document, "request_id"), "req-1");
+        assert_eq!(
+            audit_field(document, "previous_updated_at"),
+            "2026-08-01T00:00:00Z"
+        );
+        assert_eq!(audit_field(document, "created_by"), "user");
+        assert!(document.contains("완료 조건이 선언 범위 밖 파일을 요구한다."));
+        // 요청 저장은 작업 문서를 바꾸지 않는다.
+        assert_eq!(fs::read_to_string(&path).expect("task"), before);
+
+        let recorded = result.request.expect("recorded request");
+        assert!(!recorded.handled);
+        let listed = read_task_requests(root.path(), &directory);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, recorded.id);
+        assert_eq!(
+            listed[0].reason,
+            "완료 조건이 선언 범위 밖 파일을 요구한다."
+        );
+        assert!(!listed[0].handled);
+    }
+
+    #[test]
+    fn a_todo_task_without_a_lease_also_accepts_a_request() {
+        let (root, directory, path) = blocked_project();
+        set_task_status(&path, "todo");
+
+        let result = FileSystemProjectRepository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("record request");
+
+        assert_eq!(result.status, TaskRevisionRequestStatus::Recorded);
+        assert_eq!(revision_documents(root.path(), &directory).len(), 1);
+    }
+
+    #[test]
+    fn the_other_states_refuse_a_revision_request() {
+        for status in ["in_progress", "qa_waiting", "completed"] {
+            let (root, directory, path) = blocked_project();
+            set_task_status(&path, status);
+            let before = task_and_decision_files(root.path(), &directory);
+
+            let error = FileSystemProjectRepository
+                .record_task_revision_request(
+                    root.path(),
+                    &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+                )
+                .expect_err("state refused");
+
+            assert!(matches!(error, ProjectError::TaskNotRevisable), "{status}");
+            assert_eq!(task_and_decision_files(root.path(), &directory), before);
+        }
+    }
+
+    #[test]
+    fn a_lease_a_lock_and_a_stale_time_each_write_nothing() {
+        // 선점 중.
+        let (root, directory, _) = blocked_project();
+        write_lease(
+            root.path(),
+            "TASK-900.yml",
+            &format!(
+                "schema_version: 1\nlease_id: lease-1\nagent: other\ntask_id: TASK-900\nheartbeat_at: 2026-08-01T00:00:00Z\nexpires_at: {}\n",
+                (Utc::now() + Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%SZ")
+            ),
+        );
+        let before = task_and_decision_files(root.path(), &directory);
+        let error = FileSystemProjectRepository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("leased");
+        assert!(matches!(error, ProjectError::TaskRevisionLeased));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+
+        // 마이그레이션 잠금 중.
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let _lock = ProjectWriteLock::acquire(&root.path().join(".workflow")).expect("lock");
+        let error = FileSystemProjectRepository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("migration lock");
+        assert!(matches!(
+            error,
+            ProjectError::ManagedProjectAssets(_) | ProjectError::ProjectWriteLock(_)
+        ));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+        drop(_lock);
+
+        // 오래된 갱신 시각.
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let error = FileSystemProjectRepository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-07-01T00:00:00Z", "req-1"),
+            )
+            .expect_err("stale");
+        assert!(matches!(error, ProjectError::TaskRevisionStale));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn an_empty_reason_is_refused_before_anything_is_written() {
+        let (root, directory, _) = blocked_project();
+        let before = task_and_decision_files(root.path(), &directory);
+        let mut request = revision_input(&directory, "2026-08-01T00:00:00Z", "req-1");
+        request.reason = "   ".to_owned();
+
+        let error = FileSystemProjectRepository
+            .record_task_revision_request(root.path(), &request)
+            .expect_err("empty reason");
+
+        assert!(matches!(error, ProjectError::RevisionReasonRequired));
+        assert_eq!(task_and_decision_files(root.path(), &directory), before);
+    }
+
+    #[test]
+    fn repeating_the_same_revision_request_records_one_document() {
+        let (root, directory, _) = blocked_project();
+        let repository = FileSystemProjectRepository;
+        let request = revision_input(&directory, "2026-08-01T00:00:00Z", "req-1");
+
+        let first = repository
+            .record_task_revision_request(root.path(), &request)
+            .expect("first");
+        let second = repository
+            .record_task_revision_request(root.path(), &request)
+            .expect("repeat");
+
+        assert_eq!(first.status, TaskRevisionRequestStatus::Recorded);
+        assert_eq!(second.status, TaskRevisionRequestStatus::Recorded);
+        assert_eq!(
+            first.request.map(|entry| entry.id),
+            second.request.map(|entry| entry.id)
+        );
+        assert_eq!(revision_documents(root.path(), &directory).len(), 1);
+    }
+
+    #[test]
+    fn two_concurrent_revision_requests_record_one_document() {
+        let (root, directory, _) = blocked_project();
+        let request = revision_input(&directory, "2026-08-01T00:00:00Z", "req-1");
+
+        let results = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                FileSystemProjectRepository.record_task_revision_request(root.path(), &request)
+            });
+            let second = scope.spawn(|| {
+                FileSystemProjectRepository.record_task_revision_request(root.path(), &request)
+            });
+            [first.join().expect("first"), second.join().expect("second")]
+        });
+
+        assert!(results.iter().any(Result::is_ok), "한쪽은 성공해야 한다");
+        assert_eq!(revision_documents(root.path(), &directory).len(), 1);
+    }
+
+    #[test]
+    fn a_second_request_waits_while_one_is_pending() {
+        let (root, directory, _) = blocked_project();
+        let repository = FileSystemProjectRepository;
+        repository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("first request");
+
+        let second = repository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-2"),
+            )
+            .expect("second request");
+
+        assert_eq!(second.status, TaskRevisionRequestStatus::AlreadyPending);
+        assert_eq!(revision_documents(root.path(), &directory).len(), 1);
+        // 돌려주는 값은 이미 남아 있는 그 요청이다.
+        assert_eq!(
+            second.request.expect("pending request").id,
+            read_task_requests(root.path(), &directory)[0].id
+        );
+    }
+
+    #[test]
+    fn the_linked_id_alone_decides_that_a_request_was_handled() {
+        let (root, directory, path) = blocked_project();
+        let repository = FileSystemProjectRepository;
+        let recorded = repository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("record request")
+            .request
+            .expect("recorded");
+
+        assert!(!read_task_requests(root.path(), &directory)[0].handled);
+
+        // 아키텍트가 요청을 처리하고 그 id를 작업에 연결한 상태.
+        let source = fs::read_to_string(&path).expect("task");
+        fs::write(
+            &path,
+            source.replace(
+                "owner: 나\n",
+                &format!("owner: 나\nrevision_request_id: {}\n", recorded.id),
+            ),
+        )
+        .expect("link request");
+
+        let listed = read_task_requests(root.path(), &directory);
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].handled);
+        // 미처리 요청이 없으므로 다음 요청은 다시 받는다.
+        let next = repository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-2"),
+            )
+            .expect("next request");
+        assert_eq!(next.status, TaskRevisionRequestStatus::Recorded);
+        assert_eq!(revision_documents(root.path(), &directory).len(), 2);
+    }
+
+    #[test]
+    fn a_damaged_request_document_is_skipped_by_the_read() {
+        let (root, directory, _) = blocked_project();
+        FileSystemProjectRepository
+            .record_task_revision_request(
+                root.path(),
+                &revision_input(&directory, "2026-08-01T00:00:00Z", "req-1"),
+            )
+            .expect("record request");
+        // 시각을 읽을 수 없는 문서와 앱이 쓰지 않은 문서를 함께 둔다.
+        write_decision(
+            root.path(),
+            &directory,
+            "REVISION-DAMAGED.md",
+            "---\nschema: workflow-labs/task-revision-request@1\nid: REVISION-DAMAGED\ntask_id: TASK-900\nrequest_id: req-x\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: 어제\n---\n\n시각이 깨진 요청\n",
+        );
+        write_decision(
+            root.path(),
+            &directory,
+            "REVISION-AGENT.md",
+            "---\nschema: workflow-labs/task-revision-request@1\nid: REVISION-AGENT\ntask_id: TASK-900\nrequest_id: req-y\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: agent\ncreated_at: 2026-08-02T00:00:00Z\n---\n\n에이전트가 쓴 요청\n",
+        );
+
+        let listed = read_task_requests(root.path(), &directory);
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].reason,
+            "완료 조건이 선언 범위 밖 파일을 요구한다."
+        );
+    }
+
+    #[test]
+    fn a_project_without_requests_reads_exactly_as_before() {
+        let (root, directory, _) = blocked_project();
+        write_spec_with_status(root.path(), &directory, "SPEC-900", "user_review");
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-900.md",
+            &spec_decision(
+                "DECISION-900",
+                "SPEC-900",
+                "approved",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
+
+        let document = FileSystemProjectRepository
+            .read_task(root.path(), &directory, "TASK-900.md")
+            .expect("read task");
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project");
+
+        assert!(document.revision_requests.is_empty());
+        assert_eq!(
+            project.workflows[0]
+                .items
+                .specs
+                .iter()
+                .find(|item| item.id == "SPEC-900")
+                .expect("spec")
+                .status,
+            "approved"
+        );
+    }
+
+    #[test]
+    fn project_revision_candidates_join_one_sorted_decision_scan_to_the_task_graph() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "todo",
+            "scope_files: []\n",
+        );
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-002",
+            "blocked",
+            "revision_request_id: REVISION-LATE\nscope_files: []\n",
+        );
+        let request = |id: &str, task_id: &str, created_at: &str| {
+            format!(
+                "---\nschema: workflow-labs/task-revision-request@1\nid: {id}\ntask_id: {task_id}\nrequest_id: request-{id}\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{id} 사유\n"
+            )
+        };
+        // 파일 이름과 작업 그래프의 HashMap 순서가 아니라 생성 시각, 요청 id, 작업 id 순서로
+        // 결과가 고정된다. 그래프에 없는 작업의 기록은 후보에서 빠진다.
+        for (file_name, contents) in [
+            (
+                "Z-ORPHAN.md",
+                request("REVISION-ORPHAN", "TASK-999", "2026-08-01T00:00:00Z"),
+            ),
+            (
+                "Z-EARLY-B.md",
+                request("REVISION-EARLY-B", "TASK-002", "2026-08-01T01:00:00Z"),
+            ),
+            (
+                "Z-LATE.md",
+                request("REVISION-LATE", "TASK-002", "2026-08-01T02:00:00Z"),
+            ),
+            (
+                "Z-EARLY-A.md",
+                request("REVISION-EARLY-A", "TASK-001", "2026-08-01T01:00:00Z"),
+            ),
+        ] {
+            write_decision(root.path(), &directory, file_name, &contents);
+        }
+
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let graph = task_dependency_graph(&workflow_root.join("tasks"));
+        let records = read_all_revision_request_records(&workflow_root);
+        let candidates = task_revision_request_candidates(&records, &graph);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.id.as_str(),
+                    candidate.task_id.as_str(),
+                    candidate.task_status.as_str(),
+                    candidate.handled,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("REVISION-EARLY-A", "TASK-001", "todo", false),
+                ("REVISION-EARLY-B", "TASK-002", "blocked", false),
+                ("REVISION-LATE", "TASK-002", "blocked", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn task_revision_events_include_every_request_and_the_linked_application_once() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "blocked",
+            "revision_request_id: REVISION-LATE\nscope_files: []\n",
+        );
+        let request = |id: &str, created_at: &str| {
+            format!(
+                "---\nschema: workflow-labs/task-revision-request@1\nid: {id}\ntask_id: TASK-001\nrequest_id: request-{id}\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{id} 사유\n"
+            )
+        };
+        write_decision(
+            root.path(),
+            &directory,
+            "REVISION-EARLY.md",
+            &request("REVISION-EARLY", "2026-08-01T01:00:00Z"),
+        );
+        write_decision(
+            root.path(),
+            &directory,
+            "REVISION-LATE.md",
+            &request("REVISION-LATE", "2026-08-02T01:00:00Z"),
+        );
+
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect revision events");
+
+        assert_eq!(
+            task_events(&project, "TASK-001"),
+            vec![
+                (
+                    "task_revision_requested".to_owned(),
+                    "2026-08-01T01:00:00Z".to_owned(),
+                ),
+                (
+                    "task_revision_requested".to_owned(),
+                    "2026-08-02T01:00:00Z".to_owned(),
+                ),
+                (
+                    "task_revision_applied".to_owned(),
+                    "2026-08-03T00:00:00Z".to_owned(),
+                ),
+            ]
         );
     }
 }
