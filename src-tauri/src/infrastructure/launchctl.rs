@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 /// 조작에 쓰는 실행 파일. 앱이 부르는 두 번째 실행 파일이다.
 const PROGRAM: &str = "launchctl";
@@ -31,6 +32,11 @@ const BOOTSTRAP: &str = "bootstrap";
 
 /// 사용자 로그인 세션의 도메인 표기. launchd가 아는 이름이 `gui/<uid>`다.
 const DOMAIN: &str = "gui";
+
+/// CI와 OS 업데이트 직후 실행 파일 활성화가 잠깐 겹칠 때의 Unix `ETXTBSY` 안전망.
+/// 다른 시작 오류는 재시도하지 않는다.
+const EXECUTABLE_BUSY_ATTEMPTS: usize = 5;
+const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// 이 모듈이 아는 조작 둘. 그 밖의 조작을 조립하는 경로가 없다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,16 +112,46 @@ pub fn run(program: &Path, arguments: &[String]) -> std::io::Result<Executed> {
         status,
         stdout,
         stderr,
-    } = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()?;
+    } = retry_executable_busy(|| {
+        Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+    })?;
 
     Ok(Executed {
         code: status.code(),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+fn retry_executable_busy<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for attempt in 0..EXECUTABLE_BUSY_ATTEMPTS {
+        match operation() {
+            Err(error)
+                if executable_temporarily_busy(&error)
+                    && attempt + 1 < EXECUTABLE_BUSY_ATTEMPTS =>
+            {
+                std::thread::sleep(EXECUTABLE_BUSY_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+
+    unreachable!("마지막 시도는 반드시 결과를 반환한다")
+}
+
+#[cfg(unix)]
+fn executable_temporarily_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(26)
+}
+
+#[cfg(not(unix))]
+fn executable_temporarily_busy(_error: &std::io::Error) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -254,6 +290,33 @@ mod tests {
         let missing = directory.path().join("없는-실행-파일");
 
         assert!(run(&missing, &arguments(Operation::Stop, UID, LABEL, PLIST)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporarily_busy_program_is_retried_but_other_errors_are_not() {
+        let mut busy_attempts = 0;
+        let result = super::retry_executable_busy(|| {
+            busy_attempts += 1;
+            if busy_attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(26))
+            } else {
+                Ok("ready")
+            }
+        });
+
+        assert_eq!(result.expect("세 번째 시도가 성공한다"), "ready");
+        assert_eq!(busy_attempts, 3);
+
+        let mut denied_attempts = 0;
+        let error = super::retry_executable_busy::<()>(|| {
+            denied_attempts += 1;
+            Err(std::io::Error::from_raw_os_error(13))
+        })
+        .expect_err("권한 오류는 즉시 반환한다");
+
+        assert_eq!(error.raw_os_error(), Some(13));
+        assert_eq!(denied_attempts, 1);
     }
 
     #[cfg(unix)]
