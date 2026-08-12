@@ -1012,7 +1012,7 @@ mod tests {
                 ("architect_rules", 15, 15),
                 ("developer_rules", 15, 15),
                 ("claim_helper", 1, 1),
-                ("condition_script", 15, 15),
+                ("condition_script", 16, 16),
             ]
         );
         assert!(root.path().join("AGENTS.md").is_file());
