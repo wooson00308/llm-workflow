@@ -3711,8 +3711,6 @@ mod tests {
     /// 그 파일의 대조 헬퍼는 자기 테스트 모듈 안에 있어 다른 모듈에서 부를 수 없다.
     #[test]
     fn a_closed_idea_is_not_planner_work_in_either_judgement() {
-        use std::process::Command;
-
         let root = tempdir().expect("temp project");
         let repository = FileSystemProjectRepository;
         let project = repository
@@ -3749,15 +3747,12 @@ mod tests {
             ("architect", inspected.pending_work.architect),
             ("developer", inspected.pending_work.developer),
         ] {
-            let code = Command::new("sh")
-                .arg(".workflow/rules/wf-eligible.sh")
-                .arg(role)
-                .current_dir(root.path())
-                .status()
-                .expect("run condition script")
-                .code()
-                .expect("exit code");
-            assert_eq!(app_flag, code == 0, "{role} 판정이 조건 스크립트와 다르다");
+            let run = run_condition(root.path(), role);
+            assert_eq!(
+                app_flag,
+                run.code == 0,
+                "{role} 판정이 조건 스크립트와 다르다"
+            );
         }
     }
 
