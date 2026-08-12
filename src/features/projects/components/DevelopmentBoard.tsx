@@ -2,17 +2,19 @@ import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
 import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
 import type {
+  AgentLeaseSummary,
   TaskDependency,
   TaskDocument,
   TaskOverlapBlock,
   TaskQaBatchEntry,
   TaskQaOutcome,
+  TaskRevisionRequestOutcome,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
 import { parseBlockedReason, splitSection } from "../domain/documentSections";
 import { UNASSIGNED_LANE_KEY, browserSpecLaneCollapseStore } from "../infrastructure/browserSpecLaneCollapseStore";
-import { BlockedTaskPanel } from "./BlockedTaskPanel";
+import { BlockedTaskPanel, TaskRevisionRequestPanel } from "./BlockedTaskPanel";
 import { DECISION_SUMMARY_HEADING, DocumentReader } from "./DocumentReader";
 import { MarkdownBody } from "./MarkdownBody";
 
@@ -72,20 +74,29 @@ export const eventKinds = [
   // 하나는 사용자가 결과를 물린 것이고, 다른 하나는 막힌 일을 사용자가 다시 연 것이다.
   { kind: "revision_requested", label: "반려" },
   { kind: "resumed", label: "사용자 재개" },
+  { kind: "task_revision_requested", label: "정의 수정 요청" },
+  { kind: "task_revision_applied", label: "아키텍트 수정" },
 ] as const;
 
 type ViewMode = (typeof viewModes)[number]["value"];
 
 interface Props {
+  activeLeases?: AgentLeaseSummary[];
   busy: boolean;
   onReadTask(fileName: string): Promise<TaskDocument | null>;
+  onTaskRevisionRequest?(
+    fileName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    requestId: string,
+  ): Promise<TaskRevisionRequestOutcome>;
   onTaskQa(fileName: string, outcome: TaskQaOutcome, comment: string): Promise<boolean>;
   /** 일괄은 입구를 하나 더하는 것이지 `onTaskQa`를 대체하지 않는다(SPEC-031 R7). */
   onTaskQaBatch(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
   workflow: WorkflowSummary;
 }
 
-export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, workflow }: Props) {
+export function DevelopmentBoard({ activeLeases = [], busy, onReadTask, onTaskRevisionRequest = async () => ({ ok: false, message: "정의 수정 요청 조작이 연결되지 않았습니다." }), onTaskQa, onTaskQaBatch, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [laneGrouping, setLaneGrouping] = useState(false);
   const [query, setQuery] = useState("");
@@ -156,17 +167,26 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
     setTaskLoading(false);
   }
 
+  async function reloadTask() {
+    if (!taskDocument) return;
+    const document = await onReadTask(taskDocument.summary.fileName);
+    if (document) setTaskDocument(document);
+  }
+
   if (taskDocument) {
     return (
       <TaskDetail
         backLabel={qaSession ? "← QA로 돌아가기" : "← 개발 작업으로"}
         busy={busy}
         document={taskDocument}
+        leased={activeLeases.some((lease) => lease.taskId === taskDocument.summary.id)}
         onBack={() => setTaskDocument(null)}
         onOpenRelatedTask={async (item) => {
           const relatedDocument = await onReadTask(item.fileName);
           if (relatedDocument) setTaskDocument(relatedDocument);
         }}
+        onReloadTask={reloadTask}
+        onTaskRevisionRequest={onTaskRevisionRequest}
         onTaskQa={async (outcome, comment) => {
           const succeeded = await onTaskQa(taskDocument.summary.fileName, outcome, comment);
           if (succeeded) {
@@ -340,8 +360,11 @@ function TaskDetail({
   backLabel,
   busy,
   document,
+  leased,
   onBack,
   onOpenRelatedTask,
+  onReloadTask,
+  onTaskRevisionRequest,
   onTaskQa,
   tasks,
   taskTitles,
@@ -349,8 +372,16 @@ function TaskDetail({
   backLabel: string;
   busy: boolean;
   document: TaskDocument;
+  leased: boolean;
   onBack(): void;
   onOpenRelatedTask(task: WorkflowItemSummary): Promise<void>;
+  onReloadTask(): Promise<void>;
+  onTaskRevisionRequest(
+    fileName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    requestId: string,
+  ): Promise<TaskRevisionRequestOutcome>;
   onTaskQa(outcome: TaskQaOutcome, comment: string): Promise<boolean>;
   tasks: WorkflowItemSummary[];
   /** 작업 id → 제목. 선행을 제목으로 부르는 자리에서만 쓴다. */
@@ -362,6 +393,7 @@ function TaskDetail({
   const confirmQa = useArmedConfirm();
   const revisionQa = useArmedConfirm();
   const blocked = document.summary.status === "blocked";
+  const revisable = !leased && (blocked || document.summary.status === "todo");
   const awaitingQa = document.summary.status === "qa_waiting";
   const blockedReason = useMemo(
     () => (blocked ? parseBlockedReason(document.body) : null),
@@ -379,6 +411,10 @@ function TaskDetail({
   const walkthrough = useMemo(
     () => (awaitingQa ? splitSection(document.body, TASK_WALKTHROUGH_HEADING).section : null),
     [awaitingQa, document.body],
+  );
+  const preflight = useMemo(
+    () => splitSection(document.body, "## 범위 사전 검사").section,
+    [document.body],
   );
   // 사용자가 이 작업을 다시 연 사실. 문서 이력에서 그대로 읽고, 없으면 아무 말도 하지 않는다.
   const lastResumed = useMemo(() => {
@@ -481,6 +517,14 @@ function TaskDetail({
               decisionSummary={blockedSummary}
               onOpenRelatedTask={onOpenRelatedTask}
               reason={blockedReason}
+              revisionRequest={revisable ? {
+                busy,
+                dependencies,
+                document,
+                onReload: onReloadTask,
+                onRequest: onTaskRevisionRequest,
+                preflight,
+              } : undefined}
               tasks={tasks}
               updatedAt={document.summary.updatedAt}
             />
@@ -543,14 +587,26 @@ function TaskDetail({
               </div>
             </>
           ) : (
-            <div className={`decision-result ${document.summary.status === "completed" ? "approved" : ""}`}>
-              <Icon name={document.summary.status === "completed" ? "stamp" : "board"} />
-              <strong>{statusLabels[document.summary.status] ?? document.summary.status}</strong>
-              <p>{document.summary.status === "completed" ? "사용자 QA까지 완료된 작업입니다." : "QA 대기 상태가 되면 확인 도구가 활성화됩니다."}</p>
-              {lastResumed !== null && (
-                <p className="task-resume-record">사용자 재개 {formatDate(lastResumed.at)}</p>
+            <>
+              <div className={`decision-result ${document.summary.status === "completed" ? "approved" : ""}`}>
+                <Icon name={document.summary.status === "completed" ? "stamp" : "board"} />
+                <strong>{statusLabels[document.summary.status] ?? document.summary.status}</strong>
+                <p>{document.summary.status === "completed" ? "사용자 QA까지 완료된 작업입니다." : "QA 대기 상태가 되면 확인 도구가 활성화됩니다."}</p>
+                {lastResumed !== null && (
+                  <p className="task-resume-record">사용자 재개 {formatDate(lastResumed.at)}</p>
+                )}
+              </div>
+              {revisable && (
+                <TaskRevisionRequestPanel
+                  busy={busy}
+                  dependencies={dependencies}
+                  document={document}
+                  onReload={onReloadTask}
+                  onRequest={onTaskRevisionRequest}
+                  preflight={preflight}
+                />
               )}
-            </div>
+            </>
           )}
         </aside>
       </div>

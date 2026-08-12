@@ -55,8 +55,6 @@ export default function App() {
       managedAssets={workspace.managedAssets}
       project={workspace.project}
       updater={updater}
-      integrations={workspace.integrations}
-      integrationActions={workspace.integrationActions}
       onAddIdea={workspace.createIdea}
       onAddWorkflow={workspace.createWorkflow}
       onDecideSpec={workspace.decideSpec}
@@ -64,6 +62,7 @@ export default function App() {
       onReadIdea={workspace.readIdea}
       onReadSpec={workspace.readSpec}
       onReadTask={workspace.readTask}
+      onTaskRevisionRequest={workspace.recordTaskRevisionRequest}
       onTaskQa={workspace.recordTaskQa}
       onTaskQaBatch={workspace.confirmTaskQaBatch}
       onRefresh={workspace.refresh}

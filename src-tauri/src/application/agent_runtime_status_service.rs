@@ -8,7 +8,10 @@
 
 use serde_json::Value;
 
-use crate::domain::agent_runtime::{Compatibility, QueueSnapshot, RunLogPage, RunSummary};
+use crate::domain::agent_runtime::{
+    AutomationRoleState, AutomationSnapshot, Compatibility, QueueSnapshot, RunLogPage, RunSummary,
+    WatcherState,
+};
 use crate::infrastructure::agent_runtime_process::{self, RuntimeCallFailure, RuntimeCaller};
 
 /// 상태 명령이 실패하는 방식.
@@ -80,6 +83,7 @@ impl AgentRuntimeStatusService {
         }
         let providers =
             agent_runtime_process::diagnose_providers(caller, project_id).unwrap_or_default();
+        let automation = automation_from_state(&state);
         QueueSnapshot {
             project_id: project_id.to_owned(),
             paused: state
@@ -87,6 +91,7 @@ impl AgentRuntimeStatusService {
                 .and_then(|configuration| configuration.get("paused"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            automation,
             runs,
             errors: match state.get("errors") {
                 Some(Value::Array(values)) => values.clone(),
@@ -156,10 +161,47 @@ fn unavailable(project_id: &str, reason: &str) -> QueueSnapshot {
     QueueSnapshot {
         project_id: project_id.to_owned(),
         paused: false,
+        automation: AutomationSnapshot {
+            enabled: false,
+            roles: Vec::new(),
+            watcher: None,
+            dispatcher_running: false,
+        },
         runs: Vec::new(),
         errors: Vec::new(),
         providers: Vec::new(),
         unavailable: Some(reason.to_owned()),
+    }
+}
+
+fn automation_from_state(state: &Value) -> AutomationSnapshot {
+    let automation = state.get("automation");
+    let roles = automation
+        .and_then(|value| value.get("roles"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    serde_json::from_value::<AutomationRoleState>(value.clone()).ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let watcher = automation
+        .and_then(|value| value.get("watcher"))
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value::<WatcherState>(value.clone()).ok());
+    AutomationSnapshot {
+        enabled: automation
+            .and_then(|value| value.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        roles,
+        watcher,
+        dispatcher_running: automation
+            .and_then(|value| value.get("dispatcher"))
+            .is_some_and(|value| !value.is_null()),
     }
 }
 

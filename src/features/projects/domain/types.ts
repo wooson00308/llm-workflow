@@ -90,6 +90,22 @@ export interface TaskOverlapBlock {
   sharedFiles: string[];
 }
 
+/** 작업 문서의 `scope_files` 선언을 원문 계약대로 읽은 결과. */
+export interface TaskScopeDeclaration {
+  status: "declared" | "absent" | "malformed";
+  /** `declared`에서는 원문 순서의 경로이고, 나머지 두 상태에서는 비어 있다. */
+  files: string[];
+}
+
+/** 작업 하나에 남은 정의 수정 요청. `handled`는 작업이 이 요청 id를 직접 연결했을 때만 참이다. */
+export interface TaskRevisionRequest {
+  id: string;
+  previousUpdatedAt: string;
+  reason: string;
+  createdAt: string;
+  handled: boolean;
+}
+
 export interface TaskDocument {
   summary: WorkflowItemSummary;
   body: string;
@@ -99,6 +115,10 @@ export interface TaskDocument {
   dependencyFormatError?: boolean;
   /** 착수를 막고 있는 활성 lease와 그 근거. 비어 있으면 막히지 않은 것이다. */
   overlapBlocks?: TaskOverlapBlock[];
+  /** 현재 파일 범위 선언. 예전 테스트 리터럴은 값이 없을 수 있으므로 화면은 부재로 다룬다. */
+  scopeDeclaration?: TaskScopeDeclaration;
+  /** 생성 시각 순서의 정의 수정 요청 목록. */
+  revisionRequests?: TaskRevisionRequest[];
 }
 
 export interface IdeaDocument {
@@ -158,6 +178,25 @@ export interface TaskResumeResult {
   recovery: TaskResumeRecovery | null;
 }
 
+/** 잘못 분해된 작업을 고쳐 달라는 사용자 요청. 화면에서 확인한 값을 그대로 보낸다. */
+export interface TaskRevisionRequestInput {
+  workflowDirectory: string;
+  fileName: string;
+  expectedUpdatedAt: string;
+  reason: string;
+  requestId: string;
+}
+
+export interface TaskRevisionRequestResult {
+  status: "recorded" | "already_pending";
+  summary: ProjectSummary;
+  request: TaskRevisionRequest | null;
+}
+
+export type TaskRevisionRequestOutcome =
+  | { ok: true; result: TaskRevisionRequestResult }
+  | { ok: false; message: string };
+
 /**
  * 재개 호출 하나의 결말. 실패 사유를 재개 영역 안에서 읽어야 하므로 전역 오류 문구 하나로 접지
  * 않는다 — 사용자는 입력을 유지한 채 그 자리에서 다음 행동을 정한다.
@@ -184,6 +223,23 @@ export interface PendingRoleWork {
   developer: boolean;
 }
 
+export interface WorkCandidateVerdict {
+  id: string;
+  verdict: string;
+}
+
+export interface RoleWorkVerdict {
+  target: string | null;
+  targetKind: string | null;
+  candidates: WorkCandidateVerdict[];
+}
+
+export interface PendingRoleWorkDetail {
+  planner: RoleWorkVerdict;
+  architect: RoleWorkVerdict;
+  developer: RoleWorkVerdict;
+}
+
 export interface ProjectSummary {
   rootPath: string;
   initialized: boolean;
@@ -194,6 +250,8 @@ export interface ProjectSummary {
   workflows: WorkflowSummary[];
   /** 값이 없으면 "대기 물량을 모른다"이고, 모르는 상태에서는 경고하지 않는다. */
   pendingWork?: PendingRoleWork;
+  /** 현재 워크플로 판정의 전체 후보. 메인 화면은 eligible만, 상세 화면은 제외 사유까지 쓴다. */
+  pendingDetail?: PendingRoleWorkDetail;
 }
 
 export type ManagedAssetSyncStatus =
@@ -932,10 +990,6 @@ export interface IntegrationActions {
     roles: RoleJobRequest[],
     baseline: ManagedRoleJob[],
   ): Promise<boolean>;
-  installDreamJob(
-    dream: DreamJobRequest,
-    baseline: ManagedDreamJob | null,
-  ): Promise<boolean>;
 }
 
 export interface RecentProject {
@@ -947,6 +1001,11 @@ export interface RecentProject {
 export interface ProjectGateway {
   chooseDirectory(): Promise<string | null>;
   inspect(path: string): Promise<ProjectSummary>;
+  /** `.workflow` 변경 알림만 받고, 실제 프로젝트 해석은 기존 inspect가 한 번 수행한다. */
+  watchProject?(
+    path: string,
+    onChanged: () => void,
+  ): Promise<() => Promise<void>>;
   synchronizeManagedAssets(path: string): Promise<ManagedAssetSyncResult>;
   readCustomRules(path: string): Promise<CustomRulesDocument>;
   prepareCustomRulesPreview(
@@ -1006,6 +1065,11 @@ export interface ProjectGateway {
    * 사용자가 근거를 적고 확인한 자리에서만 부른다. 조회 주기가 이 메서드를 부르는 경로는 없다.
    */
   resumeTask(path: string, request: TaskResumeRequest): Promise<TaskResumeResult>;
+  /** 작업 문서는 건드리지 않고 앱 소유 정의 수정 요청 기록만 남긴다. */
+  recordTaskRevisionRequest(
+    path: string,
+    request: TaskRevisionRequestInput,
+  ): Promise<TaskRevisionRequestResult>;
   migrate(path: string): Promise<ProjectSummary>;
   /** 연동 조회는 이 메서드 하나다. 연동이 늘어나도 메서드를 늘리지 않는다. */
   inspectIntegrations(path: string): Promise<IntegrationsSnapshot>;
@@ -1017,12 +1081,6 @@ export interface ProjectGateway {
     path: string,
     roles: RoleJobRequest[],
     baseline: ManagedRoleJob[],
-  ): Promise<IntegrationsSnapshot>;
-  /** 역할 잡과 같은 규칙이다. 관리 블록에 dream 잡이 없던 상태는 `null`이다. */
-  installDreamJob(
-    path: string,
-    dream: DreamJobRequest,
-    baseline: ManagedDreamJob | null,
   ): Promise<IntegrationsSnapshot>;
   /**
    * 역할 잡 하나를 지금 한 번 실행한다. 어떤 파일도 쓰지 않으므로 스냅샷을 돌려주지 않는다.
@@ -1263,6 +1321,7 @@ export interface AgentProjectPolicy {
   workingDirectory: string;
   projectMaxParallel: number;
   deviceMaxParallel: number;
+  automationEnabled?: boolean;
   /** 역할 이름으로 찾는다. 세 역할이 모두 있어야 저장된다. */
   roles: Record<string, AgentRolePolicy>;
 }
@@ -1342,6 +1401,9 @@ export interface AgentRoleRunPlan {
   granted: number;
   excluded: string[];
   manualTargets: string[];
+  targetId?: string | null;
+  candidates?: WorkCandidateVerdict[];
+  verdict?: string;
   diagnostic: unknown;
 }
 
@@ -1376,6 +1438,7 @@ export interface AgentRunSummary {
   state: AgentRunStatus;
   targetId: string | null;
   startedAt: string | null;
+  finishedAt: string | null;
   failureStage: string | null;
   reason: string | null;
   remaining: string[];
@@ -1385,6 +1448,7 @@ export interface AgentRunSummary {
 export interface AgentRunStartOutcome {
   started: AgentRunSummary[];
   failures: unknown[];
+  waiting?: unknown[];
 }
 
 export interface AgentCancelPreview {
@@ -1411,10 +1475,34 @@ export interface AgentRunLogPage {
 export interface AgentQueueSnapshot {
   projectId: string;
   paused: boolean;
+  automation?: AgentAutomationSnapshot;
   runs: AgentRunSummary[];
   errors: unknown[];
   providers: unknown[];
   unavailable: string | null;
+}
+
+export interface AgentAutomationRoleState {
+  role: string;
+  status: "watching" | "waiting" | "running" | "attention" | string;
+  nextPollAt: string | null;
+  lastCheckAt: string | null;
+  lastResult: string | null;
+  lastAssignedAt: string | null;
+}
+
+export interface AgentWatcherState {
+  status: "watching" | "degraded" | "stopped" | string;
+  lastEventAt: string | null;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface AgentAutomationSnapshot {
+  enabled: boolean;
+  roles: AgentAutomationRoleState[];
+  watcher: AgentWatcherState | null;
+  dispatcherRunning: boolean;
 }
 
 /** 앱이 대신 실행하는 런타임 조작 셋. 셋 다 계획을 먼저 보여주고 확인받은 뒤에만 적용한다. */
@@ -1477,6 +1565,8 @@ export interface AgentRuntimeState {
 export interface AgentRuntimeActions {
   /** 기기 상태와 이 프로젝트의 정책을 다시 읽는다. 읽기 명령만 부른다. */
   refresh(): Promise<void>;
+  /** 짧은 실행 상태 조회를 에이전트 화면이 보일 때만 유지한다. */
+  setViewActive?(active: boolean): void;
   /** 계획을 만든다. 아무것도 쓰지 않는다. */
   plan(operation: AgentRuntimeOperation): Promise<void>;
   cancelPlan(): void;

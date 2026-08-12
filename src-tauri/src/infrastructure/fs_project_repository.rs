@@ -16,9 +16,9 @@ use crate::domain::project::{
     SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState, TaskDocument,
     TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
     TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
-    TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus, WorkflowCounts,
-    WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest, WorkflowStatus,
-    PROJECT_SCHEMA_VERSION,
+    TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
+    TaskScopeDeclaration, TaskScopeStatus, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
+    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 use crate::infrastructure::custom_rules::{
     prepare_custom_rules_preview, read_custom_rules, save_custom_rules, CustomRulesError,
@@ -381,6 +381,7 @@ impl FileSystemProjectRepository {
         // `inspect`의 2.5초 주기와 다르고, 목록 payload는 이 값을 싣지 않는다(SPEC-013 R5).
         let graph = task_dependency_graph(&tasks_root);
         let (dependencies, dependency_format_error) = task_dependencies(&summary.id, &graph);
+        let scope_declaration = task_scope_declaration(&summary.id, &graph);
         // 겹침 근거는 미만료 lease를 읽어야 나온다. 자격 판정이 쓰는 읽기 그대로다.
         let overlap_blocks = task_overlap_blocks(&summary.id, &graph, &lease_ids(&control_root));
         // 처리 여부는 작업이 연결한 요청 id 하나로만 갈린다(SPEC-055 R10). 다른 근거로 추측하지 않는다.
@@ -395,6 +396,7 @@ impl FileSystemProjectRepository {
             dependencies,
             dependency_format_error,
             overlap_blocks,
+            scope_declaration,
             revision_requests,
         })
     }
@@ -1069,11 +1071,13 @@ impl PreparedWorkflow {
         // 쓰지만(`WorkflowItemSummary`에 필드를 더하지 않는다 — TASK-037) 같은 읽기에서 나온다.
         let (decisions, qa_events) = read_decision_documents(&root);
         let (tasks, graph) = read_task_documents(&root.join("tasks"));
-        let (items, nondraft_spec_sources) =
+        let (mut items, nondraft_spec_sources) =
             workflow_items(&root, &decisions, &qa_events, tasks, leases);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
-        let task_revision_requests = task_revision_request_candidates(&root, &graph);
+        let revision_records = read_all_revision_request_records(&root);
+        merge_task_revision_events(&revision_records, &graph, &mut items.tasks);
+        let task_revision_requests = task_revision_request_candidates(&revision_records, &graph);
         let definition_error_tasks = graph
             .iter()
             .filter(|(_, node)| {
@@ -2170,24 +2174,65 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
 
 /// 작업 정의 수정 요청과 대상 작업의 현재 값을 아키텍트 판정용 레코드로 접는다.
 fn task_revision_request_candidates(
-    workflow_root: &Path,
+    records: &[RevisionRequestRecord],
     graph: &HashMap<String, TaskNode>,
 ) -> Vec<TaskRevisionRequestCandidate> {
-    // 결정 디렉터리는 여기서 딱 한 번 읽는다. 레코드가 이미 후보와 같은 순서로 정렬돼 있으므로
-    // HashMap인 작업 그래프의 순회 순서도 결과에 새어 나오지 않는다.
-    read_all_revision_request_records(workflow_root)
-        .into_iter()
+    // 호출자가 결정 디렉터리를 한 번 읽은 결과를 받는다. 레코드가 이미 후보와 같은 순서로
+    // 정렬돼 있으므로 HashMap인 작업 그래프의 순회 순서도 결과에 새어 나오지 않는다.
+    records
+        .iter()
         .filter_map(|record| {
             let node = graph.get(&record.task_id)?;
             Some(TaskRevisionRequestCandidate {
                 handled: node.revision_request_id.as_deref() == Some(record.entry.id.as_str()),
-                id: record.entry.id,
-                task_id: record.task_id,
-                created_at: record.entry.created_at,
+                id: record.entry.id.clone(),
+                task_id: record.task_id.clone(),
+                created_at: record.entry.created_at.clone(),
                 task_status: node.status.clone(),
             })
         })
         .collect()
+}
+
+/// 목록에 정의 수정 요청과 아키텍트 처리 사실을 기존 작업 사건과 함께 싣는다.
+fn merge_task_revision_events(
+    records: &[RevisionRequestRecord],
+    graph: &HashMap<String, TaskNode>,
+    tasks: &mut [WorkflowItemSummary],
+) {
+    for task in tasks {
+        let Some(node) = graph.get(&task.id) else {
+            continue;
+        };
+        let mut seen = task
+            .events
+            .iter()
+            .filter_map(|event| Some((event.kind.clone(), parse_event_instant(&event.at)?)))
+            .collect::<HashSet<_>>();
+        for record in records.iter().filter(|record| record.task_id == task.id) {
+            if let Some(instant) = parse_event_instant(&record.entry.created_at) {
+                let kind = "task_revision_requested".to_owned();
+                if seen.insert((kind.clone(), instant)) {
+                    task.events.push(TaskEvent {
+                        kind,
+                        at: record.entry.created_at.clone(),
+                    });
+                }
+            }
+            if node.revision_request_id.as_deref() == Some(record.entry.id.as_str()) {
+                if let Some(at) = task.updated_at.clone() {
+                    if let Some(instant) = parse_event_instant(&at) {
+                        let kind = "task_revision_applied".to_owned();
+                        if seen.insert((kind.clone(), instant)) {
+                            task.events.push(TaskEvent { kind, at });
+                        }
+                    }
+                }
+            }
+        }
+        task.events
+            .sort_by_key(|event| parse_event_instant(&event.at));
+    }
 }
 
 /// 작업 하나의 선언을 판정해 상세 payload에 실을 값으로 만든다. 순서는 선언에 적힌 그대로다 —
@@ -2208,6 +2253,26 @@ fn task_dependencies(
         ),
         Some(DependencyDeclaration::Malformed) => (Vec::new(), true),
         Some(DependencyDeclaration::Absent) | None => (Vec::new(), false),
+    }
+}
+
+fn task_scope_declaration(
+    task_id: &str,
+    graph: &HashMap<String, TaskNode>,
+) -> TaskScopeDeclaration {
+    match graph.get(task_id).map(|node| &node.scope) {
+        Some(ScopeDeclaration::Declared(files)) => TaskScopeDeclaration {
+            status: TaskScopeStatus::Declared,
+            files: files.clone(),
+        },
+        Some(ScopeDeclaration::Malformed) => TaskScopeDeclaration {
+            status: TaskScopeStatus::Malformed,
+            files: Vec::new(),
+        },
+        Some(ScopeDeclaration::Absent) | None => TaskScopeDeclaration {
+            status: TaskScopeStatus::Absent,
+            files: Vec::new(),
+        },
     }
 }
 
@@ -2843,17 +2908,17 @@ mod tests {
     use super::{
         apply_latest_decision, latest_spec_decisions, lease_ids, markdown_excerpt,
         normalize_spec_status, overlap_blocked_task_ids, parse_scope_declaration,
-        read_markdown_document, read_spec_decisions, slugify, task_dependency_graph,
-        task_revision_request_candidates, update_task_frontmatter, validate_decision,
-        validate_task_qa, walkthrough_preview, FileSystemProjectRepository, ProjectError,
-        ProjectSummary, ScopeDeclaration,
+        read_all_revision_request_records, read_markdown_document, read_spec_decisions, slugify,
+        task_dependency_graph, task_revision_request_candidates, update_task_frontmatter,
+        validate_decision, validate_task_qa, walkthrough_preview, FileSystemProjectRepository,
+        ProjectError, ProjectSummary, ScopeDeclaration,
     };
     use crate::domain::project::{
         CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
         ManagedAssetSyncStatus, PendingRoleWork, SaveCustomRulesRequest, SaveCustomRulesStatus,
         SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
         TaskResumeRequest, TaskResumeStatus, TaskRevisionRequest, TaskRevisionRequestInput,
-        TaskRevisionRequestStatus, WorkflowItemSummary,
+        TaskRevisionRequestStatus, TaskScopeStatus, WorkflowItemSummary,
     };
     // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
     use crate::infrastructure::claim_helper::claim_helper_path;
@@ -6735,6 +6800,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn task_detail_preserves_scope_declaration_states_and_path_order() {
+        let (root, directory) = dependency_workflow();
+        for (id, declaration) in [
+            ("TASK-LIST", "scope_files: [src/z.rs, src/a.rs]\n"),
+            ("TASK-EMPTY", "scope_files: []\n"),
+            ("TASK-ABSENT", ""),
+            ("TASK-BROKEN", "scope_files:\n  - src/a.rs\n"),
+        ] {
+            write_task_document(root.path(), &directory, id, "todo", declaration);
+        }
+
+        let listed = read_task_document(root.path(), &directory, "TASK-LIST.md").scope_declaration;
+        assert_eq!(listed.status, TaskScopeStatus::Declared);
+        assert_eq!(listed.files, vec!["src/z.rs", "src/a.rs"]);
+
+        let empty = read_task_document(root.path(), &directory, "TASK-EMPTY.md").scope_declaration;
+        assert_eq!(empty.status, TaskScopeStatus::Declared);
+        assert!(empty.files.is_empty());
+
+        let absent =
+            read_task_document(root.path(), &directory, "TASK-ABSENT.md").scope_declaration;
+        assert_eq!(absent.status, TaskScopeStatus::Absent);
+        assert!(absent.files.is_empty());
+
+        let malformed =
+            read_task_document(root.path(), &directory, "TASK-BROKEN.md").scope_declaration;
+        assert_eq!(malformed.status, TaskScopeStatus::Malformed);
+        assert!(malformed.files.is_empty());
+    }
+
     /// SPEC-032 완료 조건 2. 선행 관계가 없는 두 작업이라도 같은 파일을 선언하면 하나가 잡힌 동안
     /// 다른 하나는 착수 대상이 아니다.
     #[test]
@@ -8606,7 +8702,8 @@ mod tests {
 
         let workflow_root = root.path().join(".workflow").join(&directory);
         let graph = task_dependency_graph(&workflow_root.join("tasks"));
-        let candidates = task_revision_request_candidates(&workflow_root, &graph);
+        let records = read_all_revision_request_records(&workflow_root);
+        let candidates = task_revision_request_candidates(&records, &graph);
 
         assert_eq!(
             candidates
@@ -8622,6 +8719,57 @@ mod tests {
                 ("REVISION-EARLY-A", "TASK-001", "todo", false),
                 ("REVISION-EARLY-B", "TASK-002", "blocked", false),
                 ("REVISION-LATE", "TASK-002", "blocked", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn task_revision_events_include_every_request_and_the_linked_application_once() {
+        let (root, directory) = dependency_workflow();
+        write_task_document(
+            root.path(),
+            &directory,
+            "TASK-001",
+            "blocked",
+            "revision_request_id: REVISION-LATE\nscope_files: []\n",
+        );
+        let request = |id: &str, created_at: &str| {
+            format!(
+                "---\nschema: workflow-labs/task-revision-request@1\nid: {id}\ntask_id: TASK-001\nrequest_id: request-{id}\nprevious_updated_at: 2026-08-01T00:00:00Z\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{id} 사유\n"
+            )
+        };
+        write_decision(
+            root.path(),
+            &directory,
+            "REVISION-EARLY.md",
+            &request("REVISION-EARLY", "2026-08-01T01:00:00Z"),
+        );
+        write_decision(
+            root.path(),
+            &directory,
+            "REVISION-LATE.md",
+            &request("REVISION-LATE", "2026-08-02T01:00:00Z"),
+        );
+
+        let project = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect revision events");
+
+        assert_eq!(
+            task_events(&project, "TASK-001"),
+            vec![
+                (
+                    "task_revision_requested".to_owned(),
+                    "2026-08-01T01:00:00Z".to_owned(),
+                ),
+                (
+                    "task_revision_requested".to_owned(),
+                    "2026-08-02T01:00:00Z".to_owned(),
+                ),
+                (
+                    "task_revision_applied".to_owned(),
+                    "2026-08-03T00:00:00Z".to_owned(),
+                ),
             ]
         );
     }

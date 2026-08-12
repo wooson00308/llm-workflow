@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentInstallApplication,
@@ -35,6 +36,8 @@ import type {
   TaskQaBatchResult,
   TaskResumeRequest,
   TaskResumeResult,
+  TaskRevisionRequestInput,
+  TaskRevisionRequestResult,
 } from "../domain/types";
 
 export const tauriProjectGateway: ProjectGateway = {
@@ -49,6 +52,26 @@ export const tauriProjectGateway: ProjectGateway = {
 
   inspect(path) {
     return invoke<ProjectSummary>("inspect_project", { path });
+  },
+
+  async watchProject(path, onChanged) {
+    let activeWatchId: string | null = null;
+    const unlisten = await listen<{ watchId: string; path: string }>(
+      "workflow-project-changed",
+      (event) => {
+        if (event.payload.path === path && event.payload.watchId === activeWatchId) onChanged();
+      },
+    );
+    try {
+      activeWatchId = await invoke<string>("watch_project", { path });
+    } catch (error) {
+      unlisten();
+      throw error;
+    }
+    return async () => {
+      unlisten();
+      if (activeWatchId) await invoke("unwatch_project", { watchId: activeWatchId });
+    };
   },
 
   synchronizeManagedAssets(path) {
@@ -144,6 +167,10 @@ export const tauriProjectGateway: ProjectGateway = {
     return invoke<TaskResumeResult>("resume_task", { path, request });
   },
 
+  recordTaskRevisionRequest(path, request: TaskRevisionRequestInput) {
+    return invoke<TaskRevisionRequestResult>("record_task_revision_request", { path, request });
+  },
+
   migrate(path) {
     return invoke<ProjectSummary>("migrate_project", { path });
   },
@@ -156,14 +183,6 @@ export const tauriProjectGateway: ProjectGateway = {
     return invoke<IntegrationsSnapshot>("install_heartbeat_jobs", {
       path,
       roles,
-      baseline,
-    });
-  },
-
-  installDreamJob(path, dream, baseline) {
-    return invoke<IntegrationsSnapshot>("install_dream_job", {
-      path,
-      dream,
       baseline,
     });
   },

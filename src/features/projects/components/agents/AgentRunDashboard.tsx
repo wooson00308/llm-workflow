@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AgentRoleSlotRequest,
   AgentRunStatus,
   AgentRunSummary,
   AgentRuntimeActions,
   AgentRuntimeState,
+  ProjectSummary,
+  WorkflowItemSummary,
 } from "../../domain/types";
 
 const ROLE_ORDER = ["planner", "architect", "developer"] as const;
@@ -14,485 +16,290 @@ const roleLabels: Record<string, string> = {
   developer: "개발자",
 };
 const stateLabels: Record<AgentRunStatus, string> = {
-  reserved: "예약 중",
-  queued: "대기",
-  running: "실행 중",
+  reserved: "배정 중",
+  queued: "시작 대기",
+  running: "진행 중",
   paused: "일시 정지",
-  succeeded: "성공",
+  succeeded: "완료",
   failed: "실패",
   cancelled: "취소됨",
   recovery_required: "복구 필요",
-  unrecognized: "알 수 없는 상태",
+  unrecognized: "상태 확인 필요",
 };
 const activeStates = new Set<AgentRunStatus>(["reserved", "queued", "running", "paused"]);
 
 interface Props {
   actions: AgentRuntimeActions;
-  onOpenSettings(): void;
+  project: ProjectSummary;
   state: AgentRuntimeState;
+  directAssignOpen: boolean;
+  onCloseDirectAssign(): void;
 }
 
-export function AgentRunDashboard({ actions, onOpenSettings, state }: Props) {
-  // 부모의 조작 묶음은 프로젝트 자동 조회 때 새 객체가 될 수 있다. 계획 함수 자체는 같은 입력에
-  // 같은 수명을 가지므로 이 참조만 효과의 의존성으로 삼아 주기 조회를 사용자 입력 변경으로 오인하지 않는다.
-  const planRun = actions.planRun;
-  const [selectedRole, setSelectedRole] = useState<(typeof ROLE_ORDER)[number]>("planner");
-  const [allocation, setAllocation] = useState<Record<string, "automatic" | "manual">>(() =>
-    Object.fromEntries(ROLE_ORDER.map((role) => [role, "automatic"])),
-  );
-  const [slots, setSlots] = useState<Record<string, number>>(() =>
-    Object.fromEntries(ROLE_ORDER.map((role) => [role, 1])),
-  );
-  const [targets, setTargets] = useState<Record<string, string>>({});
-  const [candidateTargets, setCandidateTargets] = useState<Record<string, string[]>>({});
-  const [billingAccepted, setBillingAccepted] = useState(false);
-  const [pauseArmed, setPauseArmed] = useState(false);
-  const queue = state.queue;
-  const plan = state.runPlan;
-  const runs = queue?.runs ?? [];
+interface QueueItem {
+  id: string;
+  role: string;
+  title: string;
+  verdict: string;
+}
+
+export function AgentRunDashboard({
+  actions,
+  directAssignOpen,
+  onCloseDirectAssign,
+  project,
+  state,
+}: Props) {
+  const [selectedRun, setSelectedRun] = useState<AgentRunSummary | null>(null);
+  const [selectedQueue, setSelectedQueue] = useState<QueueItem | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const itemMap = useMemo(() => workflowItems(project), [project]);
+  const queueItems = useMemo(() => eligibleQueue(project, itemMap), [itemMap, project]);
+  const runs = state.queue?.runs ?? [];
   const active = runs.filter((run) => activeStates.has(run.state));
-  const recent = runs.filter((run) => !activeStates.has(run.state));
-  const totalGranted = plan?.roles.reduce((sum, role) => sum + role.granted, 0) ?? 0;
-  const runningCount = runs.filter((run) => run.state === "running").length;
-  const waitingCount = runs.filter(
-    (run) => run.state === "queued" || run.state === "reserved",
-  ).length;
-  const queueNeedsAttention = Boolean(state.queueError || queue?.unavailable);
-  const policyStored = state.policy?.stored === true;
-  const selectedAllocation = allocation[selectedRole] ?? "automatic";
-  const selectedSlots = Math.max(1, slots[selectedRole] ?? 1);
-  const selectedTarget = targets[selectedRole] ?? "";
-  const manualMissing = selectedAllocation === "manual" && !selectedTarget.trim();
-
-  useEffect(() => {
-    if (!plan) return;
-    setCandidateTargets((current) => ({
-      ...current,
-      ...Object.fromEntries(plan.roles.map((role) => [role.role, role.manualTargets])),
-    }));
-  }, [plan]);
-
-  useEffect(() => {
-    if (!policyStored || !state.policy?.executionAllowed || manualMissing) return;
-
-    const timer = window.setTimeout(() => {
-      setBillingAccepted(false);
-      const request: AgentRoleSlotRequest = {
-        role: selectedRole,
-        slots: selectedSlots,
-        targets:
-          selectedAllocation === "manual"
-            ? selectedTarget
-                .split(",")
-                .map((target) => target.trim())
-                .filter(Boolean)
-            : [],
-      };
-      void planRun([request]);
-    }, 250);
-
-    return () => window.clearTimeout(timer);
-  }, [
-    manualMissing,
-    planRun,
-    policyStored,
-    runs.length,
-    selectedAllocation,
-    selectedRole,
-    selectedSlots,
-    selectedTarget,
-    state.policy?.executionAllowed,
-    state.policy?.revision,
-  ]);
-
-  function selectRole(role: (typeof ROLE_ORDER)[number]) {
-    actions.cancelRunPlan();
-    setBillingAccepted(false);
-    setSelectedRole(role);
-  }
-
-  function providerLabel(provider: string | undefined) {
-    if (provider === "claude") return "Claude Code";
-    if (provider === "codex") return "Codex CLI";
-    return "실행 도구 미정";
-  }
-
-  if (!policyStored) {
-    return (
-      <section aria-label="에이전트 실행 대시보드" className="agent-run-dashboard">
-        <header className="agent-run-heading">
-          <div>
-            <h3>에이전트 작업</h3>
-            <p>이 프로젝트에서 사용할 에이전트 설정을 먼저 저장해 주세요.</p>
-          </div>
-        </header>
-        <section aria-label="에이전트 첫 설정" className="agent-first-run">
-          <span className="agent-section-kicker">FIRST SETUP</span>
-          <h4>기본 설정이 준비돼 있습니다</h4>
-          <p>역할별 실행 도구와 모델을 확인한 뒤 한 번 저장하면 바로 작업을 시작할 수 있습니다.</p>
-          <button className="stamp-button" onClick={onOpenSettings} type="button">
-            에이전트 설정 열기
-          </button>
-        </section>
-      </section>
-    );
-  }
+  const recent = runs.filter((run) => !activeStates.has(run.state)).slice(0, 3);
+  const attention = attentionItems(project, state);
+  const waitingForUser = userDecisions(project);
 
   return (
-    <section aria-label="에이전트 실행 대시보드" className="agent-run-dashboard">
-      <header className="agent-run-heading">
-        <div>
-          <h3>에이전트 작업</h3>
-          <p>새 작업을 시작하거나 진행 중인 세션을 확인합니다.</p>
-        </div>
-        {state.queueReading && !queue ? (
-          <span className="agent-run-reading" role="status">실행 상태 확인 중</span>
-        ) : (queueNeedsAttention || !queue) ? (
-          <button
-            className="secondary-button"
-            disabled={state.queueReading}
-            onClick={() => void actions.refreshRuns()}
-            type="button"
-          >
-            실행 상태 다시 확인
-          </button>
-        ) : null}
-      </header>
+    <div className="agent-operations">
+      {attention.length > 0 && (
+        <section aria-labelledby="agent-attention-heading" className="agent-ops-section agent-ops-attention">
+          <header><h2 id="agent-attention-heading">확인 필요</h2><span>{attention.length}</span></header>
+          <ul>{attention.map((item) => <li key={item}>{item}</li>)}</ul>
+        </section>
+      )}
 
-      {queue?.unavailable && <p className="agent-error">상태를 읽을 수 없음: {queue.unavailable}</p>}
-      {state.queueError && !queue?.unavailable && <p className="agent-error">{state.queueError}</p>}
+      {waitingForUser.length > 0 && (
+        <section aria-labelledby="agent-user-wait-heading" className="agent-ops-section">
+          <header><h2 id="agent-user-wait-heading">내 선택 대기</h2><span>{waitingForUser.length}</span></header>
+          <ul className="agent-plain-list">
+            {waitingForUser.map((item) => <li key={item.id}><strong>{item.title}</strong><span>{item.kind}</span></li>)}
+          </ul>
+        </section>
+      )}
 
-      <section aria-label="새 실행 설정" className="agent-run-builder">
-        <header className="agent-run-builder-heading">
-          <div>
-            <span className="agent-section-kicker">NEW SESSION</span>
-            <h4>새 작업 시작</h4>
-          </div>
-          <p>입력을 바꾸면 시작 조건을 자동으로 확인합니다.</p>
-        </header>
-        <div aria-label="설정할 역할" className="agent-run-role-tabs">
-          {ROLE_ORDER.map((role) => (
-            <button
-              aria-pressed={selectedRole === role}
-              className={selectedRole === role ? "is-active" : undefined}
-              key={role}
-              onClick={() => selectRole(role)}
-              type="button"
-            >
-              {roleLabels[role]}
-            </button>
-          ))}
-        </div>
-        <div className="agent-run-request-grid">
-          {(() => {
-            const role = selectedRole;
-            const policy = state.policy?.policy.roles[role];
-            return (
-              <fieldset key={role}>
-                <legend>{roleLabels[role]}</legend>
-                <p className="agent-run-role-policy">
-                  {providerLabel(policy?.provider)} · {policy?.model ?? "공급자 기본 모델"} · {policy?.runMode === "continuous" ? "반복" : "한 번"} · 최대 {policy?.maxParallel ?? "-"}명
-                </p>
-                <div className="agent-run-request-fields">
-                  <label>
-                    배정 방식
-                    <select
-                      aria-label={`${roleLabels[role]} 배정 방식`}
-                      onChange={(event) => {
-                        actions.cancelRunPlan();
-                        setAllocation((current) => ({
-                          ...current,
-                          [role]: event.target.value as "automatic" | "manual",
-                        }));
-                      }}
-                      value={allocation[role]}
-                    >
-                      <option value="automatic">자동 배정</option>
-                      <option value="manual">직접 지정</option>
-                    </select>
-                  </label>
-                  <label>
-                    요청 인원
-                    <input
-                      aria-label={`${roleLabels[role]} 요청 인원`}
-                      min={1}
-                      onChange={(event) => {
-                        actions.cancelRunPlan();
-                        setSlots((current) => ({ ...current, [role]: Number(event.target.value) }));
-                      }}
-                      type="number"
-                      value={slots[role]}
-                    />
-                  </label>
-                </div>
-                {allocation[role] === "manual" && (
-                  <label>
-                    대상 문서
-                    <input
-                      aria-label={`${roleLabels[role]} 수동 대상`}
-                      list={`agent-targets-${role}`}
-                      onChange={(event) => {
-                        actions.cancelRunPlan();
-                        setTargets((current) => ({ ...current, [role]: event.target.value }));
-                      }}
-                      placeholder="후보를 고르거나 쉼표로 구분"
-                      value={targets[role] ?? ""}
-                    />
-                    <datalist id={`agent-targets-${role}`}>
-                      {(candidateTargets[role] ?? []).map((target) => (
-                        <option key={target} value={target} />
-                      ))}
-                    </datalist>
-                    <small>
-                      런타임 후보: {candidateTargets[role]?.length ? candidateTargets[role].join(", ") : "계획에서 확인"}. 직접 지정도 중복·lease·상태 검사를 우회하지 않습니다.
-                    </small>
-                    {policy?.runMode === "continuous" && (
-                      <small>반복 직접 지정은 지정한 목록을 유지하며 이후 자동 배정으로 바뀌지 않습니다.</small>
-                    )}
-                  </label>
-                )}
-              </fieldset>
-            );
-          })()}
-        </div>
-        {manualMissing ? (
-          <p className="agent-auto-plan-status">대상 문서를 선택하면 시작 조건을 자동으로 확인합니다.</p>
-        ) : state.runPlanning ? (
-          <p className="agent-auto-plan-status" role="status">시작할 작업을 확인하는 중…</p>
-        ) : !plan ? (
-          <p className="agent-auto-plan-status">설정을 바꾸면 시작 조건을 자동으로 다시 확인합니다.</p>
-        ) : null}
-      </section>
-
-      {state.runError && <p className="agent-error">{state.runError}</p>}
-      {plan && (
-        <section aria-label="실행 준비" className="agent-run-plan">
-          <header className="agent-run-plan-heading">
-            <div>
-              <span className="agent-section-kicker">READY TO RUN</span>
-              <h4>실행 준비</h4>
-            </div>
-            <strong>{totalGranted}개 세션 시작 가능</strong>
-          </header>
-          <dl>
-            <div>
-              <dt>프로젝트 자리</dt>
-              <dd>최대 {state.policy?.policy.projectMaxParallel ?? "-"}명 · 지금 {Math.max(0, (state.policy?.policy.projectMaxParallel ?? plan.projectRemaining) - plan.projectRemaining)}명 사용 · {plan.projectRemaining}자리 남음</dd>
-            </div>
-            <div>
-              <dt>기기 공유 자리</dt>
-              <dd>전체 {state.policy?.policy.deviceMaxParallel ?? "-"}명 · 지금 {state.policy?.deviceCapacity.activeRuns ?? 0}명 사용 · {plan.deviceRemaining}자리 남음</dd>
-            </div>
-          </dl>
-          <ul className="agent-run-plan-roles">
-            {plan.roles.map((role) => (
-              <li key={role.role}>
-                <div>
-                  <strong>{roleLabels[role.role] ?? role.role}</strong>
-                  <span>{providerLabel(role.provider)} · {role.executionMode === "continuous" ? "반복" : "한 번"}</span>
-                </div>
-                <b>{role.granted}/{role.requested}명</b>
-                <p>대상: {role.manualTargets.length ? role.manualTargets.join(", ") : "자동 배정"}</p>
-                {role.excluded.length > 0 && <p className="agent-plan-excluded">제외: {role.excluded.join(", ")}</p>}
+      {active.length > 0 && (
+        <section aria-labelledby="agent-running-heading" className="agent-ops-section">
+          <header><h2 id="agent-running-heading">진행 중</h2><span>{active.length}</span></header>
+          <ul className="agent-session-list">
+            {active.map((run) => (
+              <li key={run.runId}>
+                <button onClick={() => setSelectedRun(run)} type="button">
+                  <span className={`agent-state-dot state-${run.state}`} aria-hidden="true" />
+                  <span className="agent-session-copy">
+                    <strong>{titleOf(run.targetId, itemMap)}</strong>
+                    <small>{roleLabels[run.role] ?? run.role} · {stateLabels[run.state]}</small>
+                  </span>
+                  <time>{run.state === "running" ? runningDuration(run.startedAt) : "시작 준비 중"}</time>
+                </button>
               </li>
             ))}
           </ul>
-          {totalGranted === 0 && (
-            <p className="agent-blocked-note">시작할 수 있는 대상이 0건입니다. 제외 사유를 확인하고 직접 지정을 선택할 수 있습니다.</p>
-          )}
-          <p>아래 버튼을 누르기 전에는 에이전트가 실행되지 않습니다.</p>
-          {plan.billingRouteRisk && (
-            <label className="agent-billing-check">
-              <input checked={billingAccepted} onChange={(event) => setBillingAccepted(event.target.checked)} type="checkbox" />
-              Claude API 과금 경로로 실행될 수 있음을 확인했습니다. 키와 토큰 값은 표시하지 않습니다.
-            </label>
-          )}
-          <div className="agent-plan-actions">
-            <button
-              className="stamp-button"
-              disabled={state.runStarting || totalGranted === 0 || (plan.billingRouteRisk && !billingAccepted)}
-              onClick={() => void actions.startRun()}
-              type="button"
-            >
-              {state.runStarting ? "시작 중" : "에이전트 시작"}
-            </button>
-          </div>
         </section>
       )}
 
-      {(runs.length > 0 || queue?.paused) && (
-        <section aria-label="프로젝트 실행 현황" className="agent-run-summary">
-          <Summary label="새 배정" value={queue?.paused ? "일시 정지" : "활성"} />
-          <Summary label="실행 중" value={`${runningCount}건`} />
-          <Summary label="대기" value={`${waitingCount}건`} />
-        </section>
-      )}
-      {active.length > 0 && <RunList actions={actions} runs={active} state={state} title="실행 중과 대기" />}
-      {recent.length > 0 && <RunList actions={actions} runs={recent} state={state} title="최근 종료" />}
-      {queue && runs.length === 0 && (
-        <section aria-label="작업 현황" className="agent-run-empty-state">
-          <strong>아직 실행한 에이전트가 없습니다</strong>
-          <p>위에서 역할을 고르면 실행할 작업과 비용 경로를 먼저 확인할 수 있습니다.</p>
-        </section>
-      )}
-      {!queue && !queueNeedsAttention && !state.queueReading && (
-        <p className="agent-run-empty-state">실행 상태를 아직 읽지 못했습니다.</p>
-      )}
-
-      {state.cancelPreview && (
-        <section aria-label="취소 확인" className="agent-control-preview">
-          <h4>취소 확인</h4>
-          <p>대상 {state.cancelPreview.targetId ?? "없음"} · 실행 {state.cancelPreview.runId}</p>
-          <p>프로세스 {state.cancelPreview.pid ?? "없음"} · 자식 프로세스 {state.cancelPreview.childProcesses}개 · 생존 판정 {state.cancelPreview.processLiveness}</p>
-          <p>lease {state.cancelPreview.leaseId ?? "없음"} · 정리 {state.cancelPreview.cleanup.join(", ") || "없음"}</p>
-          <button className="secondary-button" onClick={() => actions.dismissCancel()} type="button">돌아가기</button>
-          <button className="stamp-button" onClick={() => void actions.confirmCancel()} type="button">확인하고 취소</button>
-        </section>
-      )}
-      {state.cancelResult?.kind === "partial" && (
-        <p className="agent-error">취소했지만 정리가 남았습니다: {state.cancelResult.remaining.join(", ")}</p>
-      )}
-      {state.cancelResult?.kind === "applied" && <p className="agent-success">취소와 상태 정리가 모두 끝났습니다.</p>}
-      {state.retryPreview && (
-        <section aria-label="재시도 확인" className="agent-control-preview">
-          <h4>새 재시도 계획 확인</h4>
-          <p>이전 실행 {state.retryPreview.runId} · {state.retryPreview.reason ?? "종료 사유 없음"}</p>
-          <p>새 실행 식별자를 사용하며 이전 실행은 기록에 그대로 남습니다.</p>
-          <button className="secondary-button" onClick={() => actions.dismissRetry()} type="button">돌아가기</button>
-          <button className="stamp-button" onClick={() => void actions.confirmRetry()} type="button">확인하고 재시도</button>
-        </section>
-      )}
-      {state.controlError && <p className="agent-error">{state.controlError}</p>}
-      {state.logError && <p className="agent-error">{state.logError}</p>}
-
-      <details className="agent-project-controls">
-        <summary>
-          <span>새 작업 배정 제어</span>
-          <small>{queue?.paused ? "일시 정지 중" : "배정 활성"}</small>
-        </summary>
-        <div className="agent-project-controls-content">
-          <p>현재 실행은 유지하고, 이 프로젝트에 새로 배정되는 에이전트만 제어합니다.</p>
-          {queue?.paused ? (
-            <button
-              className="secondary-button"
-              disabled={state.pausing}
-              onClick={() => void actions.setProjectPaused(false)}
-              type="button"
-            >
-              새 배정 재개
-            </button>
-          ) : (
-            <button
-              className="secondary-button"
-              disabled={state.pausing}
-              onClick={() => setPauseArmed(true)}
-              type="button"
-            >
-              새 배정 일시 정지
-            </button>
-          )}
-          {pauseArmed && !queue?.paused && (
-            <div className="agent-control-preview" role="status">
-              <p>새 배정만 멈춥니다. 이미 실행 중인 항목과 다른 프로젝트의 상태는 유지됩니다.</p>
-              <div className="agent-plan-actions">
-                <button className="secondary-button" onClick={() => setPauseArmed(false)} type="button">
-                  돌아가기
+      {queueItems.length > 0 && (
+        <section aria-labelledby="agent-queue-heading" className="agent-ops-section">
+          <header><h2 id="agent-queue-heading">배정 대기</h2><span>{queueItems.length}</span></header>
+          <ul className="agent-session-list agent-queue-list">
+            {queueItems.map((item) => (
+              <li key={`${item.role}:${item.id}`}>
+                <button onClick={() => setSelectedQueue(item)} type="button">
+                  <span className="agent-role-chip">{roleLabels[item.role] ?? item.role}</span>
+                  <span className="agent-session-copy"><strong>{item.title}</strong><small>자리가 나면 안전 조건을 다시 확인합니다</small></span>
+                  <span aria-hidden="true" className="agent-row-chevron">›</span>
                 </button>
-                <button
-                  className="stamp-button"
-                  disabled={state.pausing}
-                  onClick={() => {
-                    setPauseArmed(false);
-                    void actions.setProjectPaused(true);
-                  }}
-                  type="button"
-                >
-                  확인하고 일시 정지
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {recent.length > 0 && (
+        <section aria-labelledby="agent-recent-heading" className="agent-ops-section agent-recent-section">
+          <header><h2 id="agent-recent-heading">최근 종료</h2><button className="agent-text-button" onClick={() => setHistoryOpen(true)} type="button">전체 기록</button></header>
+          <ul className="agent-session-list">
+            {recent.map((run) => (
+              <li key={run.runId}>
+                <button onClick={() => setSelectedRun(run)} type="button">
+                  <span className={`agent-state-dot state-${run.state}`} aria-hidden="true" />
+                  <span className="agent-session-copy"><strong>{titleOf(run.targetId, itemMap)}</strong><small>{roleLabels[run.role] ?? run.role} · {reasonLabel(run.reason, run.state)}</small></span>
+                  <time>{finishedDuration(run.startedAt, run.finishedAt)}</time>
                 </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </details>
-    </section>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {attention.length === 0 && waitingForUser.length === 0 && active.length === 0 && queueItems.length === 0 && recent.length === 0 && (
+        <p className="agent-quiet-empty">새 작업을 기다리는 중 · 다음 안전 확인 {nextCheckLabel(state)}</p>
+      )}
+
+      {directAssignOpen && (
+        <DirectAssignDialog actions={actions} itemMap={itemMap} onClose={onCloseDirectAssign} project={project} state={state} />
+      )}
+      {(selectedRun || selectedQueue) && (
+        <DetailDrawer
+          actions={actions}
+          onClose={() => { setSelectedRun(null); setSelectedQueue(null); }}
+          queueItem={selectedQueue}
+          run={selectedRun}
+          state={state}
+        />
+      )}
+      {historyOpen && <HistoryDrawer itemMap={itemMap} onClose={() => setHistoryOpen(false)} runs={runs.filter((run) => !activeStates.has(run.state))} />}
+      {state.cancelPreview && <CancelDialog actions={actions} state={state} />}
+      {state.retryPreview && <RetryDialog actions={actions} state={state} />}
+    </div>
   );
 }
 
-function Summary({ label, value }: { label: string; value: string }) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
-}
+function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
+  actions: AgentRuntimeActions;
+  itemMap: Map<string, WorkflowItemSummary>;
+  onClose(): void;
+  project: ProjectSummary;
+  state: AgentRuntimeState;
+}) {
+  const [role, setRole] = useState<(typeof ROLE_ORDER)[number]>("developer");
+  const [target, setTarget] = useState("");
+  const candidates = eligibleQueue(project, itemMap).filter((item) => item.role === role);
+  const selected = target || candidates[0]?.id || "";
+  const plannedRole = state.runPlan?.roles.find((item) => item.role === role);
+  useDismissOnEscape(onClose);
 
-function RunList({ actions, runs, state, title }: { actions: AgentRuntimeActions; runs: AgentRunSummary[]; state: AgentRuntimeState; title: string }) {
+  async function plan() {
+    const request: AgentRoleSlotRequest = { role, slots: 1, targets: selected ? [selected] : [] };
+    await actions.planRun([request]);
+  }
+
   return (
-    <section aria-label={title} className="agent-run-list">
-      <h4>{title}</h4>
-      {runs.length === 0 ? <p>표시할 항목이 없습니다.</p> : (
-        <ul>{runs.map((run) => (
-          <li key={run.runId}>
-            <header><strong>{stateLabels[run.state]}</strong><span>{roleLabels[run.role] ?? run.role} · {run.provider}</span></header>
-            <p>프로젝트 {run.projectId} · 대상 {run.targetId ?? "없음"}</p>
-            <p>시작 {run.startedAt ?? "기록 없음"} · 경과 {elapsed(run.startedAt)}</p>
-            {run.reason && <p>종료·대기 사유: {reasonLabel(run.reason)}</p>}
-            {run.failureStage && <p>종료 단계: {run.failureStage}</p>}
-            {run.previousRunId && <p>이전 실행: {run.previousRunId}</p>}
-            <div className="agent-plan-actions">
-              {(run.state === "running" || run.state === "queued" || run.state === "paused") && (
-                <button disabled={state.controllingRunId === run.runId} onClick={() => void actions.previewCancel(run.runId)} type="button">취소 계획</button>
-              )}
-              {(run.state === "failed" || run.state === "cancelled" || run.state === "recovery_required") && (
-                <button disabled={state.controllingRunId === run.runId} onClick={() => actions.previewRetry(run.runId)} type="button">재시도 계획</button>
-              )}
-              <button disabled={state.readingLogRunId === run.runId} onClick={() => void actions.readRunLog(run.runId)} type="button">{state.logs[run.runId] ? "로그 더 읽기" : "로그 보기"}</button>
-            </div>
-            {state.logs[run.runId] && (
-              <ol aria-label={`${run.runId} 구조화 이벤트`} className="agent-run-events">
-                {state.logs[run.runId].events.map((event, index) => <li key={index}>{safeEvent(event)}</li>)}
-              </ol>
-            )}
-          </li>
-        ))}</ul>
-      )}
-    </section>
+    <div className="agent-overlay" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section aria-labelledby="direct-assign-title" aria-modal="true" className="agent-dialog" role="dialog">
+        <header><div><p className="eyebrow">DIRECT ASSIGN</p><h2 id="direct-assign-title">직접 배정</h2></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
+        <label>역할<select onChange={(event) => { actions.cancelRunPlan(); setRole(event.target.value as typeof role); setTarget(""); }} value={role}>{ROLE_ORDER.map((value) => <option key={value} value={value}>{roleLabels[value]}</option>)}</select></label>
+        <fieldset><legend>배정할 작업</legend>
+          {candidates.length > 0 ? candidates.map((item) => (
+            <label className="agent-candidate-option" key={item.id}><input checked={selected === item.id} name="target" onChange={() => { actions.cancelRunPlan(); setTarget(item.id); }} type="radio" /><span><strong>{item.title}</strong><small>{roleLabels[item.role]}가 지금 시작할 수 있습니다</small></span></label>
+          )) : <p className="agent-dialog-note">현재 이 역할에 안전하게 배정할 작업이 없습니다.</p>}
+        </fieldset>
+        <details><summary>고급 직접 지정</summary><label>작업 ID<input onChange={(event) => { actions.cancelRunPlan(); setTarget(event.target.value); }} placeholder="TASK-…" value={target} /></label></details>
+        {state.runError && <p className="agent-error" role="status">{humanRuntimeMessage(state.runError)}</p>}
+        {plannedRole && <p className="agent-dialog-note">{plannedRole.granted > 0 ? "안전 조건 확인 완료" : exclusionLabel(plannedRole.excluded)}</p>}
+        <footer><button className="secondary-button" onClick={onClose} type="button">취소</button>{plannedRole?.granted ? <button className="stamp-button" disabled={state.runStarting} onClick={() => void actions.startRun().then((ok) => { if (ok) onClose(); })} type="button">{state.runStarting ? "배정 중" : "배정 시작"}</button> : <button className="stamp-button" disabled={!selected || state.runPlanning} onClick={() => void plan()} type="button">{state.runPlanning ? "확인 중" : "시작 조건 확인"}</button>}</footer>
+      </section>
+    </div>
   );
 }
 
-function elapsed(startedAt: string | null): string {
-  if (!startedAt) return "계산 불가";
-  const started = Date.parse(startedAt);
-  if (!Number.isFinite(started)) return "계산 불가";
-  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1_000));
-  if (seconds < 60) return `${seconds}초`;
-  return `${Math.floor(seconds / 60)}분 ${seconds % 60}초`;
+function DetailDrawer({ actions, onClose, queueItem, run, state }: {
+  actions: AgentRuntimeActions;
+  onClose(): void;
+  queueItem: QueueItem | null;
+  run: AgentRunSummary | null;
+  state: AgentRuntimeState;
+}) {
+  useDismissOnEscape(onClose);
+  return (
+    <div className="agent-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <aside aria-label="에이전트 상세" className="agent-detail-drawer">
+        <header><div><p className="eyebrow">DETAILS</p><h2>{run ? stateLabels[run.state] : "배정 대기"}</h2></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
+        <dl><div><dt>역할</dt><dd>{roleLabels[run?.role ?? queueItem?.role ?? ""]}</dd></div><div><dt>작업</dt><dd>{run?.targetId ?? queueItem?.id}</dd></div>{run && <><div><dt>실행 ID</dt><dd>{run.runId}</dd></div><div><dt>Provider</dt><dd>{run.provider}</dd></div></>}</dl>
+        {run?.reason && <p className="agent-detail-message">{reasonLabel(run.reason, run.state)}</p>}
+        {run && <div className="agent-drawer-actions">{activeStates.has(run.state) && <button onClick={() => void actions.previewCancel(run.runId)} type="button">취소</button>}{["failed", "cancelled", "recovery_required"].includes(run.state) && <button onClick={() => actions.previewRetry(run.runId)} type="button">재시도</button>}<button onClick={() => void actions.readRunLog(run.runId)} type="button">로그 보기</button></div>}
+        {run && state.logs[run.runId] && <ol className="agent-run-events">{state.logs[run.runId].events.map((event, index) => <li key={index}>{safeEvent(event)}</li>)}</ol>}
+      </aside>
+    </div>
+  );
 }
 
-function reasonLabel(reason: string): string {
-  const labels: Array<[RegExp, string]> = [
-    [/no.?target|대상 없음/i, "대상 없음"],
-    [/migration|마이그레이션/i, "마이그레이션 잠금"],
-    [/quota|limit|한도/i, "실행 한도 소진"],
-    [/auth|login|인증/i, "provider 인증 문제"],
-    [/billing|usage|사용 제한/i, "provider 사용 제한"],
-    [/paused|일시 정지/i, "프로젝트 일시 정지"],
-    [/slot/i, "실행 슬롯 부족"],
-  ];
-  return labels.find(([pattern]) => pattern.test(reason))?.[1] ?? reason;
+function HistoryDrawer({ itemMap, onClose, runs }: {
+  itemMap: Map<string, WorkflowItemSummary>;
+  onClose(): void;
+  runs: AgentRunSummary[];
+}) {
+  useDismissOnEscape(onClose);
+  return (
+    <div className="agent-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <aside aria-label="전체 실행 기록" aria-modal="true" className="agent-detail-drawer" role="dialog">
+        <header><div><p className="eyebrow">HISTORY</p><h2>전체 실행 기록</h2></div><button aria-label="닫기" autoFocus onClick={onClose} type="button">×</button></header>
+        {runs.length > 0 ? <ul className="agent-session-list agent-history-list">{runs.map((run) => <li key={run.runId}><div className="agent-history-row"><span className={`agent-state-dot state-${run.state}`} aria-hidden="true" /><span className="agent-session-copy"><strong>{titleOf(run.targetId, itemMap)}</strong><small>{roleLabels[run.role] ?? run.role} · {reasonLabel(run.reason, run.state)}</small></span><time>{finishedDuration(run.startedAt, run.finishedAt)}</time></div></li>)}</ul> : <p className="agent-dialog-note">아직 종료된 실행이 없습니다.</p>}
+      </aside>
+    </div>
+  );
 }
 
-/** 로그는 화면에 필요한 구조화 진행 필드만 허용한다. prompt·인증·비밀 필드는 DOM에 닿지 않는다. */
-function safeEvent(event: unknown): string {
-  if (typeof event === "string") return "런타임 이벤트";
-  if (!event || typeof event !== "object") return String(event ?? "이벤트");
-  const row = event as Record<string, unknown>;
-  const allowed = ["timestamp", "time", "stage", "status", "progress", "message", "detail", "kind"];
-  const parts = allowed
-    .filter((key) => row[key] !== undefined && typeof row[key] !== "object")
-    .map((key) => `${key}: ${safeEventValue(row[key])}`);
-  return parts.length ? parts.join(" · ") : "구조화 이벤트";
+function CancelDialog({ actions, state }: { actions: AgentRuntimeActions; state: AgentRuntimeState }) {
+  useDismissOnEscape(actions.dismissCancel);
+  const preview = state.cancelPreview!;
+  return <div className="agent-overlay"><section aria-label="실행 취소 확인" aria-modal="true" className="agent-dialog" role="dialog"><header><div><p className="eyebrow">STOP</p><h2>이 실행을 취소할까요?</h2></div><button aria-label="닫기" autoFocus onClick={actions.dismissCancel} type="button">×</button></header><p className="agent-dialog-note">진행 중인 세션을 끝내고 이 작업의 선점을 안전하게 해제합니다.</p>{preview.childProcesses > 0 && <p className="agent-detail-message">함께 종료할 하위 프로세스 {preview.childProcesses}개</p>}{state.controlError && <p className="agent-error">{humanRuntimeMessage(state.controlError)}</p>}<footer><button className="secondary-button" onClick={actions.dismissCancel} type="button">계속 실행</button><button className="stamp-button" disabled={state.controllingRunId !== null} onClick={() => void actions.confirmCancel()} type="button">취소 실행</button></footer></section></div>;
 }
 
-function safeEventValue(value: unknown): string {
-  const text = String(value);
-  return /prompt|api.?key|token|authorization|bearer|secret/i.test(text)
-    ? "[민감정보 제거됨]"
-    : text;
+function RetryDialog({ actions, state }: { actions: AgentRuntimeActions; state: AgentRuntimeState }) {
+  useDismissOnEscape(actions.dismissRetry);
+  return <div className="agent-overlay"><section aria-label="실행 재시도 확인" aria-modal="true" className="agent-dialog" role="dialog"><header><div><p className="eyebrow">RETRY</p><h2>이 작업을 다시 배정할까요?</h2></div><button aria-label="닫기" autoFocus onClick={actions.dismissRetry} type="button">×</button></header><p className="agent-dialog-note">현재 자격과 실행 한도를 다시 확인한 뒤 새 세션으로 시작합니다.</p>{state.controlError && <p className="agent-error">{humanRuntimeMessage(state.controlError)}</p>}<footer><button className="secondary-button" onClick={actions.dismissRetry} type="button">취소</button><button className="stamp-button" disabled={state.controllingRunId !== null} onClick={() => void actions.confirmRetry()} type="button">다시 배정</button></footer></section></div>;
+}
+
+function workflowItems(project: ProjectSummary) {
+  const items = new Map<string, WorkflowItemSummary>();
+  for (const workflow of project.workflows) {
+    for (const group of [workflow.items.ideas, workflow.items.specs, workflow.items.tasks]) {
+      for (const item of group) items.set(item.id, item);
+    }
+  }
+  return items;
+}
+
+function eligibleQueue(project: ProjectSummary, items: Map<string, WorkflowItemSummary>): QueueItem[] {
+  const detail = project.pendingDetail;
+  if (!detail) return [];
+  return ROLE_ORDER.flatMap((role) => detail[role].candidates
+    .filter((candidate) => candidate.verdict === "eligible")
+    .map((candidate) => ({ id: candidate.id, role, title: titleOf(candidate.id, items), verdict: candidate.verdict })));
+}
+
+function userDecisions(project: ProjectSummary) {
+  return project.workflows.flatMap((workflow) => [
+    ...workflow.items.specs.filter((item) => item.status === "user_review").map((item) => ({ id: item.id, title: item.title, kind: "기획 승인" })),
+    ...workflow.items.tasks.filter((item) => item.status === "qa_waiting").map((item) => ({ id: item.id, title: item.title, kind: "QA 확인" })),
+  ]);
+}
+
+function attentionItems(project: ProjectSummary, state: AgentRuntimeState) {
+  const items: string[] = [];
+  if (state.queueError) items.push(humanRuntimeMessage(state.queueError));
+  if (state.queue?.unavailable) items.push(humanRuntimeMessage(state.queue.unavailable));
+  if (state.queue?.automation?.watcher?.status === "degraded") items.push("파일 감시가 중단되어 안전 확인 주기로 동작 중입니다.");
+  for (const role of state.queue?.automation?.roles ?? []) if (role.status === "attention") items.push(`${roleLabels[role.role] ?? role.role}: ${reasonLabel(role.lastResult, "failed")}`);
+  for (const provider of state.policy?.providers ?? []) if (provider.status !== "ready") items.push(`${provider.provider}: 실행 도구 확인이 필요합니다.`);
+  void project;
+  return [...new Set(items)];
+}
+
+function titleOf(id: string | null, items: Map<string, WorkflowItemSummary>) { return id ? items.get(id)?.title ?? id : "작업 확인 중"; }
+function nextCheckLabel(state: AgentRuntimeState) { const next = state.queue?.automation?.roles.map((role) => role.nextPollAt).filter((value): value is string => Boolean(value)).sort()[0]; return next ? new Date(next).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "자동"; }
+function runningDuration(startedAt: string | null) { if (!startedAt) return "시작 중"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)); return seconds < 60 ? "1분 미만" : `${Math.floor(seconds / 60)}분`; }
+function finishedDuration(startedAt: string | null, finishedAt: string | null) { if (!startedAt || !finishedAt) return "시간 기록 없음"; const seconds = Math.max(0, Math.floor((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)); return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분`; }
+function exclusionLabel(reasons: string[]) { if (reasons.some((reason) => /no.?target/.test(reason))) return "지금은 배정할 작업이 없습니다."; if (reasons.includes("limit_reached")) return "현재 실행 자리가 모두 사용 중입니다."; if (reasons.includes("model_unavailable")) return "선택한 모델을 현재 계정에서 사용할 수 없습니다."; return "현재 안전 조건을 충족하지 않습니다."; }
+function reasonLabel(reason: string | null, state: string) { if (!reason) return stateLabels[state as AgentRunStatus] ?? state; if (/model_unavailable/.test(reason)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다"; if (/no.?target/.test(reason)) return "새 작업을 기다리는 중"; if (/limit/.test(reason)) return "실행 자리가 모두 사용 중입니다"; if (/login|auth/.test(reason)) return "실행 도구 로그인이 필요합니다"; return humanRuntimeMessage(reason); }
+function safeEvent(event: unknown) { if (!event || typeof event !== "object") return "런타임 이벤트"; const row = event as Record<string, unknown>; return ["kind", "stage", "status", "message", "detail"].filter((key) => typeof row[key] === "string").map((key) => `${key}: ${String(row[key]).replace(/(?:token|secret|api.?key)\s*[:=]\s*\S+/gi, "[민감정보 제거됨]")}`).join(" · ") || "구조화 이벤트"; }
+
+export function humanRuntimeMessage(message: string) {
+  if (/project_not_configured/.test(message)) return "이 프로젝트의 에이전트 설정을 먼저 저장해 주세요.";
+  if (/model_unavailable|model.+(?:not available|unsupported)/i.test(message)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다.";
+  if (/limit_reached/.test(message)) return "현재 실행 자리가 모두 사용 중입니다.";
+  if (/no.?target/.test(message)) return "새 작업을 기다리는 중입니다.";
+  if (/login|auth/i.test(message)) return "실행 도구 로그인이 필요합니다.";
+  if (/\{[\s\S]*\}|contract|계약 밖|provider error/i.test(message)) return "실행 환경 응답을 확인하지 못했습니다. 고급 설정에서 실행 환경을 복구해 주세요.";
+  return message.replace(/(?:token|secret|api.?key)\s*[:=]\s*\S+/gi, "[민감정보 제거됨]");
+}
+
+function useDismissOnEscape(onDismiss: () => void) {
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => { if (event.key === "Escape") onDismiss(); };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [onDismiss]);
 }

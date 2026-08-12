@@ -1,612 +1,237 @@
-import { useState } from "react";
-import { Icon } from "../../../../shared/ui/Icon";
+import { useEffect, useState } from "react";
 import type {
-  AgentCompatibility,
-  AgentInstallPlan,
-  AgentInstallServiceAction,
   AgentProviderDiagnosis,
   AgentRuntimeActions,
   AgentRuntimeOperation,
   AgentRuntimeState,
+  ProjectSummary,
 } from "../../domain/types";
 import { AgentRoleSettings } from "./AgentRoleSettings";
-import { AgentRunDashboard } from "./AgentRunDashboard";
+import { AgentRunDashboard, humanRuntimeMessage } from "./AgentRunDashboard";
 
-/**
- * 준비 상태 하나. 제목과 설명과 사용자가 할 다음 행동을 함께 든다. 상태마다 다음 행동이 다르므로
- * 사유를 하나로 접지 않는다.
- */
 interface Readiness {
   tone: "ready" | "attention" | "blocked";
   title: string;
   detail: string;
-  /** 앱이 대신 실행할 수 있는 조작. 없으면 사용자가 밖에서 할 일이라는 뜻이다. */
   operation: AgentRuntimeOperation | null;
   actionLabel: string | null;
 }
 
-/**
- * provider 진단 값의 뜻과 다음 행동. 런타임 계약이 정한 여섯 값이고, 그 밖의 값이 오면 화면은
- * 문자열을 그대로 보여준다 — 모르는 값을 숨기면 계약을 벗어난 런타임이 정상으로 보인다.
- */
-const providerDiagnoses: Record<string, { title: string; action: string }> = {
-  ready: { title: "실행 준비됨", action: "추가로 할 일이 없습니다." },
-  executable_missing: {
-    title: "CLI가 설치돼 있지 않음",
-    action: "해당 도구의 CLI를 설치한 뒤 다시 조회해 주세요.",
-  },
-  login_required: {
-    title: "로그인이 필요함",
-    action: "터미널에서 그 도구에 로그인해 주세요. 앱은 토큰을 입력받지 않습니다.",
-  },
-  permission_denied: {
-    title: "실행 권한이 없음",
-    action: "실행 파일의 권한을 확인해 주세요.",
-  },
-  unsupported_version: {
-    title: "지원하지 않는 버전",
-    action: "그 도구를 지원 버전으로 올린 뒤 다시 조회해 주세요.",
-  },
-  billing_route_acknowledgement_required: {
-    title: "API 과금 경로 확인이 필요함",
-    action: "구독이 아닌 API 과금으로 실행될 수 있습니다. 도구 쪽에서 과금 경로를 확인해 주세요.",
-  },
-};
-
-const installServiceActionLabels: Record<AgentInstallServiceAction, string> = {
-  register: "새 서비스 등록",
-  already_managed: "관리 중인 서비스 유지",
-  migration_required: "기존 서비스 이전 필요",
-  unknown: "서비스 상태 확인 필요",
-};
-
-function serviceFact(value: string | null | undefined, fallback = "확인 불가") {
-  return value?.trim() ? value : fallback;
-}
-
-function triState(value: boolean | null | undefined) {
-  if (value === true) return "예";
-  if (value === false) return "아니요";
-  return "확인 불가";
-}
-
-function installServiceGuidance(plan: AgentInstallPlan) {
-  const label = serviceFact(plan.service?.label);
-  const executable = serviceFact(plan.service?.executable);
-  switch (plan.serviceAction) {
-    case "register":
-      return "등록된 서비스가 없어 런타임 파일과 stable launcher를 설치한 뒤 새 서비스를 한 번 등록합니다.";
-    case "already_managed":
-      return plan.service?.running === true
-        ? "stable launcher를 가리키는 관리형 서비스가 이미 실행 중입니다. 기존 등록을 유지하고 중복 등록하지 않습니다."
-        : "stable launcher를 가리키는 관리형 서비스가 등록돼 있지만 실행 중이 아닙니다. 기존 등록을 유지하고 등록을 반복하지 않으며, 적용 뒤 다시 읽어 복구 계획을 확인합니다.";
-    case "migration_required":
-      return `기존 서비스 ${label} (${executable})를 그대로 유지합니다. 이 계획은 런타임 파일과 launcher만 놓고 서비스를 삭제·중지·덮어쓰기·중복 등록하지 않습니다. 아래 ‘기존 역할 잡 이전’에서 이전 미리보기를 확인하세요.`;
-    case "unknown":
-      return "서비스 상태를 확인하지 못해 서비스는 변경하지 않습니다. 이 계획은 런타임 파일과 launcher만 놓고 서비스 단계를 남기며, 다시 읽은 뒤 새 계획을 만들어야 합니다.";
-  }
-}
-
-/**
- * 기기 상태에서 준비 영역의 문구와 버튼을 정한다.
- *
- * 앞의 사유가 뒤의 사유를 가린다. 런타임을 부르지 못한 상태에서 버전 이야기를 하지 않고, 설치되지
- * 않은 상태에서 재시작 이야기를 하지 않는다.
- */
 export function readinessOf(state: AgentRuntimeState): Readiness {
-  const { inspection } = state;
-  if (!inspection) {
-    return {
-      tone: "attention",
-      title: "준비 상태를 아직 읽지 않았습니다",
-      detail: "기기 상태를 아직 받지 못했습니다. 조회가 끝나지 않으면 상태를 다시 확인할 수 있습니다.",
-      operation: null,
-      actionLabel: null,
-    };
-  }
-  if (inspection.unavailable !== null) {
-    return {
-      tone: "blocked",
-      title: "실행 환경을 확인하지 못했습니다",
-      detail: inspection.unavailable,
-      operation: "install",
-      actionLabel: "설치 계획 보기",
-    };
-  }
-  if (!inspection.status) {
-    return {
-      tone: "attention",
-      title: "실행 환경이 설치돼 있지 않습니다",
-      detail: `앱이 들고 있는 버전 ${inspection.bundledVersion ?? "확인 불가"}을 설치할 수 있습니다.`,
-      operation: "install",
-      actionLabel: "설치 계획 보기",
-    };
-  }
-  return readinessOfCompatibility(state.inspection?.compatibility, inspection.bundledVersion);
-}
-
-function readinessOfCompatibility(
-  compatibility: AgentCompatibility | undefined,
-  bundledVersion: string | null,
-): Readiness {
-  switch (compatibility?.kind) {
-    case "compatible":
-      return {
-        tone: "ready",
-        title: "실행 환경이 준비됐습니다",
-        detail: "바로 실행 계획을 확인하거나 역할 정책을 조정할 수 있습니다.",
-        operation: null,
-        actionLabel: null,
-      };
-    case "restartRequired":
-      return {
-        tone: "attention",
-        title: "설치된 버전과 도는 버전이 다릅니다",
-        detail: `디스크는 ${compatibility.installed}이고 지금 도는 것은 ${compatibility.running}입니다. 복구를 실행하면 도는 쪽을 맞춥니다.`,
-        operation: "repair",
-        actionLabel: "복구 계획 보기",
-      };
+  const inspection = state.inspection;
+  if (!inspection) return { tone: "attention", title: "실행 환경 확인 중", detail: "기기 상태를 읽고 있습니다.", operation: null, actionLabel: null };
+  if (inspection.unavailable) return { tone: "blocked", title: "실행 환경 복구 필요", detail: inspection.unavailable, operation: "install", actionLabel: "설치 계획" };
+  if (!inspection.status) return { tone: "attention", title: "실행 환경 설치 필요", detail: "앱에 포함된 런타임을 설치하면 자동 배정을 사용할 수 있습니다.", operation: "install", actionLabel: "설치 계획" };
+  switch (inspection.compatibility?.kind) {
+    case "compatible": {
+      const service = inspection.status.service;
+      const launcher = `${inspection.installRoot.replace(/[\\/]+$/, "")}/bin/heartbeat`;
+      const executable = service.executable?.replace(/\\/g, "/").replace(/\.exe$/i, "") ?? null;
+      const managed = executable === launcher.replace(/\\/g, "/");
+      if (service.registered !== true) return { tone: "attention", title: "자동 배정 서비스 연결 필요", detail: "직접 배정은 사용할 수 있습니다. 자동 배정을 계속 실행하려면 관리형 서비스를 연결해 주세요.", operation: "install", actionLabel: "연결 계획" };
+      if (!managed) return { tone: "attention", title: "자동 배정 서비스 전환 필요", detail: "기존 Heartbeat 서비스는 그대로 보존했습니다. 고급 설정의 기존 설정 이전에서 중복 없이 전환해 주세요.", operation: null, actionLabel: null };
+      if (service.running !== true) return { tone: "attention", title: "자동 배정 서비스 복구 필요", detail: "직접 배정은 사용할 수 있습니다. 관리형 서비스가 다시 실행되도록 복구해 주세요.", operation: "repair", actionLabel: "복구 계획" };
+      return { tone: "ready", title: "실행 환경 정상", detail: "자동 배정과 직접 배정을 사용할 수 있습니다.", operation: null, actionLabel: null };
+    }
+    case "restartRequired": return { tone: "attention", title: "실행 환경 재시작 필요", detail: "설치된 버전과 실행 중인 버전이 다릅니다.", operation: "repair", actionLabel: "복구 계획" };
     case "unsupportedApiMajor":
-      return {
-        tone: "blocked",
-        title: "이 앱과 통하지 않는 런타임입니다",
-        detail: `런타임이 API ${compatibility.found}로 답했고 이 앱은 ${compatibility.supported}만 다룹니다. 업데이트로 맞춰야 합니다.`,
-        operation: "update",
-        actionLabel: "업데이트 계획 보기",
-      };
-    case "versionOutOfRange":
-      return {
-        tone: "blocked",
-        title: "지원 범위 밖 버전입니다",
-        detail: `설치본은 ${compatibility.found}이고 이 앱은 ${compatibility.minimum}부터 ${compatibility.maximum}까지 다룹니다.${
-          bundledVersion ? ` 앱이 들고 있는 버전은 ${bundledVersion}입니다.` : ""
-        }`,
-        operation: "update",
-        actionLabel: "업데이트 계획 보기",
-      };
-    case "undetermined":
-      return {
-        tone: "blocked",
-        title: "호환 여부를 확인하지 못했습니다",
-        detail: `런타임이 ${compatibility.reason}으로 답해 판정에 필요한 값을 읽지 못했습니다. 확인하지 못한 기기에서는 실행을 열지 않습니다.`,
-        operation: "repair",
-        actionLabel: "복구 계획 보기",
-      };
-    default:
-      return {
-        tone: "attention",
-        title: "준비 상태를 아직 읽지 않았습니다",
-        detail: "기기 상태를 아직 받지 못했습니다. 조회가 끝나지 않으면 상태를 다시 확인할 수 있습니다.",
-        operation: null,
-        actionLabel: null,
-      };
+    case "versionOutOfRange": return { tone: "blocked", title: "실행 환경 업데이트 필요", detail: "이 앱과 맞는 런타임으로 업데이트해야 합니다.", operation: "install", actionLabel: "업데이트 계획" };
+    case "undetermined": return { tone: "blocked", title: "실행 환경 확인 필요", detail: inspection.compatibility.reason, operation: "repair", actionLabel: "복구 계획" };
+    default: return { tone: "attention", title: "실행 환경 확인 중", detail: "호환 상태를 읽고 있습니다.", operation: null, actionLabel: null };
   }
 }
 
 interface Props {
   actions: AgentRuntimeActions;
-  /** 이 화면이 설정을 저장할 프로젝트. 폼과 저장 대상이 같은 값을 본다. */
-  projectName: string;
+  project?: ProjectSummary;
+  /** 구형 임베더 호환. 새 화면은 project의 실제 후보를 사용한다. */
+  projectName?: string;
   state: AgentRuntimeState;
 }
 
-/**
- * 프로젝트의 에이전트 화면. 준비 상태와 역할 정책을 한 자리에서 다룬다.
- *
- * 화면 진입은 상태 조회와 선택 역할의 읽기 전용 실행 계획만 자동화한다. 실제 에이전트 실행과
- * 설치·업데이트·복구·마이그레이션·저장은 사용자가 누른 자리에서만 시작한다.
- */
-export function AgentRuntimeView({ actions, projectName, state }: Props) {
-  const [activeView, setActiveView] = useState<"work" | "settings">("work");
+export function AgentRuntimeView({ actions, project, projectName, state }: Props) {
+  const [directAssignOpen, setDirectAssignOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [enableConfirmOpen, setEnableConfirmOpen] = useState(false);
   const readiness = readinessOf(state);
-  const pending = state.plan;
-  const refreshNeeded = state.inspection === null || state.readError !== null;
-  const providerAttention = state.policy?.providers.some((provider) => provider.status !== "ready") ?? false;
-  const setupRequired = state.policy?.stored === false;
-  const versionFacts = state.inspection?.status
-    ? [
-        state.inspection.status.installedVersion
-          ? `설치 ${state.inspection.status.installedVersion}`
-          : null,
-        state.inspection.status.runningVersion
-          ? `실행 ${state.inspection.status.runningVersion}`
-          : null,
-        state.inspection.bundledVersion ? `앱 번들 ${state.inspection.bundledVersion}` : null,
-      ].filter((fact): fact is string => fact !== null)
-    : [];
-  const readyVersion = state.inspection?.status?.runningVersion
+  const currentProject = project ?? emptyProject(projectName ?? "프로젝트");
+  const policy = state.policy?.policy;
+  const automationEnabled = policy?.automationEnabled ?? false;
+  const automationReady = readiness.tone === "ready";
+  const runtimeVersion = state.inspection?.status?.runningVersion
     ?? state.inspection?.status?.installedVersion
     ?? state.inspection?.bundledVersion;
-  const showReadyIndicator = readiness.tone === "ready" && !refreshNeeded;
+
+  useEffect(() => {
+    actions.setViewActive?.(true);
+    return () => actions.setViewActive?.(false);
+  }, [actions]);
+
+  async function disableAutomation() {
+    if (!policy) return;
+    await actions.save({ ...policy, automationEnabled: false });
+  }
 
   return (
-    <section className="agents-view">
-      <div className="view-heading">
+    <section className="agents-view agent-cockpit">
+      <header className="agent-cockpit-heading">
         <div>
           <p className="eyebrow">AGENTS</p>
           <h1>에이전트</h1>
-          <p>{projectName}의 에이전트 작업을 시작하고 진행 상황을 확인합니다.</p>
+          <p>{currentProject.name}의 작업 배정과 진행 상황</p>
         </div>
-        {(showReadyIndicator || refreshNeeded) && (
-          <div className="agent-heading-actions">
-            {showReadyIndicator && (
-              <span
-                aria-label={`실행 환경 정상${readyVersion ? `, 버전 ${readyVersion}` : ""}`}
-                className="agent-ready-indicator"
-              >
-                <span aria-hidden="true" />
-                실행 정상
-                {readyVersion && <small>{readyVersion}</small>}
-              </span>
-            )}
-            {state.reading && refreshNeeded ? (
-              <span className="agent-refresh-status" role="status">
-                상태 확인 중
-              </span>
-            ) : (
-              refreshNeeded && (
-                <button
-                  className="secondary-button agent-compact-action"
-                  onClick={() => void actions.refresh()}
-                  type="button"
-                >
-                  상태 다시 확인
-                </button>
-              )
-            )}
-          </div>
-        )}
-      </div>
+        <div className="agent-cockpit-actions">
+          <span className={`agent-runtime-pill tone-${readiness.tone}`} title={readiness.detail}>
+            <i aria-hidden="true" />{readiness.title}{runtimeVersion && <small>{runtimeVersion}</small>}
+          </span>
+          <button className="secondary-button agent-compact-action" disabled={!state.policy?.executionAllowed} onClick={() => setDirectAssignOpen(true)} type="button">직접 배정</button>
+          <button className="secondary-button agent-compact-action" onClick={() => setAdvancedOpen(true)} type="button">고급 설정</button>
+        </div>
+      </header>
 
-      <div aria-label="에이전트 화면" className="agent-view-tabs" role="tablist">
-        <button
-          aria-controls="agent-work-panel"
-          aria-selected={activeView === "work"}
-          className={activeView === "work" ? "is-active" : undefined}
-          onClick={() => setActiveView("work")}
-          role="tab"
-          type="button"
-        >
-          작업
-        </button>
-        <button
-          aria-controls="agent-settings-panel"
-          aria-selected={activeView === "settings"}
-          className={activeView === "settings" ? "is-active" : undefined}
-          onClick={() => setActiveView("settings")}
-          role="tab"
-          type="button"
-        >
-          설정
-          {setupRequired ? (
-            <span className="agent-tab-alert">설정 필요</span>
-          ) : providerAttention ? (
-            <span className="agent-tab-alert">확인 필요</span>
-          ) : null}
-        </button>
-      </div>
+      <section aria-label="자동 배정" className={`agent-automation-master ${automationEnabled ? "is-on" : ""}`}>
+        <div><strong>자동 배정</strong><p>{automationEnabled ? "새 작업을 감지하면 빈 자리에 안전하게 배정합니다." : "직접 배정만 사용합니다. 켜기 전에는 자동으로 시작하지 않습니다."}</p></div>
+        <label className="agent-switch" title={automationReady ? undefined : "실행 환경 전환을 마친 뒤 켤 수 있습니다."}><input aria-label="자동 배정 켜기" checked={automationEnabled} disabled={!policy || state.saving || (!automationEnabled && !automationReady)} onChange={(event) => { if (event.target.checked) setEnableConfirmOpen(true); else void disableAutomation(); }} type="checkbox" /><span aria-hidden="true" /></label>
+      </section>
 
       {readiness.tone !== "ready" && (
-        <section
-          aria-label="실행 환경 준비 상태"
-          className={`agent-readiness tone-${readiness.tone}`}
-        >
-          <Icon name="board" />
-          <div>
-            <strong>{readiness.title}</strong>
-            <p>{readiness.detail}</p>
-            {versionFacts.length > 0 && <p className="agent-versions">{versionFacts.join(" · ")}</p>}
-          </div>
-          {readiness.operation && readiness.actionLabel && (
-            <button
-              className="stamp-button agent-primary-action"
-              disabled={state.planning !== null || state.applying}
-              onClick={() => void actions.plan(readiness.operation as AgentRuntimeOperation)}
-              type="button"
-            >
-              {state.planning === readiness.operation ? "계획을 만드는 중" : readiness.actionLabel}
-            </button>
-          )}
+        <section className="agent-runtime-attention" role="status">
+          <div><strong>{readiness.title}</strong><p>{readiness.detail}</p></div>
+          {readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}
+          {!readiness.operation && readiness.title === "자동 배정 서비스 전환 필요" && <button className="secondary-button agent-compact-action" onClick={() => setAdvancedOpen(true)} type="button">전환 준비</button>}
         </section>
       )}
+      {state.readError && <p className="agent-error" role="status">실행 환경 상태를 읽지 못했습니다. 잠시 후 자동으로 다시 확인합니다.</p>}
+      {state.planError && <p className="agent-error" role="status">{humanRuntimeMessage(state.planError)}</p>}
+      {state.applyError && <p className="agent-error" role="status">{humanRuntimeMessage(state.applyError)}</p>}
 
-      {state.readError !== null && (
-        <p className="agent-error" role="status">
-          {state.readError}
-        </p>
-      )}
-      {state.planError !== null && (
-        <p className="agent-error" role="status">
-          {state.planError}
-        </p>
-      )}
-
-      {pending && (
-        <section aria-label="확인 대기 중인 계획" className="agent-plan">
-          <strong>
-            {pending.kind === "install"
-              ? "설치 계획"
-              : pending.kind === "update"
-                ? "업데이트 계획"
-                : "복구 계획"}
-          </strong>
-          <dl>
-            {pending.kind === "install" ? (
-              <>
-                <div>
-                  <dt>설치할 버전</dt>
-                  <dd>{pending.plan.bundledVersion}</dd>
-                </div>
-                <div>
-                  <dt>설치 위치</dt>
-                  <dd>{pending.plan.versionDirectory}</dd>
-                </div>
-                <div>
-                  <dt>서비스 전환</dt>
-                  <dd>{pending.plan.serviceTransitionRequired ? "필요함" : "필요 없음"}</dd>
-                </div>
-                <div>
-                  <dt>처리 방법</dt>
-                  <dd>{installServiceActionLabels[pending.plan.serviceAction]}</dd>
-                </div>
-                <div>
-                  <dt>서비스 신원</dt>
-                  <dd>
-                    {pending.plan.serviceAction === "register"
-                      ? "등록된 서비스 없음"
-                      : `${serviceFact(pending.plan.service?.label)} · ${serviceFact(pending.plan.service?.executable)}`}
-                  </dd>
-                </div>
-                <div>
-                  <dt>등록 / 실행</dt>
-                  <dd>
-                    {triState(pending.plan.service?.registered)} / {triState(pending.plan.service?.running)}
-                  </dd>
-                </div>
-              </>
-            ) : (
-              <>
-                <div>
-                  <dt>목표 버전</dt>
-                  <dd>{pending.plan.targetVersion ?? "확인 불가"}</dd>
-                </div>
-                <div>
-                  <dt>실행 중인 작업</dt>
-                  <dd>
-                    {pending.plan.activeRuns}건
-                    {pending.plan.activeRuns > 0 && " · 적용하면 그 세션이 끊길 수 있습니다"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>영향받는 프로젝트</dt>
-                  <dd>
-                    {pending.plan.projects.length === 0
-                      ? "없음"
-                      : `${pending.plan.projects.length}개 · ${pending.plan.projects.join(", ")}`}
-                  </dd>
-                </div>
-                <div>
-                  <dt>실패 시 되돌리기</dt>
-                  <dd>{pending.plan.recoverableOnFailure ? "가능" : "불가"}</dd>
-                </div>
-              </>
-            )}
-          </dl>
-          {pending.kind === "install" && (
-            <p
-              className={
-                pending.plan.serviceAction === "migration_required" ||
-                pending.plan.serviceAction === "unknown"
-                  ? "agent-blocked-note"
-                  : "agent-migration-note"
-              }
-            >
-              {installServiceGuidance(pending.plan)}
-            </p>
-          )}
-          <div className="agent-plan-actions">
-            <button
-              className="secondary-button"
-              disabled={state.applying}
-              onClick={() => actions.cancelPlan()}
-              type="button"
-            >
-              취소
-            </button>
-            <button
-              className="stamp-button"
-              disabled={state.applying}
-              onClick={() => void actions.apply()}
-              type="button"
-            >
-              {state.applying ? "적용하는 중" : "이 계획을 적용"}
-            </button>
-          </div>
-        </section>
-      )}
-
-      {state.applyError !== null && (
-        <p className="agent-error" role="status">
-          {state.applyError}
-        </p>
-      )}
-
-      {state.application && (
-        <section aria-label="마지막 적용 결과" className="agent-application">
-          <strong>마지막 적용 결과: {state.application.result.result}</strong>
-          <ul>
-            {state.application.result.stages.map((stage, index) => (
-              <li key={`${stage.stage}:${index}`}>
-                {stage.stage} · {stage.status}
-                {stage.detail ? ` · ${stage.detail}` : ""}
-              </li>
-            ))}
-          </ul>
-          {state.application.kind !== "install" &&
-            state.application.result.recoveryActions.length > 0 && (
-              <p>복구 행동: {state.application.result.recoveryActions.join(", ")}</p>
-            )}
-        </section>
-      )}
-
-      {activeView === "work" ? (
-        <div className="agent-view-panel" id="agent-work-panel" role="tabpanel">
-          {state.policy ? (
-            <AgentRunDashboard
-              actions={actions}
-              onOpenSettings={() => setActiveView("settings")}
-              state={state}
-            />
-          ) : (
-            <p className="agent-empty">작업을 시작할 역할 정책을 아직 읽지 못했습니다.</p>
-          )}
-        </div>
+      {state.policy ? (
+        <AgentRunDashboard actions={actions} directAssignOpen={directAssignOpen} onCloseDirectAssign={() => setDirectAssignOpen(false)} project={currentProject} state={state} />
       ) : (
-        <div className="agent-view-panel agent-settings-panel" id="agent-settings-panel" role="tabpanel">
-          <header className="agent-settings-heading">
-            <h2>에이전트 설정</h2>
-            <p>역할별 실행 도구와 한도를 조정합니다. 작업 시작과 진행 기록은 작업 탭에 있습니다.</p>
-          </header>
-
-          {setupRequired && (
-            <p className="agent-setup-note" role="status">
-              아직 이 프로젝트에 저장된 설정이 없습니다. 아래 기본값을 확인하고 저장하면 작업을 시작할 수 있습니다.
-            </p>
-          )}
-
-          {state.policy ? (
-            <AgentRoleSettings
-              busy={state.reading}
-              executionAllowed={state.policy.executionAllowed}
-              onSave={actions.save}
-              saveError={state.saveError}
-              saving={state.saving}
-              snapshot={state.policy}
-            />
-          ) : (
-            <p className="agent-empty">이 프로젝트의 역할 정책을 아직 읽지 못했습니다.</p>
-          )}
-
-          {state.policy && (
-            <details
-              aria-label="실행 도구 준비 상태"
-              className="agent-providers agent-secondary-section"
-              open={providerAttention}
-              role="region"
-            >
-              <summary>
-                <span>실행 도구 상태</span>
-                <small>
-                  {providerAttention
-                    ? "확인이 필요한 도구가 있습니다"
-                    : state.policy.providers.length > 0
-                      ? `${state.policy.providers.length}개 도구 확인됨`
-                      : "진단 기록 없음"}
-                </small>
-              </summary>
-              {state.policy.providers.length > 0 ? (
-                <ul>
-                  {state.policy.providers.map((provider) => (
-                    <li key={provider.provider}>
-                      <ProviderRow diagnosis={provider} />
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="agent-secondary-empty">확인된 실행 도구가 없습니다.</p>
-              )}
-            </details>
-          )}
-
-          <details
-            aria-label="기존 역할 잡 이전"
-            className="agent-migration agent-secondary-section"
-            open={state.migration !== null || state.migrationError !== null}
-            role="region"
-          >
-            <summary>
-              <span>기존 설정 가져오기</span>
-              <small>이전에 사용하던 역할 설정이 있을 때만 확인합니다</small>
-            </summary>
-            <div className="agent-secondary-content">
-              <p>기존 하트비트 역할 잡이 있으면 이 프로젝트의 역할 정책으로 옮길 수 있습니다.</p>
-              <button
-                className="secondary-button agent-compact-action"
-                disabled={state.migrationBusy}
-                onClick={() => void actions.previewMigration()}
-                type="button"
-              >
-                {state.migrationBusy ? "확인하는 중" : "이전할 설정 확인"}
-              </button>
-              {state.migrationError !== null && (
-                <p className="agent-error" role="status">
-                  {state.migrationError}
-                </p>
-              )}
-              {state.migration && (
-                <div className="agent-migration-preview">
-                  <strong>확인 전에는 아무것도 저장되지 않습니다</strong>
-                  <ul>
-                    {Object.entries(state.migration.proposed.roles).map(([role, value]) => (
-                      <li key={role}>
-                        {role}: {value.provider} · {value.model ?? "기본 모델"} · 최대 {value.maxParallel}명
-                      </li>
-                    ))}
-                  </ul>
-                  {state.migration.untouchedRoles.length > 0 && (
-                    <p>기존 잡이 없어 기본값으로 두는 역할: {state.migration.untouchedRoles.join(", ")}</p>
-                  )}
-                  {state.migration.unresolved.length > 0 && (
-                    <div className="agent-migration-unresolved">
-                      <strong>옮기지 못한 값</strong>
-                      <ul>
-                        {state.migration.unresolved.map((entry, index) => (
-                          <li key={`${entry.role}:${entry.field}:${index}`}>
-                            {entry.role} · {entry.field} · {entry.value} · {entry.reason}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  <p className="agent-migration-note">Dream은 이 이전 대상이 아닙니다.</p>
-                  <div className="agent-plan-actions">
-                    <button
-                      className="secondary-button"
-                      disabled={state.migrationBusy}
-                      onClick={() => actions.dismissMigration()}
-                      type="button"
-                    >
-                      취소
-                    </button>
-                    <button
-                      className="stamp-button"
-                      disabled={state.migrationBusy}
-                      onClick={() => void actions.applyMigration()}
-                      type="button"
-                    >
-                      이 내용으로 이전
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </details>
-        </div>
+        <p className="agent-quiet-empty">에이전트 설정을 읽는 중입니다.</p>
       )}
+
+      {enableConfirmOpen && policy && (
+        <AutomationConfirm actions={actions} onClose={() => setEnableConfirmOpen(false)} policy={policy} />
+      )}
+      {advancedOpen && (
+        <AdvancedDrawer actions={actions} onClose={() => setAdvancedOpen(false)} projectName={currentProject.name} readiness={readiness} state={state} />
+      )}
+      {state.plan && <RuntimePlanDialog actions={actions} state={state} />}
     </section>
   );
 }
 
-function ProviderRow({ diagnosis }: { diagnosis: AgentProviderDiagnosis }) {
-  const known = providerDiagnoses[diagnosis.status];
+function AutomationConfirm({ actions, onClose, policy }: {
+  actions: AgentRuntimeActions;
+  onClose(): void;
+  policy: NonNullable<AgentRuntimeState["policy"]>["policy"];
+}) {
+  const [roles, setRoles] = useState<Record<string, boolean>>(() => Object.fromEntries(Object.keys(policy.roles).map((role) => [role, true])));
+  useDismissOnEscape(onClose);
+  async function enable() {
+    const changed = {
+      ...policy,
+      automationEnabled: true,
+      roles: Object.fromEntries(Object.entries(policy.roles).map(([role, value]) => [role, {
+        ...value,
+        enabled: roles[role],
+        runMode: roles[role] ? "continuous" : "once",
+      }])),
+    };
+    if (await actions.save(changed)) onClose();
+  }
   return (
-    <>
-      <strong>{diagnosis.provider}</strong>
-      <span className={`agent-provider-status status-${diagnosis.status}`}>
-        {known ? known.title : diagnosis.status}
-      </span>
-      <p>{known ? known.action : "앱이 모르는 상태입니다. 값을 그대로 보여드립니다."}</p>
-      {diagnosis.version && <small>버전 {diagnosis.version}</small>}
-    </>
+    <div className="agent-overlay">
+      <section aria-labelledby="automation-confirm-title" aria-modal="true" className="agent-dialog" role="dialog">
+        <header><div><p className="eyebrow">AUTO ASSIGN</p><h2 id="automation-confirm-title">자동 배정 켜기</h2></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
+        <p className="agent-dialog-note">선택한 역할이 작업을 감지하면 프로젝트와 기기 한도 안에서 세션을 시작합니다. 여러 유료 세션이 동시에 실행될 수 있습니다.</p>
+        <fieldset><legend>참여 역할</legend>{Object.keys(policy.roles).map((role) => <label className="agent-role-toggle" key={role}><input checked={roles[role]} onChange={(event) => setRoles((current) => ({ ...current, [role]: event.target.checked }))} type="checkbox" /><span>{roleName(role)}</span><small>최대 {policy.roles[role].maxParallel}명</small></label>)}</fieldset>
+        <footer><button className="secondary-button" onClick={onClose} type="button">취소</button><button className="stamp-button" disabled={!Object.values(roles).some(Boolean)} onClick={() => void enable()} type="button">자동 배정 켜기</button></footer>
+      </section>
+    </div>
   );
+}
+
+function AdvancedDrawer({ actions, onClose, projectName, readiness, state }: {
+  actions: AgentRuntimeActions;
+  onClose(): void;
+  projectName: string;
+  readiness: Readiness;
+  state: AgentRuntimeState;
+}) {
+  const providerAttention = state.policy?.providers.some((provider) => provider.status !== "ready") ?? false;
+  const migrationRequired = readiness.title === "자동 배정 서비스 전환 필요";
+  useDismissOnEscape(onClose);
+  return (
+    <div className="agent-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <aside aria-label="고급 설정" aria-modal="true" className="agent-detail-drawer agent-settings-drawer" role="dialog">
+        <header><div><p className="eyebrow">ADVANCED</p><h2>고급 설정</h2><small>{projectName}</small></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
+        {state.policy && <AgentRoleSettings busy={state.reading} executionAllowed={state.policy.executionAllowed} onSave={actions.save} saveError={state.saveError} saving={state.saving} snapshot={state.policy} />}
+        <details open={readiness.tone !== "ready"}><summary>실행 환경</summary><div className="agent-secondary-content"><p>{readiness.detail}</p>{readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}</div></details>
+        <details open={providerAttention}><summary>실행 도구</summary><ul className="agent-provider-list">{state.policy?.providers.map((provider) => <li key={provider.provider}><ProviderRow diagnosis={provider} /></li>)}</ul></details>
+        <details open={migrationRequired || state.migration !== null || state.migrationError !== null}><summary>기존 설정 이전</summary><div className="agent-secondary-content"><p>앱이 관리하던 역할 잡은 중지하고, 기존 외부 서비스 파일은 그대로 보존한 채 새 자동 배정 서비스로 전환합니다. 검증에 실패하면 역할 잡과 서비스를 원래대로 복구합니다.</p><button className="secondary-button agent-compact-action" disabled={state.migrationBusy} onClick={() => void actions.previewMigration()} type="button">전환할 설정 확인</button>{state.migrationError && <p className="agent-error">{state.migrationError}</p>}{state.migration && <div className="agent-migration-preview"><strong>전환할 역할 설정</strong><ul>{Object.entries(state.migration.proposed.roles).map(([role, value]) => <li key={role}>{roleName(role)} · {value.provider} · 최대 {value.maxParallel}명</li>)}</ul><div className="agent-plan-actions"><button onClick={() => actions.dismissMigration()} type="button">취소</button><button className="stamp-button" onClick={() => void actions.applyMigration()} type="button">검증하고 전환</button></div></div>}</div></details>
+      </aside>
+    </div>
+  );
+}
+
+function RuntimePlanDialog({ actions, state }: { actions: AgentRuntimeActions; state: AgentRuntimeState }) {
+  useDismissOnEscape(actions.cancelPlan);
+  const plan = state.plan!;
+  return (
+    <div className="agent-overlay">
+      <section aria-label="실행 환경 변경 확인" aria-modal="true" className="agent-dialog" role="dialog">
+        <header><div><p className="eyebrow">RUNTIME</p><h2>실행 환경 변경</h2></div><button aria-label="닫기" onClick={() => actions.cancelPlan()} type="button">×</button></header>
+        <p className="agent-dialog-note">실행 중인 세션은 유지하고 앱이 관리하는 런타임만 변경합니다.</p>
+        <ul className="agent-runtime-plan-summary">
+          {plan.kind === "install" ? (
+            <>
+              <li><strong>버전</strong><span>{plan.plan.installedVersion ?? "설치 안 됨"} → {plan.plan.bundledVersion}</span></li>
+              <li><strong>서비스</strong><span>{serviceActionLabel(plan.plan.serviceAction)}</span></li>
+            </>
+          ) : (
+            <>
+              <li><strong>버전</strong><span>{plan.plan.installedVersion ?? "확인 안 됨"} → {plan.plan.targetVersion ?? "현재 버전 복구"}</span></li>
+              <li><strong>실행 중 세션</strong><span>{plan.plan.activeRuns}개 유지</span></li>
+            </>
+          )}
+        </ul>
+        {plan.kind === "install" && plan.plan.serviceAction === "migration_required" && (
+          <p className="agent-detail-message">기존 외부 Heartbeat 서비스는 중복 등록하거나 삭제하지 않습니다. 런타임을 교체한 뒤 기존 설정 이전에서 안전한 전환을 이어갑니다.</p>
+        )}
+        {state.planError && <p className="agent-error">{humanRuntimeMessage(state.planError)}</p>}
+        {state.applyError && <p className="agent-error">{humanRuntimeMessage(state.applyError)}</p>}
+        <footer><button className="secondary-button" onClick={() => actions.cancelPlan()} type="button">취소</button><button className="stamp-button" disabled={state.applying} onClick={() => void actions.apply()} type="button">{state.applying ? "적용 중" : "적용"}</button></footer>
+      </section>
+    </div>
+  );
+}
+
+function serviceActionLabel(action: "register" | "already_managed" | "migration_required" | "unknown") {
+  return {
+    register: "관리형 서비스를 새로 연결",
+    already_managed: "현재 관리형 서비스를 유지",
+    migration_required: "기존 외부 서비스를 보존하고 전환 준비",
+    unknown: "상태를 다시 확인한 뒤 전환",
+  }[action];
+}
+
+function ProviderRow({ diagnosis }: { diagnosis: AgentProviderDiagnosis }) {
+  const labels: Record<string, string> = { ready: "사용 가능", executable_missing: "CLI 설치 필요", login_required: "로그인 필요", permission_denied: "권한 확인 필요", unsupported_version: "업데이트 필요", billing_route_acknowledgement_required: "과금 경로 확인 필요" };
+  return <><strong>{diagnosis.provider}</strong><span>{labels[diagnosis.status] ?? diagnosis.status}</span>{diagnosis.version && <small>{diagnosis.version}</small>}</>;
+}
+
+function roleName(role: string) { return ({ planner: "기획자", architect: "아키텍트", developer: "개발자" } as Record<string, string>)[role] ?? role; }
+
+function emptyProject(name: string): ProjectSummary {
+  return { rootPath: "", initialized: true, projectId: null, name, compatibility: "current", activeLeases: [], workflows: [], pendingWork: { planner: false, architect: false, developer: false } };
+}
+
+function useDismissOnEscape(onDismiss: () => void) {
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => { if (event.key === "Escape") onDismiss(); };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [onDismiss]);
 }

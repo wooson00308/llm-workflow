@@ -17,6 +17,110 @@
   --shadow: 0 18px 55px rgba(43, 46, 39, 0.08);
 }
 
+/* Agent operations cockpit ------------------------------------------------ */
+.agent-cockpit { max-width: 1120px; margin: 0 auto; padding: 28px clamp(20px, 3vw, 40px) 56px; }
+.agent-cockpit-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+.agent-cockpit-heading h1 { margin: 2px 0 4px; font-size: clamp(26px, 3vw, 36px); line-height: 1.05; }
+.agent-cockpit-heading p { margin: 0; }
+.agent-cockpit-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: nowrap; }
+.agent-runtime-pill { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--muted); font-size: 12px; white-space: nowrap; }
+.agent-runtime-pill i { width: 7px; height: 7px; border-radius: 50%; background: #e9a23b; }
+.agent-runtime-pill.tone-ready i { background: #45a77a; }
+.agent-runtime-pill.tone-blocked i { background: #d65d5d; }
+.agent-runtime-pill small { color: var(--muted); }
+.agent-automation-master { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--paper) 94%, transparent); }
+.agent-automation-master.is-on { border-color: color-mix(in srgb, #45a77a 38%, var(--line)); background: color-mix(in srgb, #45a77a 7%, var(--paper)); }
+.agent-automation-master strong { display: block; margin-bottom: 2px; font-size: 15px; }
+.agent-automation-master p { margin: 0; color: var(--muted); font-size: 13px; }
+.agent-switch { position: relative; flex: 0 0 auto; width: 42px; height: 24px; }
+.agent-switch input { position: absolute; opacity: 0; }
+.agent-switch span { display: block; width: 100%; height: 100%; border-radius: 999px; background: #7b8088; cursor: pointer; transition: .18s ease; }
+.agent-switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: white; box-shadow: 0 1px 3px #0004; transition: .18s ease; }
+.agent-switch input:checked + span { background: #3d9d72; }
+.agent-switch input:checked + span::after { transform: translateX(18px); }
+.agent-switch input:focus-visible + span { outline: 2px solid var(--green); outline-offset: 2px; }
+.agent-runtime-attention { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 10px; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, #d9903d 10%, var(--paper)); }
+.agent-runtime-attention p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.agent-operations { display: grid; gap: 12px; margin-top: 18px; }
+.agent-ops-section { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+.agent-ops-section > header { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.agent-ops-section > header h2 { margin: 0; font-size: 14px; }
+.agent-ops-section > header > span { min-width: 22px; padding: 2px 7px; border-radius: 999px; background: #f4f3ed; color: var(--muted); text-align: center; font-size: 11px; }
+.agent-ops-attention { border-color: color-mix(in srgb, #d65d5d 28%, var(--line)); }
+.agent-ops-attention ul { margin: 0; padding: 10px 16px 12px 34px; color: #b54c4c; font-size: 13px; }
+.agent-session-list, .agent-plain-list { list-style: none; margin: 0; padding: 0; }
+.agent-session-list li + li, .agent-plain-list li + li { border-top: 1px solid var(--line); }
+.agent-session-list button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; min-height: 58px; padding: 10px 16px; border: 0; border-radius: 0; background: transparent; color: inherit; text-align: left; }
+.agent-session-list button:hover { background: #f4f3ed; }
+.agent-session-copy { min-width: 0; }
+.agent-session-copy strong, .agent-session-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-session-copy strong { font-size: 14px; font-weight: 650; }
+.agent-session-copy small { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.agent-session-list time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.agent-state-dot { width: 9px; height: 9px; border-radius: 50%; background: #89909a; }
+.agent-state-dot.state-running { background: #45a77a; box-shadow: 0 0 0 4px color-mix(in srgb, #45a77a 14%, transparent); }
+.agent-state-dot.state-failed, .agent-state-dot.state-recovery_required { background: #d65d5d; }
+.agent-state-dot.state-succeeded { background: #6395d0; }
+.agent-role-chip { min-width: 54px; padding: 4px 7px; border-radius: 7px; background: #f4f3ed; color: var(--muted); font-size: 11px; text-align: center; }
+.agent-row-chevron { color: var(--muted); font-size: 20px; }
+.agent-plain-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 8px 16px; }
+.agent-plain-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.agent-plain-list span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.agent-text-button { min-height: auto; padding: 4px 0; border: 0; background: transparent; color: var(--green); font-size: 12px; }
+.agent-quiet-empty { margin: 0; padding: 14px 2px; color: var(--muted); font-size: 13px; }
+.agent-overlay, .agent-drawer-backdrop { position: fixed; inset: 0; z-index: 70; display: grid; background: #0c1017a8; backdrop-filter: blur(2px); }
+.agent-overlay { place-items: center; padding: 20px; }
+.agent-dialog { width: min(520px, 100%); max-height: min(720px, calc(100vh - 40px)); overflow: auto; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); box-shadow: 0 22px 70px #0007; }
+.agent-dialog > header, .agent-detail-drawer > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.agent-dialog h2, .agent-detail-drawer h2 { margin: 2px 0 0; font-size: 21px; }
+.agent-dialog > header > button, .agent-detail-drawer > header > button { width: 30px; min-height: 30px; padding: 0; border-radius: 50%; }
+.agent-dialog label:not(.agent-candidate-option):not(.agent-role-toggle) { display: grid; gap: 6px; margin: 14px 0; font-size: 12px; }
+.agent-dialog select, .agent-dialog input { width: 100%; }
+.agent-dialog fieldset { margin: 16px 0; padding: 0; border: 0; }
+.agent-dialog legend { margin-bottom: 8px; font-size: 12px; font-weight: 700; }
+.agent-candidate-option, .agent-role-toggle { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.agent-candidate-option + .agent-candidate-option, .agent-role-toggle + .agent-role-toggle { margin-top: 7px; }
+.agent-candidate-option span strong, .agent-candidate-option span small { display: block; }
+.agent-candidate-option span small, .agent-role-toggle small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.agent-dialog-note { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.agent-runtime-plan-summary { list-style: none; margin: 14px 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
+.agent-runtime-plan-summary li { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; font-size: 13px; }
+.agent-runtime-plan-summary li + li { border-top: 1px solid var(--line); }
+.agent-runtime-plan-summary span { color: var(--muted); text-align: right; }
+.agent-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.agent-drawer-backdrop { justify-items: end; }
+.agent-detail-drawer { width: min(430px, 100%); height: 100%; overflow: auto; padding: 22px; border-left: 1px solid var(--line); background: var(--paper); box-shadow: -16px 0 50px #0005; }
+.agent-detail-drawer dl { display: grid; gap: 0; margin: 0; }
+.agent-detail-drawer dl div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.agent-detail-drawer dt { color: var(--muted); font-size: 12px; }
+.agent-detail-drawer dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.agent-detail-message { padding: 12px; border-radius: 10px; background: #f4f3ed; font-size: 13px; }
+.agent-drawer-actions { display: flex; gap: 8px; margin-top: 16px; }
+.agent-history-list { border: 1px solid var(--line); border-radius: 12px; }
+.agent-history-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 56px; padding: 9px 12px; }
+.agent-history-row time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.agent-settings-drawer { width: min(620px, 100%); }
+.agent-settings-drawer > details { margin-top: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.agent-settings-drawer > details > summary { cursor: pointer; font-weight: 650; }
+.agent-provider-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.agent-provider-list li { display: grid; grid-template-columns: minmax(80px, 1fr) auto auto; gap: 10px; padding: 8px 0; font-size: 12px; }
+
+@media (max-width: 940px) {
+  .agent-cockpit { padding: 20px 18px 44px; }
+  .agent-cockpit-heading { align-items: stretch; }
+  .agent-cockpit-heading > div:first-child p:not(.eyebrow) { display: none; }
+  .agent-runtime-pill small { display: none; }
+  .agent-session-list button { min-width: 0; }
+  .agent-detail-drawer { width: min(560px, calc(100% - 28px)); height: calc(100% - 28px); margin: 14px; border: 1px solid var(--line); border-radius: 16px; }
+}
+
+@media (max-width: 720px) {
+  .agent-cockpit-heading { flex-direction: column; }
+  .agent-cockpit-actions { justify-content: flex-start; }
+  .agent-runtime-pill { margin-right: auto; }
+  .agent-automation-master { align-items: flex-start; }
+}
+
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; min-width: 320px; min-height: 100%; margin: 0; }
 body { min-height: 100vh; overflow: hidden; }

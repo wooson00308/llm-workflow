@@ -21,7 +21,7 @@ pub const SUPPORTED_API_MAJOR: u32 = 1;
 ///
 /// 세 상수를 한 곳에 둔다. 호환 판정이 여러 자리에 흩어지면 설치 경로에서는 막히고 실행 경로에서는
 /// 열리는 상태가 생기고, 그 어긋남은 사용자에게 "됐다가 안 됐다가"로 보인다.
-pub const MINIMUM_RUNTIME_VERSION: &str = "0.8.0";
+pub const MINIMUM_RUNTIME_VERSION: &str = "0.9.0";
 pub const MAXIMUM_RUNTIME_VERSION: &str = "1.99.99";
 
 /// 런타임이 돌려준 서비스 판정. 계약이 정한 일곱 어휘를 그대로 옮긴다.
@@ -237,7 +237,7 @@ mod tests {
 
     use super::{
         default_policy, judge, validate_policy, Compatibility, RuntimeStatus, ServiceResult,
-        ServiceState, SUPPORTED_API_MAJOR,
+        ServiceState, MINIMUM_RUNTIME_VERSION, SUPPORTED_API_MAJOR,
     };
 
     fn service() -> ServiceState {
@@ -258,7 +258,7 @@ mod tests {
         RuntimeStatus {
             result: "ok".into(),
             checked_at: "2026-08-08T09:00:00Z".into(),
-            runtime_version: Some("0.8.0".into()),
+            runtime_version: Some(MINIMUM_RUNTIME_VERSION.into()),
             installed_version: installed.map(str::to_owned),
             running_version: running.map(str::to_owned),
             api_major,
@@ -271,7 +271,11 @@ mod tests {
 
     #[test]
     fn matching_versions_are_compatible() {
-        let verdict = judge(&status(Some("0.8.0"), Some("0.8.0"), SUPPORTED_API_MAJOR));
+        let verdict = judge(&status(
+            Some(MINIMUM_RUNTIME_VERSION),
+            Some(MINIMUM_RUNTIME_VERSION),
+            SUPPORTED_API_MAJOR,
+        ));
 
         assert_eq!(verdict, Compatibility::Compatible);
         assert!(verdict.allows_execution());
@@ -387,6 +391,8 @@ pub struct ProjectPolicy {
     pub working_directory: String,
     pub project_max_parallel: u32,
     pub device_max_parallel: u32,
+    /// 프로젝트 자동 배정의 마스터. 꺼도 역할 선택과 실행 중 세션은 유지한다.
+    pub automation_enabled: bool,
     /// 역할 이름으로 찾는다. 세 역할이 모두 있어야 한다.
     pub roles: std::collections::BTreeMap<String, RolePolicy>,
 }
@@ -411,9 +417,6 @@ pub enum PolicyRejection {
     InvalidProjectLimit { found: u32 },
     #[serde(rename_all = "camelCase")]
     InvalidValue { role: String, field: String },
-    /// 런타임 설정 계약에 역할을 끄는 필드가 없다. 조용히 켠 채로 저장하지 않고 거절한다.
-    #[serde(rename_all = "camelCase")]
-    RoleDisableUnsupported { role: String },
     #[serde(rename_all = "camelCase")]
     WorkingDirectoryMismatch { requested: String, actual: String },
     #[serde(rename_all = "camelCase")]
@@ -435,9 +438,6 @@ pub fn validate_policy(policy: &ProjectPolicy) -> Result<(), PolicyRejection> {
         });
     }
     for (role, value) in &policy.roles {
-        if !value.enabled {
-            return Err(PolicyRejection::RoleDisableUnsupported { role: role.clone() });
-        }
         if !SUPPORTED_PROVIDERS.contains(&value.provider.as_str()) {
             return Err(PolicyRejection::UnsupportedProvider {
                 role: role.clone(),
@@ -493,7 +493,7 @@ pub fn default_policy(project_id: &str, working_directory: &str) -> ProjectPolic
                 enabled: true,
                 provider: SUPPORTED_PROVIDERS[0].to_owned(),
                 model: None,
-                run_mode: "once".to_owned(),
+                run_mode: "continuous".to_owned(),
                 max_parallel: DEFAULT_ROLE_MAX_PARALLEL,
                 interval_seconds: DEFAULT_POLL_INTERVAL_SECONDS,
                 max_per: None,
@@ -505,6 +505,7 @@ pub fn default_policy(project_id: &str, working_directory: &str) -> ProjectPolic
         working_directory: working_directory.to_owned(),
         project_max_parallel: DEFAULT_PROJECT_MAX_PARALLEL,
         device_max_parallel: DEFAULT_DEVICE_MAX_PARALLEL,
+        automation_enabled: false,
         roles,
     }
 }
@@ -541,12 +542,55 @@ pub struct RunSummary {
     pub state: RunState,
     pub target_id: Option<String>,
     pub started_at: Option<String>,
+    /// 종료 상태로 전환한 시각. 구형 런타임과 활성 실행에서는 비어 있다.
+    #[serde(default)]
+    pub finished_at: Option<String>,
     /// 어느 단계에서 실패했는지. 계약이 정한 여섯 단계 이름이 그대로 온다.
     pub failure_stage: Option<String>,
     pub reason: Option<String>,
     #[serde(default)]
     pub remaining: Vec<String>,
     pub previous_run_id: Option<String>,
+}
+
+#[cfg(test)]
+mod run_summary_tests {
+    use serde_json::json;
+
+    use super::RunSummary;
+
+    fn run(finished_at: serde_json::Value) -> serde_json::Value {
+        json!({
+            "runId": "run-1",
+            "projectId": "project-1",
+            "role": "developer",
+            "provider": "codex",
+            "state": "failed",
+            "targetId": "TASK-1",
+            "startedAt": "2026-08-10T10:00:00Z",
+            "finishedAt": finished_at,
+            "failureStage": "role_session",
+            "reason": "provider_failed",
+            "remaining": [],
+            "previousRunId": null
+        })
+    }
+
+    #[test]
+    fn finish_time_round_trips_in_camel_case_and_remains_optional_for_legacy_rows() {
+        let current: RunSummary = serde_json::from_value(run(json!("2026-08-10T10:00:09Z")))
+            .expect("current runtime row");
+        let mut legacy = run(serde_json::Value::Null);
+        legacy.as_object_mut().expect("row").remove("finishedAt");
+        let legacy: RunSummary = serde_json::from_value(legacy).expect("legacy runtime row");
+
+        assert_eq!(current.finished_at.as_deref(), Some("2026-08-10T10:00:09Z"));
+        assert_eq!(
+            serde_json::to_value(current).expect("serialize")["finishedAt"],
+            "2026-08-10T10:00:09Z"
+        );
+        assert_eq!(legacy.finished_at, None);
+    }
 }
 
 /// 역할 하나의 계획. 시작 수를 줄인 사유가 함께 온다.
@@ -562,6 +606,12 @@ pub struct RolePlanView {
     pub excluded: Vec<String>,
     #[serde(default)]
     pub manual_targets: Vec<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub candidates: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub verdict: String,
     pub diagnostic: serde_json::Value,
 }
 
@@ -588,6 +638,38 @@ pub struct RunStartOutcome {
     pub started: Vec<RunSummary>,
     #[serde(default)]
     pub failures: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub waiting: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRoleState {
+    pub role: String,
+    pub status: String,
+    pub next_poll_at: Option<String>,
+    pub last_check_at: Option<String>,
+    pub last_result: Option<String>,
+    pub last_assigned_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatcherState {
+    pub status: String,
+    pub last_event_at: Option<String>,
+    pub error: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationSnapshot {
+    pub enabled: bool,
+    #[serde(default)]
+    pub roles: Vec<AutomationRoleState>,
+    pub watcher: Option<WatcherState>,
+    pub dispatcher_running: bool,
 }
 
 /// 취소 미리보기. 무엇을 멈추고 무엇을 정리하는지 먼저 보여 준다.
@@ -618,6 +700,7 @@ pub struct RunLogPage {
 pub struct QueueSnapshot {
     pub project_id: String,
     pub paused: bool,
+    pub automation: AutomationSnapshot,
     pub runs: Vec<RunSummary>,
     pub errors: Vec<serde_json::Value>,
     pub providers: Vec<serde_json::Value>,

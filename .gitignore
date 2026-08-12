@@ -31,3 +31,4 @@ vite.config.d.ts
 
 # LLM Workflow 런타임 (lease·마이그레이션 백업)
 .workflow/.runtime/
+src-tauri/runtime/

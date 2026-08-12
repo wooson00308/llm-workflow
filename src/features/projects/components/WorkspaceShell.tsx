@@ -13,6 +13,7 @@ import type {
   TaskQaBatchEntry,
   TaskQaOutcome,
   TaskDocument,
+  TaskRevisionRequestOutcome,
   SpecDocument,
   WorkflowItemSummary,
   WorkflowSummary,
@@ -26,7 +27,6 @@ import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
-import { IntegrationsView } from "./integrations/IntegrationsView";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
 import { SettingsView } from "./SettingsView";
 import { SpecWorkspace } from "./SpecWorkspace";
@@ -39,8 +39,9 @@ interface Props {
   managedAssets: ManagedAssetsState;
   project: ProjectSummary;
   updater: AppUpdaterState;
-  integrations: IntegrationsState;
-  integrationActions: IntegrationActions;
+  /** 전용 연동 화면 제거 전 테스트·호출자 호환. 화면에서는 사용하지 않는다. */
+  integrations?: IntegrationsState;
+  integrationActions?: IntegrationActions;
   onAddIdea(workflowDirectory: string, content: string): Promise<boolean>;
   onAddWorkflow(name: string): Promise<boolean>;
   onDecideSpec(
@@ -73,6 +74,13 @@ interface Props {
     fileNames: string[],
     comment: string,
   ): Promise<TaskQaBatchEntry[] | null>;
+  onTaskRevisionRequest?(
+    workflowDirectory: string,
+    fileName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    requestId: string,
+  ): Promise<TaskRevisionRequestOutcome>;
   /**
    * 에이전트 화면의 상태와 조작. 주인이 작업 공간 훅이라 화면을 옮겨 다녀도 진행 표시가 남는다.
    * 선택인 것은 이 껍데기를 그리는 검사 리터럴이 아직 이 묶음을 모르기 때문이다.
@@ -98,7 +106,6 @@ const viewLabels = {
   archive: "기록",
   activity: "활동",
   agents: "에이전트",
-  integrations: "연동",
   help: "도움말",
   settings: "설정",
 } as const;
@@ -113,8 +120,6 @@ export function WorkspaceShell({
   managedAssets,
   project,
   updater,
-  integrations,
-  integrationActions,
   onAddIdea,
   onAddWorkflow,
   onDecideSpec,
@@ -122,6 +127,7 @@ export function WorkspaceShell({
   onReadIdea,
   onReadSpec,
   onReadTask,
+  onTaskRevisionRequest = async () => ({ ok: false, message: "정의 수정 요청 조작이 연결되지 않았습니다." }),
   onTaskQa,
   onTaskQaBatch,
   onRefresh,
@@ -140,7 +146,6 @@ export function WorkspaceShell({
     | "archive"
     | "activity"
     | "agents"
-    | "integrations"
     | "help"
     | "settings"
   >("today");
@@ -320,7 +325,6 @@ export function WorkspaceShell({
           {agentRuntime && agentRuntimeActions && (
             <button className={`settings-link ${view === "agents" ? "active" : ""}`} onClick={() => setView("agents")}><Icon name="spark" />에이전트</button>
           )}
-          <button className={`settings-link ${view === "integrations" ? "active" : ""}`} onClick={() => setView("integrations")}><Icon name="spark" />연동</button>
           <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
           <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
         </div>
@@ -461,7 +465,7 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
+          {workflow && view === "tasks" && <DevelopmentBoard activeLeases={project.activeLeases} busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskRevisionRequest={(fileName, expectedUpdatedAt, reason, requestId) => onTaskRevisionRequest(workflow.directory, fileName, expectedUpdatedAt, reason, requestId)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
@@ -491,23 +495,8 @@ export function WorkspaceShell({
           {view === "agents" && agentRuntime && agentRuntimeActions && (
             <AgentRuntimeView
               actions={agentRuntimeActions}
-              projectName={project.name}
+              project={project}
               state={agentRuntime}
-            />
-          )}
-          {view === "integrations" && integrations.heartbeatRuns && integrations.heartbeatUpdate && (
-            <IntegrationsView
-              actions={integrationActions}
-              activeLeases={project.activeLeases}
-              error={integrations.error}
-              heartbeatRuns={integrations.heartbeatRuns}
-              heartbeatService={integrations.heartbeatService}
-              heartbeatSetupRuns={integrations.heartbeatSetupRuns}
-              heartbeatUpdate={integrations.heartbeatUpdate}
-              heartbeatVersions={integrations.heartbeatVersions}
-              pendingWork={project.pendingWork}
-              snapshot={integrations.snapshot}
-              writeError={integrations.writeError}
             />
           )}
 

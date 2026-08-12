@@ -2,8 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import cssText from "./BlockedTaskPanel.css?raw";
 import type { BlockedReason } from "../domain/documentSections";
-import type { TaskDocument, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
-import { BlockedTaskPanel } from "./BlockedTaskPanel";
+import type { ProjectSummary, TaskDocument, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import { BlockedTaskPanel, TaskRevisionRequestPanel } from "./BlockedTaskPanel";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 
 afterEach(cleanup);
@@ -68,9 +68,11 @@ function blockedBody(relatedTargets = reason.relatedTargetsRaw) {
 function renderBoard(
   onReadTask: (fileName: string) => Promise<TaskDocument | null>,
   items = [blockedTask, relatedTask],
+  activeLeases: React.ComponentProps<typeof DevelopmentBoard>["activeLeases"] = [],
 ) {
   return render(
     <DevelopmentBoard
+      activeLeases={activeLeases}
       busy={false}
       onReadTask={onReadTask}
       onTaskQa={vi.fn()}
@@ -80,12 +82,15 @@ function renderBoard(
   );
 }
 
-function expectAgentOperatedNotice() {
+function expectAgentOperatedNotice(withRevisionRequest = false) {
   const notice = screen.getByRole("region", { name: "에이전트 처리 안내" });
   expect(within(notice).getByText("에이전트가 해결·재시도합니다")).toBeInTheDocument();
-  expect(within(notice).getByText(/사용자가 입력하거나 조작할 내용은 없습니다/)).toBeInTheDocument();
+  expect(within(notice).getByText(withRevisionRequest
+    ? /별도로 수정을 요청할 수 있습니다/
+    : /사용자가 입력하거나 조작할 내용은 없습니다/)).toBeInTheDocument();
   expect(screen.queryByLabelText("해결 근거")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /개발 준비로 되돌리기|한 번 더 누르면 재개/ })).not.toBeInTheDocument();
+  if (withRevisionRequest) expect(screen.getByLabelText("수정이 필요한 이유")).toBeInTheDocument();
 }
 
 describe("BlockedTaskPanel", () => {
@@ -189,6 +194,128 @@ describe("BlockedTaskPanel", () => {
   });
 });
 
+describe("TaskRevisionRequestPanel", () => {
+  const taskDocument: TaskDocument = {
+    summary: { ...blockedTask, status: "todo" },
+    body: "# 배포 준비",
+    dependencies: [{ id: "TASK-101", state: "satisfied" }],
+    scopeDeclaration: { status: "declared", files: ["src/z.ts", "src/a.ts"] },
+    revisionRequests: [{
+      id: "REVISION-OLD",
+      previousUpdatedAt: "2026-08-06T00:00:00Z",
+      reason: "기존 범위가 좁다.",
+      createdAt: "2026-08-06T01:00:00Z",
+      handled: true,
+    }],
+  };
+
+  it("shows the current facts and records only the second confirmation once", async () => {
+    let resolveRequest!: (value: {
+      ok: true;
+      result: { status: "recorded"; summary: ProjectSummary; request: null };
+    }) => void;
+    const pending = new Promise<{
+      ok: true;
+      result: { status: "recorded"; summary: ProjectSummary; request: null };
+    }>((resolve) => { resolveRequest = resolve; });
+    const onRequest = vi.fn(() => pending);
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    render(
+      <TaskRevisionRequestPanel
+        busy={false}
+        dependencies={taskDocument.dependencies ?? []}
+        document={taskDocument}
+        onReload={onReload}
+        onRequest={onRequest}
+        preflight="- 값 경로: 현재 범위를 그대로 읽는다."
+      />,
+    );
+
+    expect(screen.getByText("TASK-100 · 준비")).toBeInTheDocument();
+    expect(screen.getByText("TASK-101 (충족)")).toBeInTheDocument();
+    expect(screen.getByText("src/z.ts")).toBeInTheDocument();
+    expect(screen.getByText("src/a.ts")).toBeInTheDocument();
+    expect(screen.getByText(/처리 완료 · REVISION-OLD/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("범위 사전 검사 근거"));
+    expect(screen.getByText(/현재 범위를 그대로 읽는다/)).toBeInTheDocument();
+
+    const input = screen.getByLabelText("수정이 필요한 이유");
+    const first = screen.getByRole("button", { name: "정의 수정 요청 확인" });
+    expect(first).toBeDisabled();
+    fireEvent.change(input, { target: { value: "최상위 조립 파일을 범위에 넣어야 한다." } });
+    fireEvent.click(first);
+    expect(onRequest).not.toHaveBeenCalled();
+    expect(screen.getByText("TASK-100에 다음 이유를 기록합니다.")).toBeInTheDocument();
+
+    const second = screen.getByRole("button", { name: "한 번 더 누르면 수정 요청" });
+    fireEvent.click(second);
+    fireEvent.click(second);
+    expect(onRequest).toHaveBeenCalledTimes(1);
+    expect(onRequest).toHaveBeenCalledWith(
+      "TASK-100.md",
+      "2026-08-07T15:30:00Z",
+      "최상위 조립 파일을 범위에 넣어야 한다.",
+      expect.stringMatching(/^task-revision-/),
+    );
+
+    resolveRequest({
+      ok: true,
+      result: { status: "recorded", summary: {} as ProjectSummary, request: null },
+    });
+    await waitFor(() => expect(onReload).toHaveBeenCalledTimes(1));
+    expect(input).toHaveValue("");
+    expect(screen.getByText("정의 수정 요청을 기록했습니다.")).toBeInTheDocument();
+  });
+
+  it("blocks oversized text before the call and preserves input after a refusal and reload", async () => {
+    const onRequest = vi.fn().mockResolvedValue({ ok: false, message: "작업 문서가 그사이 변경되었습니다." });
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    render(
+      <TaskRevisionRequestPanel
+        busy={false}
+        dependencies={[]}
+        document={{ ...taskDocument, revisionRequests: [] }}
+        onReload={onReload}
+        onRequest={onRequest}
+        preflight={null}
+      />,
+    );
+
+    const input = screen.getByLabelText("수정이 필요한 이유");
+    fireEvent.change(input, { target: { value: "가".repeat(2_001) } });
+    expect(screen.getByText("2,001 / 2,000자")).toHaveClass("error");
+    expect(screen.getByRole("button", { name: "정의 수정 요청 확인" })).toBeDisabled();
+    expect(onRequest).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "현재 범위가 오래됐다." } });
+    fireEvent.click(screen.getByRole("button", { name: "정의 수정 요청 확인" }));
+    fireEvent.click(screen.getByRole("button", { name: "한 번 더 누르면 수정 요청" }));
+    expect(await screen.findByText("작업 문서가 그사이 변경되었습니다.")).toBeInTheDocument();
+    expect(input).toHaveValue("현재 범위가 오래됐다.");
+    fireEvent.click(screen.getByRole("button", { name: "최신 작업 다시 읽기" }));
+    expect(onReload).toHaveBeenCalledTimes(1);
+    expect(input).toHaveValue("현재 범위가 오래됐다.");
+  });
+
+  it.each([
+    [{ status: "declared" as const, files: [] }, "변경 파일 없음 (빈 목록으로 선언됨)"],
+    [{ status: "absent" as const, files: [] }, "범위 선언 없음"],
+    [{ status: "malformed" as const, files: [] }, "선언을 목록으로 읽지 못함"],
+  ])("keeps scope state %j distinct", (scopeDeclaration, expected) => {
+    render(
+      <TaskRevisionRequestPanel
+        busy={false}
+        dependencies={[]}
+        document={{ ...taskDocument, scopeDeclaration, revisionRequests: [] }}
+        onReload={vi.fn()}
+        onRequest={vi.fn()}
+        preflight={null}
+      />,
+    );
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+});
+
 describe("DevelopmentBoard blocked task detail", () => {
   it("opens an exact related task through the existing reader and replaces the detail only on success", async () => {
     const blockedDocument: TaskDocument = { summary: blockedTask, body: blockedBody() };
@@ -203,7 +330,7 @@ describe("DevelopmentBoard blocked task detail", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
     expect(await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" })).toBeInTheDocument();
-    expectAgentOperatedNotice();
+    expectAgentOperatedNotice(true);
     fireEvent.click(screen.getByRole("button", { name: "TASK-101 토큰 발급 작업 열기" }));
 
     expect(await screen.findByRole("heading", { level: 1, name: "토큰 발급" })).toBeInTheDocument();
@@ -225,7 +352,7 @@ describe("DevelopmentBoard blocked task detail", () => {
     await waitFor(() => expect(onReadTask).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("heading", { level: 1, name: "배포 준비" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "진행이 막혔습니다" })).toBeInTheDocument();
-    expectAgentOperatedNotice();
+    expectAgentOperatedNotice(true);
   });
 
   it("keeps historical user-resume events readable without restoring the control", async () => {
@@ -263,6 +390,25 @@ describe("DevelopmentBoard blocked task detail", () => {
       expect(screen.queryByRole("region", { name: "에이전트 처리 안내" })).not.toBeInTheDocument();
       if (status === "qa_waiting") expect(screen.getByLabelText("테스트 플로우와 확인 메모")).toBeInTheDocument();
       else expect(screen.queryByLabelText("테스트 플로우와 확인 메모")).not.toBeInTheDocument();
+      if (status === "todo") expect(screen.getByRole("region", { name: "정의 수정 요청" })).toBeInTheDocument();
+      else expect(screen.queryByRole("region", { name: "정의 수정 요청" })).not.toBeInTheDocument();
     },
   );
+
+  it("hides the request control while the selected todo task has an active lease", async () => {
+    const todoTask = { ...blockedTask, status: "todo" };
+    const onReadTask = vi.fn().mockResolvedValue({ summary: todoTask, body: blockedBody() });
+    renderBoard(onReadTask, [todoTask], [{
+      leaseId: "lease-1",
+      agent: "developer",
+      role: "developer",
+      taskId: todoTask.id,
+      heartbeatAt: "2026-08-08T01:00:00Z",
+      expiresAt: "2026-08-08T01:10:00Z",
+    }]);
+
+    fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
+    await screen.findByRole("heading", { level: 1, name: "배포 준비" });
+    expect(screen.queryByRole("region", { name: "정의 수정 요청" })).not.toBeInTheDocument();
+  });
 });

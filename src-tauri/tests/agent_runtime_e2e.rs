@@ -131,6 +131,6 @@ fn the_declared_runtime_range_is_numeric_and_contains_the_release_floor() {
 
     assert!(numeric(MINIMUM_RUNTIME_VERSION));
     assert!(numeric(MAXIMUM_RUNTIME_VERSION));
-    assert_eq!(MINIMUM_RUNTIME_VERSION, "0.8.0");
+    assert_eq!(MINIMUM_RUNTIME_VERSION, "0.9.0");
     assert_eq!(SUPPORTED_API_MAJOR, 1);
 }

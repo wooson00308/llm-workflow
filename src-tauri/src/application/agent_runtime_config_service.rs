@@ -106,12 +106,9 @@ impl ConfigFailure {
     pub fn message(&self) -> String {
         match self {
             ConfigFailure::Runtime(failure) => failure.message(),
-            ConfigFailure::Rejected(rejection) => match rejection {
-                PolicyRejection::RoleDisableUnsupported { role } => format!(
-                    "{role} 역할을 끄는 설정은 런타임 계약에 자리가 없어 저장할 수 없습니다"
-                ),
-                other => format!("설정이 계약에 맞지 않습니다: {other:?}"),
-            },
+            ConfigFailure::Rejected(rejection) => {
+                format!("설정이 계약에 맞지 않습니다: {rejection:?}")
+            }
             ConfigFailure::Stale(_) => {
                 "읽은 뒤 설정이 바뀌었습니다. 최신 값을 확인한 뒤 다시 저장하세요.".to_owned()
             }
@@ -313,13 +310,14 @@ fn from_runtime(value: &Value, working_directory: &str) -> ProjectPolicy {
     let mut roles = std::collections::BTreeMap::new();
     for role in POLICY_ROLES {
         let stored = value.get("roles").and_then(|roles| roles.get(role));
+        let run_mode = string_at(stored, "executionMode").unwrap_or_else(|| "once".to_owned());
         roles.insert(
             role.to_owned(),
             RolePolicy {
-                enabled: true,
+                enabled: run_mode == "continuous",
                 provider: string_at(stored, "provider").unwrap_or_else(|| "claude".to_owned()),
                 model: string_at(stored, "model"),
-                run_mode: string_at(stored, "executionMode").unwrap_or_else(|| "once".to_owned()),
+                run_mode,
                 max_parallel: number_at(stored, "maxParallel").unwrap_or(DEFAULT_ROLE_MAX_PARALLEL),
                 interval_seconds: number_at(stored, "pollIntervalSeconds")
                     .unwrap_or(DEFAULT_POLL_INTERVAL_SECONDS),
@@ -336,6 +334,10 @@ fn from_runtime(value: &Value, working_directory: &str) -> ProjectPolicy {
             .unwrap_or(DEFAULT_PROJECT_MAX_PARALLEL),
         device_max_parallel: number_at(Some(value), "deviceMaxParallel")
             .unwrap_or(DEFAULT_DEVICE_MAX_PARALLEL),
+        automation_enabled: value
+            .get("automationEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         roles,
     }
 }
@@ -349,7 +351,7 @@ fn to_runtime(policy: &ProjectPolicy) -> Value {
             json!({
                 "provider": value.provider,
                 "model": value.model,
-                "executionMode": value.run_mode,
+                "executionMode": if value.enabled { "continuous" } else { "once" },
                 "maxParallel": value.max_parallel,
                 "pollIntervalSeconds": value.interval_seconds,
                 "executionLimit": value.max_per,
@@ -361,6 +363,7 @@ fn to_runtime(policy: &ProjectPolicy) -> Value {
         "workingDirectory": policy.working_directory,
         "projectMaxParallel": policy.project_max_parallel,
         "deviceMaxParallel": policy.device_max_parallel,
+        "automationEnabled": policy.automation_enabled,
         "paused": false,
         "eventRetentionDays": 30,
         "roles": Value::Object(roles),
@@ -768,20 +771,14 @@ mod tests {
     }
 
     #[test]
-    fn a_role_the_contract_cannot_disable_is_refused_instead_of_silently_enabled() {
-        let caller = FakeCaller::new(vec![]);
+    fn a_role_disabled_for_automation_is_stored_as_once_without_disabling_manual_runs() {
         let mut policy = crate::domain::agent_runtime::default_policy("p1", "/p1");
         policy.roles.get_mut("planner").expect("role").enabled = false;
 
-        let failure = AgentRuntimeConfigService
-            .save(&caller, &policy, "any", Compatibility::Compatible)
-            .expect_err("refused");
+        let runtime = super::to_runtime(&policy);
 
-        assert!(matches!(
-            failure,
-            ConfigFailure::Rejected(PolicyRejection::RoleDisableUnsupported { .. })
-        ));
-        assert!(caller.calls.borrow().is_empty());
+        assert_eq!(runtime["roles"]["planner"]["executionMode"], "once");
+        assert_eq!(runtime["roles"]["developer"]["executionMode"], "continuous");
     }
 
     #[test]

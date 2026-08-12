@@ -5,7 +5,6 @@ import type {
   CustomRulesDraft,
   CustomRulesPreview,
   CustomRulesState,
-  DreamJobRequest,
   HeartbeatRunFailure,
   HeartbeatServiceOperation,
   HeartbeatServiceOutcome,
@@ -18,7 +17,6 @@ import type {
   IntegrationsState,
   ManagedAssetsState,
   ManagedAssetSyncTrigger,
-  ManagedDreamJob,
   ManagedRoleJob,
   ProjectGateway,
   ProjectSummary,
@@ -30,6 +28,7 @@ import type {
   TaskQaBatchEntry,
   TaskQaOutcome,
   TaskResumeOutcome,
+  TaskRevisionRequestOutcome,
   AgentProjectPolicy,
   AgentRuntimeActions,
   AgentRuntimeOperation,
@@ -195,6 +194,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     error: null,
     writeError: null,
   });
+  const [agentViewActive, setAgentViewActive] = useState(false);
   // 실행 상태는 조회·쓰기 상태와 따로 둔다. 한 객체에 담으면 잡 설정 저장의 통째 교체가 진행 중
   // 표시를 지우고, 프로젝트를 닫는 것이 실행을 취소한 것처럼 보인다(R3).
   const [heartbeatRuns, setHeartbeatRuns] = useState<HeartbeatRunState>({
@@ -646,6 +646,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         plan: null,
         application,
       }));
+      if (project) {
+        await readAgentRuntime(project.rootPath, project.projectId);
+      }
       return true;
     } catch (reason) {
       setAgentRuntime((current) => ({
@@ -657,7 +660,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       await planAgentRuntime(pending.kind);
       return false;
     }
-  }, [agentRuntime.plan, gateway, planAgentRuntime]);
+  }, [agentRuntime.plan, gateway, planAgentRuntime, project, readAgentRuntime]);
 
   /** 기존 역할 잡에서 새 정책을 제안받는다. 파일을 읽기만 한다. */
   const previewAgentRuntimeMigration = useCallback(async () => {
@@ -708,6 +711,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         migration: null,
         policy,
       }));
+      await readAgentRuntime(project.rootPath, project.projectId);
       return true;
     } catch (reason) {
       setAgentRuntime((current) => ({
@@ -721,8 +725,10 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     agentRuntime.migration,
     agentRuntime.policy?.revision,
     gateway,
+    project,
     project?.projectId,
     project?.rootPath,
+    readAgentRuntime,
   ]);
 
   /**
@@ -1287,6 +1293,42 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   /**
+   * 작업 정의 수정 요청을 앱 소유 기록으로 남긴다. 거절 사유는 입력 영역이 그대로 보여 줄 수 있도록
+   * 반환값에도 담고, 성공 응답의 프로젝트 요약은 즉시 반영한다.
+   */
+  const recordTaskRevisionRequest = useCallback(
+    async (
+      workflowDirectory: string,
+      fileName: string,
+      expectedUpdatedAt: string,
+      reason: string,
+      requestId: string,
+    ): Promise<TaskRevisionRequestOutcome> => {
+      if (!project) return { ok: false, message: "열린 프로젝트가 없습니다." };
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await gateway.recordTaskRevisionRequest(project.rootPath, {
+          workflowDirectory,
+          fileName,
+          expectedUpdatedAt,
+          reason,
+          requestId,
+        });
+        setProject(result.summary);
+        return { ok: true, result };
+      } catch (reason) {
+        const message = messageFrom(reason);
+        setError(message);
+        return { ok: false, message };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
+  /**
    * 일괄 확인은 앱 호출 한 번이다. 건별 실패는 돌려주는 배열에 담기고 전역 에러로 올라가지 않는다 —
    * 전역 문구는 다음 호출이 덮는 자리라 건별 보고를 담지 못한다. `null`은 호출 자체가 실패한 것이다.
    */
@@ -1388,18 +1430,10 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, writeIntegration],
   );
 
-  const installDreamJob = useCallback(
-    (dream: DreamJobRequest, baseline: ManagedDreamJob | null) =>
-      writeIntegration("dream", (path) =>
-        gateway.installDreamJob(path, dream, baseline),
-      ),
-    [gateway, writeIntegration],
-  );
-
-  // 연동 카드가 받는 쓰기 액션 묶음. 연동이 늘면 여기에 항목이 하나 더 붙는다.
+  // 기존 역할 잡 이전을 위한 임시 호환 통로. 전용 연동 화면에서는 더 이상 노출하지 않는다.
   const integrationActions = useMemo<IntegrationActions>(
-    () => ({ installHeartbeatJobs, installDreamJob }),
-    [installDreamJob, installHeartbeatJobs],
+    () => ({ installHeartbeatJobs }),
+    [installHeartbeatJobs],
   );
 
   // 잡 하나를 지금 한 번 실행한다. 사용자가 누른 자리에서만 불린다 — 조회 주기와 프로젝트 열기
@@ -1613,17 +1647,39 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   );
 
   useEffect(() => {
-    if (!project?.initialized) return;
+    if (!project?.initialized || !gateway.watchProject) return;
+    const path = project.rootPath;
+    let disposed = false;
+    let stop: (() => Promise<void>) | null = null;
+    let debounce: number | null = null;
+    void gateway.watchProject(path, () => {
+      if (debounce !== null) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => void inspect(path, true), 500);
+    }).then((cleanup) => {
+      if (disposed) void cleanup();
+      else stop = cleanup;
+    }).catch(() => {
+      // 런타임 dispatcher의 안전 확인 주기가 남아 있다. 화면은 수동 새로고침도 제공한다.
+    });
+    return () => {
+      disposed = true;
+      if (debounce !== null) window.clearTimeout(debounce);
+      if (stop) void stop();
+    };
+  }, [gateway, inspect, project?.initialized, project?.rootPath]);
+
+  const hasActiveAgentRun = agentRuntime.queue?.runs.some((run) =>
+    ["reserved", "queued", "running", "paused"].includes(run.state)
+  ) ?? false;
+
+  useEffect(() => {
+    if (!project?.initialized || !project.projectId || (!agentViewActive && !hasActiveAgentRun)) return;
     const path = project.rootPath;
     const projectId = project.projectId;
-    void readIntegrations(path);
-    const timer = window.setInterval(() => {
-      void inspect(path, true);
-      void readIntegrations(path);
-      if (projectId) void readAgentRuns(path, projectId, true);
-    }, 2_500);
+    void readAgentRuns(path, projectId, true);
+    const timer = window.setInterval(() => void readAgentRuns(path, projectId, true), 2_500);
     return () => window.clearInterval(timer);
-  }, [inspect, readAgentRuns, readIntegrations, project?.initialized, project?.projectId, project?.rootPath]);
+  }, [agentViewActive, hasActiveAgentRun, project?.initialized, project?.projectId, project?.rootPath, readAgentRuns]);
 
   const agentRuntimeActions: AgentRuntimeActions = useMemo(
     () => ({
@@ -1636,6 +1692,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
             : Promise.resolve(),
         ]);
       },
+      setViewActive: setAgentViewActive,
       plan: planAgentRuntime,
       cancelPlan: cancelAgentRuntimePlan,
       apply: applyAgentRuntimePlan,
@@ -1705,6 +1762,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     recordTaskQa,
     confirmTaskQaBatch,
     resumeTask,
+    recordTaskRevisionRequest,
     decideSpec,
     agentRuntime,
     agentRuntimeActions,

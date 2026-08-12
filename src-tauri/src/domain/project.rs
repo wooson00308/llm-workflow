@@ -61,13 +61,7 @@ pub struct ProjectSummary {
     pub active_leases: Vec<AgentLeaseSummary>,
     pub workflows: Vec<WorkflowSummary>,
     pub pending_work: PendingRoleWork,
-    /// 넓어진 판정 그대로(SPEC-049 R1). `pending_work`는 이 값에서 파생하므로 둘이 갈라질 수 없다.
-    ///
-    /// 직렬화에서 빠지므로 화면에 나가는 payload의 모양은 이 필드가 생기기 전과 같다. 화면에 대상과
-    /// 제외 사유를 노출하는 일은 SPEC-049의 이번 범위가 아니고, 그래서 프런트엔드 타입도 그대로다.
-    /// 필드를 여기 두는 것은 조건 스크립트와의 대조가 화면이 쓰는 그 배선을 그대로 지나야 하기
-    /// 때문이다 — 판정만 따로 부르는 두 번째 경로를 만들면 대조가 배선을 고정하지 못한다.
-    #[serde(skip)]
+    /// 역할별 전체 후보와 판정. 화면은 이 값을 워크플로 항목과 조인해 사람용 대기열을 만든다.
     pub pending_detail: PendingRoleWorkDetail,
 }
 
@@ -81,7 +75,8 @@ pub struct PendingRoleWork {
 }
 
 /// 세 역할의 넓어진 판정(SPEC-049 R1). 역할마다 대상 문서와 후보별 제외 사유를 함께 답한다.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingRoleWorkDetail {
     pub planner: RoleWorkVerdict,
     pub architect: RoleWorkVerdict,
@@ -100,7 +95,8 @@ impl PendingRoleWorkDetail {
 }
 
 /// 역할 하나의 판정 결과.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct RoleWorkVerdict {
     /// 그 역할이 집어야 하는 문서의 id. 대상이 없으면 `None`이다.
     pub target: Option<String>,
@@ -127,18 +123,24 @@ impl RoleWorkVerdict {
             id: id.to_owned(),
             verdict: ELIGIBLE.to_owned(),
         });
-        self.target = Some(id.to_owned());
+        if self.target.is_none() {
+            self.target = Some(id.to_owned());
+        }
     }
 
     /// 종류가 있는 대상을 고르고 그 후보를 `eligible`로 기록한다.
     pub fn select_kind(&mut self, id: &str, kind: &str) {
+        let selected = self.target.is_none();
         self.select(id);
-        self.target_kind = Some(kind.to_owned());
+        if selected {
+            self.target_kind = Some(kind.to_owned());
+        }
     }
 }
 
 /// 후보 하나와 그 후보에 내려진 판정.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkCandidate {
     pub id: String,
     /// 대상이면 [`ELIGIBLE`], 아니면 제외 사유 코드. 조건 스크립트가 내는 코드와 같은 어휘를 쓴다.
@@ -277,6 +279,23 @@ pub struct TaskOverlapBlock {
     pub shared_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskScopeStatus {
+    Declared,
+    Absent,
+    Malformed,
+}
+
+/// 작업 상세가 현재 `scope_files` 선언을 추측 없이 보여 주기 위한 값.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskScopeDeclaration {
+    pub status: TaskScopeStatus,
+    /// 선언에 적힌 순서와 문자열 그대로다. 부재·형식 오류에서는 비어 있다.
+    pub files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDocument {
@@ -290,6 +309,8 @@ pub struct TaskDocument {
     /// 이 작업의 착수를 막고 있는 활성 lease와 그 근거(SPEC-032 R7). 비어 있으면 막히지 않은
     /// 것이다. 자기 자신을 잡은 lease는 담지 않는다 — 그것은 겹침이 아니라 자기 선점이다.
     pub overlap_blocks: Vec<TaskOverlapBlock>,
+    /// 정상 목록, 선언 부재, 형식 오류를 서로 다른 상태로 싣는다.
+    pub scope_declaration: TaskScopeDeclaration,
     /// 이 작업에 남은 사용자 수정 요청. 생성 시각 오름차순이고, 요청이 없으면 비어 있다.
     pub revision_requests: Vec<TaskRevisionRequest>,
 }

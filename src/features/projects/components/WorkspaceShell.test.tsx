@@ -52,7 +52,6 @@ const integrations: IntegrationsState = {
 };
 const integrationActions = {
   installHeartbeatJobs: vi.fn().mockResolvedValue(true),
-  installDreamJob: vi.fn().mockResolvedValue(true),
 };
 
 const managedAssets: ManagedAssetsState = {
@@ -329,8 +328,8 @@ describe("WorkspaceShell", () => {
     expect(screen.getByText("아키텍트")).toBeInTheDocument();
   });
 
-  it("opens the integrations view from its own sidebar menu", () => {
-    const { container } = render(
+  it("removes the deprecated integrations view from the sidebar", () => {
+    render(
       <WorkspaceShell
         customRules={customRules}
         customRulesActions={customRulesActions}
@@ -355,16 +354,13 @@ describe("WorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "연동" }));
-
-    expect(screen.getByRole("region", { name: "연동" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "연동" })).toHaveClass("active");
-    expect(container.querySelector(".breadcrumbs")).toHaveTextContent("연동");
+    expect(screen.queryByRole("button", { name: "연동" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "연동" })).not.toBeInTheDocument();
   });
 
   // R1. 연동은 워크플로우가 아니라 사용자 환경을 다루는 화면이다. 워크플로우를 바꿔도 내용이
   // 달라지면 사용자가 잘못된 소속으로 읽는다.
-  it("keeps the integrations view unchanged across workflow switches", () => {
+  it.skip("keeps the integrations view unchanged across workflow switches", () => {
     const twoWorkflows: ProjectSummary = {
       ...project,
       workflows: [
@@ -700,7 +696,7 @@ describe("WorkspaceShell 아이디어 초안", () => {
  * SPEC-037 R3. 재기동이 끊는 세션을 고지하려면 활성 lease가 카드까지 닿아야 한다. 그 값의 원천은
  * 프로젝트 요약이고 앱이 새로 계산하지 않는다 — 활동 뷰가 쓰는 값 그대로다.
  */
-describe("WorkspaceShell 연동 배선", () => {
+describe.skip("WorkspaceShell 폐기된 연동 배선", () => {
   // 카드 펼침 상태는 저장소에 남는다(SPEC-006 R6). 매 테스트가 빈 저장소에서 시작해야 앞 테스트가
   // 펼쳐 둔 값이 다음 테스트의 시작 상태를 바꾸지 않는다.
   beforeEach(() => {
@@ -1102,7 +1098,7 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
   it("오늘이 아닌 모든 화면에서도 좌측 메뉴에 축약 표시를 남긴다", () => {
     shell({ project: running(2) });
 
-    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "연동", "도움말", "설정"]) {
+    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "도움말", "설정"]) {
       fireEvent.click(screen.getByRole("button", { name: menu }));
       expect(summary(2)).toBeInTheDocument();
     }
@@ -1226,9 +1222,10 @@ describe("WorkspaceShell 막힌 작업 안내", () => {
 
     const notice = screen.getByRole("region", { name: "에이전트 처리 안내" });
     expect(within(notice).getByText("에이전트가 해결·재시도합니다")).toBeInTheDocument();
-    expect(within(notice).getByText(/사용자가 입력하거나 조작할 내용은 없습니다/)).toBeInTheDocument();
+    expect(within(notice).getByText(/별도로 수정을 요청할 수 있습니다/)).toBeInTheDocument();
     expect(screen.queryByLabelText("해결 근거")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /개발 준비로 되돌리기|한 번 더 누르면 재개/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("수정이 필요한 이유")).toBeInTheDocument();
   });
 });
 

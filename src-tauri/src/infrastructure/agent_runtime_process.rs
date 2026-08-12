@@ -28,6 +28,7 @@ const UPDATE_APPLY: [&str; 3] = ["agent", "update", "apply"];
 /// 그다음 그 launcher가 서비스를 등록한다.
 const ACTIVATE: [&str; 2] = ["runtime", "activate"];
 const INSTALL_SERVICE: [&str; 1] = ["install-service"];
+const MIGRATE_SERVICE: [&str; 2] = ["migrate-service", "--confirmed"];
 /// 프로젝트 설정 계약의 고정 인자.
 const CONFIG_READ: [&str; 3] = ["agent", "config", "read"];
 const CONFIG_WRITE: [&str; 3] = ["agent", "config", "write"];
@@ -151,6 +152,9 @@ impl RuntimeCaller for LauncherCaller {
             });
         }
         let mut command = Command::new(&self.launcher);
+        // 서비스 정의가 PATH의 개발용 heartbeat를 우연히 고르지 않도록 현재 앱이 검증한 stable
+        // launcher를 런타임에 명시한다. 런타임은 이 값이 실제 파일일 때만 우선한다.
+        command.env("HEARTBEAT_RUNTIME_LAUNCHER", &self.launcher);
         if let Some(parent) = self.launcher.parent() {
             let mut paths = vec![parent.to_path_buf()];
             if let Some(existing) = std::env::var_os("PATH") {
@@ -262,6 +266,12 @@ pub fn activate(
 /// 사용자 서비스를 등록한다. 사용자가 확인한 설치에서만 부른다.
 pub fn install_service(caller: &dyn RuntimeCaller) -> Result<Captured, RuntimeCallFailure> {
     succeeded(caller.call(&INSTALL_SERVICE, None)?)
+}
+
+/// 기존 등록을 보존·비활성화하고 관리형 dispatcher로 전환한다.
+/// 런타임이 자체 검증과 rollback까지 끝낸 뒤 종료 코드 0을 돌려준 경우만 성공이다.
+pub fn migrate_service(caller: &dyn RuntimeCaller) -> Result<Captured, RuntimeCallFailure> {
+    succeeded(caller.call(&MIGRATE_SERVICE, None)?)
 }
 
 /// 종료 코드가 0이 아니면 계약 밖으로 다룬다. 이 두 명령은 JSON이 아니라 코드로 답한다.
@@ -532,7 +542,7 @@ pub(crate) mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        activate, apply_update, inspect, install_service, plan_update, Captured,
+        activate, apply_update, inspect, install_service, migrate_service, plan_update, Captured,
         RuntimeCallFailure, RuntimeCaller,
     };
     use crate::domain::agent_runtime::ServiceResult;
@@ -818,6 +828,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn service_migration_requires_the_fixed_confirmation_argument() {
+        let caller = FakeCaller::new(vec![Ok(Captured {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })]);
+
+        migrate_service(&caller).expect("migrated");
+
+        assert_eq!(
+            caller.calls.borrow()[0].0,
+            vec!["migrate-service", "--confirmed"]
+        );
+    }
+
+    #[test]
     fn an_answer_outside_the_contract_keeps_the_original_output() {
         let caller = FakeCaller::new(vec![Ok(Captured {
             code: Some(2),
@@ -858,13 +884,23 @@ pub(crate) mod tests {
 
         let directory = tempfile::tempdir().expect("temporary directory");
         let launcher = directory.path().join("heartbeat");
-        fs::write(&launcher, "#!/bin/sh\ncommand -v heartbeat\n").expect("launcher");
+        fs::write(
+            &launcher,
+            "#!/bin/sh\nprintf '%s\\n' \"$HEARTBEAT_RUNTIME_LAUNCHER\"\ncommand -v heartbeat\n",
+        )
+        .expect("launcher");
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).expect("permissions");
         let caller = super::LauncherCaller::new(launcher.clone());
 
         let captured = caller.call(&["install-service"], None).expect("call");
 
         assert_eq!(captured.code, Some(0));
-        assert_eq!(captured.stdout.trim(), launcher.display().to_string());
+        assert_eq!(
+            captured.stdout.lines().collect::<Vec<_>>(),
+            vec![
+                launcher.display().to_string(),
+                launcher.display().to_string()
+            ]
+        );
     }
 }

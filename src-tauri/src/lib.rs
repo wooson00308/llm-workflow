@@ -6,6 +6,7 @@ mod infrastructure;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(commands::projects::ProjectWatchers::default())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -13,6 +14,8 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             commands::projects::inspect_project,
+            commands::projects::watch_project,
+            commands::projects::unwatch_project,
             commands::projects::synchronize_managed_project_assets,
             commands::projects::read_custom_rules,
             commands::projects::prepare_custom_rules_preview,
@@ -30,7 +33,6 @@ pub fn run() {
             commands::projects::migrate_project,
             commands::heartbeat::inspect_integrations,
             commands::heartbeat::install_heartbeat_jobs,
-            commands::heartbeat::install_dream_job,
             commands::heartbeat::run_heartbeat_job,
             commands::heartbeat::run_heartbeat_setup_step,
             commands::heartbeat::control_heartbeat_service,

@@ -20,13 +20,13 @@ use crate::application::agent_runtime_run_service::{
     AgentRuntimeRunService, CancelOutcome, RoleSlotRequest, RunFailure,
 };
 use crate::application::agent_runtime_status_service::{AgentRuntimeStatusService, StatusFailure};
-use crate::application::heartbeat_service::HeartbeatService;
+use crate::application::heartbeat_service::{migration_role_requests, HeartbeatService};
 use crate::domain::agent_runtime::{
     Compatibility, ProjectPolicy, QueueSnapshot, RunLogPage, RunPlan, RunStartOutcome, RunSummary,
 };
 use crate::domain::agent_runtime::{UpdateApplication, UpdatePlan};
 use crate::infrastructure::agent_runtime_package::launcher_path;
-use crate::infrastructure::agent_runtime_process::LauncherCaller;
+use crate::infrastructure::agent_runtime_process::{self, LauncherCaller, RuntimeCallFailure};
 
 /// 번들 안에서 런타임 자산이 놓이는 디렉터리 이름.
 const RESOURCE_DIRECTORY: &str = "runtime";
@@ -181,7 +181,7 @@ pub async fn apply_agent_runtime_migration(
 ) -> Result<PolicySnapshot, String> {
     let (resource, install_root) = locations(&app)?;
     let (home, user_home) = heartbeat_home(&app)?;
-    config_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let jobs = HeartbeatService
             .inspect(Path::new(&path), &home, &user_home)
             .heartbeat
@@ -190,19 +190,63 @@ pub async fn apply_agent_runtime_migration(
         let compatibility = AgentRuntimeInstallService::new(&resource, &install_root)
             .inspect(&caller)
             .compatibility;
-        AgentRuntimeConfigService.apply_migration(
-            &caller,
-            &MigrationRequest {
-                project_id,
-                working_directory: path,
-                jobs,
-                preview_id,
-                baseline_revision,
-            },
-            compatibility,
-        )
+        let policy = AgentRuntimeConfigService
+            .apply_migration(
+                &caller,
+                &MigrationRequest {
+                    project_id,
+                    working_directory: path.clone(),
+                    jobs: jobs.clone(),
+                    preview_id,
+                    baseline_revision,
+                },
+                compatibility,
+            )
+            .map_err(|failure| failure.message())?;
+
+        // 새 정책은 automationEnabled=false로 먼저 저장된다. 그 뒤 앱이 소유한 세 역할 잡만
+        // 중지하므로 어느 단계에서 실패해도 옛 스케줄러와 새 dispatcher가 동시에 돌지 않는다.
+        let disabled = migration_role_requests(&jobs, false);
+        HeartbeatService
+            .install(Path::new(&path), &home, &user_home, &disabled, &jobs)
+            .map_err(|error| format!("기존 역할 잡을 안전하게 중지하지 못했습니다: {error}"))?;
+
+        if let Err(failure) = agent_runtime_process::migrate_service(&caller) {
+            let restored = migration_role_requests(&jobs, true);
+            let rollback = HeartbeatService
+                .install(Path::new(&path), &home, &user_home, &restored, &[])
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let suffix = match rollback {
+                Ok(()) => "기존 역할 잡은 원래대로 복구했습니다.",
+                Err(_) => {
+                    "기존 역할 잡 복구도 완료하지 못했습니다. 자동 배정은 꺼진 상태로 유지됩니다."
+                }
+            };
+            return Err(format!(
+                "자동 배정 서비스로 전환하지 못했습니다. {} {suffix}",
+                service_failure_detail(&failure),
+            ));
+        }
+
+        Ok(policy)
     })
     .await
+    .map_err(|error| format!("기존 설정 이전을 시작하지 못했습니다: {error}"))?
+}
+
+fn service_failure_detail(failure: &RuntimeCallFailure) -> String {
+    if let RuntimeCallFailure::OffContract { stdout, stderr, .. } = failure {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        if !detail.is_empty() {
+            return detail.lines().last().unwrap_or(detail).to_owned();
+        }
+    }
+    failure.message()
 }
 
 /// 실행 계획을 읽는다. 파일도 provider 프로세스도 바뀌지 않는다.

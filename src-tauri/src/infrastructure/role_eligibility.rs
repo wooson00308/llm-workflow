@@ -104,9 +104,8 @@ pub fn pending_role_work(
     }
 }
 
-/// 워크플로우를 디렉터리 이름 순으로 돌며 처음 대상을 찾은 자리에서 멈춘다. 스크립트의
-/// `for wf in .workflow/*/`가 도는 차례가 그것이고, 대상을 찾으면 그 자리에서 종료하므로 뒤의
-/// 워크플로우는 후보조차 보지 않는다.
+/// 워크플로우를 디렉터리 이름 순으로 모두 판정한다. 첫 대상은 역할 계약 순서대로 보존하고,
+/// 뒤 후보는 읽기 전용 대기열과 제외 사유를 위해 계속 모은다.
 fn judge_workflows(
     workflows: &[WorkflowInput<'_>],
     judge: impl Fn(&WorkflowInput<'_>) -> RoleWorkVerdict,
@@ -118,10 +117,9 @@ fn judge_workflows(
     for workflow in ordered {
         let verdict = judge(workflow);
         merged.candidates.extend(verdict.candidates);
-        if verdict.target.is_some() {
+        if merged.target.is_none() && verdict.target.is_some() {
             merged.target = verdict.target;
             merged.target_kind = verdict.target_kind;
-            break;
         }
     }
     merged
@@ -163,7 +161,6 @@ fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) ->
             continue;
         }
         verdict.select(&idea.id);
-        return verdict;
     }
     for decision_id in workflow.revision_requested_decisions {
         if workflow.nondraft_spec_sources.contains(decision_id) {
@@ -175,7 +172,6 @@ fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) ->
             continue;
         }
         verdict.select(decision_id);
-        return verdict;
     }
     verdict
 }
@@ -208,7 +204,6 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
             continue;
         }
         verdict.select_kind(decision_id, SPEC_APPROVAL_KIND);
-        return verdict;
     }
     verdict
 }
@@ -251,7 +246,6 @@ fn architect_workflows_verdict(
             continue;
         }
         verdict.select_kind(&request.id, TASK_REVISION_REQUEST_KIND);
-        return verdict;
     }
 
     let direct_corrections = judge_workflows(workflows, |workflow| {
@@ -268,21 +262,21 @@ fn architect_workflows_verdict(
                 continue;
             }
             direct.select_kind(&task.id, BLOCKED_TASK_KIND);
-            return direct;
         }
         direct
     });
     verdict.candidates.extend(direct_corrections.candidates);
-    if direct_corrections.target.is_some() {
+    if verdict.target.is_none() && direct_corrections.target.is_some() {
         verdict.target = direct_corrections.target;
         verdict.target_kind = direct_corrections.target_kind;
-        return verdict;
     }
 
     let approvals = judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids));
     verdict.candidates.extend(approvals.candidates);
-    verdict.target = approvals.target;
-    verdict.target_kind = approvals.target_kind;
+    if verdict.target.is_none() {
+        verdict.target = approvals.target;
+        verdict.target_kind = approvals.target_kind;
+    }
     verdict
 }
 
@@ -326,7 +320,6 @@ fn developer_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
             continue;
         }
         verdict.select(&task.id);
-        return verdict;
     }
     verdict
 }
@@ -393,15 +386,26 @@ mod tests {
                 run.target(),
                 "{role} 대상이 조건 스크립트와 다르다"
             );
-            assert_eq!(
-                candidate_lines(verdict),
-                run.candidates(),
-                "{role} 후보 목록이 조건 스크립트와 다르다"
-            );
-
             let machine = run_machine_condition(project_root, role);
             let value: serde_json::Value =
                 serde_json::from_str(machine.stdout.trim()).expect("machine JSON");
+            let machine_candidates = value["candidates"]
+                .as_array()
+                .expect("machine candidates")
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{} {}",
+                        candidate["reason"].as_str().expect("candidate reason"),
+                        candidate["id"].as_str().expect("candidate id")
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                candidate_lines(verdict),
+                machine_candidates,
+                "{role} 후보 목록이 조건 스크립트 JSON과 다르다"
+            );
             assert_eq!(
                 verdict.target_kind.as_deref(),
                 value["targetKind"].as_str(),

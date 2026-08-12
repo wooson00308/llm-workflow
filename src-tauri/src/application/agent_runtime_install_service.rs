@@ -606,7 +606,11 @@ mod tests {
         assert_eq!(status.installed_version.as_deref(), Some("0.8.0"));
         assert_eq!(status.running_version.as_deref(), Some("0.8.0"));
         assert_eq!(status.service.result, ServiceResult::Registered);
-        assert!(inspection.execution_allowed);
+        assert!(!inspection.execution_allowed);
+        assert!(matches!(
+            inspection.compatibility,
+            Compatibility::VersionOutOfRange { .. }
+        ));
     }
 
     #[test]
