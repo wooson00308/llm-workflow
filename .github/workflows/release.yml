@@ -11,7 +11,7 @@ permissions:
 env:
   # 번들에 넣을 런타임 배포물의 태그. 앱 릴리스는 이 태그의 산출물 하나만 담는다 —
   # 어느 런타임이 들어갔는지가 태그 하나로 고정돼야 나중에 그 번들을 재현할 수 있다.
-  RUNTIME_RELEASE_TAG: runtime-v0.9.1
+  RUNTIME_RELEASE_TAG: runtime-v0.9.2
   RUNTIME_REPOSITORY: wooson00308/claude-heartbeat
 
 jobs:
