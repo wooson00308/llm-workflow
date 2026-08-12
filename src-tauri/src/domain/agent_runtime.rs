@@ -600,13 +600,10 @@ mod run_summary_tests {
 
     #[test]
     fn the_reservation_result_prefix_reaches_the_app_and_stays_empty_for_legacy_rows() {
-        let current: RunSummary =
-            serde_json::from_value(run(json!("2026-08-10T10:00:09Z"))).expect("current runtime row");
+        let current: RunSummary = serde_json::from_value(run(json!("2026-08-10T10:00:09Z")))
+            .expect("current runtime row");
         let mut legacy = run(json!("2026-08-10T10:00:09Z"));
-        legacy
-            .as_object_mut()
-            .expect("row")
-            .remove("resultPrefix");
+        legacy.as_object_mut().expect("row").remove("resultPrefix");
         let legacy: RunSummary = serde_json::from_value(legacy).expect("legacy runtime row");
 
         assert_eq!(

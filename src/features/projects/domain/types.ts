@@ -1214,6 +1214,20 @@ export interface ProjectGateway {
     runId: string,
     cursor: number,
   ): Promise<AgentRunLogPage>;
+  /**
+   * 진단 자료를 저장할 위치를 사용자에게 묻는다. 고르지 않고 닫으면 null이며, 그때는 내보내기를
+   * 부르지 않으므로 파일이 만들어지지 않는다.
+   */
+  chooseDiagnosticsFile(defaultFileName: string): Promise<string | null>;
+  /**
+   * 실행 하나의 진단 자료를 조립한다. 저장 위치를 주면 백엔드가 그 자리에 쓰고, 주지 않으면 같은
+   * 내용이 문자열로 온다. 두 경로가 같은 조립을 지나므로 저장한 파일과 복사할 문자열이 같다.
+   */
+  exportAgentRunDiagnostics(
+    projectId: string,
+    runId: string,
+    destination: string | null,
+  ): Promise<string>;
 }
 
 /**
@@ -1634,6 +1648,19 @@ export interface AgentRuntimeState {
   runReports: Record<string, WorkflowReportSummary[]>;
   /** 지금 열어 둔 보고서. 닫으면 null이다. */
   reportView: AgentReportView | null;
+  /** 마지막으로 고른 진단 자료 내보내기 하나. 고른 적이 없으면 null이다. */
+  diagnosticExport: AgentDiagnosticExport | null;
+}
+
+/**
+ * 진단 자료 내보내기 한 번의 상태. 사용자가 저장이나 복사를 고른 뒤에만 생기며, 화면을 여는 것만
+ * 으로는 만들어지지 않는다.
+ */
+export interface AgentDiagnosticExport {
+  runId: string;
+  mode: "save" | "copy";
+  status: "working" | "done" | "failed";
+  error: string | null;
 }
 
 /** 읽기 전용으로 열어 둔 보고서 하나. 편집 상태나 저장 대기 값은 여기에 없다. */
@@ -1688,6 +1715,11 @@ export interface AgentRuntimeActions {
     report: WorkflowReportSummary,
   ): Promise<void>;
   closeReport(): void;
+  /**
+   * 실행 하나의 진단 자료를 파일로 저장하거나 클립보드로 복사한다. 사용자가 저장이나 복사를 고른
+   * 때만 불리며, 저장 위치를 고르지 않고 닫으면 아무것도 만들지 않는다. 외부로 보내는 경로는 없다.
+   */
+  exportRunDiagnostics(runId: string, mode: "save" | "copy"): Promise<void>;
 }
 
 export interface RecentProjectStore {

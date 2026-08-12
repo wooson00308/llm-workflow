@@ -12,8 +12,8 @@ use crate::domain::project::{
     AgentLease, AgentLeaseSummary, CustomRulesDocument, CustomRulesDraft, CustomRulesPreview,
     IdeaDocument, ManagedAssetState, ManagedAssetStatus, ManagedAssetSyncResult,
     ManagedAssetSyncStatus, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
-    ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult, SchemaCompatibility,
-    ReportDocument, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
+    ProjectSummary, ReportDocument, SaveCustomRulesRequest, SaveCustomRulesResult,
+    SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
     TaskDocument, TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
     TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
     TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
@@ -8981,7 +8981,11 @@ mod report_surface_tests {
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
         let directory = project.workflows[0].directory.clone();
-        let reports = root.path().join(".workflow").join(&directory).join("reports");
+        let reports = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("reports");
         for (file_name, body) in [
             (
                 format!("REPORT-{TARGET_ID}-DEV.md"),
@@ -9082,7 +9086,12 @@ mod report_surface_tests {
         let (root, directory) = workflow_with_reports();
 
         let linked = FileSystemProjectRepository
-            .list_run_reports(root.path(), &directory, Some(TARGET_ID), Some(RESULT_PREFIX))
+            .list_run_reports(
+                root.path(),
+                &directory,
+                Some(TARGET_ID),
+                Some(RESULT_PREFIX),
+            )
             .expect("link by both");
 
         assert!(
@@ -9112,7 +9121,11 @@ mod report_surface_tests {
     #[test]
     fn reading_a_report_returns_the_file_verbatim_and_changes_nothing() {
         let (root, directory) = workflow_with_reports();
-        let reports = root.path().join(".workflow").join(&directory).join("reports");
+        let reports = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("reports");
         let before: Vec<_> = fs::read_dir(&reports)
             .expect("reports")
             .filter_map(Result::ok)
@@ -9124,7 +9137,11 @@ mod report_surface_tests {
             .collect();
 
         let document = FileSystemProjectRepository
-            .read_report(root.path(), &directory, &format!("REPORT-{TARGET_ID}-DEV.md"))
+            .read_report(
+                root.path(),
+                &directory,
+                &format!("REPORT-{TARGET_ID}-DEV.md"),
+            )
             .expect("read report");
 
         assert_eq!(document.body, "# 개발 보고서\n\n검증을 마쳤다.\n");
@@ -9155,7 +9172,8 @@ mod report_surface_tests {
             "nested/REPORT.md",
             "/etc/hosts",
         ] {
-            let refused = FileSystemProjectRepository.read_report(root.path(), &directory, file_name);
+            let refused =
+                FileSystemProjectRepository.read_report(root.path(), &directory, file_name);
 
             assert!(
                 matches!(refused, Err(ProjectError::UnsafeDocumentFile(_))),

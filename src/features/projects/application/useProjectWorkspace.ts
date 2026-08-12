@@ -37,6 +37,7 @@ import type {
   AgentRuntimeState,
   AgentRoleSlotRequest,
 } from "../domain/types";
+import { copy } from "../infrastructure/clipboard";
 
 interface Dependencies {
   gateway: ProjectGateway;
@@ -176,6 +177,7 @@ const emptyAgentRuntime: AgentRuntimeState = {
   logWatchRunId: null,
   runReports: {},
   reportView: null,
+  diagnosticExport: null,
 };
 
 export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
@@ -688,6 +690,50 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       current.reportView ? { ...current, reportView: null } : current,
     );
   }, []);
+
+  /**
+   * 실행 하나의 진단 자료를 저장하거나 복사한다.
+   *
+   * 저장은 위치를 먼저 묻는다. 사용자가 고르지 않고 닫으면 내보내기 명령을 부르지 않으므로 파일이
+   * 만들어지지 않는다. 복사는 위치를 묻지 않고 조립한 내용을 클립보드에 넣는다. 두 경로 모두 같은
+   * 백엔드 명령 하나를 지나고, 외부로 보내는 자리는 어디에도 없다.
+   */
+  const exportAgentRunDiagnostics = useCallback(
+    async (runId: string, mode: "save" | "copy") => {
+      if (!project?.projectId) return;
+      let destination: string | null = null;
+      if (mode === "save") {
+        destination = await gateway.chooseDiagnosticsFile(`${runId}-diagnostics.json`);
+        if (!destination) return;
+      }
+      setAgentRuntime((current) => ({
+        ...current,
+        diagnosticExport: { runId, mode, status: "working", error: null },
+      }));
+      try {
+        const content = await gateway.exportAgentRunDiagnostics(
+          project.projectId,
+          runId,
+          destination,
+        );
+        if (activeProjectPath.current !== project.rootPath) return;
+        if (mode === "copy" && !(await copy(content))) {
+          throw new Error("클립보드에 넣지 못했습니다");
+        }
+        setAgentRuntime((current) => ({
+          ...current,
+          diagnosticExport: { runId, mode, status: "done", error: null },
+        }));
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          diagnosticExport: { runId, mode, status: "failed", error: messageFrom(reason) },
+        }));
+      }
+    },
+    [gateway, project],
+  );
 
   /** 계획을 만든다. 세 조작 모두 계획 단계에서는 아무것도 쓰지 않는다. */
   const planAgentRuntime = useCallback(
@@ -1838,6 +1884,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       readRunReports: readAgentRunReports,
       openReport: openAgentReport,
       closeReport: closeAgentReport,
+      exportRunDiagnostics: exportAgentRunDiagnostics,
     }),
     [
       applyAgentRuntimeMigration,
@@ -1850,6 +1897,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       dismissAgentRuntimeMigration,
       dismissAgentRunCancel,
       dismissAgentRunRetry,
+      exportAgentRunDiagnostics,
       openAgentReport,
       planAgentRuntime,
       planAgentRun,

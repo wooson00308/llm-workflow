@@ -87,7 +87,7 @@ function state(overrides: Partial<AgentRuntimeState> = {}): AgentRuntimeState {
     queue: { projectId: "prj_1", paused: false, runs: [], errors: [], providers: [], unavailable: null },
     queueReading: false, queueError: null, pausing: false, cancelPreview: null, cancelResult: null,
     retryPreview: null, controllingRunId: null, controlError: null, logs: {}, readingLogRunId: null, logError: null,
-    logWatchRunId: null, runReports: {}, reportView: null,
+    logWatchRunId: null, runReports: {}, reportView: null, diagnosticExport: null,
     ...overrides,
   };
 }
@@ -100,7 +100,7 @@ function actions(overrides: Partial<AgentRuntimeActions> = {}): AgentRuntimeActi
     setProjectPaused: vi.fn().mockResolvedValue(true), previewCancel: vi.fn().mockResolvedValue(undefined), dismissCancel: vi.fn(), confirmCancel: vi.fn().mockResolvedValue(true),
     previewRetry: vi.fn(), dismissRetry: vi.fn(), confirmRetry: vi.fn().mockResolvedValue(true), readRunLog: vi.fn().mockResolvedValue(undefined),
     watchRunLog: vi.fn(), readRunReports: vi.fn().mockResolvedValue(undefined), openReport: vi.fn().mockResolvedValue(undefined),
-    closeReport: vi.fn(), ...overrides,
+    closeReport: vi.fn(), exportRunDiagnostics: vi.fn().mockResolvedValue(undefined), ...overrides,
   };
 }
 
@@ -614,6 +614,78 @@ describe("AgentRuntimeView run reports", () => {
       fireEvent.keyDown(window, { key: "Escape" });
       expect(runtimeActions.closeReport).toHaveBeenCalled();
       expect(screen.getByRole("complementary", { name: "에이전트 상세" })).toBeInTheDocument();
+    });
+  });
+});
+
+describe("AgentRuntimeView diagnostic export", () => {
+  it("내보내기는 사용자가 저장이나 복사를 고른 때만 실행된다", () => {
+    const runtimeActions = actions();
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({ queue: queueOf([run("run-1", "succeeded", "TASK-2")]) }), runtimeActions);
+
+      // 상세를 여는 것만으로는 아무것도 나가지 않는다.
+      const drawer = openDetail("후속 작업");
+      expect(runtimeActions.exportRunDiagnostics).not.toHaveBeenCalled();
+
+      fireEvent.click(within(drawer).getByRole("button", { name: "진단 자료 저장" }));
+      expect(runtimeActions.exportRunDiagnostics).toHaveBeenCalledWith("run-1", "save");
+
+      fireEvent.click(within(drawer).getByRole("button", { name: "진단 자료 복사" }));
+      expect(runtimeActions.exportRunDiagnostics).toHaveBeenLastCalledWith("run-1", "copy");
+      // 외부로 보내거나 이슈를 만드는 자리는 없다.
+      expect(within(drawer).queryByRole("button", { name: /업로드|공유|이슈|전송/ })).not.toBeInTheDocument();
+    });
+  });
+
+  it("활성 실행과 종료된 실행 양쪽에서 저장과 복사를 고를 수 있다", () => {
+    withClock("2026-08-11T00:01:00Z", () => {
+      const view = renderView(state({
+        queue: queueOf([run("run-1", "running", "TASK-2", runStart, null)]),
+      }));
+      const active = openDetail("후속 작업");
+      expect(within(active).getByRole("button", { name: "진단 자료 저장" })).toBeEnabled();
+      expect(within(active).getByRole("button", { name: "진단 자료 복사" })).toBeEnabled();
+
+      view.rerender(<AgentRuntimeView actions={view.runtimeActions} project={project()} state={state({
+        queue: queueOf([run("run-1", "failed", "TASK-2", runStart, "2026-08-11T00:00:30Z")]),
+      })} />);
+      const finished = screen.getByRole("complementary", { name: "에이전트 상세" });
+      expect(within(finished).getByRole("button", { name: "진단 자료 저장" })).toBeEnabled();
+      expect(within(finished).getByRole("button", { name: "진단 자료 복사" })).toBeEnabled();
+    });
+  });
+
+  it("진행과 성공과 실패를 그 실행의 자리에만 보여 준다", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      const queue = queueOf([run("run-1", "succeeded", "TASK-2")]);
+      const view = renderView(state({
+        queue,
+        diagnosticExport: { runId: "run-1", mode: "save", status: "working", error: null },
+      }));
+      expect(openDetail("후속 작업")).toHaveTextContent("진단 자료를 모으는 중입니다.");
+
+      view.rerender(<AgentRuntimeView actions={view.runtimeActions} project={project()} state={state({
+        queue,
+        diagnosticExport: { runId: "run-1", mode: "copy", status: "done", error: null },
+      })} />);
+      expect(screen.getByRole("complementary", { name: "에이전트 상세" }))
+        .toHaveTextContent("진단 자료를 클립보드에 담았습니다.");
+
+      view.rerender(<AgentRuntimeView actions={view.runtimeActions} project={project()} state={state({
+        queue,
+        diagnosticExport: { runId: "run-1", mode: "save", status: "failed", error: "저장할 권한이 없습니다" },
+      })} />);
+      expect(screen.getByRole("complementary", { name: "에이전트 상세" }))
+        .toHaveTextContent("진단 자료를 내보내지 못했습니다 · 저장할 권한이 없습니다");
+
+      // 다른 실행의 결과를 이 실행의 자리에 남기지 않는다.
+      view.rerender(<AgentRuntimeView actions={view.runtimeActions} project={project()} state={state({
+        queue,
+        diagnosticExport: { runId: "run-9", mode: "save", status: "done", error: null },
+      })} />);
+      expect(screen.getByRole("complementary", { name: "에이전트 상세" }))
+        .not.toHaveTextContent("진단 자료를");
     });
   });
 });

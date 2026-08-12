@@ -1,5 +1,13 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+
+// 클립보드는 Tauri 플러그인을 부르는 자리라 jsdom에서 동작하지 않는다. 복사 경로가 실제로 그 모듈을
+// 지나는지만 보면 되므로 모듈 하나를 대신 세운다.
+const { clipboardCopy } = vi.hoisted(() => ({
+  clipboardCopy: vi.fn<(text: string) => Promise<boolean>>(),
+}));
+vi.mock("../infrastructure/clipboard", () => ({ copy: clipboardCopy }));
+
 import { useProjectWorkspace } from "./useProjectWorkspace";
 import type {
   CustomRulesDocument,
@@ -485,6 +493,10 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
       events: [],
       nextCursor: 0,
     }),
+    chooseDiagnosticsFile: vi.fn().mockResolvedValue("/tmp/run-1-diagnostics.json"),
+    exportAgentRunDiagnostics: vi
+      .fn()
+      .mockResolvedValue('{"bundleVersion":"1","runId":"run-1"}'),
     listRunReports: vi.fn().mockResolvedValue([]),
     readReport: vi.fn().mockResolvedValue({
       summary: { fileName: "REPORT-TASK-1-DEV.md", title: "구현 보고서" },
@@ -1576,6 +1588,69 @@ describe("useProjectWorkspace 에이전트 실행", () => {
 
     act(() => result.current.agentRuntimeActions.closeReport());
     expect(result.current.agentRuntime.reportView).toBeNull();
+    unmount();
+  });
+
+  it("저장 위치를 고르지 않고 닫으면 내보내기를 부르지 않아 파일이 만들어지지 않는다", async () => {
+    const chooseDiagnosticsFile = vi.fn().mockResolvedValue(null);
+    const exportAgentRunDiagnostics = vi.fn().mockResolvedValue("{}");
+    const gateway = gatewayFor({ chooseDiagnosticsFile, exportAgentRunDiagnostics });
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "save"));
+
+    expect(chooseDiagnosticsFile).toHaveBeenCalled();
+    expect(exportAgentRunDiagnostics).not.toHaveBeenCalled();
+    expect(result.current.agentRuntime.diagnosticExport).toBeNull();
+    unmount();
+  });
+
+  it("저장은 고른 위치를 넘기고 복사는 위치 없이 받은 내용을 클립보드에 넣는다", async () => {
+    const content = '{"bundleVersion":"1","runId":"run-1"}';
+    const exportAgentRunDiagnostics = vi.fn().mockResolvedValue(content);
+    const gateway = gatewayFor({ exportAgentRunDiagnostics });
+    clipboardCopy.mockResolvedValue(true);
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "save"));
+    expect(exportAgentRunDiagnostics).toHaveBeenLastCalledWith(
+      project.projectId,
+      "run-1",
+      "/tmp/run-1-diagnostics.json",
+    );
+    expect(result.current.agentRuntime.diagnosticExport).toEqual({
+      runId: "run-1",
+      mode: "save",
+      status: "done",
+      error: null,
+    });
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "copy"));
+    // 복사는 위치를 묻지 않는다. 백엔드는 같은 조립 결과를 문자열로 돌려주고 그 값이 클립보드로 간다.
+    expect(exportAgentRunDiagnostics).toHaveBeenLastCalledWith(project.projectId, "run-1", null);
+    expect(clipboardCopy).toHaveBeenCalledWith(content);
+    expect(result.current.agentRuntime.diagnosticExport?.status).toBe("done");
+    unmount();
+  });
+
+  it("클립보드에 넣지 못하면 성공으로 적지 않고 사유를 남긴다", async () => {
+    const gateway = gatewayFor({});
+    clipboardCopy.mockResolvedValue(false);
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "copy"));
+
+    expect(result.current.agentRuntime.diagnosticExport?.status).toBe("failed");
+    expect(result.current.agentRuntime.diagnosticExport?.error).toMatch(/클립보드/);
     unmount();
   });
 

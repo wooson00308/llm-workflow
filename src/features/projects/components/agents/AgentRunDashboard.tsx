@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AgentDiagnosticExport,
   AgentReportView,
   AgentRoleSlotRequest,
   AgentRunStatus,
@@ -292,7 +293,11 @@ function DetailDrawer({ actions, itemMap, onClose, project, queueItem, run, stat
             <div className="agent-drawer-actions">
               {activeStates.has(run.state) && <button onClick={() => void actions.previewCancel(run.runId)} type="button">취소</button>}
               {["failed", "cancelled", "recovery_required"].includes(run.state) && <button onClick={() => actions.previewRetry(run.runId)} type="button">재시도</button>}
+              {/* 진단 자료는 활성 실행과 종료된 실행 양쪽에서 내보낼 수 있다. 상태로 막지 않는다. */}
+              <button onClick={() => void actions.exportRunDiagnostics(run.runId, "save")} type="button">진단 자료 저장</button>
+              <button onClick={() => void actions.exportRunDiagnostics(run.runId, "copy")} type="button">진단 자료 복사</button>
             </div>
+            {state.diagnosticExport?.runId === run.runId && <DiagnosticExportStatus report={state.diagnosticExport} />}
             {state.logError && <p className="agent-detail-message">실행 기록을 읽지 못했습니다 · {redactSecrets(state.logError)}</p>}
             {(activity && (activity.signals.length > 0 || idle)) && (
               <ol className="agent-run-events">
@@ -333,6 +338,27 @@ function ReportViewer({ onClose, view }: { onClose(): void; view: AgentReportVie
       </section>
     </div>
   );
+}
+
+/**
+ * 진단 자료 내보내기 한 번의 진행·성공·실패 표시. 사용자가 저장이나 복사를 고른 뒤에만 나온다.
+ *
+ * 성공 문구가 어디에 놓였는지를 함께 말한다 — 저장은 사용자가 고른 파일에, 복사는 클립보드에
+ * 들어갔고, 두 경우 모두 앱 밖으로 나간 곳이 없다.
+ */
+function DiagnosticExportStatus({ report }: { report: AgentDiagnosticExport }) {
+  const target = report.mode === "save" ? "파일" : "클립보드";
+  if (report.status === "working") {
+    return <p className="agent-export-status" role="status">진단 자료를 모으는 중입니다.</p>;
+  }
+  if (report.status === "failed") {
+    return (
+      <p className="agent-export-status failed" role="status">
+        진단 자료를 내보내지 못했습니다 · {redactSecrets(report.error ?? "")}
+      </p>
+    );
+  }
+  return <p className="agent-export-status done" role="status">진단 자료를 {target}에 담았습니다.</p>;
 }
 
 /** 도구 사용 총 횟수와 유형별 집계. 도구 이름 원문은 여기에도 다른 어디에도 나가지 않는다. */

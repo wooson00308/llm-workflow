@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   AgentInstallApplication,
   AgentInstallPlan,
@@ -340,5 +340,23 @@ export const tauriProjectGateway: ProjectGateway = {
 
   readAgentRunLog(projectId, runId, cursor) {
     return invoke<AgentRunLogPage>("read_agent_run_log", { projectId, runId, cursor });
+  },
+
+  // 위치를 고르는 것은 대화상자가, 그 위치에 쓰는 것은 백엔드 명령이 한다. 저장소에 파일 시스템
+  // 플러그인이 없으므로 화면이 직접 파일을 만들지 않는다.
+  chooseDiagnosticsFile(defaultFileName) {
+    return save({
+      defaultPath: defaultFileName,
+      filters: [{ name: "진단 자료", extensions: ["json"] }],
+      title: "실행 진단 자료 저장",
+    });
+  },
+
+  exportAgentRunDiagnostics(projectId, runId, destination) {
+    return invoke<string>("export_agent_run_diagnostics", {
+      projectId,
+      runId,
+      destination,
+    });
   },
 };
