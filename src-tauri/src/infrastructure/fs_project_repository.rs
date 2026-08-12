@@ -937,7 +937,16 @@ fn read_active_leases(control_root: &Path) -> Result<Vec<AgentLeaseSummary>, Pro
         .into_iter()
         .map(|lease| lease.summary)
         .collect();
-    leases.sort_by(|left, right| left.expires_at.cmp(&right.expires_at));
+    // 만료 시각은 심장박동마다 연장되어, 병렬 워커가 있으면 조회할 때마다 만료순이 뒤집힌다.
+    // 화면 카드가 제자리에 있도록 lease의 수명 동안 변하지 않는 값으로만 정렬한다.
+    // 대상 문서가 없는 lease는 뒤로 보낸다.
+    leases.sort_by_key(|lease| {
+        (
+            lease.task_id.is_none(),
+            lease.task_id.clone(),
+            lease.lease_id.clone(),
+        )
+    });
     Ok(leases)
 }
 
@@ -3207,6 +3216,41 @@ mod tests {
         assert_eq!(summary.active_leases[0].lease_id, "active");
     }
 
+    #[test]
+    fn keeps_agent_lease_order_stable_while_heartbeats_extend_expiry() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let leases = root.path().join(".workflow/.runtime/leases");
+        // 뒤 문서의 lease가 더 이른 만료를 갖는다. 만료순이라면 TASK-2가 앞으로 온다.
+        let later = (Utc::now() + Duration::minutes(30)).to_rfc3339();
+        let sooner = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        fs::write(
+            leases.join("TASK-1.yml"),
+            format!(
+                "schema_version: 1\nlease_id: lease-b\nagent: codex\ntask_id: TASK-1\nheartbeat_at: {later}\nexpires_at: {later}\n"
+            ),
+        )
+        .expect("first lease");
+        fs::write(
+            leases.join("TASK-2.yml"),
+            format!(
+                "schema_version: 1\nlease_id: lease-a\nagent: codex\ntask_id: TASK-2\nheartbeat_at: {sooner}\nexpires_at: {sooner}\n"
+            ),
+        )
+        .expect("second lease");
+
+        let summary = repository.inspect(root.path()).expect("inspect leases");
+        let order: Vec<&str> = summary
+            .active_leases
+            .iter()
+            .map(|lease| lease.task_id.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(order, ["TASK-1", "TASK-2"]);
+    }
+
     fn write_lease(root: &Path, file_name: &str, contents: &str) {
         fs::write(
             root.join(".workflow/.runtime/leases").join(file_name),
@@ -3222,7 +3266,7 @@ mod tests {
         repository
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
-        // 만료 오름차순 정렬에 기대어 순서를 고정한다.
+        // 대상 문서 오름차순(없으면 뒤) 정렬에 기대어 순서를 고정한다.
         let legacy_expiry = (Utc::now() + Duration::minutes(5)).to_rfc3339();
         let role_expiry = (Utc::now() + Duration::minutes(6)).to_rfc3339();
         let blank_expiry = (Utc::now() + Duration::minutes(7)).to_rfc3339();
@@ -3258,14 +3302,14 @@ mod tests {
                 .map(|lease| (lease.lease_id.as_str(), lease.role.as_deref()))
                 .collect::<Vec<_>>(),
             vec![
-                ("legacy", None),
                 ("with-role", Some("architect")),
+                ("legacy", None),
                 ("blank-role", None),
             ]
         );
         // 원문 그대로다. `+00:00`이 `Z`로 바뀌지 않는다.
         assert_eq!(
-            summary.active_leases[0].heartbeat_at,
+            summary.active_leases[1].heartbeat_at,
             "2026-08-03T00:41:00+00:00"
         );
     }
