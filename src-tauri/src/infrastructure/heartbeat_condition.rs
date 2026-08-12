@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 17;
+const CONDITION_SCRIPT_VERSION: u32 = 18;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 17;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 17
+# condition_script_version: 18
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -691,6 +691,9 @@ DIRECT_ROWS
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+      # 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안에도 같은
+      # 결정이 대상으로 계속 나가, 화면이 중복 배정처럼 보이고 자동 배정이 헛 시도를 만든다.
+      if lease_blocks "$did"; then note_candidate leased "$did"; continue; fi
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
       note_target "$did" spec_approval
     done <<APPROVALS
@@ -818,7 +821,7 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 17
+# condition_script_version: 18
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1286,6 +1289,9 @@ switch -CaseSensitive ($Role) {
       foreach ($row in @(Get-DecisionCandidates $root 'outcome: approved' $false)) {
         if ($taskRefs.IndexOf('source_decision_id:' + $row.Id,
           [System.StringComparison]::Ordinal) -ge 0) { Write-Candidate 'decomposed' $row.Id; continue }
+        # A decomposing session's lease is keyed by the decision id. Without this check the same
+        # decision keeps being named while its session runs, which reads as a duplicate assignment.
+        if (Test-Leased $row.Id) { Write-Candidate 'leased' $row.Id; continue }
         if ($row.Spec.Length -gt 0 -and (Test-Leased $row.Spec)) {
           Write-Candidate 'spec-leased' $row.Id
           continue
@@ -1499,7 +1505,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 17"));
+        assert!(script.contains("# condition_script_version: 18"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -1513,7 +1519,7 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
-            "# condition_script_version: 17",
+            "# condition_script_version: 18",
             "# condition_script_version: 15",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
@@ -1777,7 +1783,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 17보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 18보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -2532,6 +2538,18 @@ mod tests {
             build: |control: &Path| {
                 write_approved_decision(control, "DECISION-001", "SPEC-001");
                 write_lease(control, "SPEC-001");
+            },
+        },
+        Scenario {
+            // 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안
+            // 같은 결정이 다시 대상으로 나가 중복 배정으로 보인다(v18).
+            name: "아키텍트: 그 결정 자체에 lease가 있다",
+            roles: &["architect"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_approved_decision(control, "DECISION-001", "SPEC-001");
+                write_lease(control, "DECISION-001");
             },
         },
         // 아래 세 행이 SPEC-028 R4·R5의 아키텍트 판정이다. 기획자 분기의 최신 검사와 앱의

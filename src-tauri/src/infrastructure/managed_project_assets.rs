@@ -1012,7 +1012,7 @@ mod tests {
                 ("architect_rules", 15, 15),
                 ("developer_rules", 16, 16),
                 ("claim_helper", 1, 1),
-                ("condition_script", 17, 17),
+                ("condition_script", 18, 18),
             ]
         );
         assert!(root.path().join("AGENTS.md").is_file());
@@ -1099,7 +1099,7 @@ mod tests {
         let old = fs::read_to_string(&script)
             .expect("condition script")
             .replace(
-                "# condition_script_version: 17",
+                "# condition_script_version: 18",
                 "# condition_script_version: 15",
             );
         fs::write(&script, old).expect("old condition script");
@@ -1111,15 +1111,15 @@ mod tests {
             .find(|asset| asset.id == "condition_script")
             .expect("condition script state");
         assert_eq!(updated.status, ManagedAssetSyncStatus::Updated);
-        assert_eq!(state.installed_version, Some(17));
+        assert_eq!(state.installed_version, Some(18));
         assert!(fs::read_to_string(&script)
             .expect("updated condition script")
-            .contains("# condition_script_version: 17"));
+            .contains("# condition_script_version: 18"));
 
         let future = fs::read_to_string(&script)
             .expect("condition script")
             .replace(
-                "# condition_script_version: 17",
+                "# condition_script_version: 18",
                 "# condition_script_version: 999",
             );
         fs::write(&script, &future).expect("future condition script");
@@ -1132,7 +1132,7 @@ mod tests {
             .expect("future condition script state");
         assert_eq!(conflict.status, ManagedAssetSyncStatus::Conflict);
         assert_eq!(state.installed_version, Some(999));
-        assert_eq!(state.provided_version, Some(17));
+        assert_eq!(state.provided_version, Some(18));
         assert_eq!(fs::read_to_string(script).expect("future kept"), future);
     }
 

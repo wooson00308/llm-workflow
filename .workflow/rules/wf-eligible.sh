@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 17
+# condition_script_version: 18
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -665,6 +665,9 @@ DIRECT_ROWS
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+      # 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안에도 같은
+      # 결정이 대상으로 계속 나가, 화면이 중복 배정처럼 보이고 자동 배정이 헛 시도를 만든다.
+      if lease_blocks "$did"; then note_candidate leased "$did"; continue; fi
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
       note_target "$did" spec_approval
     done <<APPROVALS
