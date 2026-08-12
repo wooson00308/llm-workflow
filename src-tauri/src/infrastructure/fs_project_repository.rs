@@ -1699,14 +1699,16 @@ struct SpecReference {
     is_rejected: bool,
 }
 
-/// `source_idea_id`를 가진 기획서만 모은다. 없는 문서는 아이디어에서 출발하지 않은 기획서이므로
-/// 판정 대상이 아니다. 결정 판정은 이미 읽어 둔 최신 결정 표를 받는다 — 규칙을 새로 쓰지 않는다.
+/// `source_idea_id`(옛 계약은 `source_idea`)를 가진 기획서만 모은다. 둘 다 없는 문서는
+/// 아이디어에서 출발하지 않은 기획서이므로 판정 대상이 아니다. 결정 판정은 이미 읽어 둔 최신
+/// 결정 표를 받는다 — 규칙을 새로 쓰지 않는다.
 fn spec_reference(
     path: &Path,
     metadata: Option<&serde_yaml::Value>,
     decided: &HashMap<String, (String, String)>,
 ) -> Option<SpecReference> {
-    let idea_id = yaml_text(metadata, "source_idea_id")?;
+    let idea_id =
+        yaml_text(metadata, "source_idea_id").or_else(|| yaml_text(metadata, "source_idea"))?;
     // `read_markdown_document`의 fallback과 같은 규칙이어야 화면이 짚어 주는 id와
     // 목록의 기획서 id가 어긋나지 않는다.
     let spec_id = yaml_text(metadata, "id").unwrap_or_else(|| {
@@ -1793,7 +1795,10 @@ fn collect_nondraft_sources(metadata: Option<&serde_yaml::Value>, sources: &mut 
     if yaml_text(metadata, "status").as_deref() == Some("draft") {
         return;
     }
-    for key in ["source_idea_id", "source_decision_id"] {
+    // 옛 계약의 기획서는 원천을 `source_idea`로 적었다. 그 값이 집합에 없으면 이미 기획된
+    // 아이디어가 다시 열려 기획자가 중복 배정된다(2026-08-12 mech-arena 실측). 조건 스크립트
+    // v17과 같은 하위호환이다.
+    for key in ["source_idea_id", "source_idea", "source_decision_id"] {
         if let Some(value) = yaml_text(metadata, key) {
             sources.insert(value);
         }
@@ -6097,6 +6102,33 @@ mod tests {
 
         assert_eq!(document.summary.status, "drafting");
         assert_eq!(document.summary.stalled_spec_ids, vec!["SPEC-001"]);
+    }
+
+    // 옛 계약의 기획서는 원천을 `source_idea`로 적었다. 그 참조가 보이지 않으면 이미 기획된
+    // 아이디어가 화면에서 미처리로 돌아가고 기획자가 중복 배정된다(2026-08-12 mech-arena 실측).
+    #[test]
+    fn keeps_an_idea_adopted_when_a_legacy_spec_names_it_without_the_id_suffix() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow = &project.workflows[0];
+        let workflow_root = root.path().join(".workflow").join(&workflow.directory);
+        fs::write(
+            workflow_root.join("ideas/IDEA-001.md"),
+            "---\nschema: workflow-labs/idea@1\nid: IDEA-001\ntitle: 옛 기획서의 아이디어\nstatus: inbox\n---\n\n본문이다.\n",
+        )
+        .expect("write idea");
+        fs::write(
+            workflow_root.join("specs/SPEC-001.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-001\ntitle: 기획서\nstatus: user_review\nsource_idea: IDEA-001\n---\n\n기획 내용이다.\n",
+        )
+        .expect("write spec");
+
+        let summary = repository.inspect(root.path()).expect("inspect");
+        let idea = &summary.workflows[0].items.ideas[0];
+        assert_eq!(idea.status, "adopted");
     }
 
     #[test]
