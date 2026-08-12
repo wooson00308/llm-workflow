@@ -7,10 +7,12 @@ use tauri::{AppHandle, Emitter, State};
 use crate::application::project_service::ProjectService;
 use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
-    ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
-    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
-    TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
+    ManagedAssetSyncResult, ProjectSummary, ReportDocument, SaveCustomRulesRequest,
+    SaveCustomRulesResult, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult,
+    TaskQaOutcome, TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput,
+    TaskRevisionRequestResult, WorkflowReportSummary,
 };
+use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
 
 #[derive(Default)]
 pub struct ProjectWatchers(Mutex<HashMap<String, RecommendedWatcher>>);
@@ -163,6 +165,37 @@ pub fn read_idea(
 ) -> Result<IdeaDocument, String> {
     ProjectService::default()
         .read_idea(Path::new(&path), &workflow_directory, &file_name)
+        .map_err(|error| error.to_string())
+}
+
+/// 실행 하나에 연결된 보고서 목록. 어떤 보고서가 그 실행의 것인지는 백엔드가 판정하고, 화면은
+/// 파일 이름이나 경로를 추측하지 않는다. 연결을 확인하지 못하면 빈 목록이 온다.
+#[tauri::command]
+pub fn list_run_reports(
+    path: String,
+    workflow_directory: String,
+    target_id: Option<String>,
+    result_prefix: Option<String>,
+) -> Result<Vec<WorkflowReportSummary>, String> {
+    FileSystemProjectRepository
+        .list_run_reports(
+            Path::new(&path),
+            &workflow_directory,
+            target_id.as_deref(),
+            result_prefix.as_deref(),
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// 보고서 하나의 읽기 전용 본문. 파일을 쓰지 않고 문서 상태를 바꾸지 않는다.
+#[tauri::command]
+pub fn read_report(
+    path: String,
+    workflow_directory: String,
+    file_name: String,
+) -> Result<ReportDocument, String> {
+    FileSystemProjectRepository
+        .read_report(Path::new(&path), &workflow_directory, &file_name)
         .map_err(|error| error.to_string())
 }
 

@@ -551,6 +551,11 @@ pub struct RunSummary {
     #[serde(default)]
     pub remaining: Vec<String>,
     pub previous_run_id: Option<String>,
+    /// 런타임이 이 실행에 예약한 결과 접두어. 그 실행이 만든 문서의 식별자가 이 값으로 시작하므로,
+    /// 앱은 이 값으로 실행과 결과 보고서를 잇는다. 이 값을 싣지 않는 구형 런타임 행에서는 비어 있고,
+    /// 앱은 비어 있는 것을 다른 값으로 메우지 않는다.
+    #[serde(default)]
+    pub result_prefix: Option<String>,
 }
 
 #[cfg(test)]
@@ -572,7 +577,8 @@ mod run_summary_tests {
             "failureStage": "role_session",
             "reason": "provider_failed",
             "remaining": [],
-            "previousRunId": null
+            "previousRunId": null,
+            "resultPrefix": "RES-20260812T130244Z-394-20260812130244"
         })
     }
 
@@ -590,6 +596,28 @@ mod run_summary_tests {
             "2026-08-10T10:00:09Z"
         );
         assert_eq!(legacy.finished_at, None);
+    }
+
+    #[test]
+    fn the_reservation_result_prefix_reaches_the_app_and_stays_empty_for_legacy_rows() {
+        let current: RunSummary =
+            serde_json::from_value(run(json!("2026-08-10T10:00:09Z"))).expect("current runtime row");
+        let mut legacy = run(json!("2026-08-10T10:00:09Z"));
+        legacy
+            .as_object_mut()
+            .expect("row")
+            .remove("resultPrefix");
+        let legacy: RunSummary = serde_json::from_value(legacy).expect("legacy runtime row");
+
+        assert_eq!(
+            current.result_prefix.as_deref(),
+            Some("RES-20260812T130244Z-394-20260812130244")
+        );
+        assert_eq!(
+            serde_json::to_value(current).expect("serialize")["resultPrefix"],
+            "RES-20260812T130244Z-394-20260812130244"
+        );
+        assert_eq!(legacy.result_prefix, None);
     }
 }
 

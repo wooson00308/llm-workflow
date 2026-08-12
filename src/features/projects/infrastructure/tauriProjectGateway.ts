@@ -29,6 +29,7 @@ import type {
   ManagedAssetSyncResult,
   ProjectGateway,
   ProjectSummary,
+  ReportDocument,
   SaveCustomRulesRequest,
   SaveCustomRulesResult,
   SpecDocument,
@@ -38,6 +39,7 @@ import type {
   TaskResumeResult,
   TaskRevisionRequestInput,
   TaskRevisionRequestResult,
+  WorkflowReportSummary,
 } from "../domain/types";
 
 export const tauriProjectGateway: ProjectGateway = {
@@ -128,6 +130,25 @@ export const tauriProjectGateway: ProjectGateway = {
 
   readIdea(path, workflowDirectory, fileName) {
     return invoke<IdeaDocument>("read_idea", {
+      path,
+      workflowDirectory,
+      fileName,
+    });
+  },
+
+  // 넘기는 것은 실행 기록에 이미 실려 있는 대상 문서 식별자와 예약 결과 접두어 둘뿐이다. 어떤
+  // 파일이 그 실행의 보고서인지는 백엔드가 판정하므로 이 계층은 파일 이름을 만들지 않는다.
+  listRunReports(path, workflowDirectory, targetId, resultPrefix) {
+    return invoke<WorkflowReportSummary[]>("list_run_reports", {
+      path,
+      workflowDirectory,
+      targetId,
+      resultPrefix,
+    });
+  },
+
+  readReport(path, workflowDirectory, fileName) {
+    return invoke<ReportDocument>("read_report", {
       path,
       workflowDirectory,
       fileName,

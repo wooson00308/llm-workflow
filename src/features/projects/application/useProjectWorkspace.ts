@@ -29,7 +29,9 @@ import type {
   TaskQaOutcome,
   TaskResumeOutcome,
   TaskRevisionRequestOutcome,
+  WorkflowReportSummary,
   AgentProjectPolicy,
+  AgentRunSummary,
   AgentRuntimeActions,
   AgentRuntimeOperation,
   AgentRuntimeState,
@@ -171,6 +173,9 @@ const emptyAgentRuntime: AgentRuntimeState = {
   logs: {},
   readingLogRunId: null,
   logError: null,
+  logWatchRunId: null,
+  runReports: {},
+  reportView: null,
 };
 
 export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
@@ -238,6 +243,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeState>(
     emptyAgentRuntime,
   );
+  // 실행별로 다음에 읽을 위치. 이어 읽기 주기가 이 값을 읽으므로 상태에 두면 한 번 읽을 때마다
+  // 읽기 함수의 신원이 바뀌고 주기가 스스로를 다시 세운다.
+  const agentLogCursors = useRef<Record<string, number>>({});
   const customRulesReadRequest = useRef(0);
   const customRulesPreviewRequest = useRef(0);
   const customRulesSaveRequest = useRef(0);
@@ -547,7 +555,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const readAgentRunLog = useCallback(
     async (runId: string) => {
       if (!project?.projectId) return;
-      const cursor = agentRuntime.logs[runId]?.nextCursor ?? 0;
+      const cursor = agentLogCursors.current[runId] ?? 0;
       setAgentRuntime((current) => ({
         ...current,
         readingLogRunId: runId,
@@ -556,6 +564,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       try {
         const page = await gateway.readAgentRunLog(project.projectId, runId, cursor);
         if (activeProjectPath.current !== project.rootPath) return;
+        agentLogCursors.current[runId] = page.nextCursor;
         setAgentRuntime((current) => {
           const previous = current.logs[runId];
           return {
@@ -579,8 +588,106 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         }));
       }
     },
-    [agentRuntime.logs, gateway, project],
+    [gateway, project],
   );
+
+  /** 이어 읽을 실행을 정하거나(`runId`) 읽기를 멈춘다(`null`). 주기 자체는 아래 effect가 관리한다. */
+  const watchAgentRunLog = useCallback((runId: string | null) => {
+    setAgentRuntime((current) =>
+      current.logWatchRunId === runId ? current : { ...current, logWatchRunId: runId },
+    );
+  }, []);
+
+  const readAgentRunReports = useCallback(
+    async (run: AgentRunSummary, workflowDirectory: string) => {
+      if (!project) return;
+      try {
+        const reports = await gateway.listRunReports(
+          project.rootPath,
+          workflowDirectory,
+          run.targetId,
+          run.resultPrefix,
+        );
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          runReports: { ...current.runReports, [run.runId]: reports },
+        }));
+      } catch {
+        if (activeProjectPath.current !== project.rootPath) return;
+        // 연결을 확인하지 못한 실행은 자리를 비운다. 직전에 읽은 목록을 지금의 사실로 남기면
+        // 사라진 보고서의 바로가기가 계속 열려 있게 된다.
+        setAgentRuntime((current) => {
+          if (!(run.runId in current.runReports)) return current;
+          const remaining = { ...current.runReports };
+          delete remaining[run.runId];
+          return { ...current, runReports: remaining };
+        });
+      }
+    },
+    [gateway, project],
+  );
+
+  const openAgentReport = useCallback(
+    async (workflowDirectory: string, report: WorkflowReportSummary) => {
+      if (!project) return;
+      setAgentRuntime((current) => ({
+        ...current,
+        reportView: {
+          fileName: report.fileName,
+          title: report.title,
+          body: null,
+          reading: true,
+          error: null,
+        },
+      }));
+      try {
+        const document = await gateway.readReport(
+          project.rootPath,
+          workflowDirectory,
+          report.fileName,
+        );
+        if (activeProjectPath.current !== project.rootPath) return;
+        // 읽는 동안 다른 보고서로 옮겨 갔으면 그 화면에 이 본문을 싣지 않는다.
+        setAgentRuntime((current) =>
+          current.reportView?.fileName === report.fileName
+            ? {
+                ...current,
+                reportView: {
+                  fileName: report.fileName,
+                  title: document.summary.title,
+                  body: document.body,
+                  reading: false,
+                  error: null,
+                },
+              }
+            : current,
+        );
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return;
+        setAgentRuntime((current) =>
+          current.reportView?.fileName === report.fileName
+            ? {
+                ...current,
+                reportView: {
+                  ...current.reportView,
+                  body: null,
+                  reading: false,
+                  error: messageFrom(reason),
+                },
+              }
+            : current,
+        );
+      }
+    },
+    [gateway, project],
+  );
+
+  const closeAgentReport = useCallback(() => {
+    setAgentRuntime((current) =>
+      current.reportView ? { ...current, reportView: null } : current,
+    );
+  }, []);
 
   /** 계획을 만든다. 세 조작 모두 계획 단계에서는 아무것도 쓰지 않는다. */
   const planAgentRuntime = useCallback(
@@ -860,6 +967,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
           resetCustomRules();
           // 이전 프로젝트의 정책과 계획이 새 프로젝트 화면에 남지 않게 통째로 되돌린다(R5).
           setAgentRuntime(emptyAgentRuntime);
+          agentLogCursors.current = {};
           void readAgentRuntime(next.rootPath, next.projectId);
           if (next.projectId) void readAgentRuns(next.rootPath, next.projectId);
         }
@@ -1681,6 +1789,16 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     return () => window.clearInterval(timer);
   }, [agentViewActive, hasActiveAgentRun, project?.initialized, project?.projectId, project?.rootPath, readAgentRuns]);
 
+  // 실행 상세가 열려 있는 동안만 이벤트를 이어 읽는다. 활동 없음 신호는 새 이벤트가 와야 사라지므로
+  // 사용자가 단추를 누른 순간의 이벤트만으로는 판정할 수 없다. 주기는 실행 목록 조회와 같은 값이다.
+  useEffect(() => {
+    const runId = agentRuntime.logWatchRunId;
+    if (!runId || !project?.projectId) return;
+    void readAgentRunLog(runId);
+    const timer = window.setInterval(() => void readAgentRunLog(runId), 2_500);
+    return () => window.clearInterval(timer);
+  }, [agentRuntime.logWatchRunId, project?.projectId, readAgentRunLog]);
+
   const agentRuntimeActions: AgentRuntimeActions = useMemo(
     () => ({
       refresh: async () => {
@@ -1716,17 +1834,23 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       dismissRetry: dismissAgentRunRetry,
       confirmRetry: confirmAgentRunRetry,
       readRunLog: readAgentRunLog,
+      watchRunLog: watchAgentRunLog,
+      readRunReports: readAgentRunReports,
+      openReport: openAgentReport,
+      closeReport: closeAgentReport,
     }),
     [
       applyAgentRuntimeMigration,
       applyAgentRuntimePlan,
       cancelAgentRuntimePlan,
       cancelAgentRunPlan,
+      closeAgentReport,
       confirmAgentRunCancel,
       confirmAgentRunRetry,
       dismissAgentRuntimeMigration,
       dismissAgentRunCancel,
       dismissAgentRunRetry,
+      openAgentReport,
       planAgentRuntime,
       planAgentRun,
       previewAgentRuntimeMigration,
@@ -1735,10 +1859,12 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       project,
       readAgentRuntime,
       readAgentRunLog,
+      readAgentRunReports,
       readAgentRuns,
       saveAgentRuntimePolicy,
       setAgentProjectPaused,
       startAgentRun,
+      watchAgentRunLog,
     ],
   );
 
@@ -1774,6 +1900,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       activeProjectPath.current = null;
       resetCustomRules();
       setAgentRuntime(emptyAgentRuntime);
+      agentLogCursors.current = {};
       setProject(null);
       setError(null);
       setManagedAssets({

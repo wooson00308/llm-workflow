@@ -13,12 +13,12 @@ use crate::domain::project::{
     IdeaDocument, ManagedAssetState, ManagedAssetStatus, ManagedAssetSyncResult,
     ManagedAssetSyncStatus, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
     ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult, SchemaCompatibility,
-    SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState, TaskDocument,
-    TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
+    ReportDocument, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
+    TaskDocument, TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
     TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
     TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
     TaskScopeDeclaration, TaskScopeStatus, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
-    WorkflowItems, WorkflowManifest, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    WorkflowItems, WorkflowManifest, WorkflowReportSummary, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 use crate::infrastructure::custom_rules::{
     prepare_custom_rules_preview, read_custom_rules, save_custom_rules, CustomRulesError,
@@ -424,6 +424,52 @@ impl FileSystemProjectRepository {
             &leases,
         );
         Ok(IdeaDocument { summary, body })
+    }
+
+    /// 실행 하나에 연결된 보고서만 돌려준다.
+    ///
+    /// 연결 근거는 그 실행의 대상 문서 식별자와 예약 결과 접두어 둘뿐이다. 보고서 파일에는 앞머리
+    /// 메타데이터가 없어 이름이 유일한 식별 수단이고, 개발 작업 보고서는 대상 작업 식별자를,
+    /// 기획·아키텍트 보고서는 예약 결과 접두어를 담은 문서 식별자를 이름에 담는다. 두 값이 모두
+    /// 비어 있으면 고를 근거가 없으므로 빈 목록이다 — 근거 없이 다른 실행의 보고서를 채우면
+    /// 사용자는 남의 결과를 자기 실행의 결과로 읽는다.
+    pub fn list_run_reports(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        target_id: Option<&str>,
+        result_prefix: Option<&str>,
+    ) -> Result<Vec<WorkflowReportSummary>, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        Ok(run_reports(&workflow_root, target_id, result_prefix))
+    }
+
+    /// 보고서 하나의 전문. 파일을 쓰지 않고 어떤 문서의 상태도 바꾸지 않는다.
+    ///
+    /// 파일 이름은 다른 문서 읽기와 같은 검사를 거치므로 `reports/` 밖을 가리키는 이름은 읽지 않는다.
+    pub fn read_report(
+        &self,
+        root: &Path,
+        workflow_directory: &str,
+        file_name: &str,
+    ) -> Result<ReportDocument, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
+        let report_path = safe_markdown_file(&workflow_root.join("reports"), file_name)?;
+        // 본문은 파일에 적힌 그대로 싣는다. 다른 문서 읽기가 하는 줄바꿈 정규화와 앞뒤 공백 제거를
+        // 여기서는 하지 않는다. 이 조회가 답하는 것은 "그 파일에 무엇이 적혀 있는가" 하나다.
+        let body = fs::read_to_string(&report_path)?;
+        Ok(ReportDocument {
+            summary: report_summary(&report_path),
+            body,
+        })
     }
 
     pub fn record_spec_decision(
@@ -2813,6 +2859,74 @@ fn workflow_counts(workflow_root: &Path, items: &WorkflowItems) -> WorkflowCount
             .count(),
         tasks: items.tasks.len(),
         reports: count_markdown_files(&workflow_root.join("reports")),
+    }
+}
+
+/// 워크플로 하나의 보고서 목록. 파일 이름 오름차순이다.
+///
+/// 파일을 고르는 판정은 바로 아래 `count_markdown_files`와 같아야 한다. 두 판정이 갈리면 카드가
+/// 말하는 보고서 수와 목록에 담긴 수가 어긋난다. 그래서 읽지 못한 파일도 목록에서 빼지 않고
+/// 이름만으로 싣는다 — 빼는 순간 개수와 갈라지기 때문이다.
+fn workflow_reports(reports_root: &Path) -> Vec<WorkflowReportSummary> {
+    let mut reports: Vec<_> = fs::read_dir(reports_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("md")
+        })
+        .map(|path| report_summary(&path))
+        .collect();
+    reports.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    reports
+}
+
+/// 실행 하나에 연결된 보고서를 고른다. 판정 근거는 `list_run_reports`의 주석에 있다.
+fn run_reports(
+    workflow_root: &Path,
+    target_id: Option<&str>,
+    result_prefix: Option<&str>,
+) -> Vec<WorkflowReportSummary> {
+    // 빈 문자열은 값이 아니다. 걸러 두지 않으면 모든 이름이 그 값을 담은 것으로 판정돼 연결을
+    // 확인하지 못한 실행이 워크플로의 보고서를 전부 자기 것으로 달고 나온다.
+    let keys: Vec<&str> = [target_id, result_prefix]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    workflow_reports(&workflow_root.join("reports"))
+        .into_iter()
+        .filter(|report| keys.iter().any(|key| report.file_name.contains(key)))
+        .collect()
+}
+
+/// 보고서 파일 하나의 목록 항목. 제목은 본문에서 찾고, 찾지 못하면 파일 이름의 줄기를 그대로 쓴다.
+/// 파일을 열지 못한 경우도 같다 — 읽지 못한 것을 제목으로 지어내지 않는다.
+fn report_summary(path: &Path) -> WorkflowReportSummary {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("REPORT")
+        .to_owned();
+    let title = fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            let (metadata, body) = split_frontmatter(&contents.replace("\r\n", "\n"));
+            yaml_text(metadata.as_ref(), "title").or_else(|| markdown_title(&body))
+        })
+        .unwrap_or_else(|| stem.clone());
+    WorkflowReportSummary {
+        file_name: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("report.md")
+            .to_owned(),
+        title,
     }
 }
 
@@ -8843,5 +8957,210 @@ mod tests {
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod report_surface_tests {
+    use std::fs;
+
+    use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
+
+    use super::{run_reports, workflow_reports, FileSystemProjectRepository, ProjectError};
+
+    /// 실행이 남긴 결과를 흉내 낸 보고서 네 개를 심는다. 이름 규칙은 실제 워크플로 파일에서 왔다 —
+    /// 개발 작업 보고서는 대상 작업 식별자를, 기획·아키텍트 보고서는 예약 결과 접두어를 담은 문서
+    /// 식별자를 이름에 담는다.
+    const TARGET_ID: &str = "TASK-RES-20260812T130244Z-394-20260812130244-02";
+    const RESULT_PREFIX: &str = "RES-20260812T124007Z-69525-20260812124007";
+
+    fn workflow_with_reports() -> (tempfile::TempDir, String) {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let reports = root.path().join(".workflow").join(&directory).join("reports");
+        for (file_name, body) in [
+            (
+                format!("REPORT-{TARGET_ID}-DEV.md"),
+                "# 개발 보고서\n\n검증을 마쳤다.\n",
+            ),
+            (
+                format!("REPORT-SPEC-{RESULT_PREFIX}-PLAN.md"),
+                "# 기획 보고서\n",
+            ),
+            (
+                format!("REPORT-SPEC-{RESULT_PREFIX}-ARCH.md"),
+                "# 아키텍트 보고서\n",
+            ),
+            (
+                "REPORT-TASK-OTHER-RUN-01-DEV.md".to_owned(),
+                "# 다른 실행의 보고서\n",
+            ),
+        ] {
+            fs::write(reports.join(file_name), body).expect("report file");
+        }
+        (root, directory)
+    }
+
+    #[test]
+    fn the_workflow_listing_names_every_report_and_agrees_with_the_count() {
+        let (root, directory) = workflow_with_reports();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+
+        let listed = workflow_reports(&workflow_root.join("reports"));
+        let counted = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect")
+            .workflows[0]
+            .counts
+            .reports;
+
+        assert_eq!(listed.len(), counted);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|report| report.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("REPORT-SPEC-{RESULT_PREFIX}-ARCH.md"),
+                format!("REPORT-SPEC-{RESULT_PREFIX}-PLAN.md"),
+                "REPORT-TASK-OTHER-RUN-01-DEV.md".to_owned(),
+                format!("REPORT-{TARGET_ID}-DEV.md"),
+            ]
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .find(|report| report.file_name.contains(TARGET_ID))
+                .map(|report| report.title.as_str()),
+            Some("개발 보고서")
+        );
+    }
+
+    #[test]
+    fn a_target_identifier_alone_links_only_its_own_report() {
+        let (root, directory) = workflow_with_reports();
+
+        let linked = FileSystemProjectRepository
+            .list_run_reports(root.path(), &directory, Some(TARGET_ID), None)
+            .expect("link by target");
+
+        assert_eq!(
+            linked
+                .iter()
+                .map(|report| report.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("REPORT-{TARGET_ID}-DEV.md")]
+        );
+    }
+
+    #[test]
+    fn a_result_prefix_alone_links_the_documents_created_under_it() {
+        let (root, directory) = workflow_with_reports();
+
+        let linked = FileSystemProjectRepository
+            .list_run_reports(root.path(), &directory, None, Some(RESULT_PREFIX))
+            .expect("link by prefix");
+
+        assert_eq!(
+            linked
+                .iter()
+                .map(|report| report.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("REPORT-SPEC-{RESULT_PREFIX}-ARCH.md"),
+                format!("REPORT-SPEC-{RESULT_PREFIX}-PLAN.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_matching_neither_value_is_never_linked() {
+        let (root, directory) = workflow_with_reports();
+
+        let linked = FileSystemProjectRepository
+            .list_run_reports(root.path(), &directory, Some(TARGET_ID), Some(RESULT_PREFIX))
+            .expect("link by both");
+
+        assert!(
+            !linked
+                .iter()
+                .any(|report| report.file_name == "REPORT-TASK-OTHER-RUN-01-DEV.md"),
+            "다른 실행의 보고서가 연결됐다: {linked:?}"
+        );
+        assert_eq!(linked.len(), 3);
+    }
+
+    #[test]
+    fn a_run_with_neither_value_links_nothing_instead_of_everything() {
+        let (root, directory) = workflow_with_reports();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+
+        let missing = FileSystemProjectRepository
+            .list_run_reports(root.path(), &directory, None, None)
+            .expect("link without values");
+        // 빈 문자열도 값이 아니다. 값으로 세면 모든 이름이 그것을 담은 것으로 판정된다.
+        let blank = run_reports(&workflow_root, Some(""), Some("   "));
+
+        assert_eq!(missing, Vec::new());
+        assert_eq!(blank, Vec::new());
+    }
+
+    #[test]
+    fn reading_a_report_returns_the_file_verbatim_and_changes_nothing() {
+        let (root, directory) = workflow_with_reports();
+        let reports = root.path().join(".workflow").join(&directory).join("reports");
+        let before: Vec<_> = fs::read_dir(&reports)
+            .expect("reports")
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let path = entry.path();
+                let modified = fs::metadata(&path).and_then(|value| value.modified());
+                (path.clone(), fs::read_to_string(&path).ok(), modified.ok())
+            })
+            .collect();
+
+        let document = FileSystemProjectRepository
+            .read_report(root.path(), &directory, &format!("REPORT-{TARGET_ID}-DEV.md"))
+            .expect("read report");
+
+        assert_eq!(document.body, "# 개발 보고서\n\n검증을 마쳤다.\n");
+        assert_eq!(document.summary.title, "개발 보고서");
+        assert_eq!(
+            document.summary.file_name,
+            format!("REPORT-{TARGET_ID}-DEV.md")
+        );
+        for (path, contents, modified) in before {
+            assert_eq!(fs::read_to_string(&path).ok(), contents, "{path:?}");
+            assert_eq!(
+                fs::metadata(&path).and_then(|value| value.modified()).ok(),
+                modified,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_name_leaving_the_workflow_directory_is_refused_without_reading() {
+        let (root, directory) = workflow_with_reports();
+        let outside = root.path().join("outside.md");
+        fs::write(&outside, "# 워크플로 밖 문서\n").expect("outside file");
+
+        for file_name in [
+            "../../../outside.md",
+            "../tasks/TASK-001.md",
+            "nested/REPORT.md",
+            "/etc/hosts",
+        ] {
+            let refused = FileSystemProjectRepository.read_report(root.path(), &directory, file_name);
+
+            assert!(
+                matches!(refused, Err(ProjectError::UnsafeDocumentFile(_))),
+                "{file_name}을 거절하지 않았다: {refused:?}"
+            );
+        }
     }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AgentReportView,
   AgentRoleSlotRequest,
   AgentRunStatus,
   AgentRunSummary,
@@ -8,6 +9,13 @@ import type {
   ProjectSummary,
   WorkflowItemSummary,
 } from "../../domain/types";
+import type { RunSignal, RunSignalKind, ToolCategory } from "../../domain/runActivity";
+import {
+  idleSeconds,
+  isRunIdle,
+  redactSecrets,
+  summarizeRunActivity,
+} from "../../domain/runActivity";
 
 const ROLE_ORDER = ["planner", "architect", "developer"] as const;
 const roleLabels: Record<string, string> = {
@@ -27,6 +35,21 @@ const stateLabels: Record<AgentRunStatus, string> = {
   unrecognized: "상태 확인 필요",
 };
 const activeStates = new Set<AgentRunStatus>(["reserved", "queued", "running", "paused"]);
+const toolCategoryLabels: Record<ToolCategory, string> = {
+  fileRead: "파일 읽기",
+  fileEdit: "파일 편집",
+  command: "명령 실행",
+  search: "검색",
+  other: "기타",
+  unnamed: "이름 없음",
+};
+const signalLabels: Record<RunSignalKind, string> = {
+  started: "시작",
+  completed: "완료",
+  failed: "실패",
+  cancelled: "취소",
+  timed_out: "시간 초과",
+};
 
 interface Props {
   actions: AgentRuntimeActions;
@@ -143,7 +166,9 @@ export function AgentRunDashboard({
       {(selectedRun || selectedQueue) && (
         <DetailDrawer
           actions={actions}
+          itemMap={itemMap}
           onClose={() => { setSelectedRun(null); setSelectedQueue(null); }}
+          project={project}
           queueItem={selectedQueue}
           run={selectedRun}
           state={state}
@@ -194,24 +219,146 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
   );
 }
 
-function DetailDrawer({ actions, onClose, queueItem, run, state }: {
+function DetailDrawer({ actions, itemMap, onClose, project, queueItem, run, state }: {
   actions: AgentRuntimeActions;
+  itemMap: Map<string, WorkflowItemSummary>;
   onClose(): void;
+  project: ProjectSummary;
   queueItem: QueueItem | null;
   run: AgentRunSummary | null;
   state: AgentRuntimeState;
 }) {
-  useDismissOnEscape(onClose);
+  // 보고서를 열어 둔 동안에는 상세가 닫히지 않는다. 그 키는 보고서 화면이 받는다.
+  useDismissOnEscape(() => { if (!state.reportView) onClose(); });
+  const runId = run?.runId ?? null;
+  const { readRunReports, watchRunLog } = actions;
+  // 상세가 열려 있는 동안만 이벤트를 이어 읽는다. 닫으면 그 자리에서 멈춘다.
+  useEffect(() => {
+    if (!runId) return;
+    watchRunLog(runId);
+    return () => watchRunLog(null);
+  }, [runId, watchRunLog]);
+
+  // 실행이 남긴 보고서를 담고 있는 워크플로. 대상 문서를 어느 워크플로에서도 찾지 못하면 이 실행의
+  // 연결을 확인할 방법이 없다는 뜻이므로, 다른 워크플로를 대신 넣지 않고 바로가기를 만들지 않는다.
+  const workflowDirectory = useMemo(
+    () => (run ? workflowDirectoryOf(project, run.targetId) : null),
+    [project, run],
+  );
+  useEffect(() => {
+    if (!run || !workflowDirectory) return;
+    void readRunReports(run, workflowDirectory);
+  }, [readRunReports, run, workflowDirectory]);
+
+  const page = runId ? state.logs[runId] : undefined;
+  // 읽은 기록이 없으면 집계 자체가 없다. 지난 실행의 값을 이 실행의 사실로 보여주지 않는다.
+  const activity = useMemo(() => (page ? summarizeRunActivity(page.events) : null), [page]);
+  const idle = Boolean(
+    run && activity && activeStates.has(run.state) && isRunIdle(activity.lastActivityAt, Date.now()),
+  );
+  // 이 실행의 자리에 있는 목록만 쓴다. 자리가 비어 있으면 다른 실행의 목록으로 메우지 않는다.
+  const reports = runId ? state.runReports[runId] ?? [] : [];
+
   return (
+    <>
     <div className="agent-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <aside aria-label="에이전트 상세" className="agent-detail-drawer">
         <header><div><p className="eyebrow">DETAILS</p><h2>{run ? stateLabels[run.state] : "배정 대기"}</h2></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
-        <dl><div><dt>역할</dt><dd>{roleLabels[run?.role ?? queueItem?.role ?? ""]}</dd></div><div><dt>작업</dt><dd>{run?.targetId ?? queueItem?.id}</dd></div>{run && <><div><dt>실행 ID</dt><dd>{run.runId}</dd></div><div><dt>Provider</dt><dd>{run.provider}</dd></div></>}</dl>
-        {run?.reason && <p className="agent-detail-message">{reasonLabel(run.reason, run.state)}</p>}
-        {run && <div className="agent-drawer-actions">{activeStates.has(run.state) && <button onClick={() => void actions.previewCancel(run.runId)} type="button">취소</button>}{["failed", "cancelled", "recovery_required"].includes(run.state) && <button onClick={() => actions.previewRetry(run.runId)} type="button">재시도</button>}<button onClick={() => void actions.readRunLog(run.runId)} type="button">로그 보기</button></div>}
-        {run && state.logs[run.runId] && <ol className="agent-run-events">{state.logs[run.runId].events.map((event, index) => <li key={index}>{safeEvent(event)}</li>)}</ol>}
+        {run ? (
+          <>
+            <dl className="agent-run-card">
+              <div><dt>대상</dt><dd><strong>{titleOf(run.targetId, itemMap)}</strong><small>{run.targetId ?? "확인 중"}</small></dd></div>
+              <div><dt>역할</dt><dd>{roleLabels[run.role] ?? run.role} · {run.provider}</dd></div>
+              <div><dt>시작</dt><dd>{clockLabel(run.startedAt)}</dd></div>
+              <div><dt>{run.finishedAt ? "소요" : "경과"}</dt><dd>{run.finishedAt ? finishedDuration(run.startedAt, run.finishedAt) : runningDuration(run.startedAt)}</dd></div>
+              <div><dt>상태</dt><dd>{stateLabels[run.state]}</dd></div>
+              <div><dt>사유</dt><dd>{run.reason ? reasonLabel(run.reason, run.state) : "기록 없음"}</dd></div>
+              <div><dt>도구 사용</dt><dd>{activity ? <ToolUsage counts={activity.usage} total={activity.toolTotal} /> : "모름"}</dd></div>
+              <div><dt>마지막 활동</dt><dd>{activity ? clockLabel(activity.lastActivityAt) : "모름"}</dd></div>
+              {workflowDirectory && reports.length > 0 && (
+                <div><dt>결과 보고서</dt><dd>
+                  <ul className="agent-report-links">
+                    {reports.map((report) => (
+                      <li key={report.fileName}>
+                        <button className="agent-text-button" onClick={() => void actions.openReport(workflowDirectory, report)} type="button">{report.title}</button>
+                      </li>
+                    ))}
+                  </ul>
+                </dd></div>
+              )}
+              <div><dt>실행 ID</dt><dd>{run.runId}</dd></div>
+            </dl>
+            <div className="agent-drawer-actions">
+              {activeStates.has(run.state) && <button onClick={() => void actions.previewCancel(run.runId)} type="button">취소</button>}
+              {["failed", "cancelled", "recovery_required"].includes(run.state) && <button onClick={() => actions.previewRetry(run.runId)} type="button">재시도</button>}
+            </div>
+            {state.logError && <p className="agent-detail-message">실행 기록을 읽지 못했습니다 · {redactSecrets(state.logError)}</p>}
+            {(activity && (activity.signals.length > 0 || idle)) && (
+              <ol className="agent-run-events">
+                {activity.signals.map((signal, index) => <SignalRow key={index} signal={signal} />)}
+                {idle && (
+                  <li className="agent-run-signal alert">
+                    <span>활동 없음</span>
+                    <time>{idleLabel(activity.lastActivityAt)}</time>
+                  </li>
+                )}
+              </ol>
+            )}
+            {!activity && !state.logError && <p className="agent-dialog-note">실행 기록을 읽는 중입니다.</p>}
+          </>
+        ) : (
+          <dl><div><dt>역할</dt><dd>{roleLabels[queueItem?.role ?? ""] ?? queueItem?.role}</dd></div><div><dt>작업</dt><dd>{queueItem?.id}</dd></div></dl>
+        )}
       </aside>
     </div>
+    {state.reportView && <ReportViewer onClose={actions.closeReport} view={state.reportView} />}
+    </>
+  );
+}
+
+/**
+ * 보고서 본문을 읽기 전용으로 보여 준다. 편집 입력도 저장 수단도 두지 않으므로, 이 화면을 거쳐
+ * 보고서 파일이 바뀌는 경로가 없다. 본문을 읽지 못하면 그 사실만 알리고 빈 본문을 대신 싣지 않는다.
+ */
+function ReportViewer({ onClose, view }: { onClose(): void; view: AgentReportView }) {
+  useDismissOnEscape(onClose);
+  return (
+    <div className="agent-overlay" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section aria-labelledby="agent-report-title" aria-modal="true" className="agent-dialog agent-report-dialog" role="dialog">
+        <header><div><p className="eyebrow">REPORT</p><h2 id="agent-report-title">{view.title}</h2></div><button aria-label="닫기" autoFocus onClick={onClose} type="button">×</button></header>
+        {view.reading && <p className="agent-dialog-note">보고서를 읽는 중입니다.</p>}
+        {view.error && <p className="agent-detail-message">보고서를 읽지 못했습니다 · {redactSecrets(view.error)}</p>}
+        {view.body !== null && <pre className="agent-report-body">{view.body}</pre>}
+      </section>
+    </div>
+  );
+}
+
+/** 도구 사용 총 횟수와 유형별 집계. 도구 이름 원문은 여기에도 다른 어디에도 나가지 않는다. */
+function ToolUsage({ counts, total }: { counts: { category: ToolCategory; count: number }[]; total: number }) {
+  return (
+    <>
+      <strong>총 {total}회</strong>
+      {counts.length > 0 && (
+        <span className="agent-tool-usage">
+          {counts.map((usage) => (
+            <span key={usage.category}>{toolCategoryLabels[usage.category]} {usage.count}</span>
+          ))}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** 줄로 남는 신호 하나. 실패 상세는 런타임이 준 문장을 그대로 싣는다. */
+function SignalRow({ signal }: { signal: RunSignal }) {
+  const alert = signal.kind === "failed" || signal.kind === "cancelled" || signal.kind === "timed_out";
+  return (
+    <li className={alert ? "agent-run-signal alert" : "agent-run-signal"}>
+      <span>{signalLabels[signal.kind]}</span>
+      <time>{clockLabel(signal.at)}</time>
+      {signal.detail && <p>{redactSecrets(signal.detail)}</p>}
+    </li>
   );
 }
 
@@ -250,6 +397,19 @@ function workflowItems(project: ProjectSummary) {
     }
   }
   return items;
+}
+
+/**
+ * 실행의 대상 문서를 담고 있는 워크플로의 디렉터리. 앱이 매니페스트에서 읽어 둔 값을 그대로 돌려
+ * 주며 화면이 조립하지 않는다. 대상이 없거나 어느 워크플로에도 없으면 null이다.
+ */
+function workflowDirectoryOf(project: ProjectSummary, targetId: string | null) {
+  if (!targetId) return null;
+  const owner = project.workflows.find((workflow) =>
+    [workflow.items.ideas, workflow.items.specs, workflow.items.tasks]
+      .some((group) => group.some((item) => item.id === targetId)),
+  );
+  return owner?.directory ?? null;
 }
 
 function eligibleQueue(project: ProjectSummary, items: Map<string, WorkflowItemSummary>): QueueItem[] {
@@ -295,7 +455,8 @@ function runningDuration(startedAt: string | null) { if (!startedAt) return "시
 function finishedDuration(startedAt: string | null, finishedAt: string | null) { if (!startedAt || !finishedAt) return "시간 기록 없음"; const seconds = Math.max(0, Math.floor((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)); return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분`; }
 function exclusionLabel(reasons: string[]) { if (reasons.some((reason) => /no.?target/.test(reason))) return "지금은 배정할 작업이 없습니다."; if (reasons.includes("limit_reached")) return "현재 실행 자리가 모두 사용 중입니다."; if (reasons.includes("model_unavailable")) return "선택한 모델을 현재 계정에서 사용할 수 없습니다."; return "현재 안전 조건을 충족하지 않습니다."; }
 function reasonLabel(reason: string | null, state: string) { if (!reason) return stateLabels[state as AgentRunStatus] ?? state; if (/model_unavailable/.test(reason)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다"; if (/no.?target/.test(reason)) return "새 작업을 기다리는 중"; if (/limit/.test(reason)) return "실행 자리가 모두 사용 중입니다"; if (/login|auth/.test(reason)) return "실행 도구 로그인이 필요합니다"; return humanRuntimeMessage(reason); }
-function safeEvent(event: unknown) { if (!event || typeof event !== "object") return "런타임 이벤트"; const row = event as Record<string, unknown>; return ["kind", "stage", "status", "message", "detail"].filter((key) => typeof row[key] === "string").map((key) => `${key}: ${String(row[key]).replace(/(?:token|secret|api.?key)\s*[:=]\s*\S+/gi, "[민감정보 제거됨]")}`).join(" · ") || "구조화 이벤트"; }
+function clockLabel(value: string | null) { if (!value) return "기록 없음"; const parsed = Date.parse(value); return Number.isNaN(parsed) ? "기록 없음" : new Date(parsed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+function idleLabel(lastActivityAt: string | null) { const seconds = idleSeconds(lastActivityAt, Date.now()); return seconds === null ? "확인 필요" : `${Math.floor(seconds / 60)}분째 조용함`; }
 
 // 진단 상태 중 사용자가 행동할 수 있는 것만 문장으로 옮기고, 나머지는 원문 코드 대신 일반 안내를
 // 쓴다. 상태 코드는 런타임 계약(provider-lifecycle-contract.md)의 것이라 화면이 다 알 수 없다.

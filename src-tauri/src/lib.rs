@@ -25,6 +25,8 @@ pub fn run() {
             commands::projects::read_spec,
             commands::projects::read_task,
             commands::projects::read_idea,
+            commands::projects::list_run_reports,
+            commands::projects::read_report,
             commands::projects::record_spec_decision,
             commands::projects::record_task_qa,
             commands::projects::confirm_task_qa_batch,
