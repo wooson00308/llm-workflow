@@ -244,6 +244,15 @@ describe("AgentRuntimeView cockpit", () => {
     expect(within(screen.getByRole("dialog", { name: "전체 실행 기록" })).getAllByRole("listitem")).toHaveLength(4);
   });
 
+  it("keeps parallel active runs in start order even when the runtime reorders by update time", () => {
+    const older = run("run-b", "running", "TASK-2", "2026-08-11T00:00:00Z", null);
+    const newer = run("run-a", "running", "TASK-1", "2026-08-11T00:05:00Z", null);
+    const reserved = { ...run("run-c", "reserved", "TASK-QA"), startedAt: null, finishedAt: null };
+    renderView(state({ queue: { projectId: "prj_1", paused: false, runs: [newer, reserved, older], errors: [], providers: [], unavailable: null } }));
+    const rows = screen.getByRole("heading", { name: "진행 중" }).closest("section")!.querySelectorAll("li strong");
+    expect([...rows].map((node) => node.textContent)).toEqual(["후속 작업", "조종석 HUD 구현", "QA 확인 작업"]);
+  });
+
   it("opens advanced settings and closes drawers with Escape", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));

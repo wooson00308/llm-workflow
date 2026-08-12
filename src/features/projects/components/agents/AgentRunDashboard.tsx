@@ -56,7 +56,7 @@ export function AgentRunDashboard({
   const itemMap = useMemo(() => workflowItems(project), [project]);
   const queueItems = useMemo(() => eligibleQueue(project, itemMap), [itemMap, project]);
   const runs = state.queue?.runs ?? [];
-  const active = runs.filter((run) => activeStates.has(run.state));
+  const active = runs.filter((run) => activeStates.has(run.state)).sort(activeOrder);
   const recent = runs.filter((run) => !activeStates.has(run.state)).slice(0, 3);
   const attention = attentionItems(project, state);
   const waitingForUser = userDecisions(project);
@@ -276,6 +276,17 @@ function attentionItems(project: ProjectSummary, state: AgentRuntimeState) {
   for (const provider of state.policy?.providers ?? []) if (provider.status !== "ready") items.push(`${provider.provider}: 실행 도구 확인이 필요합니다.`);
   void project;
   return [...new Set(items)];
+}
+
+// 진행 중 목록의 자리 고정용 정렬. 런타임은 마지막 갱신 순으로 주므로 병렬 실행이 폴링마다
+// 서로 자리를 바꾼다. 시작 시각 오름차순(미시작은 뒤, 동률은 runId)이면 행이 움직이지 않는다.
+function activeOrder(a: AgentRunSummary, b: AgentRunSummary) {
+  if (a.startedAt !== b.startedAt) {
+    if (a.startedAt === null) return 1;
+    if (b.startedAt === null) return -1;
+    return a.startedAt < b.startedAt ? -1 : 1;
+  }
+  return a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0;
 }
 
 function titleOf(id: string | null, items: Map<string, WorkflowItemSummary>) { return id ? items.get(id)?.title ?? id : "작업 확인 중"; }

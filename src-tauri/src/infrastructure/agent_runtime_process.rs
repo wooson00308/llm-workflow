@@ -160,6 +160,16 @@ impl RuntimeCaller for LauncherCaller {
             if let Some(existing) = std::env::var_os("PATH") {
                 paths.extend(std::env::split_paths(&existing));
             }
+            // Finder가 띄운 앱의 PATH에는 개발 도구 설치 경로가 없어, 여기서 부른 provider 진단이
+            // 셸이나 데몬과 다르게 답한다. 데몬 서비스 정의가 쓰는 표준 설치 경로를 뒤에 보태
+            // 두 자리의 판정을 같게 한다. 뒤에 붙이므로 기존 PATH의 우선순위는 그대로다.
+            #[cfg(unix)]
+            for known in ["/opt/homebrew/bin", "/usr/local/bin"] {
+                let known = PathBuf::from(known);
+                if !paths.contains(&known) {
+                    paths.push(known);
+                }
+            }
             if let Ok(joined) = std::env::join_paths(paths) {
                 command.env("PATH", joined);
             }
