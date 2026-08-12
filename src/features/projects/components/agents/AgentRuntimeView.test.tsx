@@ -265,6 +265,28 @@ describe("AgentRuntimeView cockpit", () => {
     expect([...rows].map((node) => node.textContent)).toEqual(["후속 작업", "조종석 HUD 구현", "QA 확인 작업"]);
   });
 
+  it("renders the model list from the provider catalog and marks a vanished stored model", () => {
+    const withCatalog = state();
+    withCatalog.policy = policy({
+      policy: {
+        projectId: "prj_1", workingDirectory: "/projects/workflow-labs", automationEnabled: false,
+        projectMaxParallel: 3, deviceMaxParallel: 8,
+        roles: { planner: role({ model: "gpt-5.6" }), architect: role(), developer: role() },
+      },
+      providers: [{
+        provider: "codex", status: "ready", version: "1.0",
+        modelCatalog: { status: "available", models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol" }, { id: "gpt-5.7-nova", label: "GPT-5.7-Nova" }] },
+      }],
+    });
+    renderView(withCatalog);
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    const select = screen.getByRole("combobox", { name: "기획자 모델" });
+    expect(within(select).getByText("현재 설정 · gpt-5.6 — 계정 목록에 없음")).toBeInTheDocument();
+    expect(within(select).getByText("GPT-5.6-Sol · 최고 성능")).toBeInTheDocument();
+    expect(within(select).getByText("GPT-5.7-Nova")).toBeInTheDocument();
+    expect(screen.getByText(/실행은 기본 모델로 진행됩니다/)).toBeInTheDocument();
+  });
+
   it("opens advanced settings and closes drawers with Escape", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));

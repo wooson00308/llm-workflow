@@ -1356,6 +1356,8 @@ export interface AgentProviderDiagnosis {
   provider: string;
   status: string;
   version: string | null;
+  /** 실행 도구가 진단 때 보고한 계정 기준 모델 목록. 구버전 런타임 응답에는 없다. */
+  modelCatalog?: { status: string; models?: Array<{ id: string; label?: string }> };
 }
 
 export interface AgentPolicySnapshot {
