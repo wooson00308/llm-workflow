@@ -273,7 +273,7 @@ function attentionItems(project: ProjectSummary, state: AgentRuntimeState) {
   if (state.queue?.unavailable) items.push(humanRuntimeMessage(state.queue.unavailable));
   if (state.queue?.automation?.watcher?.status === "degraded") items.push("파일 감시가 중단되어 안전 확인 주기로 동작 중입니다.");
   for (const role of state.queue?.automation?.roles ?? []) if (role.status === "attention") items.push(`${roleLabels[role.role] ?? role.role}: ${reasonLabel(role.lastResult, "failed")}`);
-  for (const provider of state.policy?.providers ?? []) if (provider.status !== "ready") items.push(`${provider.provider}: 실행 도구 확인이 필요합니다.`);
+  for (const provider of state.policy?.providers ?? []) if (provider.status !== "ready") items.push(`${provider.provider}: ${providerReadinessLabel(provider.status)}`);
   void project;
   return [...new Set(items)];
 }
@@ -297,12 +297,24 @@ function exclusionLabel(reasons: string[]) { if (reasons.some((reason) => /no.?t
 function reasonLabel(reason: string | null, state: string) { if (!reason) return stateLabels[state as AgentRunStatus] ?? state; if (/model_unavailable/.test(reason)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다"; if (/no.?target/.test(reason)) return "새 작업을 기다리는 중"; if (/limit/.test(reason)) return "실행 자리가 모두 사용 중입니다"; if (/login|auth/.test(reason)) return "실행 도구 로그인이 필요합니다"; return humanRuntimeMessage(reason); }
 function safeEvent(event: unknown) { if (!event || typeof event !== "object") return "런타임 이벤트"; const row = event as Record<string, unknown>; return ["kind", "stage", "status", "message", "detail"].filter((key) => typeof row[key] === "string").map((key) => `${key}: ${String(row[key]).replace(/(?:token|secret|api.?key)\s*[:=]\s*\S+/gi, "[민감정보 제거됨]")}`).join(" · ") || "구조화 이벤트"; }
 
+// 진단 상태 중 사용자가 행동할 수 있는 것만 문장으로 옮기고, 나머지는 원문 코드 대신 일반 안내를
+// 쓴다. 상태 코드는 런타임 계약(provider-lifecycle-contract.md)의 것이라 화면이 다 알 수 없다.
+function providerReadinessLabel(status: string) {
+  return /executable_missing|unsupported_version|permission_denied|login|auth/.test(status)
+    ? humanRuntimeMessage(status)
+    : "실행 도구 확인이 필요합니다.";
+}
+
 export function humanRuntimeMessage(message: string) {
   if (/project_not_configured/.test(message)) return "이 프로젝트의 에이전트 설정을 먼저 저장해 주세요.";
   if (/model_unavailable|model.+(?:not available|unsupported)/i.test(message)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다.";
   if (/limit_reached/.test(message)) return "현재 실행 자리가 모두 사용 중입니다.";
   if (/no.?target/.test(message)) return "새 작업을 기다리는 중입니다.";
   if (/login|auth/i.test(message)) return "실행 도구 로그인이 필요합니다.";
+  if (/executable_missing/.test(message)) return "실행 도구가 설치되어 있지 않거나 찾을 수 없습니다. 설치를 확인해 주세요.";
+  if (/unsupported_version/.test(message)) return "실행 도구 버전이 낮습니다. 실행 도구를 업데이트해 주세요.";
+  if (/permission_denied/.test(message)) return "실행 도구를 실행할 권한이 없습니다.";
+  if (/^diagnostic$/.test(message)) return "실행 도구 점검에 실패했습니다. 실행 도구 설치와 로그인 상태를 확인해 주세요.";
   if (/\{[\s\S]*\}|contract|계약 밖|provider error/i.test(message)) return "실행 환경 응답을 확인하지 못했습니다. 고급 설정에서 실행 환경을 복구해 주세요.";
   return message.replace(/(?:token|secret|api.?key)\s*[:=]\s*\S+/gi, "[민감정보 제거됨]");
 }

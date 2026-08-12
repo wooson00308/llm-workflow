@@ -9,6 +9,7 @@ import type {
   AgentRuntimeState,
   ProjectSummary,
 } from "../../domain/types";
+import { humanRuntimeMessage } from "./AgentRunDashboard";
 import { AgentRuntimeView, readinessOf } from "./AgentRuntimeView";
 
 afterEach(cleanup);
@@ -242,6 +243,17 @@ describe("AgentRuntimeView cockpit", () => {
     expect(screen.getAllByText("9초")).toHaveLength(3);
     fireEvent.click(screen.getByRole("button", { name: "전체 기록" }));
     expect(within(screen.getByRole("dialog", { name: "전체 실행 기록" })).getAllByRole("listitem")).toHaveLength(4);
+  });
+
+  it("turns provider readiness codes into user guidance instead of raw codes", () => {
+    expect(humanRuntimeMessage("provider_executable_missing")).toBe("실행 도구가 설치되어 있지 않거나 찾을 수 없습니다. 설치를 확인해 주세요.");
+    expect(humanRuntimeMessage("provider_unsupported_version")).toBe("실행 도구 버전이 낮습니다. 실행 도구를 업데이트해 주세요.");
+    expect(humanRuntimeMessage("provider_login_required")).toBe("실행 도구 로그인이 필요합니다.");
+    expect(humanRuntimeMessage("diagnostic")).toBe("실행 도구 점검에 실패했습니다. 실행 도구 설치와 로그인 상태를 확인해 주세요.");
+    const withProvider = state();
+    withProvider.policy = policy({ providers: [{ provider: "codex", status: "executable_missing", version: null }] });
+    renderView(withProvider);
+    expect(screen.getByText(/codex: 실행 도구가 설치되어 있지 않거나/)).toBeInTheDocument();
   });
 
   it("keeps parallel active runs in start order even when the runtime reorders by update time", () => {
