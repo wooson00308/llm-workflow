@@ -318,7 +318,10 @@ describe("DevelopmentBoard", () => {
     const hub = screen.getByRole("region", { name: "사용자 QA" });
     expect(within(hub).getByRole("heading", { name: "확인할 기능" })).toBeInTheDocument();
     expect(within(hub).getByText("프로젝트 에이전트 실행")).toBeInTheDocument();
-    expect(within(hub).queryByText("막힌 작업 정의 수정")).not.toBeInTheDocument();
+    // 미완성 기획은 세션으로 열리지 않고 예고 카드로만 보인다. 숨기면 완성된 작업이 수면 아래 쌓인다.
+    expect(within(hub).getByText("막힌 작업 정의 수정")).toBeInTheDocument();
+    expect(within(hub).getByText("QA 1건 준비 중 · 남은 작업 1개")).toBeInTheDocument();
+    expect(within(hub).queryByRole("button", { name: "막힌 작업 정의 수정 QA 시작" })).not.toBeInTheDocument();
     expect(within(hub).queryByText("TASK-S051-09")).not.toBeInTheDocument();
     expect(within(hub).getByText("직접 확인 1단계")).toBeInTheDocument();
     expect(within(hub).getByText("자동 검증 1건")).toBeInTheDocument();

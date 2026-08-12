@@ -259,6 +259,19 @@ describe("AgentRuntimeView cockpit", () => {
     expect(screen.getByText(/codex: 실행 도구가 설치되어 있지 않거나/)).toBeInTheDocument();
   });
 
+  it("counts only actionable QA in the waiting list while the spec batch is locked", () => {
+    const custom = project();
+    const [first, second] = custom.workflows[0].items.tasks;
+    custom.workflows[0].items.tasks = [
+      { ...first, id: "TASK-A", fileName: "TASK-A.md", status: "qa_waiting", sourceSpecId: "SPEC-9" },
+      { ...second, id: "TASK-B", fileName: "TASK-B.md", status: "in_progress", sourceSpecId: "SPEC-9" },
+    ];
+    render(<AgentRuntimeView actions={actions()} project={custom} state={state()} />);
+    // 기획 승인 건은 남고, 통째 QA 관문에 잠긴 작업은 세지 않는다.
+    expect(screen.getByText("기획 승인")).toBeInTheDocument();
+    expect(screen.queryByText("QA 확인")).not.toBeInTheDocument();
+  });
+
   it("keeps parallel active runs in start order even when the runtime reorders by update time", () => {
     const older = run("run-b", "running", "TASK-2", "2026-08-11T00:00:00Z", null);
     const newer = run("run-a", "running", "TASK-1", "2026-08-11T00:05:00Z", null);

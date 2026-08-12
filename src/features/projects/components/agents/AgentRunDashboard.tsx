@@ -10,6 +10,7 @@ import type {
   WorkflowItemSummary,
 } from "../../domain/types";
 import type { RunSignal, RunSignalKind, ToolCategory } from "../../domain/runActivity";
+import { actionableQaFileNames } from "../DevelopmentBoard";
 import {
   idleSeconds,
   isRunIdle,
@@ -421,10 +422,17 @@ function eligibleQueue(project: ProjectSummary, items: Map<string, WorkflowItemS
 }
 
 function userDecisions(project: ProjectSummary) {
-  return project.workflows.flatMap((workflow) => [
-    ...workflow.items.specs.filter((item) => item.status === "user_review").map((item) => ({ id: item.id, title: item.title, kind: "기획 승인" })),
-    ...workflow.items.tasks.filter((item) => item.status === "qa_waiting").map((item) => ({ id: item.id, title: item.title, kind: "QA 확인" })),
-  ]);
+  // "내 선택 대기"는 지금 누를 수 있는 것만 센다. 통째 QA 관문에 잠긴 작업까지 세면 개발
+  // 화면은 "할 QA 없음"이라 답해 두 화면이 어긋난다. 잠긴 묶음은 개발 화면이 예고 카드로 보인다.
+  return project.workflows.flatMap((workflow) => {
+    const actionableQa = actionableQaFileNames(workflow.items.tasks);
+    return [
+      ...workflow.items.specs.filter((item) => item.status === "user_review").map((item) => ({ id: item.id, title: item.title, kind: "기획 승인" })),
+      ...workflow.items.tasks
+        .filter((item) => item.status === "qa_waiting" && actionableQa.has(item.fileName))
+        .map((item) => ({ id: item.id, title: item.title, kind: "QA 확인" })),
+    ];
+  });
 }
 
 function attentionItems(project: ProjectSummary, state: AgentRuntimeState) {
