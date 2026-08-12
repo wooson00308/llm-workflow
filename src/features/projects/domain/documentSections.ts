@@ -19,10 +19,60 @@ export interface SectionSplit {
   rest: string;
 }
 
+/** 결정 보드가 추측 없이 표시할 수 있는 고정 요약 값이다. */
+export interface DecisionSummary {
+  proposal: string;
+  current: string;
+  after: string;
+  userResult: string;
+  changed: string;
+  unchanged: string;
+  risk?: string;
+  decisionRequest: string;
+}
+
+/** 막힌 작업 문서가 명시한 현재 사유를 화면에서 그대로 사용할 수 있게 분리한 값이다. */
+export interface BlockedReason {
+  blockedPoint: string;
+  requiredResolution: string;
+  resumeCondition: string;
+  relatedTargetsRaw: string;
+  relatedTargets: string[];
+}
+
 /** 줄 앞의 공백 세 칸까지는 펜스로 인정한다. CommonMark가 그 자리까지를 들여쓴 코드로 보지 않는다. */
 const FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/;
 
 const HEADING_PATTERN = /^(#{1,6})\s/;
+
+const DECISION_SUMMARY_HEADING = "## 결정권자 요약";
+const BLOCKED_REASON_HEADING = "## 막힌 사유";
+const BLOCKED_REASON_MARKERS = ["- 막힌 지점: ", "- 필요한 해결: ", "- 재개 조건: ", "- 관련 대상: "] as const;
+const STRUCTURED_SUMMARY_HEADINGS = [
+  "### 제안",
+  "### 현재",
+  "### 변경 후",
+  "### 사용자 결과",
+  "### 영향 범위",
+  "### 비용과 위험",
+  "### 결정 요청",
+] as const;
+
+const REQUIRED_SUMMARY_HEADINGS = [
+  "### 제안",
+  "### 현재",
+  "### 변경 후",
+  "### 사용자 결과",
+  "### 영향 범위",
+  "### 결정 요청",
+] as const;
+
+const MARKDOWN_HEADING_PATTERN = /^ {0,3}(#{1,6})\s/;
+
+interface SummaryPart {
+  heading: (typeof STRUCTURED_SUMMARY_HEADINGS)[number];
+  lines: string[];
+}
 
 /**
  * 본문에서 `heading` 절을 잘라 낸 결과를 돌려준다.
@@ -72,7 +122,213 @@ export function splitSection(body: string, heading: string): SectionSplit {
   };
 }
 
+/**
+ * `splitSection`으로 분리한 결정권자 요약이 고정 계약을 만족할 때만 보드용 값을 돌려준다.
+ *
+ * 문장 뜻이나 비슷한 제목을 보완하지 않는다. 구조가 한 곳이라도 어긋나면 `null`을 돌려 기존
+ * Markdown 표시가 원문을 그대로 맡도록 한다.
+ */
+export function parseDecisionSummary(section: string | null): DecisionSummary | null {
+  if (section === null) return null;
+
+  const lines = section.split("\n");
+  if (lines[0]?.trimEnd() !== DECISION_SUMMARY_HEADING) return null;
+
+  const parts = splitStructuredSummary(lines.slice(1));
+  if (parts === null) return null;
+
+  const hasRisk = parts.length === STRUCTURED_SUMMARY_HEADINGS.length;
+  const expectedHeadings = hasRisk ? STRUCTURED_SUMMARY_HEADINGS : REQUIRED_SUMMARY_HEADINGS;
+  if (parts.length !== expectedHeadings.length || parts.some((part, index) => part.heading !== expectedHeadings[index])) {
+    return null;
+  }
+
+  const proposal = partValue(parts[0]);
+  const current = partValue(parts[1]);
+  const after = partValue(parts[2]);
+  const userResult = partValue(parts[3]);
+  const impact = impactValues(parts[4]);
+  const risk = hasRisk ? partValue(parts[5]) : undefined;
+  const decisionRequest = partValue(parts[hasRisk ? 6 : 5]);
+
+  if (!proposal || !current || !after || !userResult || !impact || (hasRisk && !risk) || !decisionRequest) {
+    return null;
+  }
+
+  return {
+    proposal,
+    current,
+    after,
+    userResult,
+    changed: impact.changed,
+    unchanged: impact.unchanged,
+    ...(risk ? { risk } : {}),
+    decisionRequest,
+  };
+}
+
+/**
+ * 문서 전체에서 정확한 막힌 사유 절 하나를 찾아 네 필수 값을 분리한다.
+ *
+ * 비슷한 제목이나 불완전한 목록을 보완하지 않는다. 구조가 모두 유효할 때만 전체 값을 돌려주며,
+ * 코드 펜스 안의 예시는 제목이나 라벨로 세지 않는다.
+ */
+export function parseBlockedReason(body: string): BlockedReason | null {
+  const sectionLines = blockedReasonSectionLines(body);
+  if (sectionLines === null) return null;
+
+  const contentLines = sectionLines.filter((line) => line.trim().length > 0);
+  if (contentLines.length !== BLOCKED_REASON_MARKERS.length) return null;
+
+  const values = BLOCKED_REASON_MARKERS.map((marker, index) => markedValue(contentLines[index], marker));
+  if (values.some((value) => value === null)) return null;
+
+  const [blockedPoint, requiredResolution, resumeCondition, relatedTargetsRaw] = values as [string, string, string, string];
+  const relatedTargets = parseRelatedTargets(relatedTargetsRaw);
+  if (relatedTargets === null) return null;
+
+  return {
+    blockedPoint,
+    requiredResolution,
+    resumeCondition,
+    relatedTargetsRaw,
+    relatedTargets,
+  };
+}
+
+function blockedReasonSectionLines(body: string) {
+  const lines = body.split("\n");
+  const headingIndexes: number[] = [];
+  let openFence: string | null = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = FENCE_PATTERN.exec(line)?.[1];
+    if (openFence) {
+      if (closesFence(line, fence, openFence)) openFence = null;
+      continue;
+    }
+    if (fence) {
+      openFence = fence;
+      continue;
+    }
+    if (line === BLOCKED_REASON_HEADING) headingIndexes.push(index);
+  }
+
+  if (headingIndexes.length !== 1) return null;
+
+  const start = headingIndexes[0];
+  const depth = headingDepth(BLOCKED_REASON_HEADING);
+  let end = lines.length;
+  openFence = null;
+
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = FENCE_PATTERN.exec(line)?.[1];
+    if (openFence) {
+      if (closesFence(line, fence, openFence)) openFence = null;
+      continue;
+    }
+    if (fence) {
+      openFence = fence;
+      continue;
+    }
+    const foundDepth = headingDepth(line);
+    if (foundDepth !== null && depth !== null && foundDepth <= depth) {
+      end = index;
+      break;
+    }
+  }
+
+  return lines.slice(start + 1, end);
+}
+
+function markedValue(line: string, marker: string) {
+  if (!line.startsWith(marker)) return null;
+  const value = line.slice(marker.length).trim();
+  return value || null;
+}
+
+function parseRelatedTargets(raw: string) {
+  if (raw === "없음") return [];
+  if (raw.endsWith(",")) return null;
+
+  const targets = raw.split(/,\s+/).map((target) => target.trim());
+  return targets.some((target) => target.length === 0) ? null : targets;
+}
+
+function closesFence(line: string, fence: string | undefined, openFence: string) {
+  return Boolean(fence && fence[0] === openFence[0] && fence.length >= openFence.length && line.trim() === fence);
+}
+
+function splitStructuredSummary(lines: string[]): SummaryPart[] | null {
+  const parts: SummaryPart[] = [];
+  let openFence: string | null = null;
+
+  for (const line of lines) {
+    const fence = FENCE_PATTERN.exec(line)?.[1];
+    if (openFence) {
+      parts[parts.length - 1].lines.push(line);
+      if (fence && fence[0] === openFence[0] && fence.length >= openFence.length && line.trim() === fence) {
+        openFence = null;
+      }
+      continue;
+    }
+    if (fence) {
+      if (parts.length === 0) return null;
+      parts[parts.length - 1].lines.push(line);
+      openFence = fence;
+      continue;
+    }
+
+    const depth = markdownHeadingDepth(line);
+    if (depth !== null) {
+      const heading = line.trimEnd();
+      if (depth !== 3 || !isStructuredSummaryHeading(heading)) return null;
+      parts.push({ heading, lines: [] });
+      continue;
+    }
+
+    if (parts.length === 0) {
+      if (line.trim().length > 0) return null;
+      continue;
+    }
+    parts[parts.length - 1].lines.push(line);
+  }
+
+  return parts;
+}
+
+function isStructuredSummaryHeading(heading: string): heading is SummaryPart["heading"] {
+  return (STRUCTURED_SUMMARY_HEADINGS as readonly string[]).includes(heading);
+}
+
+function partValue(part: SummaryPart | undefined) {
+  const value = part?.lines.join("\n").trim();
+  return value || null;
+}
+
+function impactValues(part: SummaryPart | undefined) {
+  const lines = part?.lines.filter((line) => line.trim().length > 0);
+  if (!lines || lines.length !== 2) return null;
+
+  const changed = impactValue(lines[0], "- 변경:");
+  const unchanged = impactValue(lines[1], "- 유지:");
+  return changed && unchanged ? { changed, unchanged } : null;
+}
+
+function impactValue(line: string, marker: string) {
+  if (!line.startsWith(marker)) return null;
+  const value = line.slice(marker.length).trim();
+  return value || null;
+}
+
 function headingDepth(line: string) {
   const match = HEADING_PATTERN.exec(line);
+  return match ? match[1].length : null;
+}
+
+function markdownHeadingDepth(line: string) {
+  const match = MARKDOWN_HEADING_PATTERN.exec(line);
   return match ? match[1].length : null;
 }

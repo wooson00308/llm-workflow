@@ -2,17 +2,20 @@ import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
 import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
 import type {
+  AgentLeaseSummary,
   TaskDependency,
   TaskDocument,
   TaskOverlapBlock,
   TaskQaBatchEntry,
   TaskQaOutcome,
+  TaskRevisionRequestOutcome,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
-import { splitSection } from "../domain/documentSections";
+import { parseBlockedReason, splitSection } from "../domain/documentSections";
 import { UNASSIGNED_LANE_KEY, browserSpecLaneCollapseStore } from "../infrastructure/browserSpecLaneCollapseStore";
-import { DocumentReader } from "./DocumentReader";
+import { BlockedTaskPanel, TaskRevisionRequestPanel } from "./BlockedTaskPanel";
+import { DECISION_SUMMARY_HEADING, DocumentReader } from "./DocumentReader";
 import { MarkdownBody } from "./MarkdownBody";
 
 /** 다섯 상태의 순서와 열 구성. 기획서 화면의 파생 작업 배지가 같은 목록으로 센다(SPEC-039 R5). */
@@ -67,27 +70,40 @@ export const eventKinds = [
   { kind: "blocked", label: "막힘" },
   { kind: "qa_waiting", label: "QA 대기" },
   { kind: "completed", label: "완료" },
+  // QA 반려와 사용자 재개는 둘 다 작업을 `todo`로 되돌리지만 서로 다른 사실이라 이름을 나눈다.
+  // 하나는 사용자가 결과를 물린 것이고, 다른 하나는 막힌 일을 사용자가 다시 연 것이다.
   { kind: "revision_requested", label: "반려" },
+  { kind: "resumed", label: "사용자 재개" },
+  { kind: "task_revision_requested", label: "정의 수정 요청" },
+  { kind: "task_revision_applied", label: "아키텍트 수정" },
 ] as const;
 
 type ViewMode = (typeof viewModes)[number]["value"];
 
 interface Props {
+  activeLeases?: AgentLeaseSummary[];
   busy: boolean;
   onReadTask(fileName: string): Promise<TaskDocument | null>;
+  onTaskRevisionRequest?(
+    fileName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    requestId: string,
+  ): Promise<TaskRevisionRequestOutcome>;
   onTaskQa(fileName: string, outcome: TaskQaOutcome, comment: string): Promise<boolean>;
   /** 일괄은 입구를 하나 더하는 것이지 `onTaskQa`를 대체하지 않는다(SPEC-031 R7). */
   onTaskQaBatch(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
   workflow: WorkflowSummary;
 }
 
-export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, workflow }: Props) {
+export function DevelopmentBoard({ activeLeases = [], busy, onReadTask, onTaskRevisionRequest = async () => ({ ok: false, message: "정의 수정 요청 조작이 연결되지 않았습니다." }), onTaskQa, onTaskQaBatch, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [laneGrouping, setLaneGrouping] = useState(false);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [calendarCursor, setCalendarCursor] = useState(() => startOfMonth(new Date()));
   const [taskDocument, setTaskDocument] = useState<TaskDocument | null>(null);
+  const [qaSession, setQaSession] = useState<QaSession | null>(null);
   const [taskLoading, setTaskLoading] = useState(false);
   // 게으른 초기화라 렌더마다 저장소를 읽지 않는다.
   const [laneCollapsed, setLaneCollapsed] = useState(() => browserSpecLaneCollapseStore.load(workflow.directory));
@@ -120,6 +136,17 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
     [workflow.items.tasks],
   );
   const hasFilters = Boolean(query.trim()) || statusFilter !== "all";
+  const qaSessions = useMemo(
+    () => buildQaSessions(workflow.items.tasks, workflow.items.specs),
+    [workflow.items.specs, workflow.items.tasks],
+  );
+  const visibleQaSessions = useMemo(
+    () => qaSessions.filter((session) => matchesQaSessionFilters(session, query, statusFilter)),
+    [qaSessions, query, statusFilter],
+  );
+  const boardResultCount = laneGrouping
+    ? filteredTasks.length
+    : filteredTasks.filter((item) => item.status !== "qa_waiting").length + visibleQaSessions.length;
 
   /**
    * 레인 하나의 접힘을 뒤집고 같은 자리에서 저장한다(`applyPanelWidth`와 같은 어법).
@@ -140,18 +167,48 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
     setTaskLoading(false);
   }
 
+  async function reloadTask() {
+    if (!taskDocument) return;
+    const document = await onReadTask(taskDocument.summary.fileName);
+    if (document) setTaskDocument(document);
+  }
+
   if (taskDocument) {
     return (
       <TaskDetail
+        backLabel={qaSession ? "← QA로 돌아가기" : "← 개발 작업으로"}
         busy={busy}
         document={taskDocument}
+        leased={activeLeases.some((lease) => lease.taskId === taskDocument.summary.id)}
         onBack={() => setTaskDocument(null)}
+        onOpenRelatedTask={async (item) => {
+          const relatedDocument = await onReadTask(item.fileName);
+          if (relatedDocument) setTaskDocument(relatedDocument);
+        }}
+        onReloadTask={reloadTask}
+        onTaskRevisionRequest={onTaskRevisionRequest}
         onTaskQa={async (outcome, comment) => {
           const succeeded = await onTaskQa(taskDocument.summary.fileName, outcome, comment);
-          if (succeeded) setTaskDocument(null);
+          if (succeeded) {
+            setTaskDocument(null);
+            setQaSession(null);
+          }
           return succeeded;
         }}
+        tasks={workflow.items.tasks}
         taskTitles={taskTitles}
+      />
+    );
+  }
+
+  if (qaSession) {
+    return (
+      <QaSessionView
+        busy={busy}
+        onBack={() => setQaSession(null)}
+        onConfirm={onTaskQaBatch}
+        onOpenTask={(item) => void openTask(item)}
+        session={qaSession}
       />
     );
   }
@@ -205,11 +262,11 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
       <div className="development-summary">
         <span><i className="summary-dot active" />진행 중 {count(workflow.items.tasks, "in_progress")}</span>
         <span><i className="summary-dot danger" />막힘 {count(workflow.items.tasks, "blocked")}</span>
-        <span><i className="summary-dot review" />QA 대기 {count(workflow.items.tasks, "qa_waiting")}</span>
+        <span><i className="summary-dot review" />내 확인 {qaSessions.length}</span>
         <span className="result-count">
           {viewMode === "calendar"
             ? `${timelineTasks.length}개 표시 · 완료 작업까지 전부 표시`
-            : `${filteredTasks.length}개 표시 · 완료는 최근 3개만 표시`}
+            : `${viewMode === "board" ? boardResultCount : filteredTasks.length}개 표시 · 완료는 최근 3개만 표시`}
         </span>
       </div>
 
@@ -217,6 +274,13 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
 
       {viewMode === "board" && (
         <>
+          {!laneGrouping && (statusFilter === "all" || statusFilter === "qa_waiting") && (
+            <QaSessionHub
+              onOpen={setQaSession}
+              sessions={visibleQaSessions}
+              showEmpty={statusFilter === "qa_waiting"}
+            />
+          )}
           <div className="task-lane-controls">
             <button aria-pressed={laneGrouping} onClick={() => setLaneGrouping((value) => !value)}>
               기획서별 묶기
@@ -235,9 +299,14 @@ export function DevelopmentBoard({ busy, onReadTask, onTaskQa, onTaskQaBatch, wo
               statusFilter={statusFilter}
               visibleTasks={filteredTasks}
             />
-          ) : (
-            <BoardView items={filteredTasks} onOpen={(item) => void openTask(item)} statusFilter={statusFilter} />
-          )}
+          ) : statusFilter !== "qa_waiting" ? (
+            <BoardView
+              excludeQa={statusFilter === "all"}
+              items={filteredTasks}
+              onOpen={(item) => void openTask(item)}
+              statusFilter={statusFilter}
+            />
+          ) : null}
         </>
       )}
       {viewMode === "list" && <ListView items={filteredTasks} onOpen={(item) => void openTask(item)} />}
@@ -288,16 +357,33 @@ function saveQaPanelWidth(value: number) {
 const TASK_WALKTHROUGH_HEADING = "## 확인 동선";
 
 function TaskDetail({
+  backLabel,
   busy,
   document,
+  leased,
   onBack,
+  onOpenRelatedTask,
+  onReloadTask,
+  onTaskRevisionRequest,
   onTaskQa,
+  tasks,
   taskTitles,
 }: {
+  backLabel: string;
   busy: boolean;
   document: TaskDocument;
+  leased: boolean;
   onBack(): void;
+  onOpenRelatedTask(task: WorkflowItemSummary): Promise<void>;
+  onReloadTask(): Promise<void>;
+  onTaskRevisionRequest(
+    fileName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    requestId: string,
+  ): Promise<TaskRevisionRequestOutcome>;
   onTaskQa(outcome: TaskQaOutcome, comment: string): Promise<boolean>;
+  tasks: WorkflowItemSummary[];
   /** 작업 id → 제목. 선행을 제목으로 부르는 자리에서만 쓴다. */
   taskTitles: Map<string, string>;
 }) {
@@ -306,7 +392,19 @@ function TaskDetail({
   const [resizing, setResizing] = useState(false);
   const confirmQa = useArmedConfirm();
   const revisionQa = useArmedConfirm();
+  const blocked = document.summary.status === "blocked";
+  const revisable = !leased && (blocked || document.summary.status === "todo");
   const awaitingQa = document.summary.status === "qa_waiting";
+  const blockedReason = useMemo(
+    () => (blocked ? parseBlockedReason(document.body) : null),
+    [blocked, document.body],
+  );
+  const blockedSummary = useMemo(
+    () => (blocked && blockedReason === null
+      ? splitSection(document.body, DECISION_SUMMARY_HEADING).section
+      : null),
+    [blocked, blockedReason, document.body],
+  );
   // 개발자가 적어 둔 확인 동선을 도장 옆으로 가져온다(SPEC-039 R7). 이미 읽어 온 본문 위에서 자르고
   // 문서를 다시 읽지 않는다. 확인 도구가 활성화된 `qa_waiting`에서만 찾는다 — 도장이 없는 자리에
   // 확인 동선만 띄우지 않는다. 절이 없으면 `null`이고, 그때 이 자리는 지금 모습 그대로다.
@@ -314,6 +412,15 @@ function TaskDetail({
     () => (awaitingQa ? splitSection(document.body, TASK_WALKTHROUGH_HEADING).section : null),
     [awaitingQa, document.body],
   );
+  const preflight = useMemo(
+    () => splitSection(document.body, "## 범위 사전 검사").section,
+    [document.body],
+  );
+  // 사용자가 이 작업을 다시 연 사실. 문서 이력에서 그대로 읽고, 없으면 아무 말도 하지 않는다.
+  const lastResumed = useMemo(() => {
+    const resumed = (document.summary.events ?? []).filter((event) => event.kind === "resumed");
+    return resumed.length === 0 ? null : resumed[resumed.length - 1];
+  }, [document.summary.events]);
   const dependencies = document.dependencies ?? [];
   const formatError = document.dependencyFormatError ?? false;
   const overlaps = document.overlapBlocks ?? [];
@@ -358,7 +465,7 @@ function TaskDetail({
 
   return (
     <section className="task-detail-view">
-      <button className="text-button task-detail-back" onClick={onBack}>← 개발 작업으로</button>
+      <button className="text-button task-detail-back" onClick={onBack}>{backLabel}</button>
       <div className="view-heading task-detail-heading">
         <div><p className="eyebrow">{document.summary.id}</p><h1>{document.summary.title}</h1><p>개발 작업의 범위와 검증 내용을 확인합니다.</p></div>
         {/* 지금 상태와 시작 가능 여부가 같은 자리에서 읽힌다(SPEC-039 R5). 시작 가능 여부는 선행
@@ -403,9 +510,25 @@ function TaskDetail({
             tabIndex={0}
             title="드래그로 너비 조절 · 더블클릭으로 초기화"
           />
-          <p className="eyebrow">USER QA</p>
-          <h2>{awaitingQa ? "직접 확인해 주세요" : "현재 작업 상태"}</h2>
-          {awaitingQa ? (
+          <p className="eyebrow">{blocked ? "BLOCKED TASK" : "USER QA"}</p>
+          <h2>{blocked ? "진행이 막혔습니다" : awaitingQa ? "직접 확인해 주세요" : "현재 작업 상태"}</h2>
+          {blocked ? (
+            <BlockedTaskPanel
+              decisionSummary={blockedSummary}
+              onOpenRelatedTask={onOpenRelatedTask}
+              reason={blockedReason}
+              revisionRequest={revisable ? {
+                busy,
+                dependencies,
+                document,
+                onReload: onReloadTask,
+                onRequest: onTaskRevisionRequest,
+                preflight,
+              } : undefined}
+              tasks={tasks}
+              updatedAt={document.summary.updatedAt}
+            />
+          ) : awaitingQa ? (
             <>
               <p>테스트한 순서와 결과를 남기면 완료 기록 또는 개발자 재작업 지시로 전달됩니다.</p>
               {/* 문서가 쓴 문장을 그대로 옮긴다. 앱이 이 절의 문장을 조립하지 않는다(SPEC-039 R4). */}
@@ -464,11 +587,26 @@ function TaskDetail({
               </div>
             </>
           ) : (
-            <div className={`decision-result ${document.summary.status === "completed" ? "approved" : ""}`}>
-              <Icon name={document.summary.status === "completed" ? "stamp" : "board"} />
-              <strong>{statusLabels[document.summary.status] ?? document.summary.status}</strong>
-              <p>{document.summary.status === "completed" ? "사용자 QA까지 완료된 작업입니다." : "QA 대기 상태가 되면 확인 도구가 활성화됩니다."}</p>
-            </div>
+            <>
+              <div className={`decision-result ${document.summary.status === "completed" ? "approved" : ""}`}>
+                <Icon name={document.summary.status === "completed" ? "stamp" : "board"} />
+                <strong>{statusLabels[document.summary.status] ?? document.summary.status}</strong>
+                <p>{document.summary.status === "completed" ? "사용자 QA까지 완료된 작업입니다." : "QA 대기 상태가 되면 확인 도구가 활성화됩니다."}</p>
+                {lastResumed !== null && (
+                  <p className="task-resume-record">사용자 재개 {formatDate(lastResumed.at)}</p>
+                )}
+              </div>
+              {revisable && (
+                <TaskRevisionRequestPanel
+                  busy={busy}
+                  dependencies={dependencies}
+                  document={document}
+                  onReload={onReloadTask}
+                  onRequest={onTaskRevisionRequest}
+                  preflight={preflight}
+                />
+              )}
+            </>
           )}
         </aside>
       </div>
@@ -576,11 +714,13 @@ function overlapSentence(block: TaskOverlapBlock) {
 }
 
 function BoardView({
+  excludeQa = false,
   items,
   label = "개발 작업 칸반 보드",
   onOpen,
   statusFilter,
 }: {
+  excludeQa?: boolean;
   items: WorkflowItemSummary[];
   /** region 이름. 레인 수만큼 보드가 생길 때 같은 이름이 겹치지 않게 레인이 갈아 끼운다. */
   label?: string;
@@ -590,7 +730,7 @@ function BoardView({
   const knownStatuses = new Set<string>(taskColumns.map((column) => column.status));
   const unknown = items.filter((item) => !knownStatuses.has(item.status));
   const columns = statusFilter === "all"
-    ? taskColumns
+    ? taskColumns.filter((column) => !excludeQa || column.status !== "qa_waiting")
     : taskColumns.filter((column) => column.status === statusFilter);
 
   return (
@@ -609,6 +749,179 @@ function BoardView({
         <TaskColumn description="규격을 확인해야 하는 상태" items={unknown} onOpen={onOpen} title="확인 필요" tone="danger" />
       )}
     </div>
+  );
+}
+
+function QaSessionHub({
+  onOpen,
+  sessions,
+  showEmpty,
+}: {
+  onOpen(session: QaSession): void;
+  sessions: QaSession[];
+  showEmpty: boolean;
+}) {
+  if (sessions.length === 0 && !showEmpty) return null;
+  return (
+    <section aria-label="사용자 QA" className="qa-session-hub">
+      <header>
+        <div>
+          <span>USER QA</span>
+          <h2>확인할 기능</h2>
+          <p>개발 작업이 아니라, 실제로 바뀐 기능 흐름을 한 번에 확인합니다.</p>
+        </div>
+        <strong>{sessions.length}</strong>
+      </header>
+      {sessions.length > 0 ? (
+        <div className="qa-session-list">
+          {sessions.map((session) => (
+            <article className="qa-session-card" key={session.key}>
+              <div>
+                <strong>{session.title}</strong>
+                {session.description && <p>{session.description}</p>}
+              </div>
+              <footer>
+                <span>직접 확인 {session.steps.length}단계</span>
+                {session.evidence.length > 0 && <span>자동 검증 {session.evidence.length}건</span>}
+                <button
+                  aria-label={`${session.title} QA 시작`}
+                  className="secondary-button"
+                  onClick={() => onOpen(session)}
+                  type="button"
+                >
+                  QA 시작
+                </button>
+              </footer>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="qa-session-empty">지금 사용자에게 요청할 기능 QA가 없습니다. 개발이 모두 끝난 기능만 여기에 나타납니다.</p>
+      )}
+    </section>
+  );
+}
+
+interface QaSessionOutcome {
+  entries: TaskQaBatchEntry[] | null;
+}
+
+function QaSessionView({
+  busy,
+  onBack,
+  onConfirm,
+  onOpenTask,
+  session,
+}: {
+  busy: boolean;
+  onBack(): void;
+  onConfirm(fileNames: string[], comment: string): Promise<TaskQaBatchEntry[] | null>;
+  onOpenTask(item: WorkflowItemSummary): void;
+  session: QaSession;
+}) {
+  const [comment, setComment] = useState("");
+  const [running, setRunning] = useState(false);
+  const [outcome, setOutcome] = useState<QaSessionOutcome | null>(null);
+  const confirmSession = useArmedConfirm();
+  const locked = busy || running;
+
+  async function run() {
+    setRunning(true);
+    const entries = await onConfirm(session.tasks.map((item) => item.fileName), comment.trim());
+    setRunning(false);
+    if (entries !== null && entries.length > 0 && entries.every((entry) => entry.recorded)) {
+      onBack();
+      return;
+    }
+    setOutcome({ entries });
+  }
+
+  const failures = outcome?.entries?.filter((entry) => !entry.recorded) ?? [];
+  const taskTitle = (fileName: string) =>
+    session.tasks.find((item) => item.fileName === fileName)?.title ?? "기록하지 못한 확인 항목";
+
+  return (
+    <section className="qa-session-view">
+      <button className="text-button qa-session-back" onClick={onBack} type="button">← 개발 작업으로</button>
+      <div className="view-heading qa-session-heading">
+        <div>
+          <p className="eyebrow">USER QA</p>
+          <h1>{session.title}</h1>
+          <p>아래 흐름을 한 번 확인하면 관련 개발 작업의 QA가 함께 기록됩니다.</p>
+        </div>
+        <span><strong>{session.steps.length}</strong><small>확인 단계</small></span>
+      </div>
+
+      <ol aria-label="직접 확인 단계" className="qa-session-steps">
+        {session.steps.map((step, index) => (
+          <li key={step.fileName}>
+            <span aria-hidden="true">{index + 1}</span>
+            <div>
+              <strong>{step.title}</strong>
+              {step.excerpt && <p>{step.excerpt}</p>}
+              <button className="text-button" onClick={() => onOpenTask(step)} type="button">
+                문제 있는 단계 열기
+              </button>
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {session.steps.length === 0 && (
+        <p className="qa-session-no-steps">직접 조작할 화면은 없습니다. 아래 자동 검증 결과를 확인해 주세요.</p>
+      )}
+
+      {session.evidence.length > 0 && (
+        <details className="qa-session-evidence">
+          <summary>자동으로 확인된 항목 {session.evidence.length}건</summary>
+          <ul>
+            {session.evidence.map((item) => <li key={item.fileName}>{item.title}</li>)}
+          </ul>
+        </details>
+      )}
+
+      <section aria-label="QA 결과 기록" className="qa-session-finish">
+        <div>
+          <h2>기능이 기대대로 동작했나요?</h2>
+          <p>문제가 있으면 위 단계에서 해당 작업을 열어 수정 내용을 남길 수 있습니다.</p>
+        </div>
+        <label htmlFor={`qa-session-comment-${session.key}`}>확인 메모 <small>선택</small></label>
+        <textarea
+          id={`qa-session-comment-${session.key}`}
+          maxLength={2_000}
+          onChange={(event) => {
+            confirmSession.disarm();
+            setComment(event.target.value);
+          }}
+          placeholder="확인한 환경이나 남길 메모가 있으면 적어 주세요."
+          value={comment}
+        />
+        {confirmSession.armed && (
+          <p className="confirm-warning" role="status">이 기능의 QA를 모두 완료 처리합니다. 한 번 더 눌러 확정해 주세요.</p>
+        )}
+        {outcome?.entries === null && (
+          <p className="qa-session-error" role="status">QA 결과를 기록하지 못했습니다. 입력은 유지했습니다. 잠시 후 다시 시도해 주세요.</p>
+        )}
+        {failures.length > 0 && (
+          <div className="qa-session-error" role="status">
+            <strong>{failures.length}건을 기록하지 못했습니다.</strong>
+            <ul>{failures.map((entry) => <li key={entry.fileName}>{taskTitle(entry.fileName)}</li>)}</ul>
+          </div>
+        )}
+        <div className="qa-session-finish-actions">
+          <button className="text-button" disabled={locked} onClick={onBack} type="button">나중에 확인</button>
+          <button
+            className={`stamp-button ${confirmSession.armed ? "armed" : ""}`}
+            disabled={locked}
+            onClick={() => confirmSession.fire(() => void run())}
+            type="button"
+          >
+            {running ? "기록 중…" : confirmSession.armed ? "한 번 더 누르면 완료" : "이 기능 확인 완료"}
+            {confirmSession.armed && <i aria-hidden="true" className="confirm-timer" />}
+          </button>
+        </div>
+      </section>
+    </section>
   );
 }
 
@@ -1036,17 +1349,21 @@ function TaskColumn({
     <section className={`task-column tone-${tone}`}>
       <header><div><strong>{title}</strong><small>{description}</small></div><span>{items.length}</span></header>
       <div className="task-stack">
-        {items.map((item) => (
-          <button className="task-card" key={item.fileName} onClick={() => onOpen(item)}>
-            <div><span className={`status-pill status-${item.status}`}>{statusLabels[item.status] ?? item.status}</span><small>{item.id}</small></div>
-            <strong>{item.title}</strong>
-            {item.excerpt && <p>{item.excerpt}</p>}
-            <footer><Icon name="board" /><span>{item.dueAt ? `목표 ${formatDueDate(item.dueAt)}` : formatDate(item.updatedAt)}</span></footer>
-          </button>
-        ))}
+        {items.map((item) => <TaskCard item={item} key={item.fileName} onOpen={onOpen} />)}
         {items.length === 0 && <div className="task-column-empty"><span /><small>작업 없음</small></div>}
       </div>
     </section>
+  );
+}
+
+function TaskCard({ item, onOpen }: { item: WorkflowItemSummary; onOpen(item: WorkflowItemSummary): void }) {
+  return (
+    <button className="task-card" onClick={() => onOpen(item)}>
+      <div><span className={`status-pill status-${item.status}`}>{statusLabels[item.status] ?? item.status}</span><small>{item.id}</small></div>
+      <strong>{item.title}</strong>
+      {item.excerpt && <p>{item.excerpt}</p>}
+      <footer><Icon name="board" /><span>{item.dueAt ? `목표 ${formatDueDate(item.dueAt)}` : formatDate(item.updatedAt)}</span></footer>
+    </button>
   );
 }
 
@@ -1061,6 +1378,83 @@ function tasksForDevelopment(items: WorkflowItemSummary[]) {
     .slice(0, 3);
   const recentFiles = new Set(recentCompleted.map((item) => item.fileName));
   return items.filter((item) => item.status !== "completed" || recentFiles.has(item.fileName));
+}
+
+interface QaSession {
+  key: string;
+  title: string;
+  description: string;
+  tasks: WorkflowItemSummary[];
+  steps: WorkflowItemSummary[];
+  evidence: WorkflowItemSummary[];
+}
+
+/**
+ * 내부 작업을 사용자가 실제로 확인할 기능 단위로 접는다.
+ *
+ * 같은 기획서에 준비·진행·막힘·규격 밖 작업이 하나라도 남아 있으면 아직 하나의 사용자 흐름이라고
+ * 부를 수 없으므로 노출하지 않는다. 기획서 연결이 없는 옛 작업은 서로 관계를 추정하지 않고 단건
+ * 세션으로만 보존한다. 자동 검사만 확인하면 되는 작업도 완료 대상에는 포함하되 직접 조작 단계에서는
+ * 접는다.
+ */
+function buildQaSessions(tasks: WorkflowItemSummary[], specs: WorkflowItemSummary[]): QaSession[] {
+  const specById = new Map(specs.map((spec) => [spec.id, spec]));
+  const groups = new Map<string, WorkflowItemSummary[]>();
+
+  for (const task of tasks) {
+    const specId = task.sourceSpecId?.trim();
+    const key = specId || (task.status === "qa_waiting" ? `task:${task.fileName}` : null);
+    if (!key) continue;
+    groups.set(key, [...(groups.get(key) ?? []), task]);
+  }
+
+  const sessions: QaSession[] = [];
+  for (const [key, group] of groups) {
+    const qaWaiting = group.filter((item) => item.status === "qa_waiting");
+    if (qaWaiting.length === 0) continue;
+    if (group.some((item) => item.status !== "completed" && item.status !== "qa_waiting")) continue;
+
+    const ordered = [...qaWaiting].sort(compareQaTasks);
+    const evidence = ordered.filter(isEvidenceOnlyQa);
+    const evidenceFiles = new Set(evidence.map((item) => item.fileName));
+    const steps = ordered.filter((item) => !evidenceFiles.has(item.fileName));
+    const spec = key.startsWith("task:") ? null : specById.get(key);
+    const onlyTask = ordered.length === 1 ? ordered[0] : null;
+    sessions.push({
+      key,
+      title: spec?.title ?? onlyTask?.title ?? key,
+      description: spec?.excerpt ?? onlyTask?.excerpt ?? "",
+      tasks: ordered,
+      steps,
+      evidence,
+    });
+  }
+
+  return sessions.sort((left, right) => left.key.localeCompare(right.key, "ko", { numeric: true }));
+}
+
+function compareQaTasks(left: WorkflowItemSummary, right: WorkflowItemSummary) {
+  return left.id.localeCompare(right.id, "ko", { numeric: true }) || left.fileName.localeCompare(right.fileName);
+}
+
+/** 확인 동선이 직접 화면 조작이 아니라고 명시한 경우만 자동 근거로 접는다. 모호하면 사용자 단계에 남긴다. */
+function isEvidenceOnlyQa(item: WorkflowItemSummary) {
+  return [
+    "화면은 없다",
+    "화면은 없고",
+    "화면은 이 작업의 범위가 아니다",
+    "눈으로 볼 화면이 없다",
+  ].some((phrase) => item.excerpt.includes(phrase));
+}
+
+function matchesQaSessionFilters(session: QaSession, query: string, statusFilter: string) {
+  if (statusFilter !== "all" && statusFilter !== "qa_waiting") return false;
+  const normalized = query.trim().toLocaleLowerCase("ko-KR");
+  if (!normalized) return true;
+  return [session.title, session.description, ...session.tasks.flatMap((item) => [item.id, item.title, item.excerpt])]
+    .join(" ")
+    .toLocaleLowerCase("ko-KR")
+    .includes(normalized);
 }
 
 interface SpecLane {

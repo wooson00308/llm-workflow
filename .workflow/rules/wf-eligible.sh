@@ -1,12 +1,17 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 11
+# condition_script_version: 15
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
-# 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer  (프로젝트 루트에서 실행)
+# 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
 set -u
 
 role="${1:-}"
+machine_output=0
+[ "${2:-}" = "--json" ] && machine_output=1
+machine_target=""
+machine_target_kind=""
+machine_candidates=""
 leases=".workflow/.runtime/leases"
 # 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
 # 개행이 목록의 경계가 된다.
@@ -19,9 +24,77 @@ nl='
 # 표준 출력에 쓰는 것은 이 함수뿐이다. deps_of의 목록 출력은 언제나 명령 치환이 받아 가므로
 # 이 줄과 섞이지 않는다 — 그래서 사유가 표준 출력의 첫 줄이자 유일한 줄이 된다.
 # 사유는 판정을 바꾸지 않는다. 종료 코드는 이 함수를 쓰기 전과 같다.
+json_quote() {
+  # 기계 출력은 문서에서 읽은 값을 담으므로 한 줄 JSON의 인용을 여기서 보장한다. 문서의 한 줄 값에는
+  # 개행이 없고, 탭·따옴표·역슬래시만 이스케이프하면 이 계약의 문자열 자리가 유효하다.
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+machine_result() { # $1=사유 코드
+  machine_reason=$1
+  if [ -n "$machine_target" ]; then machine_reason=eligible; fi
+  printf '{"schemaVersion":1,"role":"%s","targetId":' "$(json_quote "$role")"
+  if [ -n "$machine_target" ]; then
+    printf '"%s"' "$(json_quote "$machine_target")"
+  else
+    printf 'null'
+  fi
+  printf ',"targetKind":'
+  if [ -n "$machine_target_kind" ]; then
+    printf '"%s"' "$(json_quote "$machine_target_kind")"
+  else
+    printf 'null'
+  fi
+  printf ',"candidates":['
+  machine_first=1
+  while IFS='	' read -r machine_code machine_id; do
+    [ -n "$machine_code" ] || continue
+    [ "$machine_first" -eq 1 ] || printf ','
+    machine_first=0
+    printf '{"id":"%s","reason":"%s"}' \
+      "$(json_quote "$machine_id")" "$(json_quote "$machine_code")"
+  done <<MACHINE_CANDIDATES
+$machine_candidates
+MACHINE_CANDIDATES
+  printf '],"verdict":"%s"}\n' "$(json_quote "$machine_reason")"
+}
+
 verdict() { # $1=사유 코드 $2=종료 코드
+  if [ "$machine_output" -eq 1 ]; then
+    if [ -n "$machine_target" ]; then
+      machine_result eligible
+      exit 0
+    fi
+    machine_result "$1"
+    exit "$2"
+  fi
   printf '%s\n' "$1"
   exit "$2"
+}
+
+# 대상과 후보별 제외 사유는 표준 오류로 낸다(SPEC-049 R1). 표준 출력은 데몬이 사유 한 줄로 옮기는
+# 자리라 그 계약을 그대로 두고(SPEC-023 R4), 넓어진 답은 사람과 세션이 읽는 자리로 보낸다.
+# 코드를 앞에 두는 것은 뒤가 id이기 때문이다 — 값에 공백이 들어와도 줄의 뜻이 갈라지지 않는다.
+# 이 두 함수는 판정을 바꾸지 않는다. 종료 코드도 후보를 고르는 차례도 그대로다.
+note_candidate() { # $1=제외 사유 코드 $2=후보 id
+  if [ "$machine_output" -eq 1 ]; then
+    machine_candidates="${machine_candidates}$1	$2$nl"
+    return
+  fi
+  printf 'candidate: %s %s\n' "$1" "$2" >&2
+}
+
+# 대상으로 고른 후보. 후보 줄과 대상 줄을 함께 내어, 목록만 읽어도 대상이 어디서 나왔는지 보인다.
+note_target() { # $1=대상 id $2=대상 종류(없으면 빈 값)
+  if [ "$machine_output" -eq 1 ]; then
+    note_candidate eligible "$1"
+    [ -n "$machine_target" ] || machine_target=$1
+    [ -n "$machine_target_kind" ] || machine_target_kind=${2:-}
+    return
+  fi
+  printf 'candidate: eligible %s\n' "$1" >&2
+  printf 'target: %s\n' "$1" >&2
+  verdict eligible 0
 }
 
 [ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
@@ -195,11 +268,34 @@ scan_refs() { # $1=문서 디렉터리 경로 $2=콜론까지 포함한 키
   done
   [ "$#" -eq 0 ] && return 0
   awk -v key="$scan_key" '
+    function emit_direct() {
+      if (status == "blocked" && kind == "definition_error" && id != "") {
+        print "__WF_DIRECT__\t" id
+      }
+    }
+    FILENAME != prev {
+      emit_direct()
+      prev = FILENAME
+      id = ""; status = ""; kind = ""
+      got_id = 0; got_status = 0; got_kind = 0
+    }
+    {
+      if (!got_id && index($0, "id:") == 1) {
+        got_id = 1; id = substr($0, 4); sub(/^ */, "", id)
+      }
+      if (!got_status && index($0, "status:") == 1) {
+        got_status = 1; status = substr($0, 8); sub(/^ */, "", status)
+      }
+      if (!got_kind && index($0, "blocked_kind:") == 1) {
+        got_kind = 1; kind = substr($0, 14); sub(/^ */, "", kind)
+      }
+    }
     index($0, key) > 0 {
       line = $0
       gsub(key " +", key, line)
       print line
     }
+    END { emit_direct() }
   ' "$@"
 }
 
@@ -316,6 +412,46 @@ scan_decisions() { # $1=워크플로우 경로 $2=찾는 outcome 값 $3=1이면 
   ' "$@"
 }
 
+# 작업 정의 수정 요청을 "생성 시각<TAB>요청 id<TAB>작업 id"로 낸다. 스키마와
+# created_by가 앱이 쓴 기록임을 확정하고, 판정할 수 없는 문서는 그 파일만 건너뛴다.
+scan_task_revision_requests() { # $1=워크플로우 경로
+  scan_dir="$1"decisions
+  set --
+  for f in "$scan_dir"/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  [ "$#" -eq 0 ] && return 0
+  awk '
+    function emit() {
+      if (schema && by == "user" && id != "" && task != "" && at != "") {
+        print at "\t" id "\t" task
+      }
+    }
+    FILENAME != prev {
+      emit()
+      prev = FILENAME
+      id = ""; task = ""; by = ""; at = ""; schema = 0
+      got_id = 0; got_task = 0; got_by = 0; got_at = 0
+    }
+    {
+      if (!got_id && index($0, "id:") == 1) {
+        got_id = 1; id = substr($0, 4); sub(/^ */, "", id)
+      }
+      if (!got_task && index($0, "task_id:") == 1) {
+        got_task = 1; task = substr($0, 9); sub(/^ */, "", task)
+      }
+      if (!got_by && index($0, "created_by:") == 1) {
+        got_by = 1; by = substr($0, 12); sub(/^ */, "", by)
+      }
+      if (!got_at && index($0, "created_at:") == 1) {
+        got_at = 1; at = substr($0, 12); sub(/^ */, "", at)
+      }
+      if (index($0, "schema: workflow-labs/task-revision-request@1") == 1) schema = 1
+    }
+    END { emit() }
+  ' "$@"
+}
+
 # lease 디렉터리를 한 번 훑어 미만료 lease의 대상 id를 $active_leases에 모으고 그 수를
 # $active_count에 담는다. 개발자 분기가 후보마다 이 디렉터리를 다시 훑던 자리다.
 # 판정 시각은 훑기 앞에서 한 번 정하고 그 값을 쓴다. 만료 판정이 판정 시점 기준인 것은 그대로이고,
@@ -352,7 +488,7 @@ lease_active() { # $1=대상 id
 #
 # 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
 # 네 자리는 차례로
-#   후보 여부  — ^status: (todo|in_progress)가 파일 아무 줄에나 있는가
+#   후보 여부  — ^status: (todo|in_progress)가 있거나, definition_error가 아닌 blocked인가
 #   충족 여부  — ^status: qa_waiting 또는 ^status: completed가 파일 아무 줄에나 있는가
 #   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
 #   겹침 줄 수 — 0·1·2
@@ -376,8 +512,9 @@ scan_tasks() { # $1=워크플로우 경로
       sub(/[[:space:]]*$/, "", s)
       return s
     }
-    function emit(  i, line) {
+    function emit(  i, line, cand) {
       if (!started) return
+      cand = ordinary || (blocked && !definition_error)
       line = "M" cand sat depn scopen " "
       for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
       print line
@@ -390,7 +527,8 @@ scan_tasks() { # $1=워크플로우 경로
       prev = FILENAME
       started = 1
       files = files + 1
-      cand = 0; sat = 0; depn = 0; scopen = 0
+      ordinary = 0; blocked = 0; definition_error = 0
+      sat = 0; depn = 0; scopen = 0
       got_id = 0; first_id = ""; dep_value = ""; scope_value = ""; n_ids = 0
     }
     {
@@ -404,7 +542,9 @@ scan_tasks() { # $1=워크플로우 경로
           id_list[n_ids] = v
         }
       }
-      if ($0 ~ /^status: (todo|in_progress)/) cand = 1
+      if ($0 ~ /^status: (todo|in_progress)/) ordinary = 1
+      if ($0 ~ /^status: blocked/) blocked = 1
+      if ($0 ~ /^blocked_kind: definition_error/) definition_error = 1
       if ($0 ~ /^status: qa_waiting/ || $0 ~ /^status: completed/) sat = 1
       if (index($0, "depends_on:") == 1) {
         if (depn == 0) { depn = 1; dep_value = trim(substr($0, 12)) } else depn = 2
@@ -427,9 +567,9 @@ planner)
       ideas=$(scan_ideas "$wf")
       while IFS= read -r id; do
         [ -n "$id" ] || continue
-        case "$nondraft_refs" in *"source_idea_id:$id"*) continue ;; esac
-        lease_blocks "$id" && continue
-        verdict eligible 0
+        case "$nondraft_refs" in *"source_idea_id:$id"*) note_candidate spec-exists "$id"; continue ;; esac
+        lease_blocks "$id" && { note_candidate leased "$id"; continue; }
+        note_target "$id"
       done <<IDEAS
 $ideas
 IDEAS
@@ -445,27 +585,84 @@ IDEAS
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       # 판정 키는 결정 id다. 기획서 id로 보면 한 기획서가 여러 번 반려됐을 때 구분되지 않는다.
-      case "$nondraft_refs" in *"source_decision_id:$did"*) continue ;; esac
-      lease_blocks "$did" && continue
-      verdict eligible 0
+      case "$nondraft_refs" in *"source_decision_id:$did"*) note_candidate follow-up-exists "$did"; continue ;; esac
+      lease_blocks "$did" && { note_candidate leased "$did"; continue; }
+      note_target "$did"
     done <<REVISIONS
 $revisions
 REVISIONS
   done
   ;;
 architect)
+  # 작업 정의 수정 요청은 워크플로우 경계를 넘어 모두 먼저 모으고 생성 시각으로 정렬한다.
+  # 승인 분해 후보는 처리할 수 있는 요청이 없을 때만 아래 두 번째 훑기에서 본다.
+  revision_rows=""
+  for wf in .workflow/*/; do
+    rows=$(scan_task_revision_requests "$wf")
+    while IFS='	' read -r created rid tid; do
+      [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] || continue
+      revision_rows="$revision_rows$created	$rid	$tid	$wf$nl"
+    done <<REVISION_ROWS
+$rows
+REVISION_ROWS
+  done
+  ordered_revision_rows=$(printf '%s' "$revision_rows" | LC_ALL=C sort)
+  revision_task_ids="$nl"
+  while IFS='	' read -r created rid tid wf; do
+    [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] && [ -n "$wf" ] || continue
+    task_file=""
+    for f in "${wf}tasks"/*.md; do
+      [ -f "$f" ] && [ -r "$f" ] || continue
+      if grep -qs "^id: *$tid$" "$f"; then task_file=$f; break; fi
+    done
+    [ -n "$task_file" ] || continue
+    grep -Eqs '^status: (todo|blocked)$' "$task_file" || continue
+    grep -qs "^revision_request_id: *$rid$" "$task_file" && continue
+    case "$revision_task_ids" in *"$nl$tid$nl"*) ;; *) revision_task_ids="$revision_task_ids$tid$nl" ;; esac
+    if lease_blocks "$rid" || lease_blocks "$tid"; then note_candidate leased "$rid"; continue; fi
+    note_target "$rid" task_revision_request
+  done <<ORDERED_REVISION_ROWS
+$ordered_revision_rows
+ORDERED_REVISION_ROWS
+  # 이전 앱이 남긴 사용자 수정 요청은 먼저 처리한다. 그런 요청이 없으면 task 문서가 이미 기록한
+  # definition_error를 사용자 조작 없이 바로 아키텍트 작업으로 연다. 이 훑기는 승인 분해 판정이
+  # 필요로 하는 source_decision_id 줄도 함께 모아 아래 두 판단이 tasks/를 한 번만 읽게 한다.
+  architect_task_refs=""
+  direct_rows=""
+  for wf in .workflow/*/; do
+    task_scan=$(scan_refs "${wf}tasks" "source_decision_id:")
+    task_refs=""
+    while IFS= read -r task_row; do
+      case "$task_row" in
+        "__WF_DIRECT__	"*) direct_rows="$direct_rows$wf	${task_row#*	}$nl" ;;
+        *) task_refs="$task_refs$task_row$nl" ;;
+      esac
+    done <<TASK_SCAN
+$task_scan
+TASK_SCAN
+    architect_task_refs="$architect_task_refs${nl}W$wf$nl$task_refs${nl}E$wf$nl"
+  done
+  while IFS='	' read -r wf tid; do
+    [ -n "$wf" ] && [ -n "$tid" ] || continue
+    case "$revision_task_ids" in *"$nl$tid$nl"*) continue ;; esac
+    lease_blocks "$tid" && { note_candidate leased "$tid"; continue; }
+    note_target "$tid" blocked_task
+  done <<DIRECT_ROWS
+$direct_rows
+DIRECT_ROWS
   for wf in .workflow/*/; do
     [ -d "${wf}decisions" ] || continue
     # 아키텍트 후보는 스키마 줄도 spec_id도 요구하지 않는다. strict가 0인 것이 그 차이다.
     # created_by 필터와 최신 검사는 기획자 분기와 같은 훑기가 한다.
-    task_refs=$(scan_refs "${wf}tasks" "source_decision_id:")
+    task_ref_section=${architect_task_refs#*"$nl"W$wf"$nl"}
+    task_refs=${task_ref_section%%"$nl"E$wf"$nl"*}
     approvals=$(scan_decisions "$wf" approved 0)
     while IFS= read -r did; do
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
-      case "$task_refs" in *"source_decision_id:$did"*) continue ;; esac
-      if [ -n "$spec" ] && lease_blocks "$spec"; then continue; fi
-      verdict eligible 0
+      case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+      if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
+      note_target "$did" spec_approval
     done <<APPROVALS
 $approvals
 APPROVALS
@@ -499,9 +696,10 @@ developer)
       tid=""
       dep_value=""
       scope_value=""
-      # 후보는 todo와 in_progress 둘이다. 죽은 세션이 남긴 in_progress 작업은 그 작업을 덮는
-      # 미만료 lease가 없으므로 아래 lease_active가 통과시키고, 살아 있는 세션의 작업은 그 lease가
-      # 막는다(SPEC-035 R1). 나머지 조건은 todo와 완전히 같고 blocked은 후보가 아니다.
+      # 후보는 todo, in_progress, 그리고 definition_error가 아닌 blocked다. 죽은 세션이 남긴
+      # in_progress 작업은 그 작업을 덮는 미만료 lease가 없으므로 아래 lease_active가 통과시키고,
+      # 살아 있는 세션의 작업은 그 lease가 막는다(SPEC-035 R1). blocked 복구에도 lease·선행·겹침
+      # 조건은 완전히 같다. definition_error는 위 아키텍트 분기의 대상이라 후보로 내지 않는다.
       [ "$cand" = 1 ] && IFS= read -r tid
       [ "$depn" = 1 ] && IFS= read -r dep_value
       [ "$scopen" = 1 ] && IFS= read -r scope_value
@@ -544,8 +742,10 @@ SCAN
       tid=${rest#*"|"}
       deps_ok=${flags%?}
       scope_ok=${flags#?}
-      lease_active "$tid" && continue
-      [ "$deps_ok" -eq 1 ] || continue
+      lease_active "$tid" && { note_candidate leased "$tid"; continue; }
+      # 선행 관련 제외는 사유가 하나다. 선언을 읽지 못한 것과 선행이 아직 끝나지 않은 것과 고리가
+      # 있는 것은 세션이 할 일이 같다 — 그 선언을 보고 앞의 작업을 먼저 끝내는 것이다.
+      [ "$deps_ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       ok=1
       # 선행 셋이 모두 참이어야 자격이고 셋 중 어느 것도 다른 것을 바꾸지 않으므로, 보는 차례는
       # 답을 바꾸지 않는다. 값싼 둘을 먼저 보고 순환 탐색은 그 둘을 통과한 선언에만 돈다.
@@ -553,13 +753,13 @@ SCAN
         case "$known_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
         case "$sat_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
       done
-      [ "$ok" -eq 1 ] || continue
+      [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       for dep in $deps; do
         reaches "$dep" "$tid" && { ok=0; break; }
       done
-      [ "$ok" -eq 1 ] || continue
-      overlap_blocks "$scope_ok" "$scope" && continue
-      verdict eligible 0
+      [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
+      overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
+      note_target "$tid"
     done <<ROWS
 $rows
 ROWS

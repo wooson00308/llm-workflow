@@ -10,6 +10,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::time::Duration;
 
 /// 하트비트 실행 파일 이름. PATH 후보와 사용자 설치 후보가 같은 이름을 쓴다.
 const EXECUTABLE: &str = "heartbeat";
@@ -21,6 +22,11 @@ const JOB_FLAG: &str = "-j";
 
 /// pip·pipx의 사용자 설치 위치. Homebrew는 이 도구를 배포하지 않으므로 후보에 넣지 않는다.
 const USER_BIN: [&str; 2] = [".local", "bin"];
+
+/// macOS/Linux가 교체 직후의 실행 파일을 아주 짧게 `ETXTBSY`로 잠글 때 허용할 재시도 횟수.
+/// 권한·형식·경로 오류는 즉시 반환하며, 이 경합만 총 40ms 안에서 흡수한다.
+const EXECUTABLE_BUSY_ATTEMPTS: usize = 5;
+const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// 실행이 실패한 사유. 사유마다 다른 값을 담고, 사용자가 읽을 문구를 만드는 일은 호출자가 한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,10 +173,42 @@ fn status_of(program: &Path, job_name: &str) -> std::io::Result<ExitStatus> {
 ///
 /// 작업 디렉터리를 지정하지 않는 것은 `status_of`와 같다.
 fn output_of(program: &Path, arguments: &[&str]) -> std::io::Result<Output> {
-    Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
+    retry_executable_busy(|| {
+        Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+    })
+}
+
+/// Unix에서 실행 파일을 원자 교체한 직후 발생할 수 있는 `ETXTBSY`만 짧게 재시도한다.
+/// 다른 플랫폼과 다른 종류의 시작 오류는 기존 계약대로 첫 실패를 그대로 반환한다.
+fn retry_executable_busy<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for attempt in 0..EXECUTABLE_BUSY_ATTEMPTS {
+        match operation() {
+            Err(error)
+                if executable_temporarily_busy(&error)
+                    && attempt + 1 < EXECUTABLE_BUSY_ATTEMPTS =>
+            {
+                std::thread::sleep(EXECUTABLE_BUSY_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+
+    unreachable!("마지막 시도는 반드시 결과를 반환한다")
+}
+
+#[cfg(unix)]
+fn executable_temporarily_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(26)
+}
+
+#[cfg(not(unix))]
+fn executable_temporarily_busy(_error: &std::io::Error) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -310,6 +348,39 @@ mod tests {
             run_capturing(&looked, &UPDATE),
             Err(RunFailure::NotFound { looked })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capturing_retries_only_a_temporarily_busy_executable() {
+        let mut attempts = 0;
+
+        let result = super::retry_executable_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(26))
+            } else {
+                Ok("ready")
+            }
+        });
+
+        assert_eq!(result.expect("세 번째 시도가 성공한다"), "ready");
+        assert_eq!(attempts, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capturing_does_not_retry_another_start_error() {
+        let mut attempts = 0;
+
+        let error = super::retry_executable_busy::<()>(|| {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(13))
+        })
+        .expect_err("권한 오류는 즉시 반환한다");
+
+        assert_eq!(error.raw_os_error(), Some(13));
+        assert_eq!(attempts, 1);
     }
 
     #[cfg(unix)]

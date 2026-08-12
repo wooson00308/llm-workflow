@@ -1,36 +1,38 @@
 # 판 상태 핸드오프 (TL 스냅샷)
 
-> 다음 세션 팔로업용 요약. 개발 로그 전체를 읽기 전에 이 파일을 먼저 본다.
-> 갱신: 2026-08-06T14:55Z (TL 병렬 지휘 세션). 이 파일은 매 TL 세션 마감 시 덮어쓴다.
+> 다음 세션 팔로업용 정본. 갱신: 2026-08-12.
 
-## 보드
+## 완료된 결과
 
-- completed 137건 / qa_waiting 4건(TASK-139·140·141·142) / in_progress 0 / todo 0 / blocked 0.
-- 세 역할 자격 전부 no-target. 미처리 아이디어 0, 미답변 수정 요청 0, 미파생 승인 0.
-- lease 잔여: 만료된 SPEC-009.yml 하나(2026-08-03 만료, 계약상 무접촉 관례).
+1. 에이전트 화면을 설정 폼에서 관제 화면으로 교체했다. 자동 배정 여부, 사용자가 확인할 관문, 진행 중, 현재 자격 대기열, 최근 종료만 기본 화면에 남겼다.
+2. 자동 배정은 프로젝트별 opt-in이며 기본값은 꺼짐이다. 끄기는 새 자동 시작만 막고 직접 배정과 이미 실행 중인 세션은 유지한다.
+3. `no_target`은 정상 대기다. run/error/lease/quota/provider 호출을 만들지 않으며, 수동 지정 대상이 경합으로 사라진 경우만 실행 이력 밖 시작 실패로 답한다.
+4. 작업 대기열은 예약 목록이 아니라 전체 역할 자격 판정의 읽기 전용 결과다. 실제 실행 직전에만 다시 판정하고 lease를 잡는다. 프로젝트 간·역할 간 공정 순환은 유지하고 역할 내부 순서는 워크플로 계약을 따른다.
+5. `.workflow` 변경 watcher는 500ms debounce로 즉시 재판정하며, 실패하면 기본 5분 안전 확인으로 저하 운행한다. 앱의 2.5초 전체 프로젝트·연동 반복 조회는 제거했다.
+6. 연동 메뉴와 Dream 관리 UI/API를 제거했다. 런타임 복구와 기존 역할 잡 이전은 고급 설정으로 이동했고, 외부 Dream 파일은 수정·삭제하지 않는다.
+7. 런타임 0.9.0/API 1/schema 5를 앱에 bundle했다. launchd 서비스는 stable launcher의 `agent-dispatcher`를 실행하며 강제 재시작과 앱 종료 뒤에도 복구한다.
+8. workflow-labs 구형 역할 잡은 실기 전환으로 제거됐다. mech-arena 잡과 외부 Dream plist는 보존됐다. workflow-labs 자동 배정은 실제 DB에서 OFF다.
+9. 모델 선택은 provider 공통 메타데이터·실제 카탈로그를 사용하며, 잘못된 모델과 `limit_reached`·`no_target`을 서로 다른 사용자 안내로 표시한다. 종료된 실행의 경과는 고정 종료 시각을 사용한다.
+10. 최신 universal debug 앱은 940px 에이전트 관제 화면에 열려 있다. 고급 설정은 좁은 창에서 overlay sheet로 동작하고 기본 화면에는 원시 JSON·project/lease 식별자가 없다.
 
-## 사용자 관문 (대기 중)
+## 검증 정본
 
-1. QA 도장 4건: TASK-139(자격 헬퍼 대상 출력), 140(계약 문언·보고서 80줄 상한), 141(측정 스크립트 — 터미널 확인 동선), 142(사이드바 세션 표시 — 활성 세션 있을 때 눈 확인).
-2. 도장 후 커밋 컷(v0.1.10 감). 이번 컷부터 SPEC-044 규범 적용 — 병합은 원격 CI 4갈래 그린 확인 후 (정본 docs/releasing.md).
+- claude-heartbeat: 330 passed, 8 skipped; 변경 범위 Ruff 통과.
+- workflow-labs 프런트: 24 files, 446 passed·42 skipped; typecheck·production build 통과.
+- workflow-labs Rust: 718 lib + 19 e2e; `cargo fmt --check`, Clippy `-D warnings` 통과.
+- macOS 실기: service PID 강제 교체 뒤 DB 소유권 일치, runningVersion 0.9.0, 앱 종료 뒤 서비스 유지.
+- bundle: 앱·heartbeat·psutil·watchdog 모두 arm64/x86_64, manifest 0.9.0/API 1/macos-universal 검증.
+- 1180px·940px 실화면: 헤더 개행·가로 스크롤 없음, 940px drawer sheet 확인.
 
-## 오늘 착지한 것 (2026-08-06, 상세는 개발 로그·reports/)
+## 다음 확인
 
-- SPEC-043 폐기(rejected), SPEC-044(CI 그린 규범→TASK-138), SPEC-046~050 전부 승인·분해·구현 완료.
-- SPEC-049(토큰 고정비): TASK-139 조건 스크립트 v12 + 앱 판정이 대상·제외 사유 출력, TASK-140 계약 v9/v10(작업 문서 우선 착수·완결 지시서·보고서 5절+80줄), TASK-141 측정 스크립트(scripts/measure-compliance-cost.mjs, 기준값 HEAD 개발자 763,847토큰 상한 / 08-02 37,671 — 나흘 20배 증가 실측).
-- SPEC-050: TASK-142 사이드바 활성 세션 축약 표시.
-- 파이프라인 밖 직접 수정 2건(사용자 승인): ① remark-gfm singleTilde:false (MarkdownBody·CustomRulesCard — 단일 물결 취소선 차단) ② claude-heartbeat 데몬 group 옵션(잡별 디스패치 그룹, slug 네임스페이스) + workflow-labs jobs.d에 역할별 group 부여 + 데몬 재시작(PID 82324, 23:33 KST) → 같은 프로젝트 역할 병렬 활성화. 데몬 저장소 커밋은 아직 안 함.
+1. 자동 배정은 사용자가 원할 때만 켠다. 현재 OFF이므로 유료 세션이 자동 시작되지 않는다.
+2. Linux·Windows 실제 서비스와 앱 bundle smoke, 공식 3OS release 산출물 양성 경로는 target CI 또는 해당 OS 기기에서 확인한다.
+3. `.workflow`의 기존 QA·task·report 변경은 사용자/역할 작업이므로 보호한다. 이 직접 구현과 섞어 상태를 소급 수정하지 않는다.
+4. main 병합·push·태그·릴리스는 하지 않았다. 릴리스 컷은 별도 승인과 `docs/releasing.md` 절차를 따른다.
 
-## 리스크·후속
+## 산출물
 
-- TASK-140이 범위 밖 managed_project_assets.rs 검사 5건을 수정(TL 추인). 원인: 미커밋 신규 파일이라 분해 실측에서 누락. 버전 상수 올리는 분해 시 이 파일을 scope_files에 넣을 것.
-- 설치본 계약은 앱 동기화 시 v9/v10으로 갱신됨(아직 옛 버전). 다음 세션이 새 계약 문장(작업 문서 우선 착수)을 실제로 따르는지가 첫 관찰 지점.
-- claude-heartbeat 변경 미커밋 — 커밋/PR은 사용자 지시 대기. test_quota.py 1건은 기왕 환경 누출 결함(conftest가 실기기 jobs.d 미격리, CI는 통과).
-- SPEC-049 절감 실측: 다음 컷 커밋으로 `node scripts/measure-compliance-cost.mjs <커밋>` 재실행해 기준값과 비교.
-
-## TL 운영 규범 (이 세션에서 실증된 것 포함)
-
-- 워커는 오퍼스, TL만 세션 모델. 게이트는 워커 보고 수치 채택. 보고서는 워커 발신 전문을 TL이 대리 기록(기록 경위 머리말). 워커 재사용으로 규칙 재독 절약.
-- 역할 분리: 분해자가 자기 분해를 구현하지 않는다(tl-dev-136 거절 선례 — SPEC-049 완료 조건 7의 측정 유효성). 신규 워커는 얇은 프롬프트로 스폰해 "작업 문서만으로 착수 가능한가"를 오염 없이 측정.
-- QA 확인·승인 도장은 어떤 위임으로도 대리 불가.
-- 로그 규격(2026-08-07 개정, 사용자 위임): 역할 세션은 개발 로그 면제(정본 = reports/), 로그 쓰기는 셸 append 전용, 팔로업은 이 파일 먼저. 워커 스폰 프롬프트에 로그 지시 넣지 않기.
+- 앱: `/Users/catze/project/workflow-labs/src-tauri/target/universal-apple-darwin/debug/bundle/macos/LLM Workflow.app`
+- DMG: `/Users/catze/project/workflow-labs/src-tauri/target/universal-apple-darwin/debug/bundle/dmg/LLM Workflow_0.1.11_universal.dmg`
+- 런타임: `/Users/catze/Git/claude-heartbeat/dist/heartbeat`

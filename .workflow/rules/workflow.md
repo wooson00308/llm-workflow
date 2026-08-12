@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 14
+rules_version: 21
 ---
 
 # LLM Workflow agent protocol
@@ -98,7 +98,7 @@ Judge every call by its exit code, never by the text it printed:
 
 The obligations around the claim do not change. Only the way the lease itself is written moves to the helper:
 
-1. Immediately after a successful `acquire`, record the working state in the document itself before doing the real work: create the specification skeleton with `status: draft`, or move the claimed task to `status: in_progress`.
+1. Immediately after a successful `acquire`, record the working state in the document itself before doing the real work: create the specification skeleton with `status: draft`, or move a `todo` task to `status: in_progress`. A claimed `blocked` task follows §5's agent-recovery check first and moves to `in_progress` only when recovery work can actually begin.
 2. `renew` during long work, and keep the validity short (minutes, not hours).
 3. `release` after writing the final report or when abandoning the item.
 
@@ -135,6 +135,23 @@ When something you discard is a test, say so plainly and say why it was the dead
 
 This obligation is the same for every role that can take a claim over. It is written here once, and the role contracts point at this section instead of restating it.
 
+### Runtime reservation handoff
+
+The app-managed `wf-reserve` helper may reserve a target before a provider starts. Its successful,
+versioned JSON result names the role, `targetId`, `leaseId`, `resultPrefix`, expiry, and the role
+prompt to send unchanged to the provider. It is a lease handoff, not a second claim path.
+
+- A session receiving those values starts by calling `wf-claim renew <targetId> <leaseId> <minutes>`.
+  It verifies that it owns the reservation and never calls `acquire` for the same target.
+- A session without a reservation follows the ordinary `acquire` procedure above. A missing or
+  failed handoff never authorizes a direct lease-file write.
+- `resultPrefix` is unique to the reserved lease. Planners use it when creating SPEC identifiers;
+  architects use it with task sequence numbers only when decomposing an approval into new TASK identifiers. A task correction creates no new identifier. Before writing, stop
+  if the resulting document path already exists. Developers preserve it in their report when it
+  explains a runtime handoff but do not invent a new result identifier.
+- The role prompt may name only this role, target, lease, result prefix, and the managed rules it
+  must read. Runtime and provider adapters do not add provider-specific role instructions.
+
 ## 5. Follow the document state machine
 
 ### Ideas and specifications
@@ -164,6 +181,59 @@ Set `blocked` only for a real impediment. A question or approval request belongs
 
 The app records user QA under `decisions/` with `schema: workflow-labs/qa-decision@1`. A confirmed QA moves the task to `completed`; a QA revision request returns it to `todo`. Read the latest QA comment before reworking a returned task.
 
+Blocked recovery is agent-operated. The user may inspect the recorded reason and status, but is never required to provide a resolution, reopen the task, or create a request before work continues. A `definition_error` block is routed to an architect; every other block, including an unclassified legacy block, is routed to a developer. The eventual user handoff for recovered implementation work is the ordinary QA gate.
+
+Older projects may contain app-owned `workflow-labs/task-resume@1` decisions and `resumed` history entries from the retired user-reopen path. Readers preserve those records as historical audit data. Agents never create or imitate either record, and their presence is not required for agent recovery.
+
+### Recording why a task is blocked
+
+A session that moves a task to `blocked` writes the reason into the task document in the same edit that sets the status, appends the `blocked` history entry, and updates `updated_at`. The section is headed `## 막힌 사유`, written in exactly those characters, and holds four labels:
+
+```markdown
+## 막힌 사유
+
+- 막힌 지점: 지금 진행할 수 없는 구체적인 이유
+- 필요한 해결: 누가 무엇을 제공하거나 바꿔야 하는지
+- 재개 조건: 어떤 사실이 충족되면 개발을 다시 시작하는지
+- 관련 대상: TASK-001, 외부 승인 대기
+```
+
+- The heading and each of the four labels appear exactly once, and no value is left empty. A repeated label, a missing one, or a label standing over nothing is not the section this contract asks for.
+- `관련 대상` names the tasks, approvals, or outside parties this block is waiting on. With nothing to name, write `없음`. With several, separate them with a comma and a space and keep them in the order you wrote them.
+- While the task stays `blocked` and the reason changes, update the four values and `updated_at` together. A new `blocked` entry belongs to a real status transition only. Editing the wording of a reason is not a transition and never adds one, and the history stays append-only exactly as the next section describes.
+- Leaving `blocked` does not delete the section. It is the last recorded reason and it stays where it is. If the same task is blocked again, the section is replaced by the reason that holds now, and the earlier detail stays in the implementation reports and the append-only history that already carry it.
+- Existing tasks are not converted. A task with no such section, or with an incomplete one, stays valid and readable exactly as it is, and no session is stopped and no judgement changes because of it.
+
+### Naming what kind of block it is
+
+The same edit that records the reason also records what kind of block it is, in the optional frontmatter field `blocked_kind`. The field carries meaning only while the task's status is `blocked`, and it holds one of four values:
+
+- `definition_error`: the task document itself is wrong — its scope, its dependencies, or its completion conditions cannot be satisfied as written.
+- `missing_prerequisite`: something the task depends on has not been built or agreed yet, and the task is waiting on it.
+- `implementation_failure`: the work was attempted and did not succeed, and the reason sits in the code or the environment rather than in the document.
+- `external_dependency`: the block is outside this repository — an approval, a third party, a service.
+
+- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified and is routed to a developer. Eligibility never guesses the cause from the prose. After claiming it, the developer may classify it only from facts verified during that recovery attempt.
+- Leaving `blocked` does not delete the value. It is the kind of the last block, kept for the same reason the reason section is kept, and it is not read as a present impediment once the status is no longer `blocked`.
+
+### Agent-operated recovery
+
+- An architect directly claims a `definition_error` task. No user revision request is needed.
+- A developer directly claims every other `blocked` task under the same lease, dependency, and overlap checks as `todo` and `in_progress` work. A declared prerequisite that is still unsatisfied therefore keeps the task ineligible until the prerequisite reaches `qa_waiting` or `completed`.
+- After claiming a blocked task, the developer first re-reads the recorded reason, its resume condition, and the latest implementation report. If the impediment still exists and there is no in-scope recovery to perform, the task stays `blocked`; the session records what it rechecked and releases the lease without fabricating progress.
+- When recovery work can actually begin, the developer changes the task to `in_progress`, appends an `in_progress` history entry, and updates `updated_at` in the same edit. This is an agent retry, not a user reopening, so it never creates a `task-resume@1` decision or a `resumed` history entry.
+- If that inspection proves the task definition itself is wrong, the developer keeps the task `blocked`, records `blocked_kind: definition_error` with the verified reason, reports the finding, and releases it for an architect. The user is not the handoff target.
+
+### When the task definition itself is wrong
+
+A `definition_error` block is the one kind an implementer cannot clear by working harder, because what is wrong is the instruction sheet. Correcting it is the architect's work and `.workflow/rules/roles/architect.md` states what that session may touch.
+
+Older projects may also contain an app-owned task-definition revision request. An agent never writes one. Where such a historical record exists it remains valid ground for the correction, and the task corrected on it names the handled record in the optional frontmatter field `revision_request_id`. A direct `definition_error` recovery without such a record leaves the key out.
+
+A correction does not wait for that record. A task blocked as `definition_error` already carries its own ground in writing: the `## 막힌 사유` section the blocking session wrote, and the implementation report that recorded what could not be satisfied as written. Those two are enough for an architect session to correct the definition, and the audit record of the correction is that session's own report under `reports/` — what was wrong, what changed, and which ground it worked from. The user's gate is QA on the finished work, not permission to fix a task sheet that is already recorded as broken.
+
+A session that finishes such a correction returns the task to `todo` in the same edit, so the work can be claimed again. That return is not a user reopening: it appends no `resumed` entry, because that `kind` belongs to the app-owned path this section describes above, and the architect's report is what records the return instead. The `blocked_kind` value is not cleared, and it reads as the kind of the last block exactly as the section above says.
+
 ### Record every task transition
 
 A session that changes a task's status appends one entry to the task's `history` field in the same edit. A session that takes a stopped task over appends an `in_progress` entry as well, even though the status it finds is already `in_progress` and does not change. The takeover is a fact about the task, and the history is where facts about the task live: without that entry, nothing outside a report says the work changed hands.
@@ -177,16 +247,19 @@ history:
   - { at: 2026-07-30T14:00:00Z, kind: qa_waiting }
 ```
 
-- `at` is an RFC3339 timestamp. `kind` is one of six values:
+- `at` is an RFC3339 timestamp. `kind` is one of seven values:
   - `created`: the task document was created
   - `in_progress`: implementation started
   - `blocked`: work became blocked
   - `qa_waiting`: the task entered user QA
   - `completed`: user QA confirmed the task
   - `revision_requested`: user QA returned the task to `todo`
-- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no seventh `kind` for a takeover, and there is none for anything else: these six are the whole list.
+  - `resumed`: a legacy app version recorded that the user reopened a `blocked` task
+- The log is append-only. Never edit or drop an existing entry; add the new one at the end. The same `kind` may appear more than once after rework or a takeover. There is no `kind` of its own for a takeover, and there is none for anything else: these seven are the whole list.
 - The entries a stopped session left are entries like any other. A takeover appends after them and does not correct them.
-- Do not write `completed` or `revision_requested` entries. The app records those two when it records the QA decision.
+- Do not write `completed`, `revision_requested`, or `resumed` entries. The app records the first two from QA decisions; `resumed` is preserved only for compatibility with the retired user-reopen path.
+- `resumed` never stands in for `in_progress`. A developer that starts agent-operated recovery from `blocked` appends its own `in_progress` entry when recovery work actually begins.
+- The one status change that appends nothing is the architect's return of a corrected `definition_error` task to `todo`. No `kind` names it, `resumed` is not it, and the architect's report carries that fact instead, as the section above states.
 - Do not use `updated_at` as a transition time. It only tells you when the file last changed.
 - Omit the `history` key entirely while a task has no entries.
 
@@ -199,6 +272,7 @@ history:
 - Task transition facts live in the optional `history` field; leave the key out while there are no entries.
 - The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
 - An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
+- What kind of block a task is under lives in the optional `blocked_kind` field, and the task-definition revision request a task has already answered lives in the optional `revision_request_id` field. §5 defines both, and a task that has neither fact leaves both keys out.
 - Do not combine user decisions with an agent-authored specification or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
 - Re-read a file immediately before writing when another user or agent may have changed it. Do not overwrite concurrent changes silently.
@@ -227,6 +301,30 @@ Idea documents are outside this section. The user writes there too, so no obliga
 - What each document kind must say is written in the role contract that owns it. There is no exemption: all three kinds carry the section.
 - The limit is ten lines, blank lines excluded. Longer than that and the summary has become a second body.
 
+### The structured summary
+
+A specification and a development task written from here on carry the summary as a fixed set of sub-headings, in this order, each written exactly once:
+
+1. `### 제안`
+2. `### 현재`
+3. `### 변경 후`
+4. `### 사용자 결과`
+5. `### 영향 범위`
+6. `### 비용과 위험` — optional
+7. `### 결정 요청`
+
+- `### 영향 범위` holds two markers, `- 변경:` and `- 유지:`, in that order and once each. Both carry a value; neither may be dropped and neither may be left empty.
+- Every required heading carries a value. A heading standing over nothing is not a filled one.
+- `### 비용과 위험` is written only when there is a real cost or risk to name. With nothing to name, the heading is left out entirely — it is never written empty.
+- A repeated heading, a changed order, a heading at another depth, a sub-heading outside this list, or a missing impact marker is not the structured form. Neither the app nor the writing role guesses at a near-miss heading or invents a value it was not given.
+- An implementation report is outside this. Reports keep the plain summary defined above.
+
+What each heading holds is written in the role contract that owns the document. `### 결정 요청` is the one heading whose meaning differs by kind: in a specification it names the ground on which the user approves or sends the document back, and in a development task it names the result the user checks at QA.
+
+The ten-line limit above does not reach a structured summary, because the headings alone exceed it. Brevity comes from the shape instead: one short paragraph under each ordinary heading, and one item under each impact marker. A plain summary and a report summary keep the ten-line limit exactly as written above.
+
+Everything under "What it must not contain" reaches structured values too. A value is Markdown text and nothing else: a document does not write HTML here, and the app builds no separate HTML copy, no summary cache, no image, no chart payload, no network call, and no model call out of this section. It reads the same body it already reads.
+
 ### What it must not contain
 
 Inside the summary section there are none of the following:
@@ -254,7 +352,9 @@ A development task that goes to `qa_waiting` carries a second section for the sa
 ### Documents written before this section
 
 - A document with no summary section stays valid. It is read, displayed, and judged exactly as it was.
+- A plain summary written before the structured form stays valid too, and so does one whose structure is incomplete. Neither is converted, repaired, or reported as a fault, and no session stops over one.
 - Whether a summary exists is not part of any eligibility judgement, and reading a document never fails over a missing or malformed summary. No session is stopped and no task is closed because a summary is absent.
+- The structure is a body contract. It adds no frontmatter field, changes no schema version, and takes no part in any judgement the app makes.
 - Nothing is filled in retroactively. This section reaches the documents written from here on.
 
 ## 9. Write Korean workflow documents in clear professional language

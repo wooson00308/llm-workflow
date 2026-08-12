@@ -8,9 +8,12 @@ import type {
   ManagedAssetsState,
   ProjectSummary,
   SpecDecisionOutcome,
+  AgentRuntimeActions,
+  AgentRuntimeState,
   TaskQaBatchEntry,
   TaskQaOutcome,
   TaskDocument,
+  TaskRevisionRequestOutcome,
   SpecDocument,
   WorkflowItemSummary,
   WorkflowSummary,
@@ -19,11 +22,11 @@ import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
 import { ActivityView } from "./ActivityView";
+import { AgentRuntimeView } from "./agents/AgentRuntimeView";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
-import { IntegrationsView } from "./integrations/IntegrationsView";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
 import { SettingsView } from "./SettingsView";
 import { SpecWorkspace } from "./SpecWorkspace";
@@ -36,8 +39,9 @@ interface Props {
   managedAssets: ManagedAssetsState;
   project: ProjectSummary;
   updater: AppUpdaterState;
-  integrations: IntegrationsState;
-  integrationActions: IntegrationActions;
+  /** 전용 연동 화면 제거 전 테스트·호출자 호환. 화면에서는 사용하지 않는다. */
+  integrations?: IntegrationsState;
+  integrationActions?: IntegrationActions;
   onAddIdea(workflowDirectory: string, content: string): Promise<boolean>;
   onAddWorkflow(name: string): Promise<boolean>;
   onDecideSpec(
@@ -70,6 +74,19 @@ interface Props {
     fileNames: string[],
     comment: string,
   ): Promise<TaskQaBatchEntry[] | null>;
+  onTaskRevisionRequest?(
+    workflowDirectory: string,
+    fileName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    requestId: string,
+  ): Promise<TaskRevisionRequestOutcome>;
+  /**
+   * 에이전트 화면의 상태와 조작. 주인이 작업 공간 훅이라 화면을 옮겨 다녀도 진행 표시가 남는다.
+   * 선택인 것은 이 껍데기를 그리는 검사 리터럴이 아직 이 묶음을 모르기 때문이다.
+   */
+  agentRuntime?: AgentRuntimeState;
+  agentRuntimeActions?: AgentRuntimeActions;
   onRefresh(): Promise<void> | void;
   onSwitchProject(): void;
 }
@@ -88,12 +105,14 @@ const viewLabels = {
   tasks: "개발",
   archive: "기록",
   activity: "활동",
-  integrations: "연동",
+  agents: "에이전트",
   help: "도움말",
   settings: "설정",
 } as const;
 
 export function WorkspaceShell({
+  agentRuntime,
+  agentRuntimeActions,
   busy,
   customRules,
   customRulesActions,
@@ -101,8 +120,6 @@ export function WorkspaceShell({
   managedAssets,
   project,
   updater,
-  integrations,
-  integrationActions,
   onAddIdea,
   onAddWorkflow,
   onDecideSpec,
@@ -110,6 +127,7 @@ export function WorkspaceShell({
   onReadIdea,
   onReadSpec,
   onReadTask,
+  onTaskRevisionRequest = async () => ({ ok: false, message: "정의 수정 요청 조작이 연결되지 않았습니다." }),
   onTaskQa,
   onTaskQaBatch,
   onRefresh,
@@ -121,7 +139,15 @@ export function WorkspaceShell({
   const [showWorkflowForm, setShowWorkflowForm] = useState(false);
   const [workflowName, setWorkflowName] = useState("");
   const [view, setView] = useState<
-    "today" | "ideas" | "specs" | "tasks" | "archive" | "activity" | "integrations" | "help" | "settings"
+    | "today"
+    | "ideas"
+    | "specs"
+    | "tasks"
+    | "archive"
+    | "activity"
+    | "agents"
+    | "help"
+    | "settings"
   >("today");
   const [specDocument, setSpecDocument] = useState<SpecDocument | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
@@ -292,7 +318,13 @@ export function WorkspaceShell({
             </button>
           )}
           <UpdateControl updater={updater} />
-          <button className={`settings-link ${view === "integrations" ? "active" : ""}`} onClick={() => setView("integrations")}><Icon name="spark" />연동</button>
+          {/*
+            작업 공간이 이 묶음을 넘겨줄 때만 진입점을 세운다. 배선 없이 메뉴만 있으면 사용자가 빈
+            화면을 열게 되므로, 통로가 없는 동안에는 자리를 만들지 않는다.
+          */}
+          {agentRuntime && agentRuntimeActions && (
+            <button className={`settings-link ${view === "agents" ? "active" : ""}`} onClick={() => setView("agents")}><Icon name="spark" />에이전트</button>
+          )}
           <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
           <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
         </div>
@@ -433,7 +465,7 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
+          {workflow && view === "tasks" && <DevelopmentBoard activeLeases={project.activeLeases} busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskRevisionRequest={(fileName, expectedUpdatedAt, reason, requestId) => onTaskRevisionRequest(workflow.directory, fileName, expectedUpdatedAt, reason, requestId)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
@@ -460,19 +492,11 @@ export function WorkspaceShell({
               `heartbeatSetupRuns`·`heartbeatVersions`·`heartbeatService`는 이 조건에 걸지 않는다.
               없으면 설치 실행 버튼과 버전 표시와 데몬 조작 통로만 빠지고 카드의 나머지는 그대로
               돌아야 한다 — 조회·설치·업데이트가 그 셋을 기다릴 이유가 없다. */}
-          {view === "integrations" && integrations.heartbeatRuns && integrations.heartbeatUpdate && (
-            <IntegrationsView
-              actions={integrationActions}
-              activeLeases={project.activeLeases}
-              error={integrations.error}
-              heartbeatRuns={integrations.heartbeatRuns}
-              heartbeatService={integrations.heartbeatService}
-              heartbeatSetupRuns={integrations.heartbeatSetupRuns}
-              heartbeatUpdate={integrations.heartbeatUpdate}
-              heartbeatVersions={integrations.heartbeatVersions}
-              pendingWork={project.pendingWork}
-              snapshot={integrations.snapshot}
-              writeError={integrations.writeError}
+          {view === "agents" && agentRuntime && agentRuntimeActions && (
+            <AgentRuntimeView
+              actions={agentRuntimeActions}
+              project={project}
+              state={agentRuntime}
             />
           )}
 

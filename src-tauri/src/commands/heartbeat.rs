@@ -4,8 +4,7 @@ use tauri::Manager;
 
 use crate::application::heartbeat_run_service::{HeartbeatRunService, RunJobFailure};
 use crate::application::heartbeat_service::{
-    DreamJobRequest, HeartbeatService, IntegrationsSnapshot, ManagedDreamJob, ManagedRoleJob,
-    RoleJobRequest,
+    HeartbeatService, IntegrationsSnapshot, ManagedRoleJob, RoleJobRequest,
 };
 use crate::application::heartbeat_service_control::{
     HeartbeatServiceControlService, HeartbeatServiceRun,
@@ -48,31 +47,6 @@ pub fn install_heartbeat_jobs(
     let (home, user_home) = heartbeat_home(&app)?;
     HeartbeatService
         .install(Path::new(&path), &home, &user_home, &roles, &baseline)
-        .map_err(|error| error.to_string())
-}
-
-/// dream 잡을 설치하고 갱신된 연동 스냅샷을 돌려준다.
-///
-/// 이 프로젝트의 잡 파일만 쓴다. 역할 잡 설치와 달리 프로젝트 로컬 파일은 쓰지 않는다.
-/// 화면에서 대상 경로와 변경 요지를 보여주고 확인을 받은 뒤에만 호출한다.
-///
-/// `baseline`은 화면이 폼을 시딩할 때 읽은 dream 잡이다. 잡 파일에 없었으면 `None`이다(R3).
-#[tauri::command]
-pub fn install_dream_job(
-    app: tauri::AppHandle,
-    path: String,
-    dream: DreamJobRequest,
-    baseline: Option<ManagedDreamJob>,
-) -> Result<IntegrationsSnapshot, String> {
-    let (home, user_home) = heartbeat_home(&app)?;
-    HeartbeatService
-        .install_dream(
-            Path::new(&path),
-            &home,
-            &user_home,
-            &dream,
-            baseline.as_ref(),
-        )
         .map_err(|error| error.to_string())
 }
 

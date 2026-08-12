@@ -2,24 +2,31 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 10
+rules_version: 15
 ---
 
 # Developer role
 
-Implement and verify one eligible development task, then hand it to the user for QA.
+Implement one eligible task or recover one agent-owned blocked task, verify the result, then hand finished work to the user for QA.
+
+## Runtime reservation handoff
+
+When the runtime supplies `targetId` and `leaseId`, renew that exact lease before inspecting or
+implementing the task and do not call `acquire` again. Keep the supplied result prefix in the handoff
+report when relevant; the runtime prompt never replaces this contract or adds provider-specific role
+instructions.
 
 ## Eligibility
 
-- The task must be `todo` or `in_progress`, its dependencies must be satisfied, and its source decision must remain approved.
+- The task must be `todo`, `in_progress`, or `blocked` without `blocked_kind: definition_error`; its dependencies must be satisfied and its source decision must remain approved.
 - An `in_progress` task qualifies only while no unexpired lease covers it. A missing lease file and an expired one mean the same thing here, and `.workflow/rules/workflow.md` §4 is where "unexpired" is defined. Every other condition on this list holds for it exactly as it holds for a `todo` task; none of them is loosened because the task was already started.
-- A `blocked` task never qualifies, whatever its lease says. `blocked` is a state a session declared on purpose after hitting a real impediment, so it is not the trace of a session that stopped — a session that stopped leaves the state it was working in.
+- A non-definition `blocked` task qualifies only while no unexpired lease covers it. Missing-prerequisite declarations, overlapping work, and source approval are checked exactly as they are for the other states. A `definition_error` task belongs to the architect and never qualifies here.
 - No unexpired lease may cover work that overlaps the task's `scope_files`. "Overlapping work" below is that judgement.
 - If the task returned from user QA, read the latest `workflow-labs/qa-decision@1` comment and follow its test flow.
 
 ## Choose in this order
 
-- Take a resumable `in_progress` task before a `todo` task. Work that stopped has already been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it — satisfied dependencies count only `qa_waiting` and `completed`, so a task nobody resumes starves the ones behind it too.
+- Take a resumable `in_progress` task first, then an eligible `blocked` recovery, then a `todo` task. Work already attempted has been paid for, and while it stays stopped every task that names it in `depends_on` is stopped with it.
 - When the claim fails, move on to the next target in this order. When every target is already claimed, change no files and report `NO_ELIGIBLE_WORK`.
 - One session still processes exactly one task. The condition script and the app's pending-work display answer only whether work exists, never which work comes first, so do not read either as an order.
 
@@ -29,6 +36,14 @@ Implement and verify one eligible development task, then hand it to the user for
 - Evaluate the stopped session's residue as `.workflow/rules/workflow.md` §4 requires, and report the split it asks for.
 - The body of the task document — its scope and its completion conditions — belongs to the architect, and a takeover does not edit it. What the stopped session failed to finish and what the task is defined to be are different things, and this line is what keeps them apart.
 - If the stopped session damaged that body, report it as an out-of-role finding and stop. Repairing it is not this role's work.
+
+## Recovering a blocked task
+
+- Read the `## 막힌 사유` section, its resume condition, `blocked_kind`, and the latest implementation report before changing the status or product files.
+- Recheck the recorded impediment from current repository and environment facts. If it still exists and there is no in-scope recovery to perform, leave the task and its history unchanged, report the recheck, release the lease, and stop. Never ask the user to reopen it or provide a resolution.
+- When recovery work can begin, move the task from `blocked` to `in_progress`, append an `in_progress` history entry, and update `updated_at` in the same edit. Do not append `resumed`; that value is historical compatibility for the retired user path.
+- Preserve the reason section as the last recorded block. If implementation fails again, replace it only with the reason that now holds and append a new `blocked` transition.
+- If verified facts show that the definition, scope, dependencies, or completion conditions are wrong, leave the task `blocked`, set `blocked_kind: definition_error`, update the structured reason and report, then release the lease. The architect is the next owner; the user is not.
 
 ## Satisfied dependencies
 
@@ -69,6 +84,8 @@ Open the linked specification and the decision when the task document is ambiguo
 
 If you opened the specification or the decision, write in the report which part of the task document was insufficient and what you had to go outside it to find. That note is how a later architect session learns where its task documents fall short.
 
+Before you change the first product file, read the task's `## 범위 사전 검사` section against the repository as it is now. This is a short cross-read, not a second decomposition: open what the section names and see whether those files still carry the behaviour the completion conditions ask for. The architect wrote that section from the same repository, and this reading is what catches the gap between then and now.
+
 ## The confirmation walkthrough
 
 A task you hand to user QA carries a section headed `## 확인 동선`, written in exactly those characters. `.workflow/rules/workflow.md` §8 names it; what it holds is defined here, because you are the one who writes it.
@@ -83,11 +100,31 @@ Write it into the assigned task document, in the same edit that records the `qa_
 
 The `## 사용자 QA 제안` heading some reports carry is free writing, not this obligation. The task document is where the user reads the walkthrough, because the app opens task bodies beside the confirmation stamp and does not open reports at all.
 
+## Blocking a task
+
+`blocked` is for an impediment you actually hit. The eligibility section above already says why a question or an approval request is not one, and nothing here loosens that.
+
+When you do hit one, write the reason section `.workflow/rules/workflow.md` §5 defines into the assigned task, in the same edit that sets the status and appends the `blocked` entry. The heading and its four labels are that section's definition and are not restated here.
+
+- The four values carry what you have checked and nothing else. Do not write a resolution you have not seen, and do not present as settled anything that is still open.
+- The report says what you verified and what impediment remains. It does not become the place a reader goes for the current reason: the section in the task document is where that lives, and the report is read beside it, not instead of it.
+- Reasons you wrote earlier are not edited away. A later block replaces the section with the reason that holds then, and the earlier one stays in the report that recorded it.
+- Record what kind of block it is in `blocked_kind`, in that same edit. `.workflow/rules/workflow.md` §5 defines the four values, and choosing among them is reading what you hit, not guessing at a cause you have not seen.
+
+### When the scope declaration is what is wrong
+
+The cross-read above can end with a file that the completion conditions plainly need and the declaration does not carry. That is a defect in the task document, and it is not yours to repair.
+
+- Do not change a product file outside the declared scope to get past it, and do not widen the declaration yourself.
+- Block the task with `blocked_kind: definition_error` and write the reason section as this contract already describes.
+- The report carries what the next architect session needs: which path is missing, the direct reference that makes the work need it, and which verification fails while it stays out. Name the reference you actually followed, not a suspicion.
+- None of this is ground for deleting a check, loosening one, or writing outside the declared scope. A blocked task with an accurate report costs one session; a quiet edit outside the scope costs the guarantee that two sessions can run at once.
+
 ## What the report holds
 
 The implementation report carries a fixed set of sections. Write all of them, and keep the body within the limit below.
 
-- The decision-maker summary `.workflow/rules/workflow.md` §8 defines stays first, in the position and under the conditions that section sets. Nothing here moves it or relaxes it.
+- The decision-maker summary `.workflow/rules/workflow.md` §8 defines stays first, in the position and under the conditions that section sets. Nothing here moves it or relaxes it. A report is not one of the two kinds that carry the structured form, so this summary stays plain prose under the ten-line limit.
 - Changed files and modules: what you edited, named so a reader can open it directly.
 - Verification steps and their results: which command or check you ran, and the result it returned.
 - Remaining risks: what this change could still break, and what stayed unverified.
@@ -120,8 +157,10 @@ The `## 확인 동선` section is not one of these. It is written into the task 
 
 ## Completion
 
-- Claim the task as `.workflow/rules/workflow.md` §4 describes, move it to `in_progress` immediately, and only then implement and run relevant verification. A takeover finds the status already there and records the `history` entry alone.
+- Claim the task as `.workflow/rules/workflow.md` §4 describes. Move a `todo` task to `in_progress` immediately; a takeover records its new `in_progress` history entry; a `blocked` recovery moves only after the recovery check above says work can actually begin.
 - Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
+- When the task you are transitioning carries the structured summary §8 defines, bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them. Updating a fact is not an occasion to reshape the section.
+- A task whose summary is plain prose, or has no summary at all, stays that way. Do not convert an existing task into the structured form.
 - Record changes, checks, risks, and handoff notes in `reports/`.
 - Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done and what was verified, and what the user is being asked to do now.
 - Before handing the task to user QA, check that the report's Korean follows `.workflow/rules/workflow.md` §9. Keep the report focused on changes, verification, risks, and user confirmation. This self-review does not affect eligibility.
