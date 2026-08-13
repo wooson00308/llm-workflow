@@ -15,8 +15,25 @@ env:
   RUNTIME_REPOSITORY: wooson00308/claude-heartbeat
 
 jobs:
+  # 세 플랫폼 잡이 드래프트 릴리스를 각자 찾아-만들면 생성이 경합해 드래프트가 둘로 갈라진다
+  # (v0.1.14 실측: 리눅스 산출물이 별도 드래프트에 실림). 여기서 한 번만 만들어 두면 이후 잡은
+  # 언제나 기존 드래프트를 찾는다.
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the draft release once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+              --draft --title "LLM Workflow ${{ github.ref_name }}" \
+              --notes "설치 파일과 앱 내부 업데이트 메타데이터입니다."
+
   release:
     name: Release (${{ matrix.platform }})
+    needs: prepare-release
     strategy:
       fail-fast: false
       matrix:

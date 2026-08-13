@@ -833,9 +833,22 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
 
   // 앱 업데이트는 번들 런타임 교체까지 이어져야 한다. 실전에서 번들만 새 버전이고 설치본이
   // 그대로 남아, 런타임 수정이 배달만 되고 장착되지 않았다(2026-08-13 진단 번들: 번들 0.9.4,
-  // 설치·실행 0.9.2). 실행 중인 세션이 있으면 방해하지 않고 다음 조회가 다시 본다. 자동 경로가
-  // 실패하면 조용히 물러난다 — 고급 설정의 수동 업데이트가 그대로 있다.
+  // 설치·실행 0.9.2). 실행 중인 세션이 있으면 방해하지 않고 미룬다 — 다만 자동 실행 기기는
+  // 세션이 거의 항상 돌므로, 화면이 아는 실행 수가 0으로 떨어지는 순간에도 다시 시도해야
+  // 미룸이 사실상의 포기가 되지 않는다. 자동 경로가 실패하면 조용히 물러난다 — 고급 설정의
+  // 수동 업데이트가 그대로 있다.
   const autoRuntimeUpdateDone = useRef(false);
+  const activeRunCount = useMemo(
+    () =>
+      (agentRuntime.queue?.runs ?? []).filter(
+        (run) =>
+          run.state === "reserved" ||
+          run.state === "queued" ||
+          run.state === "running" ||
+          run.state === "paused",
+      ).length,
+    [agentRuntime.queue],
+  );
   useEffect(() => {
     const inspection = agentRuntime.inspection;
     const installed = inspection?.status?.installedVersion;
@@ -843,11 +856,13 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     if (!installed || !bundled || autoRuntimeUpdateDone.current) return;
     if (inspection.status?.result !== "ok") return;
     if (!bundledRuntimeIsNewer(bundled, installed)) return;
+    if (activeRunCount > 0) return;
     autoRuntimeUpdateDone.current = true;
     void (async () => {
       try {
         const plan = await gateway.planAgentRuntimeUpdate();
         if (plan.activeRuns > 0) {
+          // 화면이 모르는 실행이 있었다. 실행 수 변화가 이 판단을 다시 깨운다.
           autoRuntimeUpdateDone.current = false;
           return;
         }
@@ -859,7 +874,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         // 수동 경로가 남아 있으므로 자동 경로의 실패는 화면을 막지 않는다.
       }
     })();
-  }, [agentRuntime.inspection, gateway, project, readAgentRuntime]);
+  }, [activeRunCount, agentRuntime.inspection, gateway, project, readAgentRuntime]);
 
   /** 기존 역할 잡에서 새 정책을 제안받는다. 파일을 읽기만 한다. */
   const previewAgentRuntimeMigration = useCallback(async () => {

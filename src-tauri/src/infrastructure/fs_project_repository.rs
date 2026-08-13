@@ -6396,7 +6396,7 @@ mod tests {
             fs::read_to_string(reservation_helper_path(&root.path().join(".workflow")))
                 .expect("reservation helper");
         assert!(reservation.contains("# managed_by: workflow-labs"));
-        assert!(reservation.contains("# reservation_helper_version: 1"));
+        assert!(reservation.contains("# reservation_helper_version: 2"));
     }
 
     #[test]
@@ -6410,7 +6410,7 @@ mod tests {
         let future = fs::read_to_string(&helper)
             .expect("reservation helper")
             .replace(
-                "# reservation_helper_version: 1",
+                "# reservation_helper_version: 2",
                 "# reservation_helper_version: 999",
             );
         fs::write(&helper, &future).expect("future reservation helper");
