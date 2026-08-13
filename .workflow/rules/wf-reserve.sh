@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# reservation_helper_version: 1
+# reservation_helper_version: 2
 # LLM Workflow runtime reservation helper.
 # Usage: sh .workflow/rules/wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>
 set -u
@@ -34,8 +34,15 @@ expires_of() {
   sed -n 's/^expires_at: *//p' ".workflow/.runtime/leases/$1.yml" | head -1
 }
 
+# 지시문은 계약의 요약이 아니라 계약으로 가는 문이다. 계약이 요구하는 중간 단계(기획자의 초안
+# 선생성)를 지시문이 생략하면 세션은 지시문의 마무리 서사만 따라가 초안 없이 끝에 한 번에 쓴다 —
+# 그동안 화면에는 아무것도 보이지 않는다(2026-08-13 실측). 역할별 필수 중간 단계는 지시문에도 싣는다.
 prompt_for() {
-  printf '%s' "You are the $1 role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$1.md, and the active workflow documents. The runtime already reserved target $2 with lease $3. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. Use result prefix $4 for any new SPEC or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
+  case "$1" in
+    planner) role_step="Immediately after verifying ownership, create your result specification file with status: draft and its source references, exactly as the role contract orders, so the writing is visible while you compose. " ;;
+    *) role_step="" ;;
+  esac
+  printf '%s' "You are the $1 role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$1.md, and the active workflow documents. The runtime already reserved target $2 with lease $3. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${role_step}Use result prefix $4 for any new SPEC or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
 }
 
 [ "${1:-}" = acquire ] && [ "$#" -eq 4 ] || usage
