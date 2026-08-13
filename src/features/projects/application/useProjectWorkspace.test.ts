@@ -8,7 +8,7 @@ const { clipboardCopy } = vi.hoisted(() => ({
 }));
 vi.mock("../infrastructure/clipboard", () => ({ copy: clipboardCopy }));
 
-import { useProjectWorkspace } from "./useProjectWorkspace";
+import { bundledRuntimeIsNewer, useProjectWorkspace } from "./useProjectWorkspace";
 import type {
   CustomRulesDocument,
   CustomRulesDraft,
@@ -2739,5 +2739,45 @@ describe("작업 정의 수정 요청", () => {
     });
     expect(result.current.project?.name).toBe("요청 기록 후");
     unmount();
+  });
+});
+
+// 앱 업데이트가 런타임 교체로 이어지지 않아 수정이 배달만 되고 장착되지 않았다
+// (2026-08-13 실사용 진단 번들: 번들 0.9.4, 설치 0.9.2). 프로젝트를 열면 앱이 스스로 갱신한다.
+describe("런타임 자동 업데이트", () => {
+  it("번들이 설치본보다 새 버전이면 프로젝트를 열 때 업데이트를 적용한다", async () => {
+    const gateway = gatewayFor({
+      inspectAgentRuntime: vi.fn().mockResolvedValue({ ...agentInspection, bundledVersion: "0.9.4" }),
+    });
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(gateway.applyAgentRuntimeUpdate).toHaveBeenCalledWith("plan-update-1", true));
+    unmount();
+  });
+
+  it("실행 중인 세션이 있으면 자동 업데이트를 미룬다", async () => {
+    const gateway = gatewayFor({
+      inspectAgentRuntime: vi.fn().mockResolvedValue({ ...agentInspection, bundledVersion: "0.9.4" }),
+      planAgentRuntimeUpdate: vi.fn().mockResolvedValue({ ...agentUpdatePlan, activeRuns: 2 }),
+    });
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(gateway.planAgentRuntimeUpdate).toHaveBeenCalled());
+    expect(gateway.applyAgentRuntimeUpdate).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("버전 비교는 숫자 조각만 믿는다", () => {
+    expect(bundledRuntimeIsNewer("0.9.4", "0.9.2")).toBe(true);
+    expect(bundledRuntimeIsNewer("0.10.0", "0.9.4")).toBe(true);
+    expect(bundledRuntimeIsNewer("0.9.2", "0.9.2")).toBe(false);
+    expect(bundledRuntimeIsNewer("0.9.2", "0.9.4")).toBe(false);
+    expect(bundledRuntimeIsNewer("dev", "0.9.2")).toBe(false);
   });
 });

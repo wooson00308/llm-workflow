@@ -109,6 +109,22 @@ function messageFrom(error: unknown): string {
 }
 
 /**
+ * 번들 런타임이 설치본보다 새 버전인가. 점으로 나뉜 숫자 표기만 비교하고, 숫자가 아닌 조각이
+ * 있으면 거짓이다 — 자동 업데이트는 확신이 있을 때만 움직이고, 애매하면 수동 경로에 맡긴다.
+ */
+export function bundledRuntimeIsNewer(bundled: string, installed: string): boolean {
+  const left = bundled.split(".");
+  const right = installed.split(".");
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = Number(left[index] ?? "0");
+    const b = Number(right[index] ?? "0");
+    if (Number.isNaN(a) || Number.isNaN(b)) return false;
+    if (a !== b) return a > b;
+  }
+  return false;
+}
+
+/**
  * 백엔드가 계약 모양(`jobName`·`message`·`command`)으로 거절했는가.
  *
  * `command`가 비어 있으면 계약을 채우지 못한 값으로 본다. 화면이 명령 없이 "직접 실행하세요"라고
@@ -814,6 +830,36 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       return false;
     }
   }, [agentRuntime.plan, gateway, planAgentRuntime, project, readAgentRuntime]);
+
+  // 앱 업데이트는 번들 런타임 교체까지 이어져야 한다. 실전에서 번들만 새 버전이고 설치본이
+  // 그대로 남아, 런타임 수정이 배달만 되고 장착되지 않았다(2026-08-13 진단 번들: 번들 0.9.4,
+  // 설치·실행 0.9.2). 실행 중인 세션이 있으면 방해하지 않고 다음 조회가 다시 본다. 자동 경로가
+  // 실패하면 조용히 물러난다 — 고급 설정의 수동 업데이트가 그대로 있다.
+  const autoRuntimeUpdateDone = useRef(false);
+  useEffect(() => {
+    const inspection = agentRuntime.inspection;
+    const installed = inspection?.status?.installedVersion;
+    const bundled = inspection?.bundledVersion;
+    if (!installed || !bundled || autoRuntimeUpdateDone.current) return;
+    if (inspection.status?.result !== "ok") return;
+    if (!bundledRuntimeIsNewer(bundled, installed)) return;
+    autoRuntimeUpdateDone.current = true;
+    void (async () => {
+      try {
+        const plan = await gateway.planAgentRuntimeUpdate();
+        if (plan.activeRuns > 0) {
+          autoRuntimeUpdateDone.current = false;
+          return;
+        }
+        await gateway.applyAgentRuntimeUpdate(plan.planId, true);
+        if (project) {
+          await readAgentRuntime(project.rootPath, project.projectId);
+        }
+      } catch {
+        // 수동 경로가 남아 있으므로 자동 경로의 실패는 화면을 막지 않는다.
+      }
+    })();
+  }, [agentRuntime.inspection, gateway, project, readAgentRuntime]);
 
   /** 기존 역할 잡에서 새 정책을 제안받는다. 파일을 읽기만 한다. */
   const previewAgentRuntimeMigration = useCallback(async () => {
