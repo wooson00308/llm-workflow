@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AgentPolicySnapshot, AgentProjectPolicy, AgentRolePolicy } from "../../domain/types";
+import type { AgentPolicySnapshot, AgentProjectPolicy, AgentProviderDiagnosis, AgentRolePolicy } from "../../domain/types";
 
 /** 화면이 보여주는 역할 차례. 계약의 세 역할이고 앱이 새 역할을 만들지 않는다. */
 const ROLE_ORDER = ["planner", "architect", "developer"] as const;
@@ -26,11 +26,42 @@ const modelOptions: Record<string, Array<{ label: string; value: string }>> = {
   ],
   codex: [
     { value: "", label: "Codex 기본 모델 (권장)" },
-    { value: "gpt-5.6", label: "GPT-5.6 Sol · 최고 성능" },
+    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol · 최고 성능" },
     { value: "gpt-5.6-terra", label: "GPT-5.6 Terra · 균형" },
     { value: "gpt-5.6-luna", label: "GPT-5.6 Luna · 빠르고 경제적" },
   ],
 };
+
+// 아는 모델에만 붙이는 안내 문구. 처음 보는 모델은 도구가 준 이름 그대로 나간다.
+const modelHints: Record<string, string> = {
+  opus: "복잡한 작업",
+  sonnet: "균형",
+  haiku: "빠른 작업",
+  fable: "장기 자율 작업",
+  "gpt-5.6-sol": "최고 성능",
+  "gpt-5.6-terra": "균형",
+  "gpt-5.6-luna": "빠르고 경제적",
+};
+
+// 모델 목록의 정본은 실행 도구가 진단 때 보고한 계정 기준 목록이다. 도구가 업데이트되면 이 목록이
+// 저절로 따라가므로 앱이 이름을 외울 필요가 없다. 위 하드코딩 목록은 목록을 싣지 못한 응답
+// (구버전 런타임, 목록 미지원 도구)의 대비일 뿐이다.
+function modelChoices(provider: string, diagnoses: AgentProviderDiagnosis[]) {
+  const catalog = diagnoses.find((entry) => entry.provider === provider)?.modelCatalog;
+  if (catalog?.status === "available" && catalog.models?.length) {
+    return {
+      live: true,
+      options: [
+        { value: "", label: `${providerLabel(provider)} 기본 모델 (권장)` },
+        ...catalog.models.map((model) => ({
+          value: model.id,
+          label: modelHints[model.id] ? `${model.label ?? model.id} · ${modelHints[model.id]}` : model.label ?? model.id,
+        })),
+      ],
+    };
+  }
+  return { live: false, options: modelOptions[provider] ?? [{ value: "", label: "공급자 기본 모델" }] };
+}
 
 const runModes = [
   { value: "continuous", label: "반복" },
@@ -143,6 +174,8 @@ export function AgentRoleSettings({
         const value = draft.roles[role];
         if (!value) return null;
         const label = roleLabels[role] ?? role;
+        const models = modelChoices(value.provider, snapshot.providers);
+        const staleModel = Boolean(value.model) && !models.options.some((option) => option.value === value.model);
         return (
           <section
             aria-label={`${label} 역할 정책`}
@@ -186,13 +219,16 @@ export function AgentRoleSettings({
                   onChange={(event) => editRole(role, { model: event.target.value || null })}
                   value={value.model ?? ""}
                 >
-                  {!modelOptions[value.provider]?.some((option) => option.value === (value.model ?? "")) && value.model && (
-                    <option value={value.model}>현재 설정 · {value.model}</option>
+                  {staleModel && value.model && (
+                    <option value={value.model}>현재 설정 · {value.model}{models.live ? " — 계정 목록에 없음" : ""}</option>
                   )}
-                  {(modelOptions[value.provider] ?? [{ value: "", label: "공급자 기본 모델" }]).map((option) => (
+                  {models.options.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
+                {staleModel && models.live && (
+                  <small className="agent-model-stale-note">이 모델은 더 이상 계정 목록에 없어, 실행은 기본 모델로 진행됩니다.</small>
+                )}
               </label>
               <label htmlFor={`agent-run-mode-${role}`}>
                 <span>실행 방식</span>

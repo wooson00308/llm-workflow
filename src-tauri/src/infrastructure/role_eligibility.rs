@@ -198,6 +198,12 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
             verdict.exclude(decision_id, DECOMPOSED);
             continue;
         }
+        // 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안에도
+        // 대기열이 같은 결정을 계속 내밀어 중복 배정처럼 보인다.
+        if lease_ids.contains(decision_id) {
+            verdict.exclude(decision_id, LEASED);
+            continue;
+        }
         // 스크립트도 `spec_id`가 비어 있으면 lease를 보지 않는다.
         if !spec_id.is_empty() && lease_ids.contains(spec_id) {
             verdict.exclude(decision_id, SPEC_LEASED);
@@ -845,6 +851,26 @@ mod tests {
             candidate_lines(&detail.architect),
             ["eligible DECISION-001"]
         );
+    }
+
+    // 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 판정이 없으면 세션이 도는 동안에도
+    // 대기열이 같은 결정을 내밀어 중복 배정처럼 보인다(조건 스크립트 v18과 같은 규칙).
+    #[test]
+    fn a_leased_approval_decision_is_not_named_again_while_its_session_runs() {
+        let (root, workflow_root) = project();
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-04T00:00:00Z",
+        );
+        write_lease(root.path(), "DECISION-001", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target, None);
+        assert_eq!(candidate_lines(&detail.architect), ["leased DECISION-001"]);
     }
 
     #[test]

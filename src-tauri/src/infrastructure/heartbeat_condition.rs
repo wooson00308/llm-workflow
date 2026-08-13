@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 16;
+const CONDITION_SCRIPT_VERSION: u32 = 18;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 16;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 16
+# condition_script_version: 18
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -361,9 +361,10 @@ scan_nondraft_refs() { # $1=워크플로우 경로
       status_value = substr($0, 8)
       sub(/^ */, "", status_value)
     }
-    index($0, "source_idea_id:") > 0 || index($0, "source_decision_id:") > 0 {
+    index($0, "source_idea_id:") > 0 || index($0, "source_idea:") > 0 || index($0, "source_decision_id:") > 0 {
       line = $0
       gsub(/source_idea_id: +/, "source_idea_id:", line)
+      gsub(/source_idea: +/, "source_idea:", line)
       gsub(/source_decision_id: +/, "source_decision_id:", line)
       held = held + 1
       buffer[held] = line
@@ -593,7 +594,10 @@ planner)
       ideas=$(scan_ideas "$wf")
       while IFS= read -r id; do
         [ -n "$id" ] || continue
-        case "$nondraft_refs" in *"source_idea_id:$id"*) note_candidate spec-exists "$id"; continue ;; esac
+        # 옛 계약의 기획서는 원천을 source_idea:로 적었다. 그 문서가 참조로 보이지 않으면 이미
+        # 기획된 아이디어가 다시 열려 기획자가 중복 배정된다(2026-08-12 mech-arena 실측). 두 키를
+        # 모두 참조로 인정한다. source_idea:는 source_idea_id: 줄과 부분 일치하지 않는다.
+        case "$nondraft_refs" in *"source_idea_id:$id"* | *"source_idea:$id"*) note_candidate spec-exists "$id"; continue ;; esac
         lease_blocks "$id" && { note_candidate leased "$id"; continue; }
         note_target "$id"
       done <<IDEAS
@@ -687,6 +691,9 @@ DIRECT_ROWS
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+      # 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안에도 같은
+      # 결정이 대상으로 계속 나가, 화면이 중복 배정처럼 보이고 자동 배정이 헛 시도를 만든다.
+      if lease_blocks "$did"; then note_candidate leased "$did"; continue; fi
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
       note_target "$did" spec_approval
     done <<APPROVALS
@@ -814,7 +821,7 @@ verdict no-target 1
 /// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
 const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 16
+# condition_script_version: 18
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1056,7 +1063,7 @@ function Get-References([string]$Root, [string]$Kind, [string]$Key) {
 # file's lines are held and flushed once the file ends.
 function Get-NonDraftReferences([string]$Root) {
   $collected = @()
-  $keys = @('source_idea_id:', 'source_decision_id:')
+  $keys = @('source_idea_id:', 'source_idea:', 'source_decision_id:')
   foreach ($path in (Get-Documents $Root 'specs')) {
     $lines = Get-Lines $path
     if ((Get-Value $lines 'status') -ceq 'draft') { continue }
@@ -1214,8 +1221,12 @@ switch -CaseSensitive ($Role) {
       foreach ($path in (Get-Documents $root 'ideas')) {
         $id = Get-Value (Get-Lines $path) 'id'
         if ($id.Length -eq 0) { continue }
-        if ($nonDraftRefs.IndexOf('source_idea_id:' + $id,
-          [System.StringComparison]::Ordinal) -ge 0) { Write-Candidate 'spec-exists' $id; continue }
+        # Legacy specs name their source with source_idea:. Both keys count as a reference, and
+        # source_idea: never partially matches a source_idea_id: line.
+        if (($nonDraftRefs.IndexOf('source_idea_id:' + $id,
+          [System.StringComparison]::Ordinal) -ge 0) -or
+          ($nonDraftRefs.IndexOf('source_idea:' + $id,
+          [System.StringComparison]::Ordinal) -ge 0)) { Write-Candidate 'spec-exists' $id; continue }
         if (Test-Leased $id) { Write-Candidate 'leased' $id; continue }
         Write-Target $id
       }
@@ -1278,6 +1289,9 @@ switch -CaseSensitive ($Role) {
       foreach ($row in @(Get-DecisionCandidates $root 'outcome: approved' $false)) {
         if ($taskRefs.IndexOf('source_decision_id:' + $row.Id,
           [System.StringComparison]::Ordinal) -ge 0) { Write-Candidate 'decomposed' $row.Id; continue }
+        # A decomposing session's lease is keyed by the decision id. Without this check the same
+        # decision keeps being named while its session runs, which reads as a duplicate assignment.
+        if (Test-Leased $row.Id) { Write-Candidate 'leased' $row.Id; continue }
         if ($row.Spec.Length -gt 0 -and (Test-Leased $row.Spec)) {
           Write-Candidate 'spec-leased' $row.Id
           continue
@@ -1491,7 +1505,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 16"));
+        assert!(script.contains("# condition_script_version: 18"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -1505,7 +1519,7 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
-            "# condition_script_version: 16",
+            "# condition_script_version: 18",
             "# condition_script_version: 15",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
@@ -1769,7 +1783,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 16보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 18보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -2422,6 +2436,23 @@ mod tests {
             },
         },
         Scenario {
+            // 옛 계약의 기획서는 원천을 `source_idea:`로 적었다. 그 참조도 아이디어를 닫아야
+            // 이미 기획된 아이디어가 중복 배정되지 않는다(v17 하위호환).
+            name: "기획자: 옛 필드로 참조된 아이디어도 닫힌다",
+            roles: &["planner"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_document(
+                    control,
+                    "specs",
+                    "SPEC-001",
+                    "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\nsource_idea: IDEA-001\n---\n",
+                );
+            },
+        },
+        Scenario {
             name: "기획자: 참조 없는 아이디어에 lease가 있다",
             roles: &["planner"],
             expected: 1,
@@ -2507,6 +2538,18 @@ mod tests {
             build: |control: &Path| {
                 write_approved_decision(control, "DECISION-001", "SPEC-001");
                 write_lease(control, "SPEC-001");
+            },
+        },
+        Scenario {
+            // 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안
+            // 같은 결정이 다시 대상으로 나가 중복 배정으로 보인다(v18).
+            name: "아키텍트: 그 결정 자체에 lease가 있다",
+            roles: &["architect"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_approved_decision(control, "DECISION-001", "SPEC-001");
+                write_lease(control, "DECISION-001");
             },
         },
         // 아래 세 행이 SPEC-028 R4·R5의 아키텍트 판정이다. 기획자 분기의 최신 검사와 앱의

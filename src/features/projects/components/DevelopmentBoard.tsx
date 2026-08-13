@@ -140,6 +140,10 @@ export function DevelopmentBoard({ activeLeases = [], busy, onReadTask, onTaskRe
     () => buildQaSessions(workflow.items.tasks, workflow.items.specs),
     [workflow.items.specs, workflow.items.tasks],
   );
+  const upcomingQa = useMemo(
+    () => buildUpcomingQa(workflow.items.tasks, workflow.items.specs),
+    [workflow.items.specs, workflow.items.tasks],
+  );
   const visibleQaSessions = useMemo(
     () => qaSessions.filter((session) => matchesQaSessionFilters(session, query, statusFilter)),
     [qaSessions, query, statusFilter],
@@ -279,6 +283,7 @@ export function DevelopmentBoard({ activeLeases = [], busy, onReadTask, onTaskRe
               onOpen={setQaSession}
               sessions={visibleQaSessions}
               showEmpty={statusFilter === "qa_waiting"}
+              upcoming={upcomingQa}
             />
           )}
           <div className="task-lane-controls">
@@ -756,12 +761,14 @@ function QaSessionHub({
   onOpen,
   sessions,
   showEmpty,
+  upcoming,
 }: {
   onOpen(session: QaSession): void;
   sessions: QaSession[];
   showEmpty: boolean;
+  upcoming: UpcomingQa[];
 }) {
-  if (sessions.length === 0 && !showEmpty) return null;
+  if (sessions.length === 0 && upcoming.length === 0 && !showEmpty) return null;
   return (
     <section aria-label="사용자 QA" className="qa-session-hub">
       <header>
@@ -795,8 +802,18 @@ function QaSessionHub({
             </article>
           ))}
         </div>
-      ) : (
+      ) : upcoming.length === 0 ? (
         <p className="qa-session-empty">지금 사용자에게 요청할 기능 QA가 없습니다. 개발이 모두 끝난 기능만 여기에 나타납니다.</p>
+      ) : null}
+      {upcoming.length > 0 && (
+        <div className="qa-session-list">
+          {upcoming.map((group) => (
+            <article aria-disabled="true" className="qa-session-card qa-session-upcoming" key={group.key}>
+              <div><strong>{group.title}</strong></div>
+              <footer><span>QA {group.qaCount}건 준비 중 · 남은 작업 {group.blocking}개</span></footer>
+            </article>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -1397,22 +1414,68 @@ interface QaSession {
  * 세션으로만 보존한다. 자동 검사만 확인하면 되는 작업도 완료 대상에는 포함하되 직접 조작 단계에서는
  * 접는다.
  */
-function buildQaSessions(tasks: WorkflowItemSummary[], specs: WorkflowItemSummary[]): QaSession[] {
-  const specById = new Map(specs.map((spec) => [spec.id, spec]));
+/** 세션 묶음 규칙 한 자리. QA 노출과 "내 선택 대기" 집계가 같은 묶음을 봐야 두 화면이 같은 말을 한다. */
+function qaGroups(tasks: WorkflowItemSummary[]): Map<string, WorkflowItemSummary[]> {
   const groups = new Map<string, WorkflowItemSummary[]>();
-
   for (const task of tasks) {
     const specId = task.sourceSpecId?.trim();
     const key = specId || (task.status === "qa_waiting" ? `task:${task.fileName}` : null);
     if (!key) continue;
     groups.set(key, [...(groups.get(key) ?? []), task]);
   }
+  return groups;
+}
+
+/** 이 묶음을 지금 통째 QA로 열 수 있는가. */
+function qaBatchReady(group: WorkflowItemSummary[]): boolean {
+  return group.every((item) => item.status === "completed" || item.status === "qa_waiting");
+}
+
+/**
+ * 지금 QA를 시작할 수 있는 작업의 파일명 집합. 에이전트 화면의 "내 선택 대기"가 이 기준으로
+ * 세야, 여기서 잠긴 묶음이 저기서는 선택거리로 세어지는 어긋남이 생기지 않는다.
+ */
+export function actionableQaFileNames(tasks: WorkflowItemSummary[]): Set<string> {
+  const ready = new Set<string>();
+  for (const group of qaGroups(tasks).values()) {
+    if (!qaBatchReady(group)) continue;
+    for (const item of group) if (item.status === "qa_waiting") ready.add(item.fileName);
+  }
+  return ready;
+}
+
+/** 아직 열 수 없는 QA 묶음. 숨기면 완성된 작업이 수면 아래 쌓이므로 예고 카드로만 보인다. */
+interface UpcomingQa {
+  key: string;
+  title: string;
+  qaCount: number;
+  blocking: number;
+}
+
+function buildUpcomingQa(tasks: WorkflowItemSummary[], specs: WorkflowItemSummary[]): UpcomingQa[] {
+  const specById = new Map(specs.map((spec) => [spec.id, spec]));
+  const upcoming: UpcomingQa[] = [];
+  for (const [key, group] of qaGroups(tasks)) {
+    const qaCount = group.filter((item) => item.status === "qa_waiting").length;
+    if (qaCount === 0 || qaBatchReady(group)) continue;
+    upcoming.push({
+      key,
+      title: specById.get(key)?.title ?? key,
+      qaCount,
+      blocking: group.filter((item) => item.status !== "completed" && item.status !== "qa_waiting").length,
+    });
+  }
+  return upcoming.sort((left, right) => left.key.localeCompare(right.key, "ko", { numeric: true }));
+}
+
+function buildQaSessions(tasks: WorkflowItemSummary[], specs: WorkflowItemSummary[]): QaSession[] {
+  const specById = new Map(specs.map((spec) => [spec.id, spec]));
 
   const sessions: QaSession[] = [];
-  for (const [key, group] of groups) {
+  for (const [key, group] of qaGroups(tasks)) {
     const qaWaiting = group.filter((item) => item.status === "qa_waiting");
     if (qaWaiting.length === 0) continue;
-    if (group.some((item) => item.status !== "completed" && item.status !== "qa_waiting")) continue;
+    if (!qaBatchReady(group)) continue;
 
     const ordered = [...qaWaiting].sort(compareQaTasks);
     const evidence = ordered.filter(isEvidenceOnlyQa);

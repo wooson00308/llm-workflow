@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 15
+rules_version: 16
 ---
 
 # Developer role
@@ -40,10 +40,10 @@ instructions.
 ## Recovering a blocked task
 
 - Read the `## 막힌 사유` section, its resume condition, `blocked_kind`, and the latest implementation report before changing the status or product files.
-- Recheck the recorded impediment from current repository and environment facts. If it still exists and there is no in-scope recovery to perform, leave the task and its history unchanged, report the recheck, release the lease, and stop. Never ask the user to reopen it or provide a resolution.
+- Recheck the recorded impediment from current repository and environment facts. If it still exists and there is no in-scope recovery to perform, leave the task's status and history unchanged, record the `blocked_kind` your verified facts support in the same edit, report the recheck, release the lease, and stop. Never ask the user to reopen it or provide a resolution.
 - When recovery work can begin, move the task from `blocked` to `in_progress`, append an `in_progress` history entry, and update `updated_at` in the same edit. Do not append `resumed`; that value is historical compatibility for the retired user path.
 - Preserve the reason section as the last recorded block. If implementation fails again, replace it only with the reason that now holds and append a new `blocked` transition.
-- If verified facts show that the definition, scope, dependencies, or completion conditions are wrong, leave the task `blocked`, set `blocked_kind: definition_error`, update the structured reason and report, then release the lease. The architect is the next owner; the user is not.
+- If verified facts show that the definition, scope, dependencies, or completion conditions are wrong, leave the task `blocked`, set `blocked_kind: definition_error`, update the structured reason and report, then release the lease. The architect is the next owner; the user is not. A completion condition the agent environment cannot execute — the sandbox forbids what it requires, such as binding a server port — is this case, not an environment retry: no developer session will ever clear it, and the condition itself must be rewritten.
 
 ## Satisfied dependencies
 

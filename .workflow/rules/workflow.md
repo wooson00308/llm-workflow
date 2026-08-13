@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 21
+rules_version: 22
 ---
 
 # LLM Workflow agent protocol
@@ -208,12 +208,12 @@ A session that moves a task to `blocked` writes the reason into the task documen
 
 The same edit that records the reason also records what kind of block it is, in the optional frontmatter field `blocked_kind`. The field carries meaning only while the task's status is `blocked`, and it holds one of four values:
 
-- `definition_error`: the task document itself is wrong — its scope, its dependencies, or its completion conditions cannot be satisfied as written.
+- `definition_error`: the task document itself is wrong — its scope, its dependencies, or its completion conditions cannot be satisfied as written. Conditions that no agent session can execute because the execution environment forbids what they require are this kind too: the sheet demands something its executor can never do, and only a rewritten sheet clears that.
 - `missing_prerequisite`: something the task depends on has not been built or agreed yet, and the task is waiting on it.
 - `implementation_failure`: the work was attempted and did not succeed, and the reason sits in the code or the environment rather than in the document.
 - `external_dependency`: the block is outside this repository — an approval, a third party, a service.
 
-- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified and is routed to a developer. Eligibility never guesses the cause from the prose. After claiming it, the developer may classify it only from facts verified during that recovery attempt.
+- A task with no `blocked_kind`, or with a value outside those four, reads as unclassified and is routed to a developer. Eligibility never guesses the cause from the prose. A recovery attempt that ends with the task still `blocked` also ends it classified: the session records the `blocked_kind` its verified facts support, and only from facts verified during that attempt. An unclassified block makes every later session repeat the same inspection, so a session that could verify nothing states that in its report instead of leaving the field silently empty.
 - Leaving `blocked` does not delete the value. It is the kind of the last block, kept for the same reason the reason section is kept, and it is not read as a present impediment once the status is no longer `blocked`.
 
 ### Agent-operated recovery

@@ -126,6 +126,21 @@ export interface IdeaDocument {
   body: string;
 }
 
+/**
+ * 보고서 파일 하나의 목록 항목. 보고서에는 앞머리 메타데이터가 없어 다른 문서 요약이 싣는 id와
+ * 상태가 없고, 파일 이름과 본문 제목만 온다.
+ */
+export interface WorkflowReportSummary {
+  fileName: string;
+  title: string;
+}
+
+/** 보고서 하나의 읽기 전용 전문. 본문은 파일에 적힌 그대로이고 앱이 다듬지 않는다. */
+export interface ReportDocument {
+  summary: WorkflowReportSummary;
+  body: string;
+}
+
 export type SpecDecisionOutcome =
   | "approved"
   | "revision_requested"
@@ -1037,6 +1052,23 @@ export interface ProjectGateway {
     workflowDirectory: string,
     fileName: string,
   ): Promise<IdeaDocument>;
+  /**
+   * 실행 하나에 연결된 보고서 목록. 어떤 보고서가 그 실행의 것인지는 백엔드가 판정하므로 화면은
+   * 파일 이름이나 경로를 만들어 넘기지 않고, 실행 기록이 이미 싣고 있는 두 값만 넘긴다. 연결을
+   * 확인하지 못하면 빈 목록이 온다.
+   */
+  listRunReports(
+    path: string,
+    workflowDirectory: string,
+    targetId: string | null,
+    resultPrefix: string | null,
+  ): Promise<WorkflowReportSummary[]>;
+  /** 보고서 하나의 읽기 전용 본문. 파일 이름은 위 목록이 준 값을 그대로 쓴다. */
+  readReport(
+    path: string,
+    workflowDirectory: string,
+    fileName: string,
+  ): Promise<ReportDocument>;
   decideSpec(
     path: string,
     workflowDirectory: string,
@@ -1182,6 +1214,20 @@ export interface ProjectGateway {
     runId: string,
     cursor: number,
   ): Promise<AgentRunLogPage>;
+  /**
+   * 진단 자료를 저장할 위치를 사용자에게 묻는다. 고르지 않고 닫으면 null이며, 그때는 내보내기를
+   * 부르지 않으므로 파일이 만들어지지 않는다.
+   */
+  chooseDiagnosticsFile(defaultFileName: string): Promise<string | null>;
+  /**
+   * 실행 하나의 진단 자료를 조립한다. 저장 위치를 주면 백엔드가 그 자리에 쓰고, 주지 않으면 같은
+   * 내용이 문자열로 온다. 두 경로가 같은 조립을 지나므로 저장한 파일과 복사할 문자열이 같다.
+   */
+  exportAgentRunDiagnostics(
+    projectId: string,
+    runId: string,
+    destination: string | null,
+  ): Promise<string>;
 }
 
 /**
@@ -1356,6 +1402,8 @@ export interface AgentProviderDiagnosis {
   provider: string;
   status: string;
   version: string | null;
+  /** 실행 도구가 진단 때 보고한 계정 기준 모델 목록. 구버전 런타임 응답에는 없다. */
+  modelCatalog?: { status: string; models?: Array<{ id: string; label?: string }> };
 }
 
 export interface AgentPolicySnapshot {
@@ -1443,6 +1491,12 @@ export interface AgentRunSummary {
   reason: string | null;
   remaining: string[];
   previousRunId: string | null;
+  /**
+   * 런타임이 이 실행에 예약한 결과 접두어. 그 실행이 만든 문서의 식별자가 이 값으로 시작하므로
+   * 대상 문서 식별자와 함께 실행과 결과 보고서를 잇는 근거가 된다. 이 값을 싣지 않는 구형 실행
+   * 기록에서는 null이고, 앱은 비어 있는 것을 다른 값으로 메우지 않는다.
+   */
+  resultPrefix: string | null;
 }
 
 export interface AgentRunStartOutcome {
@@ -1465,6 +1519,25 @@ export type AgentCancelOutcome =
   | { kind: "preview"; preview: AgentCancelPreview }
   | { kind: "applied"; run: AgentRunSummary }
   | { kind: "partial"; run: AgentRunSummary; remaining: string[] };
+
+/**
+ * 실행 로그 이벤트 하나를 계약이 정한 형태로 읽은 결과. 저장된 값은 백엔드가 해석 없이 나르는
+ * JSON이라 이 형태는 화면 쪽에서 읽어 낸 것이고, 확인하지 못한 값은 지어내지 않고 null이다.
+ *
+ * 절대 시각 필드가 없는 것은 계약이 그렇기 때문이다. 이벤트가 일어난 시각은 `startedAt`과
+ * `elapsedSeconds`를 더해 계산한다.
+ */
+export interface AgentRunEvent {
+  /** `started`·`progress`·`tool`·`completed`·`failed`·`cancelled`·`timed_out`. */
+  kind: string;
+  /** 도구 이벤트가 쓴 도구 이름. 이 필드가 생기기 전 기록과 이름을 확인하지 못한 경우 null이다. */
+  toolName: string | null;
+  /** 실행이 시작한 시각(RFC3339). */
+  startedAt: string | null;
+  /** 실행 시작에서 이 이벤트까지 흐른 초. */
+  elapsedSeconds: number | null;
+  detail: string | null;
+}
 
 export interface AgentRunLogPage {
   runId: string;
@@ -1560,6 +1633,44 @@ export interface AgentRuntimeState {
   logs: Record<string, AgentRunLogPage>;
   readingLogRunId: string | null;
   logError: string | null;
+  /**
+   * 실행 상세가 열려 있어 이벤트를 이어 읽는 대상. null이면 읽지 않는다.
+   *
+   * 상세를 닫으면 읽기가 멈춰야 하므로 주인이 화면이 아니라 훅이다 — 화면이 들고 있으면 언마운트
+   * 순간에 주기를 멈출 자리가 사라진다.
+   */
+  logWatchRunId: string | null;
+  /**
+   * 실행 식별자별 연결된 보고서 목록. 백엔드가 연결을 확인해 준 실행만 열쇠를 가지며, 확인하지
+   * 못한 실행은 열쇠 자체가 없다. 실행마다 나누어 두는 것은 한 실행에서 읽은 목록이 다른 실행의
+   * 카드에 남지 않게 하기 위해서다.
+   */
+  runReports: Record<string, WorkflowReportSummary[]>;
+  /** 지금 열어 둔 보고서. 닫으면 null이다. */
+  reportView: AgentReportView | null;
+  /** 마지막으로 고른 진단 자료 내보내기 하나. 고른 적이 없으면 null이다. */
+  diagnosticExport: AgentDiagnosticExport | null;
+}
+
+/**
+ * 진단 자료 내보내기 한 번의 상태. 사용자가 저장이나 복사를 고른 뒤에만 생기며, 화면을 여는 것만
+ * 으로는 만들어지지 않는다.
+ */
+export interface AgentDiagnosticExport {
+  runId: string;
+  mode: "save" | "copy";
+  status: "working" | "done" | "failed";
+  error: string | null;
+}
+
+/** 읽기 전용으로 열어 둔 보고서 하나. 편집 상태나 저장 대기 값은 여기에 없다. */
+export interface AgentReportView {
+  fileName: string;
+  title: string;
+  /** 파일에 적힌 본문. 아직 읽지 못했으면 null이며, 화면은 빈 본문으로 대신하지 않는다. */
+  body: string | null;
+  reading: boolean;
+  error: string | null;
 }
 
 export interface AgentRuntimeActions {
@@ -1588,6 +1699,27 @@ export interface AgentRuntimeActions {
   dismissRetry(): void;
   confirmRetry(): Promise<boolean>;
   readRunLog(runId: string): Promise<void>;
+  /**
+   * 실행 하나의 이벤트를 이어 읽기 시작하거나(`runId`) 멈춘다(`null`). 실행 상세가 열리고 닫히는
+   * 것과 같은 수명이며, 읽기 주기는 훅이 관리한다.
+   */
+  watchRunLog(runId: string | null): void;
+  /**
+   * 실행 하나에 연결된 보고서 목록을 읽어 그 실행의 자리에 넣는다. 판정 입력은 실행 기록이 이미
+   * 싣고 있는 값이라 화면이 만들지 않는다. 읽지 못하면 그 실행의 자리를 비워 둔다.
+   */
+  readRunReports(run: AgentRunSummary, workflowDirectory: string): Promise<void>;
+  /** 보고서 하나를 읽기 전용으로 연다. 파일 이름은 목록이 준 값을 그대로 쓴다. */
+  openReport(
+    workflowDirectory: string,
+    report: WorkflowReportSummary,
+  ): Promise<void>;
+  closeReport(): void;
+  /**
+   * 실행 하나의 진단 자료를 파일로 저장하거나 클립보드로 복사한다. 사용자가 저장이나 복사를 고른
+   * 때만 불리며, 저장 위치를 고르지 않고 닫으면 아무것도 만들지 않는다. 외부로 보내는 경로는 없다.
+   */
+  exportRunDiagnostics(runId: string, mode: "save" | "copy"): Promise<void>;
 }
 
 export interface RecentProjectStore {

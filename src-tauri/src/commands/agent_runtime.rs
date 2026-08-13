@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use tauri::Manager;
 
 use crate::application::agent_runtime_config_service::{
@@ -364,6 +365,43 @@ pub async fn read_agent_run_log(
         AgentRuntimeStatusService.read_log(&caller, &project_id, &run_id, cursor, &compatibility)
     })
     .await
+}
+
+/// 실행 하나의 진단 번들을 만든다. 저장 위치를 받으면 그 자리에 쓰고, 받지 않으면 같은 내용을
+/// 문자열로 돌려준다.
+///
+/// 두 경로가 조립을 한 번만 지나므로 저장한 파일과 화면이 복사하는 문자열은 같은 내용이다. 번들을
+/// 외부로 보내는 자리는 없다 — 이 명령이 하는 쓰기는 사용자가 대화상자로 고른 경로 하나뿐이다.
+#[tauri::command]
+pub async fn export_agent_run_diagnostics(
+    app: tauri::AppHandle,
+    project_id: String,
+    run_id: String,
+    destination: Option<String>,
+) -> Result<String, String> {
+    let (resource, install_root) = locations(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let caller = LauncherCaller::new(launcher_path(&install_root));
+        let runtime = AgentRuntimeInstallService::new(&resource, &install_root).inspect(&caller);
+        let compatibility = runtime.compatibility.clone();
+        let bundle = AgentRuntimeStatusService.export_diagnostics(
+            &caller,
+            &project_id,
+            &run_id,
+            runtime,
+            &compatibility,
+            &Utc::now().to_rfc3339(),
+        );
+        let content = serde_json::to_string_pretty(&bundle)
+            .map_err(|error| format!("진단 자료를 만들지 못했습니다: {error}"))?;
+        if let Some(path) = destination {
+            std::fs::write(&path, &content)
+                .map_err(|error| format!("진단 자료를 저장하지 못했습니다: {error}"))?;
+        }
+        Ok(content)
+    })
+    .await
+    .map_err(|error| format!("진단 자료 내보내기를 시작하지 못했습니다: {error}"))?
 }
 
 async fn set_paused(

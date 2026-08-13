@@ -322,6 +322,25 @@ pub struct IdeaDocument {
     pub body: String,
 }
 
+/// 보고서 파일 하나의 목록 항목. 보고서에는 앞머리 메타데이터가 없고 파일 이름이 유일한 식별
+/// 수단이므로, 다른 문서 요약이 싣는 id·상태·전이는 담지 않는다. 없는 사실을 지어내지 않기 위해
+/// 필드를 두 개로 묶어 둔다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowReportSummary {
+    pub file_name: String,
+    /// 본문 제목. 찾지 못하면 파일 이름의 줄기를 그대로 쓴다.
+    pub title: String,
+}
+
+/// 보고서 하나의 읽기 전용 전문. 본문은 파일에 적힌 그대로이고 앱이 다듬지 않는다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportDocument {
+    pub summary: WorkflowReportSummary,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecDecisionOutcome {

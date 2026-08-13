@@ -6,8 +6,10 @@
 //! **로그는 cursor만 주고받는다.** 화면이 파일 경로를 보내지도 받지도 않으며, 런타임이 이미 민감정보를
 //! 제거한 이벤트만 온다. 앱은 그 이벤트를 다시 해석하지 않고 그대로 전달한다.
 
+use serde::Serialize;
 use serde_json::Value;
 
+use crate::application::agent_runtime_install_service::RuntimeInspection;
 use crate::domain::agent_runtime::{
     AutomationRoleState, AutomationSnapshot, Compatibility, QueueSnapshot, RunLogPage, RunSummary,
     WatcherState,
@@ -41,6 +43,72 @@ impl StatusFailure {
             }
         }
     }
+}
+
+/// 진단 번들 규격 버전. 번들을 나중에 읽는 쪽이 형태를 판단하는 값이다.
+const BUNDLE_VERSION: &str = "1";
+
+/// 번들이 이벤트 하나에서 옮기는 값.
+///
+/// 런타임 계약이 정한 필드만 자리를 가진다. 도구 인자, 도구 결과 본문, 프롬프트처럼 계약 밖 필드는
+/// 여기 자리가 없으므로, 런타임이 그런 값을 이벤트에 더 싣더라도 번들로는 옮겨지지 않는다.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleEvent {
+    pub kind: String,
+    pub role: Option<String>,
+    pub provider: Option<String>,
+    pub target_id: Option<String>,
+    /// 실행 시작 시각과 그로부터 흐른 초. 이벤트의 시각 근거는 이 두 값뿐이다.
+    pub started_at: Option<String>,
+    pub elapsed_seconds: Option<f64>,
+    pub tool_name: Option<String>,
+    /// 런타임이 준 상세 문장. 도구 이벤트에서는 싣지 않는다 — 도구 결과 본문이 이 자리로 들어오는
+    /// 길을 막는다.
+    pub detail: Option<String>,
+}
+
+/// provider 진단 결과 하나에서 번들이 옮기는 값.
+///
+/// 계정 모델 목록은 옮기지 않는다. 그 자리는 provider마다 형태가 다른 값이 그대로 들어오는 통로인데,
+/// 실패 사유는 `status`가 이미 말해 주므로 번들이 그 통로를 열어 둘 이유가 없다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleProvider {
+    pub provider: Option<String>,
+    pub status: Option<String>,
+    pub version: Option<String>,
+}
+
+/// 읽지 못한 항목 하나와 그 사유. 성공으로 추측하지 않고 빠진 사실을 그대로 적는다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleGap {
+    pub item: String,
+    pub reason: String,
+}
+
+/// 실행 하나를 재현하는 데 필요한 자료를 한 덩어리로 모은 것.
+///
+/// 담는 것은 런타임이 이미 저장해 둔 값뿐이다. 이 구조를 채우려고 새로 수집하는 값은 없다.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticBundle {
+    pub bundle_version: String,
+    pub generated_at: String,
+    pub project_id: String,
+    pub run_id: String,
+    /// 실행 메타정보. 큐 상태에서 이 실행의 행을 찾지 못했으면 없다.
+    pub run: Option<RunSummary>,
+    /// 이 실행이 쓴 provider의 버전. provider 진단 결과에서 온다.
+    pub provider_version: Option<String>,
+    pub events: Vec<BundleEvent>,
+    pub provider_diagnostics: Option<Vec<BundleProvider>>,
+    pub runtime_diagnostics: RuntimeInspection,
+    /// 런타임이 기록해 둔 최근 오류. 각 기록이 담은 단계와 사유 코드를 그대로 옮긴다.
+    pub recent_errors: Option<Vec<Value>>,
+    /// 읽지 못한 항목들. 비어 있으면 모두 읽었다는 뜻이다.
+    pub unavailable: Vec<BundleGap>,
 }
 
 #[derive(Debug, Default)]
@@ -153,6 +221,154 @@ impl AgentRuntimeStatusService {
             });
         }
         Ok(page)
+    }
+
+    /// 실행 하나의 진단 번들을 조립한다. 저장과 복사 두 경로가 모두 이 함수 하나를 지난다.
+    ///
+    /// 어느 항목을 읽지 못해도 조립을 중단하지 않는다. 읽은 부분을 담고 읽지 못한 항목의 이름과
+    /// 사유를 `unavailable`에 적는다 — 빈 값을 조용히 채우면 읽은 것과 없는 것을 구분할 수 없다.
+    pub fn export_diagnostics(
+        &self,
+        caller: &dyn RuntimeCaller,
+        project_id: &str,
+        run_id: &str,
+        runtime: RuntimeInspection,
+        compatibility: &Compatibility,
+        generated_at: &str,
+    ) -> DiagnosticBundle {
+        let mut gaps = Vec::new();
+
+        // 실행 메타정보와 최근 오류는 같은 큐 상태에서 온다. 큐 상태 조회는 실패를 사유로 답하므로
+        // 여기서도 실패가 조립을 멈추지 않는다.
+        let snapshot = self.inspect(caller, project_id, compatibility);
+        let (run, recent_errors) = match &snapshot.unavailable {
+            Some(reason) => {
+                gaps.push(gap("run", reason));
+                gaps.push(gap("recentErrors", reason));
+                (None, None)
+            }
+            None => {
+                let found = snapshot
+                    .runs
+                    .iter()
+                    .find(|row| row.run_id == run_id)
+                    .cloned();
+                if found.is_none() {
+                    gaps.push(gap("run", "큐 상태에 이 실행의 행이 없습니다"));
+                }
+                (found, Some(snapshot.errors.clone()))
+            }
+        };
+
+        // 위의 큐 상태 조회도 provider 진단을 부르지만, 그 자리는 실패를 빈 목록으로 떨어뜨려
+        // 읽지 못한 것과 진단 대상이 없는 것을 구분하지 못한다. 번들은 그 둘을 구분해야 하므로
+        // 여기서 한 번 더 부른다.
+        let provider_diagnostics =
+            match agent_runtime_process::diagnose_providers(caller, project_id) {
+                Ok(providers) => Some(providers.iter().map(bundle_provider).collect::<Vec<_>>()),
+                Err(failure) => {
+                    gaps.push(gap("providerDiagnostics", &failure.message()));
+                    None
+                }
+            };
+        let provider_version = match (&run, &provider_diagnostics) {
+            (Some(row), Some(entries)) => entries
+                .iter()
+                .find(|entry| entry.provider.as_deref() == Some(row.provider.as_str()))
+                .and_then(|entry| entry.version.clone()),
+            _ => None,
+        };
+
+        if let Some(reason) = &runtime.unavailable {
+            gaps.push(gap("runtimeDiagnostics", reason));
+        }
+
+        let events = self.read_whole_log(caller, project_id, run_id, compatibility, &mut gaps);
+
+        DiagnosticBundle {
+            bundle_version: BUNDLE_VERSION.to_owned(),
+            generated_at: generated_at.to_owned(),
+            project_id: project_id.to_owned(),
+            run_id: run_id.to_owned(),
+            run,
+            provider_version,
+            events,
+            provider_diagnostics,
+            runtime_diagnostics: runtime,
+            recent_errors,
+            unavailable: gaps,
+        }
+    }
+
+    /// 실행 하나의 이벤트를 처음부터 끝까지 읽는다.
+    ///
+    /// 저장 계층은 한 번의 조회로 정해진 수까지만 돌려주므로, cursor가 더 나아가지 않을 때까지
+    /// 이어 읽어야 전체가 모인다. 도중에 읽지 못하면 그때까지 읽은 것을 남기고 사유를 적는다.
+    fn read_whole_log(
+        &self,
+        caller: &dyn RuntimeCaller,
+        project_id: &str,
+        run_id: &str,
+        compatibility: &Compatibility,
+        gaps: &mut Vec<BundleGap>,
+    ) -> Vec<BundleEvent> {
+        let mut events = Vec::new();
+        let mut cursor = 0;
+        loop {
+            match self.read_log(caller, project_id, run_id, cursor, compatibility) {
+                Ok(page) => {
+                    events.extend(page.events.iter().map(bundle_event));
+                    // 빈 묶음과 제자리 cursor는 둘 다 더 읽을 것이 없다는 뜻이다.
+                    if page.events.is_empty() || page.next_cursor <= cursor {
+                        return events;
+                    }
+                    cursor = page.next_cursor;
+                }
+                Err(failure) => {
+                    gaps.push(gap("events", &failure.message()));
+                    return events;
+                }
+            }
+        }
+    }
+}
+
+fn gap(item: &str, reason: &str) -> BundleGap {
+    BundleGap {
+        item: item.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+fn text(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// provider 진단 결과 하나를 번들이 싣는 값으로 옮긴다. 계약이 정한 세 값만 읽는다.
+fn bundle_provider(value: &Value) -> BundleProvider {
+    BundleProvider {
+        provider: text(value, "provider"),
+        status: text(value, "status"),
+        version: text(value, "version"),
+    }
+}
+
+/// 저장된 이벤트 하나를 번들이 싣는 값으로 옮긴다. 계약이 정한 필드만 읽고 나머지는 버린다.
+fn bundle_event(value: &Value) -> BundleEvent {
+    let kind = text(value, "kind").unwrap_or_default();
+    BundleEvent {
+        role: text(value, "role"),
+        provider: text(value, "provider"),
+        target_id: text(value, "targetId"),
+        started_at: text(value, "startedAt"),
+        elapsed_seconds: value.get("elapsedSeconds").and_then(Value::as_f64),
+        tool_name: text(value, "toolName"),
+        detail: if kind == "tool" {
+            None
+        } else {
+            text(value, "detail")
+        },
+        kind,
     }
 }
 
@@ -396,5 +612,290 @@ mod tests {
             .expect_err("refused");
 
         assert!(matches!(failure, StatusFailure::OffContract { .. }));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_bundle_tests {
+    use pretty_assertions::assert_eq;
+    use serde_json::{json, Value};
+
+    use super::{AgentRuntimeStatusService, DiagnosticBundle};
+    use crate::application::agent_runtime_install_service::RuntimeInspection;
+    use crate::domain::agent_runtime::{Compatibility, RunState};
+    use crate::infrastructure::agent_runtime_process::tests::FakeCaller;
+    use crate::infrastructure::agent_runtime_process::{Captured, RuntimeCallFailure};
+
+    /// 성공 봉투 하나. 조립은 봉투의 명령 이름을 읽지 않으므로 한 값으로 둔다.
+    fn envelope(data: Value) -> Captured {
+        Captured {
+            code: Some(0),
+            stdout: json!({
+                "apiVersion": "1", "requestId": "r", "command": "state.read",
+                "outcome": "success", "data": data,
+            })
+            .to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    fn runtime(unavailable: Option<&str>) -> RuntimeInspection {
+        RuntimeInspection {
+            bundled_version: Some("0.9.0".to_owned()),
+            status: None,
+            compatibility: Compatibility::Compatible,
+            execution_allowed: true,
+            unavailable: unavailable.map(str::to_owned),
+            install_root: "/runtime".to_owned(),
+        }
+    }
+
+    /// 조립이 부르는 순서대로 응답을 세워 둔다: 큐 상태, 큐 상태 안쪽의 provider 진단,
+    /// 번들이 따로 부르는 provider 진단, 그다음이 이벤트 묶음들이다.
+    fn export(
+        responses: Vec<Result<Captured, RuntimeCallFailure>>,
+        inspection: RuntimeInspection,
+    ) -> DiagnosticBundle {
+        let caller = FakeCaller::new(responses);
+        AgentRuntimeStatusService.export_diagnostics(
+            &caller,
+            "p1",
+            "run-1",
+            inspection,
+            &Compatibility::Compatible,
+            "2026-08-12T15:00:00Z",
+        )
+    }
+
+    fn tool_event(elapsed: u32) -> Value {
+        json!({
+            "kind": "tool", "role": "developer", "provider": "claude", "targetId": "TASK-7",
+            "startedAt": "2026-08-12T10:00:00Z", "elapsedSeconds": elapsed, "toolName": "Read",
+        })
+    }
+
+    fn page(events: Vec<Value>, next_cursor: u64) -> Captured {
+        envelope(json!({"runId": "run-1", "events": events, "nextCursor": next_cursor}))
+    }
+
+    fn failed_run_state() -> Value {
+        json!({
+            "configuration": {"projectId": "p1", "paused": false},
+            "queue": [],
+            "runs": [{
+                "runId": "run-1", "projectId": "p1", "role": "developer", "provider": "claude",
+                "state": "failed", "targetId": "TASK-7", "startedAt": "2026-08-12T10:00:00Z",
+                "finishedAt": "2026-08-12T10:02:00Z", "failureStage": "role_session",
+                "reason": "provider_failed", "remaining": [], "previousRunId": null,
+                "resultPrefix": "RES-20260812T130244Z-394",
+            }],
+            "errors": [{"stage": "role_session", "reason": "provider_failed", "role": "developer"}],
+        })
+    }
+
+    fn ready_providers() -> Value {
+        json!({"providers": [{"provider": "claude", "status": "ready", "version": "2.1.0"}]})
+    }
+
+    #[test]
+    fn the_bundle_carries_the_run_identity_its_provider_version_and_the_recent_errors() {
+        let bundle = export(
+            vec![
+                Ok(envelope(failed_run_state())),
+                Ok(envelope(ready_providers())),
+                Ok(envelope(ready_providers())),
+                Ok(page(vec![], 0)),
+            ],
+            runtime(None),
+        );
+
+        assert_eq!(bundle.bundle_version, "1");
+        assert_eq!(bundle.generated_at, "2026-08-12T15:00:00Z");
+        assert_eq!(bundle.project_id, "p1");
+        assert_eq!(bundle.run_id, "run-1");
+        let run = bundle.run.expect("실행 행");
+        assert_eq!(run.target_id.as_deref(), Some("TASK-7"));
+        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(run.failure_stage.as_deref(), Some("role_session"));
+        assert_eq!(run.reason.as_deref(), Some("provider_failed"));
+        assert_eq!(run.started_at.as_deref(), Some("2026-08-12T10:00:00Z"));
+        assert_eq!(run.finished_at.as_deref(), Some("2026-08-12T10:02:00Z"));
+        assert_eq!(
+            run.result_prefix.as_deref(),
+            Some("RES-20260812T130244Z-394")
+        );
+        assert_eq!(bundle.provider_version.as_deref(), Some("2.1.0"));
+        assert_eq!(bundle.recent_errors.expect("오류 기록").len(), 1);
+        assert!(bundle.unavailable.is_empty());
+    }
+
+    /// 저장과 복사는 이 조립 함수 하나를 지나고, 명령은 그 결과를 한 번만 문자열로 만들어 파일과
+    /// 화면 양쪽에 같은 값을 준다. 여기서 확인하는 것은 그 앞단이다 — 같은 실행을 두 번 내보내도
+    /// 규격 버전과 실행 내용이 같고, 생성 시각만 다르다.
+    #[test]
+    fn two_exports_of_one_run_agree_on_the_format_version_and_the_run_content() {
+        let responses = || {
+            vec![
+                Ok(envelope(failed_run_state())),
+                Ok(envelope(ready_providers())),
+                Ok(envelope(ready_providers())),
+                Ok(page(vec![tool_event(1), tool_event(2)], 2)),
+                Ok(page(vec![], 2)),
+            ]
+        };
+        let saved = export(responses(), runtime(None));
+        let copied = export(responses(), runtime(None));
+
+        assert_eq!(saved.bundle_version, copied.bundle_version);
+        assert_eq!(saved.run, copied.run);
+        assert_eq!(saved.events, copied.events);
+        assert_eq!(saved.provider_version, copied.provider_version);
+        assert_eq!(saved.recent_errors, copied.recent_errors);
+        assert_eq!(saved.unavailable, copied.unavailable);
+    }
+
+    #[test]
+    fn events_are_read_on_past_one_page_and_keep_the_order_the_runtime_stored() {
+        // 저장 계층은 한 번의 조회로 200건까지만 돌려준다. 한 번에 끊으면 뒤의 3건이 빠진다.
+        let first: Vec<Value> = (0..200).map(tool_event).collect();
+        let second: Vec<Value> = (200..203).map(tool_event).collect();
+        let bundle = export(
+            vec![
+                Ok(envelope(failed_run_state())),
+                Ok(envelope(ready_providers())),
+                Ok(envelope(ready_providers())),
+                Ok(page(first, 200)),
+                Ok(page(second, 203)),
+                Ok(page(vec![], 203)),
+            ],
+            runtime(None),
+        );
+
+        assert_eq!(bundle.events.len(), 203);
+        assert_eq!(bundle.events[0].elapsed_seconds, Some(0.0));
+        assert_eq!(bundle.events[199].elapsed_seconds, Some(199.0));
+        assert_eq!(bundle.events[202].elapsed_seconds, Some(202.0));
+        assert_eq!(
+            bundle.events[202].started_at.as_deref(),
+            Some("2026-08-12T10:00:00Z")
+        );
+        assert!(bundle.unavailable.is_empty());
+    }
+
+    #[test]
+    fn what_could_not_be_read_is_named_with_its_reason_and_the_rest_still_reaches_the_bundle() {
+        let bundle = export(
+            vec![
+                Err(RuntimeCallFailure::NotStarted {
+                    reason: "런타임이 응답하지 않습니다".to_owned(),
+                }),
+                Err(RuntimeCallFailure::NotStarted {
+                    reason: "진단을 읽지 못했습니다".to_owned(),
+                }),
+                Ok(page(vec![tool_event(1)], 1)),
+                Ok(page(vec![], 1)),
+            ],
+            runtime(Some("런타임 조회에 실패했습니다")),
+        );
+
+        // 읽지 못한 자리를 빈 값으로 채우지 않는다. 없는 것과 읽지 못한 것이 구분돼야 한다.
+        assert!(bundle.run.is_none());
+        assert!(bundle.recent_errors.is_none());
+        assert!(bundle.provider_diagnostics.is_none());
+        assert!(bundle.provider_version.is_none());
+        // 읽은 부분은 그대로 남는다.
+        assert_eq!(bundle.events.len(), 1);
+        let named: Vec<&str> = bundle
+            .unavailable
+            .iter()
+            .map(|entry| entry.item.as_str())
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                "run",
+                "recentErrors",
+                "providerDiagnostics",
+                "runtimeDiagnostics"
+            ]
+        );
+        assert!(bundle
+            .unavailable
+            .iter()
+            .all(|entry| !entry.reason.is_empty()));
+    }
+
+    #[test]
+    fn a_run_the_queue_does_not_list_leaves_the_meta_empty_with_its_own_reason() {
+        let bundle = export(
+            vec![
+                Ok(envelope(json!({
+                    "configuration": {"projectId": "p1", "paused": false},
+                    "queue": [], "runs": [], "errors": [],
+                }))),
+                Ok(envelope(ready_providers())),
+                Ok(envelope(ready_providers())),
+                Ok(page(vec![], 0)),
+            ],
+            runtime(None),
+        );
+
+        assert!(bundle.run.is_none());
+        // 오류 기록은 읽었으므로 자리가 비어 있는 것이 아니라 빈 목록이다.
+        assert_eq!(bundle.recent_errors.expect("오류 기록").len(), 0);
+        assert_eq!(bundle.unavailable.len(), 1);
+        assert_eq!(bundle.unavailable[0].item, "run");
+    }
+
+    #[test]
+    fn injected_instructions_credentials_and_tool_payloads_never_reach_the_bundle() {
+        const FAKE: &str = "SENTINEL-8f3a91c2";
+        let state = json!({
+            "configuration": {"projectId": "p1", "paused": false},
+            "queue": [],
+            "runs": [{
+                "runId": "run-1", "projectId": "p1", "role": "developer", "provider": "claude",
+                "state": "running", "targetId": "TASK-7", "startedAt": "2026-08-12T10:00:00Z",
+                "failureStage": null, "reason": null, "remaining": [], "previousRunId": null,
+                // 실행 요청이 들고 다니는 값들. 계약이 정한 실행 행에는 이 자리가 없다.
+                "prompt": FAKE, "instruction": FAKE, "env": {"ANTHROPIC_API_KEY": FAKE},
+            }],
+            "errors": [],
+        });
+        let providers = json!({"providers": [{
+            "provider": "claude", "status": "ready", "version": "2.1.0",
+            "apiKey": FAKE, "modelCatalog": {"status": "ok", "models": [{"id": FAKE}]},
+        }]});
+        let log = json!({"runId": "run-1", "events": [{
+            "kind": "tool", "role": "developer", "provider": "claude", "targetId": "TASK-7",
+            "startedAt": "2026-08-12T10:00:00Z", "elapsedSeconds": 3, "toolName": "Bash",
+            "toolArgs": FAKE, "toolResult": FAKE, "detail": FAKE,
+            "environment": {"CLAUDE_TOKEN": FAKE},
+        }], "nextCursor": 1});
+
+        let bundle = export(
+            vec![
+                Ok(envelope(state)),
+                Ok(envelope(providers.clone())),
+                Ok(envelope(providers)),
+                Ok(envelope(log)),
+                Ok(page(vec![], 1)),
+            ],
+            runtime(None),
+        );
+
+        let serialized = serde_json::to_string(&bundle).expect("직렬화");
+        assert!(
+            !serialized.contains(FAKE),
+            "주입한 값이 번들에 남았습니다: {serialized}"
+        );
+        // 지우기만 한 것이 아니라 계약이 정한 값은 그대로 옮긴다.
+        assert_eq!(bundle.events[0].tool_name.as_deref(), Some("Bash"));
+        assert_eq!(bundle.events[0].elapsed_seconds, Some(3.0));
+        assert_eq!(bundle.provider_version.as_deref(), Some("2.1.0"));
+        assert_eq!(
+            bundle.run.expect("실행 행").target_id.as_deref(),
+            Some("TASK-7")
+        );
     }
 }

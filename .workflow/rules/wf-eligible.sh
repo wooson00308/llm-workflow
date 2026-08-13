@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 15
+# condition_script_version: 18
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -335,9 +335,10 @@ scan_nondraft_refs() { # $1=워크플로우 경로
       status_value = substr($0, 8)
       sub(/^ */, "", status_value)
     }
-    index($0, "source_idea_id:") > 0 || index($0, "source_decision_id:") > 0 {
+    index($0, "source_idea_id:") > 0 || index($0, "source_idea:") > 0 || index($0, "source_decision_id:") > 0 {
       line = $0
       gsub(/source_idea_id: +/, "source_idea_id:", line)
+      gsub(/source_idea: +/, "source_idea:", line)
       gsub(/source_decision_id: +/, "source_decision_id:", line)
       held = held + 1
       buffer[held] = line
@@ -567,7 +568,10 @@ planner)
       ideas=$(scan_ideas "$wf")
       while IFS= read -r id; do
         [ -n "$id" ] || continue
-        case "$nondraft_refs" in *"source_idea_id:$id"*) note_candidate spec-exists "$id"; continue ;; esac
+        # 옛 계약의 기획서는 원천을 source_idea:로 적었다. 그 문서가 참조로 보이지 않으면 이미
+        # 기획된 아이디어가 다시 열려 기획자가 중복 배정된다(2026-08-12 mech-arena 실측). 두 키를
+        # 모두 참조로 인정한다. source_idea:는 source_idea_id: 줄과 부분 일치하지 않는다.
+        case "$nondraft_refs" in *"source_idea_id:$id"* | *"source_idea:$id"*) note_candidate spec-exists "$id"; continue ;; esac
         lease_blocks "$id" && { note_candidate leased "$id"; continue; }
         note_target "$id"
       done <<IDEAS
@@ -661,6 +665,9 @@ DIRECT_ROWS
       IFS= read -r spec || spec=""
       [ -n "$did" ] || continue
       case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+      # 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안에도 같은
+      # 결정이 대상으로 계속 나가, 화면이 중복 배정처럼 보이고 자동 배정이 헛 시도를 만든다.
+      if lease_blocks "$did"; then note_candidate leased "$did"; continue; fi
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
       note_target "$did" spec_approval
     done <<APPROVALS

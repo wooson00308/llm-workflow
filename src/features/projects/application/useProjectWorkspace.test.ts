@@ -1,5 +1,13 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+
+// 클립보드는 Tauri 플러그인을 부르는 자리라 jsdom에서 동작하지 않는다. 복사 경로가 실제로 그 모듈을
+// 지나는지만 보면 되므로 모듈 하나를 대신 세운다.
+const { clipboardCopy } = vi.hoisted(() => ({
+  clipboardCopy: vi.fn<(text: string) => Promise<boolean>>(),
+}));
+vi.mock("../infrastructure/clipboard", () => ({ copy: clipboardCopy }));
+
 import { useProjectWorkspace } from "./useProjectWorkspace";
 import type {
   CustomRulesDocument,
@@ -23,11 +31,13 @@ import type {
   SaveCustomRulesResult,
   TaskQaBatchEntry,
   TaskResumeOutcome,
+  WorkflowReportSummary,
   AgentInstallApplication,
   AgentInstallPlan,
   AgentMigrationPreview,
   AgentPolicySnapshot,
   AgentRolePolicy,
+  AgentRunSummary,
   AgentRuntimeInspection,
   AgentUpdateApplication,
   AgentUpdatePlan,
@@ -483,6 +493,15 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
       events: [],
       nextCursor: 0,
     }),
+    chooseDiagnosticsFile: vi.fn().mockResolvedValue("/tmp/run-1-diagnostics.json"),
+    exportAgentRunDiagnostics: vi
+      .fn()
+      .mockResolvedValue('{"bundleVersion":"1","runId":"run-1"}'),
+    listRunReports: vi.fn().mockResolvedValue([]),
+    readReport: vi.fn().mockResolvedValue({
+      summary: { fileName: "REPORT-TASK-1-DEV.md", title: "구현 보고서" },
+      body: "# 구현 보고서\n",
+    }),
     migrate: vi.fn().mockResolvedValue(project),
     inspectIntegrations: vi.fn().mockResolvedValue(snapshot),
     installHeartbeatJobs: vi.fn().mockResolvedValue(snapshot),
@@ -494,6 +513,30 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     ...overrides,
   };
 }
+
+/** 실행 기록 하나. 보고서 연결 판정이 쓰는 두 값만 실행마다 다르다. */
+function runOf(runId: string, targetId: string): AgentRunSummary {
+  return {
+    runId,
+    projectId: "prj_1",
+    role: "developer",
+    provider: "codex",
+    state: "succeeded",
+    targetId,
+    startedAt: "2026-08-12T00:00:00Z",
+    finishedAt: "2026-08-12T00:01:00Z",
+    failureStage: null,
+    reason: null,
+    remaining: [],
+    previousRunId: null,
+    resultPrefix: `RES-${runId}`,
+  };
+}
+
+const reportSummary: WorkflowReportSummary = {
+  fileName: "REPORT-TASK-1-DEV.md",
+  title: "구현 보고서",
+};
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -1429,6 +1472,185 @@ describe("useProjectWorkspace 에이전트 실행", () => {
     expect(gateway.pauseAgentProject).toHaveBeenCalledWith(project.projectId);
     expect(gateway.cancelAgentRun).toHaveBeenCalledWith(project.projectId, "run-1", false);
     expect(gateway.readAgentRunLog).toHaveBeenCalledWith(project.projectId, "run-1", 0);
+    unmount();
+  });
+
+  // 활동 없음 신호는 새 이벤트가 와야 사라진다. 사용자가 단추를 누른 순간의 이벤트만으로는
+  // 판정할 수 없으므로 상세가 열려 있는 동안 이어 읽는다.
+  it("실행 상세가 열려 있는 동안 이벤트를 이어 읽고 닫으면 멈춘다", async () => {
+    vi.useFakeTimers();
+    try {
+      const readAgentRunLog = vi
+        .fn()
+        .mockResolvedValueOnce({ runId: "run-1", events: [{ kind: "started" }], nextCursor: 1 })
+        .mockResolvedValue({ runId: "run-1", events: [{ kind: "progress" }], nextCursor: 2 });
+      const gateway = gatewayFor({ readAgentRunLog });
+      const recentStore = storeStub();
+      const { result, unmount } = renderHook(() =>
+        useProjectWorkspace({ gateway, recentStore }),
+      );
+      await act(() => result.current.openFolder());
+
+      act(() => result.current.agentRuntimeActions.watchRunLog("run-1"));
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(readAgentRunLog).toHaveBeenCalledTimes(1);
+
+      await act(() => vi.advanceTimersByTimeAsync(2_500));
+      await act(() => vi.advanceTimersByTimeAsync(2_500));
+      expect(readAgentRunLog).toHaveBeenCalledTimes(3);
+      // 이어 읽기는 마지막으로 읽은 위치에서 계속한다. 같은 이벤트를 다시 쌓지 않는다.
+      expect(readAgentRunLog).toHaveBeenLastCalledWith(project.projectId, "run-1", 2);
+      expect(result.current.agentRuntime.logs["run-1"]?.events).toHaveLength(3);
+
+      act(() => result.current.agentRuntimeActions.watchRunLog(null));
+      await act(() => vi.advanceTimersByTimeAsync(7_500));
+      expect(readAgentRunLog).toHaveBeenCalledTimes(3);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("실행에 연결된 보고서를 실행 식별자별로 보관하고 판정 입력만 백엔드에 넘긴다", async () => {
+    const listRunReports = vi
+      .fn()
+      .mockResolvedValueOnce([{ fileName: "REPORT-TASK-1-DEV.md", title: "구현 보고서" }])
+      .mockResolvedValueOnce([]);
+    const gateway = gatewayFor({ listRunReports });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.readRunReports(runOf("run-1", "TASK-1"), "feature--wf_1"));
+    await act(() => result.current.agentRuntimeActions.readRunReports(runOf("run-2", "TASK-2"), "feature--wf_1"));
+
+    // 넘기는 것은 열린 프로젝트 경로와 등록된 워크플로 디렉터리, 그리고 실행 기록이 이미 싣고 있는
+    // 대상 문서 식별자와 예약 결과 접두어뿐이다. 보고서 파일 이름은 여기에 없다.
+    expect(listRunReports).toHaveBeenCalledWith(
+      project.rootPath,
+      "feature--wf_1",
+      "TASK-1",
+      "RES-run-1",
+    );
+    expect(result.current.agentRuntime.runReports["run-1"]).toHaveLength(1);
+    expect(result.current.agentRuntime.runReports["run-2"]).toHaveLength(0);
+    unmount();
+  });
+
+  it("연결을 확인하지 못하면 그 실행의 보고서 자리를 비우고 다른 실행의 목록은 남긴다", async () => {
+    const listRunReports = vi
+      .fn()
+      .mockResolvedValueOnce([{ fileName: "REPORT-TASK-1-DEV.md", title: "구현 보고서" }])
+      .mockResolvedValueOnce([{ fileName: "REPORT-TASK-2-DEV.md", title: "후속 보고서" }])
+      .mockRejectedValueOnce(new Error("워크플로 디렉터리를 읽지 못했습니다"));
+    const gateway = gatewayFor({ listRunReports });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.readRunReports(runOf("run-1", "TASK-1"), "feature--wf_1"));
+    await act(() => result.current.agentRuntimeActions.readRunReports(runOf("run-2", "TASK-2"), "feature--wf_1"));
+    await act(() => result.current.agentRuntimeActions.readRunReports(runOf("run-1", "TASK-1"), "feature--wf_1"));
+
+    expect(result.current.agentRuntime.runReports["run-1"]).toBeUndefined();
+    expect(result.current.agentRuntime.runReports["run-2"]).toHaveLength(1);
+    unmount();
+  });
+
+  it("보고서 본문을 읽어 화면 상태에 담고 읽지 못하면 본문 없이 사유만 남긴다", async () => {
+    const readReport = vi
+      .fn()
+      .mockResolvedValueOnce({
+        summary: { fileName: "REPORT-TASK-1-DEV.md", title: "구현 보고서" },
+        body: "# 구현 보고서\n\n검사 469개가 통과했다.\n",
+      })
+      .mockRejectedValueOnce(new Error("보고서 파일을 찾을 수 없습니다"));
+    const gateway = gatewayFor({ readReport });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.openReport("feature--wf_1", reportSummary));
+    expect(readReport).toHaveBeenCalledWith(project.rootPath, "feature--wf_1", reportSummary.fileName);
+    expect(result.current.agentRuntime.reportView?.body).toMatch(/검사 469개가 통과했다/);
+    expect(result.current.agentRuntime.reportView?.reading).toBe(false);
+
+    await act(() => result.current.agentRuntimeActions.openReport("feature--wf_1", reportSummary));
+    // 읽지 못한 본문을 빈 문자열로 대신하지 않는다. 화면은 사유만 보여 준다.
+    expect(result.current.agentRuntime.reportView?.body).toBeNull();
+    expect(result.current.agentRuntime.reportView?.error).toMatch(/보고서 파일을 찾을 수 없습니다/);
+
+    act(() => result.current.agentRuntimeActions.closeReport());
+    expect(result.current.agentRuntime.reportView).toBeNull();
+    unmount();
+  });
+
+  it("저장 위치를 고르지 않고 닫으면 내보내기를 부르지 않아 파일이 만들어지지 않는다", async () => {
+    const chooseDiagnosticsFile = vi.fn().mockResolvedValue(null);
+    const exportAgentRunDiagnostics = vi.fn().mockResolvedValue("{}");
+    const gateway = gatewayFor({ chooseDiagnosticsFile, exportAgentRunDiagnostics });
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "save"));
+
+    expect(chooseDiagnosticsFile).toHaveBeenCalled();
+    expect(exportAgentRunDiagnostics).not.toHaveBeenCalled();
+    expect(result.current.agentRuntime.diagnosticExport).toBeNull();
+    unmount();
+  });
+
+  it("저장은 고른 위치를 넘기고 복사는 위치 없이 받은 내용을 클립보드에 넣는다", async () => {
+    const content = '{"bundleVersion":"1","runId":"run-1"}';
+    const exportAgentRunDiagnostics = vi.fn().mockResolvedValue(content);
+    const gateway = gatewayFor({ exportAgentRunDiagnostics });
+    clipboardCopy.mockResolvedValue(true);
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "save"));
+    expect(exportAgentRunDiagnostics).toHaveBeenLastCalledWith(
+      project.projectId,
+      "run-1",
+      "/tmp/run-1-diagnostics.json",
+    );
+    expect(result.current.agentRuntime.diagnosticExport).toEqual({
+      runId: "run-1",
+      mode: "save",
+      status: "done",
+      error: null,
+    });
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "copy"));
+    // 복사는 위치를 묻지 않는다. 백엔드는 같은 조립 결과를 문자열로 돌려주고 그 값이 클립보드로 간다.
+    expect(exportAgentRunDiagnostics).toHaveBeenLastCalledWith(project.projectId, "run-1", null);
+    expect(clipboardCopy).toHaveBeenCalledWith(content);
+    expect(result.current.agentRuntime.diagnosticExport?.status).toBe("done");
+    unmount();
+  });
+
+  it("클립보드에 넣지 못하면 성공으로 적지 않고 사유를 남긴다", async () => {
+    const gateway = gatewayFor({});
+    clipboardCopy.mockResolvedValue(false);
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+    await act(() => result.current.openFolder());
+
+    await act(() => result.current.agentRuntimeActions.exportRunDiagnostics("run-1", "copy"));
+
+    expect(result.current.agentRuntime.diagnosticExport?.status).toBe("failed");
+    expect(result.current.agentRuntime.diagnosticExport?.error).toMatch(/클립보드/);
     unmount();
   });
 
