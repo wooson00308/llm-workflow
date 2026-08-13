@@ -252,6 +252,7 @@ describe("AgentRuntimeView cockpit", () => {
     expect(humanRuntimeMessage("provider_executable_missing")).toBe("실행 도구가 설치되어 있지 않거나 찾을 수 없습니다. 설치를 확인해 주세요.");
     expect(humanRuntimeMessage("provider_unsupported_version")).toBe("실행 도구 버전이 낮습니다. 실행 도구를 업데이트해 주세요.");
     expect(humanRuntimeMessage("provider_login_required")).toBe("실행 도구 로그인이 필요합니다.");
+    expect(humanRuntimeMessage("Not inside a trusted directory and --skip-git-repo-check was not specified.")).toBe("실행 도구가 프로젝트 폴더에서 실행을 거부했습니다. 실행 환경을 최신 버전으로 업데이트하면 해결됩니다.");
     expect(humanRuntimeMessage("diagnostic")).toBe("실행 도구 점검에 실패했습니다. 실행 도구 설치와 로그인 상태를 확인해 주세요.");
     const withProvider = state();
     withProvider.policy = policy({ providers: [{ provider: "codex", status: "executable_missing", version: null }] });

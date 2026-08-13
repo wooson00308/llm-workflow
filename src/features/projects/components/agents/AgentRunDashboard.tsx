@@ -506,6 +506,7 @@ export function humanRuntimeMessage(message: string) {
   if (/limit_reached/.test(message)) return "현재 실행 자리가 모두 사용 중입니다.";
   if (/no.?target/.test(message)) return "새 작업을 기다리는 중입니다.";
   if (/login|auth/i.test(message)) return "실행 도구 로그인이 필요합니다.";
+  if (/trusted directory|skip-git-repo-check/i.test(message)) return "실행 도구가 프로젝트 폴더에서 실행을 거부했습니다. 실행 환경을 최신 버전으로 업데이트하면 해결됩니다.";
   if (/executable_missing/.test(message)) return "실행 도구가 설치되어 있지 않거나 찾을 수 없습니다. 설치를 확인해 주세요.";
   if (/unsupported_version/.test(message)) return "실행 도구 버전이 낮습니다. 실행 도구를 업데이트해 주세요.";
   if (/permission_denied/.test(message)) return "실행 도구를 실행할 권한이 없습니다.";
