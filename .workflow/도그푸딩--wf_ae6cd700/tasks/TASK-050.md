@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-050
 title: 마법사의 각 단계 명령을 한 번의 조작으로 복사하게 한다
-status: completed
+status: verified
 source_spec_id: SPEC-016
 source_decision_id: DECISION-4F1083FF
-depends_on: [TASK-049]
-updated_at: 2026-08-04T11:43:27.726102+00:00
+depends_on:
+- TASK-049
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T07:45:00Z, kind: created }
-  - { at: 2026-08-03T12:46:49Z, kind: in_progress }
-  - { at: 2026-08-03T12:54:52Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:27.726102+00:00, kind: completed }
+- at: 2026-08-03T07:45:00Z
+  kind: created
+- at: 2026-08-03T12:46:49Z
+  kind: in_progress
+- at: 2026-08-03T12:54:52Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:27.726102+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-4F1083FF
+work_group_revision: 1
 ---
 
 # 마법사의 각 단계 명령을 한 번의 조작으로 복사하게 한다

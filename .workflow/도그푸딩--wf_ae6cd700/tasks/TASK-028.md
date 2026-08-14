@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-028
 title: 연동 잡의 실행 한도 사용량을 백엔드가 계산해 스냅샷에 싣는다
-status: completed
+status: verified
 source_spec_id: SPEC-009
 source_decision_id: DECISION-85491D81
-updated_at: 2026-08-03T12:42:55Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T00:45:00Z, kind: created }
-  - { at: 2026-08-03T04:05:00Z, kind: in_progress }
-  - { at: 2026-08-03T04:18:00Z, kind: qa_waiting }
+- at: 2026-08-03T00:45:00Z
+  kind: created
+- at: 2026-08-03T04:05:00Z
+  kind: in_progress
+- at: 2026-08-03T04:18:00Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-85491D81
+work_group_revision: 1
 ---
 
 # 연동 잡의 실행 한도 사용량을 백엔드가 계산해 스냅샷에 싣는다

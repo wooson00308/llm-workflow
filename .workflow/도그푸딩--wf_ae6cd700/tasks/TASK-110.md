@@ -2,17 +2,32 @@
 schema: workflow-labs/task@1
 id: TASK-110
 title: 멈춘 일을 세 판정이 함께 다시 보게 한다
-status: completed
+status: verified
 source_spec_id: SPEC-035
 source_decision_id: DECISION-D6C694F2
-depends_on: [TASK-101, TASK-104, TASK-105, TASK-106]
-scope_files: [src-tauri/src/infrastructure/heartbeat_condition.rs, src-tauri/src/infrastructure/role_eligibility.rs, src-tauri/src/infrastructure/fs_project_repository.rs]
-updated_at: 2026-08-05T06:13:57.765509+00:00
+depends_on:
+- TASK-101
+- TASK-104
+- TASK-105
+- TASK-106
+scope_files:
+- src-tauri/src/infrastructure/heartbeat_condition.rs
+- src-tauri/src/infrastructure/role_eligibility.rs
+- src-tauri/src/infrastructure/fs_project_repository.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T01:55:00Z, kind: created }
-  - { at: 2026-08-05T04:25:18Z, kind: in_progress }
-  - { at: 2026-08-05T04:46:26Z, kind: qa_waiting }
-  - { at: 2026-08-05T06:13:57.765509+00:00, kind: completed }
+- at: 2026-08-05T01:55:00Z
+  kind: created
+- at: 2026-08-05T04:25:18Z
+  kind: in_progress
+- at: 2026-08-05T04:46:26Z
+  kind: qa_waiting
+- at: 2026-08-05T06:13:57.765509+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-D6C694F2
+work_group_revision: 1
 ---
 
 # 멈춘 일을 세 판정이 함께 다시 보게 한다

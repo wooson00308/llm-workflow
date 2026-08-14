@@ -3,8 +3,9 @@ use std::path::Path;
 use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
-    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult, TaskQaOutcome,
-    TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
+    SpecDecisionOutcome, SpecDocument, TaskDocument, TaskResumeRequest, TaskResumeResult,
+    TaskRevisionRequestInput, TaskRevisionRequestResult, WorkGroupQaSubmission,
+    WorkGroupQaSubmissionResult,
 };
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
@@ -105,27 +106,12 @@ impl ProjectService {
             .record_spec_decision(root, workflow_directory, file_name, outcome, comment)
     }
 
-    pub fn record_task_qa(
+    pub fn submit_work_group_qa(
         &self,
         root: &Path,
-        workflow_directory: &str,
-        file_name: &str,
-        outcome: TaskQaOutcome,
-        comment: &str,
-    ) -> Result<ProjectSummary, ProjectError> {
-        self.repository
-            .record_task_qa(root, workflow_directory, file_name, outcome, comment)
-    }
-
-    pub fn confirm_task_qa_batch(
-        &self,
-        root: &Path,
-        workflow_directory: &str,
-        file_names: &[String],
-        comment: &str,
-    ) -> Result<TaskQaBatchResult, ProjectError> {
-        self.repository
-            .confirm_task_qa_batch(root, workflow_directory, file_names, comment)
+        submission: &WorkGroupQaSubmission,
+    ) -> Result<WorkGroupQaSubmissionResult, ProjectError> {
+        self.repository.submit_work_group_qa(root, submission)
     }
 
     pub fn resume_task(

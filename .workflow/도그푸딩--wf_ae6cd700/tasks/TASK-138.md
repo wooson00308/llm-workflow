@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-138
 title: 릴리스 컷의 병합 조건을 원격 검사 통과 확인으로 문서에 규범화한다
-status: completed
+status: verified
 source_spec_id: SPEC-044
 source_decision_id: DECISION-D581BB43
-scope_files: [AGENTS.md, docs/releasing.md]
-updated_at: 2026-08-06T13:49:25.121012+00:00
+scope_files:
+- AGENTS.md
+- docs/releasing.md
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T13:38:00Z, kind: created }
-  - { at: 2026-08-06T13:43:25Z, kind: in_progress }
-  - { at: 2026-08-06T13:48:02Z, kind: qa_waiting }
-  - { at: 2026-08-06T13:49:25.121012+00:00, kind: completed }
+- at: 2026-08-06T13:38:00Z
+  kind: created
+- at: 2026-08-06T13:43:25Z
+  kind: in_progress
+- at: 2026-08-06T13:48:02Z
+  kind: qa_waiting
+- at: 2026-08-06T13:49:25.121012+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-D581BB43
+work_group_revision: 1
 ---
 
 # 릴리스 컷의 병합 조건을 원격 검사 통과 확인으로 문서에 규범화한다

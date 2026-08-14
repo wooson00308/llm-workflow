@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-095
 title: 보드 뷰에 기획서별 레인과 그룹 QA 신호를 그린다
-status: completed
+status: verified
 source_spec_id: SPEC-029
 source_decision_id: DECISION-DD348ED0
-depends_on: [TASK-093]
-updated_at: 2026-08-04T15:29:41.889685+00:00
+depends_on:
+- TASK-093
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T11:30:00Z, kind: created }
-  - { at: 2026-08-04T11:54:00Z, kind: in_progress }
-  - { at: 2026-08-04T12:02:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T15:29:41.889685+00:00, kind: completed }
+- at: 2026-08-04T11:30:00Z
+  kind: created
+- at: 2026-08-04T11:54:00Z
+  kind: in_progress
+- at: 2026-08-04T12:02:00Z
+  kind: qa_waiting
+- at: 2026-08-04T15:29:41.889685+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-DD348ED0
+work_group_revision: 1
 ---
 
 # 보드 뷰에 기획서별 레인과 그룹 QA 신호를 그린다

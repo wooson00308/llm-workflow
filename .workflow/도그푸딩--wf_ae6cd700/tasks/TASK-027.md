@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-027
 title: 아이디어 미리보기가 요약 대신 전문을 문서 뷰어로 보여준다
-status: completed
+status: verified
 source_spec_id: SPEC-008
 source_decision_id: DECISION-E03D1301
-updated_at: 2026-08-03T02:32:28.016270+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:16:00Z, kind: in_progress }
-  - { at: 2026-08-03T02:21:00Z, kind: qa_waiting }
-  - { at: 2026-08-03T02:32:28.016270+00:00, kind: completed }
+- at: 2026-08-03T02:16:00Z
+  kind: in_progress
+- at: 2026-08-03T02:21:00Z
+  kind: qa_waiting
+- at: 2026-08-03T02:32:28.016270+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-E03D1301
+work_group_revision: 1
 ---
 
 # 아이디어 미리보기가 요약 대신 전문을 문서 뷰어로 보여준다

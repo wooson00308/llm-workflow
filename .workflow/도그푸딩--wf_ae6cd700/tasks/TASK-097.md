@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-097
 title: 조건 스크립트 기획자 분기가 created_by를 두 자리에서 읽게 하고 버전을 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-030
 source_decision_id: DECISION-4B917B03
-updated_at: 2026-08-04T15:29:44.320867+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T11:32:00Z, kind: created }
-  - { at: 2026-08-04T12:40:00Z, kind: in_progress }
-  - { at: 2026-08-04T12:51:30Z, kind: qa_waiting }
-  - { at: 2026-08-04T15:29:44.320867+00:00, kind: completed }
+- at: 2026-08-04T11:32:00Z
+  kind: created
+- at: 2026-08-04T12:40:00Z
+  kind: in_progress
+- at: 2026-08-04T12:51:30Z
+  kind: qa_waiting
+- at: 2026-08-04T15:29:44.320867+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-4B917B03
+work_group_revision: 1
 ---
 
 # 조건 스크립트 기획자 분기가 created_by를 두 자리에서 읽게 하고 버전을 올린다

@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-039
 title: 선점 헬퍼를 앱 관리 자산으로 설치하고 선점·갱신·해제를 종료 코드로 판정하게 한다
-status: completed
+status: verified
 source_spec_id: SPEC-013
 source_decision_id: DECISION-73D4BC1B
-depends_on: [TASK-037]
-updated_at: 2026-08-03T12:42:56Z
+depends_on:
+- TASK-037
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T05:05:00Z, kind: created }
-  - { at: 2026-08-03T09:24:56Z, kind: in_progress }
-  - { at: 2026-08-03T09:43:42Z, kind: qa_waiting }
+- at: 2026-08-03T05:05:00Z
+  kind: created
+- at: 2026-08-03T09:24:56Z
+  kind: in_progress
+- at: 2026-08-03T09:43:42Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-73D4BC1B
+work_group_revision: 1
 ---
 
 # 선점 헬퍼를 앱 관리 자산으로 설치하고 선점·갱신·해제를 종료 코드로 판정하게 한다

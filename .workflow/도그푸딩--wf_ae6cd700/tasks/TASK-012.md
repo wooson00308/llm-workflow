@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-012
 title: dream 잡 설치·토글·편집과 역할 잡 독립 토글 보장
-status: completed
+status: verified
 source_spec_id: SPEC-003
 source_decision_id: DECISION-5276FDBF
-updated_at: 2026-08-02T14:57:41Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-5276FDBF
+work_group_revision: 1
 ---
 
 # dream 잡 설치·토글·편집과 역할 잡 독립 토글 보장

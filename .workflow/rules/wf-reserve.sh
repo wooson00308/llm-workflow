@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# reservation_helper_version: 2
+# reservation_helper_version: 3
 # LLM Workflow runtime reservation helper.
 # Usage: sh .workflow/rules/wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>
 set -u
@@ -40,9 +40,10 @@ expires_of() {
 prompt_for() {
   case "$1" in
     planner) role_step="Immediately after verifying ownership, create your result specification file with status: draft and its source references, exactly as the role contract orders, so the writing is visible while you compose. " ;;
+    architect) role_step="For a new approval, immediately create the result work-group file with status: preparing and its source references, exactly as the role contract orders, so architecture progress is visible before you compose tasks. " ;;
     *) role_step="" ;;
   esac
-  printf '%s' "You are the $1 role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$1.md, and the active workflow documents. The runtime already reserved target $2 with lease $3. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${role_step}Use result prefix $4 for any new SPEC or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
+  printf '%s' "You are the $1 role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$1.md, and the active workflow documents. The runtime already reserved target $2 with lease $3. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${role_step}Use result prefix $4 for any new SPEC, GROUP, or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
 }
 
 [ "${1:-}" = acquire ] && [ "$#" -eq 4 ] || usage

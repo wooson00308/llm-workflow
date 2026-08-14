@@ -2,18 +2,29 @@
 schema: workflow-labs/task@1
 id: TASK-079
 title: 두 아이디어 입력창을 초안 저장소에 배선하고 동작을 테스트로 고정한다
-status: completed
+status: verified
 source_spec_id: SPEC-025
 source_decision_id: DECISION-5B7E9F14
-depends_on: [TASK-078]
-updated_at: 2026-08-04T11:42:45.078212+00:00
+depends_on:
+- TASK-078
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:12:00Z, kind: created }
-  - { at: 2026-08-04T09:24:30Z, kind: in_progress }
-  - { at: 2026-08-04T09:34:00Z, kind: blocked }
-  - { at: 2026-08-04T09:39:38Z, kind: in_progress }
-  - { at: 2026-08-04T09:40:20Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:45.078212+00:00, kind: completed }
+- at: 2026-08-04T09:12:00Z
+  kind: created
+- at: 2026-08-04T09:24:30Z
+  kind: in_progress
+- at: 2026-08-04T09:34:00Z
+  kind: blocked
+- at: 2026-08-04T09:39:38Z
+  kind: in_progress
+- at: 2026-08-04T09:40:20Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:45.078212+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-5B7E9F14
+work_group_revision: 1
 ---
 
 # 두 아이디어 입력창을 초안 저장소에 배선하고 동작을 테스트로 고정한다

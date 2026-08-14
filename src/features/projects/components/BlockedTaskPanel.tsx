@@ -14,8 +14,9 @@ const relatedTaskStatusLabels: Record<string, string> = {
   todo: "준비",
   in_progress: "진행 중",
   blocked: "막힘",
-  qa_waiting: "QA 대기",
-  completed: "완료",
+  verified: "AI 검증 완료",
+  qa_waiting: "기존 QA 대기",
+  completed: "기존 완료",
 };
 
 interface Props {

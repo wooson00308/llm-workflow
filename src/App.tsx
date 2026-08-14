@@ -62,9 +62,7 @@ export default function App() {
       onReadIdea={workspace.readIdea}
       onReadSpec={workspace.readSpec}
       onReadTask={workspace.readTask}
-      onTaskRevisionRequest={workspace.recordTaskRevisionRequest}
-      onTaskQa={workspace.recordTaskQa}
-      onTaskQaBatch={workspace.confirmTaskQaBatch}
+      onWorkGroupQaSubmit={workspace.submitWorkGroupQa}
       onRefresh={workspace.refresh}
       onSwitchProject={workspace.closeProject}
     />

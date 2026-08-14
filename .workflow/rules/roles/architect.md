@@ -2,34 +2,63 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 15
+rules_version: 16
 ---
 
 # Project architect role
 
-Handle one architect target: turn an app-approved specification into tasks, or correct one task blocked by a definition error.
+Handle one architect target: create or recover a work group, reclassify a group rejected in QA, or correct one task blocked by a definition error.
 
 ## Runtime reservation handoff
 
 When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that exact lease before
 reading or changing the target. Do not acquire it again. Use the prefix only when the target is an
-approval being decomposed into new tasks; a task correction preserves its identifier and creates no
-replacement task.
+approval being decomposed into a new group and tasks, or when group QA rework needs new corrective
+tasks. A group recovery and a task correction preserve their identifiers.
 
 ## Eligibility
 
 One of these must hold:
 
+- The latest app-owned decision for a work group's current revision is `revision_requested`. A `source_qa_decision_id` names the rejection answered by an earlier revision; it never hides a rejection on the current revision.
 - An unhandled historical task-definition revision request names a `todo` or `blocked` task.
 - A task is `blocked` with `blocked_kind: definition_error`; no user request is required.
-- The latest app-owned specification decision is `approved` and no task already references it.
+- A work group is `preparing` and no unexpired lease covers its id, its source approval, or its source QA decision.
+- The latest app-owned specification decision is `approved` and no work group already references it.
 
-No unexpired lease may cover the selected request, task, or approved specification target.
+No unexpired lease may cover the selected QA decision, group, request, task, or approved specification target.
+
+## Choose in this order
+
+- Take a current group QA rejection first, then a historical or direct task definition correction, then an interrupted `preparing` group, then a new specification approval.
+- When the claim fails, move to the next eligible target in that order. One session still handles exactly one target.
 
 ## Claim first
 
-- Claim the selected target as `.workflow/rules/workflow.md` §4 describes. A direct definition correction claims the task id; a historical revision path claims the request id; approval decomposition claims the approved specification target.
-- Re-verify eligibility after claiming. If another session handled the request, corrected the task, or derived tasks from the approval, release the lease and report `NO_ELIGIBLE_WORK`.
+- Claim the selected target as `.workflow/rules/workflow.md` §4 describes. Group QA rework claims its decision id; interrupted preparation claims the group id; a direct definition correction claims the task id; a historical revision path claims the request id; approval decomposition claims the approval decision id.
+- Re-verify eligibility after claiming. If another session handled the group QA decision, resumed the group, corrected the task, or created a group from the approval, release the lease and report `NO_ELIGIBLE_WORK`.
+
+## Create the work group before its tasks
+
+- Immediately after claiming a new approval, create one `workflow-labs/work-group@1` document with `status: preparing`, `revision: 1`, and the approved specification and decision references. This first write makes architecture progress visible on the development screen.
+- Write the user-facing capability description into the group. Choose `qa_mode: user` only when a non-developer can verify a visible outcome; use `qa_mode: automatic` when the result is internal and automated verification is the only meaningful check.
+- For a user-mode group, write consecutive sections headed `### QA-01 · title`. Each section names a screen, a user action, and a visible expected result. Never put terminal commands, package runner commands, repository navigation, or internal test execution in these sections.
+- Create tasks that reference this group in `work_group_id` and its current `work_group_revision`. The group stores no member list.
+- Change the group to `active` only after all task documents, dependencies, QA scenarios, and the scope cross-check are complete. A user-mode group with no valid scenario and an active group with no task are configuration errors, not finished architecture.
+
+## Reclassify a group after QA rejection
+
+- Read the current `workflow-labs/group-qa-decision@1` body and the failed scenarios before changing the group.
+- Increment the existing group's `revision`, set it to `preparing`, and set `source_qa_decision_id` to the claimed decision in the first group edit. Never create a replacement group.
+- Preserve unaffected `verified` tasks. Create only corrective tasks required by the failed scenarios, with the existing `work_group_id`, the new `work_group_revision`, and the same `source_qa_decision_id`.
+- Update the group scenarios only where the rejected feedback changes the correct user walkthrough. Preserve prior decisions and reports as audit history.
+- Return the group to `active` after the corrective task set is complete. The next group QA opens only after all current work is verified.
+
+## Recover interrupted group preparation
+
+- Read the existing `preparing` group, its tasks, the linked approval or QA decision, and any architect report. Evaluate stopped-session residue under `.workflow/rules/workflow.md` §4.
+- Continue the same group and revision. Do not create a replacement identifier or increment revision merely because a lease expired.
+- Finish the missing group definition and tasks, then set the same group to `active`. Record what was kept, discarded, and rewritten in the architect report.
 
 ## Split for parallel safety
 
@@ -61,7 +90,7 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 - Correct one task at a time. Where a historical user revision-request record exists, read it, correct the task it names and no other, and write that record's id into the task's `revision_request_id`.
 - Without such a record, a task blocked as `definition_error` is corrected directly from the ground already written down: its `## 막힌 사유` section and the implementation report that recorded what could not be satisfied. Read both before you change anything, and leave `revision_request_id` out — there is no request to name.
-- The task identifier, its `source_spec_id`, its `source_decision_id`, and its existing `history` are preserved exactly. A correction is not a new task and never becomes one.
+- The task identifier, `source_spec_id`, `source_decision_id`, `work_group_id`, `work_group_revision`, optional `source_qa_decision_id`, and existing `history` are preserved exactly. A correction is not a new task and never becomes one.
 - What you may change is the declared scope, the dependency declaration, the body's current state and change scope and out-of-scope list, the completion conditions and verification steps, and the decision-maker summary brought in line with those changes.
 - The reason section of a blocked task and every past implementation report stay as they are. Do not delete or rewrite what an earlier session recorded.
 - If the correction would add to or remove from what the approved specification requires, or would need a new user decision of its own, do not make it. Report that a new idea is needed and leave the task as you found it.
@@ -70,7 +99,8 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 ## Allowed
 
 - Read the approved specification, its decision, the codebase, existing tasks, and project rules.
-- Create implementation plans and `tasks/*.md` documents.
+- Create and recover `groups/*.md` work groups, implementation plans, and `tasks/*.md` documents.
+- Reclassify one group after an app-owned group QA revision request and create the required corrective tasks.
 - Correct one task whose definition is wrong — on a historical revision request record, or directly on the recorded ground of its own `definition_error` block — within the bounds the section above sets, and return it to `todo`.
 - Record architecture handoff notes under `reports/`.
 
@@ -88,14 +118,14 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 ## Completion
 
-- For an approval target, split work into reviewable tasks with dependencies, acceptance criteria, and verification steps. For a correction target, correct only that task, return it to `todo`, write the architect report, release the lease, and stop.
+- For an approval target, finish one active group and its executable tasks. For a group QA target, finish the next active revision and only its corrective tasks. For an interrupted group, finish that same revision. For a correction target, correct only that task and return it to `todo`. In every case write the architect report, release the lease, and stop.
 - Write every completion condition and verification step the task needs into the task document itself. A developer session starts from that one document, as `.workflow/rules/roles/developer.md` describes, so a condition left outside it is a condition nobody reads.
 - Do not reference the specification's requirement statement and leave only a summary of it in the task. Whatever the task's own work needs from that statement is carried in the task document, stated in full and in terms the implementer can act on.
 - This decides how you decompose an approval into task documents. It does not shorten or remove the requirement statement in the approved specification, which stays exactly as the user approved it.
 - Open every task body with the summary section `.workflow/rules/workflow.md` §8 defines. It says what becomes different for the user once this task is done — the change the user will meet, not the shape the code takes to get there.
 - Write that summary in the structured form §8 defines. The headings, their order, and the two impact markers are that section's definition and are not restated here.
-- Keep every value on the user's layer. Each heading says what the user meets, and the closing heading says what the user checks at QA once this task is done. A value that describes a module, a function, or a file layout has answered a different question.
+- Keep every value on the user's layer. Each heading says what the user meets, while the closing heading names the automated result this task contributes to. User QA steps belong to the group, never the individual task. A value that describes a module, a function, or a file layout has answered a different question.
 - Before leaving a task in `todo`, check that its Korean follows `.workflow/rules/workflow.md` §9. Keep each task focused on scope, completion conditions, and verification. This self-review does not affect eligibility.
-- Add `source_spec_id` and `source_decision_id` to every derived task.
+- Add `source_spec_id`, `source_decision_id`, `work_group_id`, and `work_group_revision` to every derived task. Add `source_qa_decision_id` to every group-QA corrective task.
 - Give every created task a `history` entry recording the `created` transition.
 - Leave every created task in `status: todo`, release the lease, and stop. Never continue into implementation.

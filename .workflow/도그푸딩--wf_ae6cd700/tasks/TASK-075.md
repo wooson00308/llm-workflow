@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-075
 title: 저장소 사본 scripts/wf-eligible.sh를 없애고 문서가 설치본 경로를 안내하게 한다
-status: completed
+status: verified
 source_spec_id: SPEC-023
 source_decision_id: DECISION-9E5D2C71
-updated_at: 2026-08-04T11:43:17.042095+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:04:00Z, kind: created }
-  - { at: 2026-08-04T09:09:40Z, kind: in_progress }
-  - { at: 2026-08-04T09:17:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:17.042095+00:00, kind: completed }
+- at: 2026-08-04T09:04:00Z
+  kind: created
+- at: 2026-08-04T09:09:40Z
+  kind: in_progress
+- at: 2026-08-04T09:17:00Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:17.042095+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-9E5D2C71
+work_group_revision: 1
 ---
 
 # 저장소 사본 scripts/wf-eligible.sh를 없애고 문서가 설치본 경로를 안내하게 한다

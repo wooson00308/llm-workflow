@@ -2,17 +2,30 @@
 schema: workflow-labs/task@1
 id: TASK-121
 title: QA 대기에서 무엇을 확인할지가 도장 옆에서 읽힌다
-status: completed
+status: verified
 source_spec_id: SPEC-039
 source_decision_id: DECISION-BAD86692
-depends_on: [TASK-118, TASK-120]
-scope_files: [src/features/projects/components/DevelopmentBoard.tsx, src/features/projects/components/DevelopmentBoard.test.tsx, src/App.css]
-updated_at: 2026-08-05T16:45:19.483226+00:00
+depends_on:
+- TASK-118
+- TASK-120
+scope_files:
+- src/features/projects/components/DevelopmentBoard.tsx
+- src/features/projects/components/DevelopmentBoard.test.tsx
+- src/App.css
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T06:47:00Z, kind: created }
-  - { at: 2026-08-05T11:20:00Z, kind: in_progress }
-  - { at: 2026-08-05T11:29:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:45:19.483226+00:00, kind: completed }
+- at: 2026-08-05T06:47:00Z
+  kind: created
+- at: 2026-08-05T11:20:00Z
+  kind: in_progress
+- at: 2026-08-05T11:29:00Z
+  kind: qa_waiting
+- at: 2026-08-05T16:45:19.483226+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-BAD86692
+work_group_revision: 1
 ---
 
 # QA 대기에서 무엇을 확인할지가 도장 옆에서 읽힌다

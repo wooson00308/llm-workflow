@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-077
 title: 앱이 last_condition_output을 읽어 건너뜀 사유를 카드에 보여준다
-status: completed
+status: verified
 source_spec_id: SPEC-023
 source_decision_id: DECISION-9E5D2C71
-depends_on: [TASK-076, TASK-065]
-updated_at: 2026-08-04T12:03:13.566570+00:00
+depends_on:
+- TASK-076
+- TASK-065
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:04:00Z, kind: created }
-  - { at: 2026-08-04T09:58:00Z, kind: in_progress }
-  - { at: 2026-08-04T10:13:18Z, kind: qa_waiting }
-  - { at: 2026-08-04T12:03:13.566570+00:00, kind: completed }
+- at: 2026-08-04T09:04:00Z
+  kind: created
+- at: 2026-08-04T09:58:00Z
+  kind: in_progress
+- at: 2026-08-04T10:13:18Z
+  kind: qa_waiting
+- at: 2026-08-04T12:03:13.566570+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-9E5D2C71
+work_group_revision: 1
 ---
 
 # 앱이 last_condition_output을 읽어 건너뜀 사유를 카드에 보여준다

@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-141
 title: 세션의 규격 준수 비용을 다시 잴 수 있는 측정 방법을 정하고 기준값을 남긴다
-status: completed
+status: verified
 source_spec_id: SPEC-049
 source_decision_id: DECISION-30E36EFB
-scope_files: [docs/compliance-cost-measurement.md, scripts/measure-compliance-cost.mjs]
-updated_at: 2026-08-06T15:13:24.920877+00:00
+scope_files:
+- docs/compliance-cost-measurement.md
+- scripts/measure-compliance-cost.mjs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T13:59:00Z, kind: created }
-  - { at: 2026-08-06T14:13:50Z, kind: in_progress }
-  - { at: 2026-08-06T14:22:08Z, kind: qa_waiting }
-  - { at: 2026-08-06T15:13:24.920877+00:00, kind: completed }
+- at: 2026-08-06T13:59:00Z
+  kind: created
+- at: 2026-08-06T14:13:50Z
+  kind: in_progress
+- at: 2026-08-06T14:22:08Z
+  kind: qa_waiting
+- at: 2026-08-06T15:13:24.920877+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-30E36EFB
+work_group_revision: 1
 ---
 
 # 세션의 규격 준수 비용을 다시 잴 수 있는 측정 방법을 정하고 기준값을 남긴다

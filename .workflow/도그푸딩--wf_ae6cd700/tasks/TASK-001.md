@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-001
 title: 하트비트 가이드 문서 docs/heartbeat.md 작성
-status: completed
+status: verified
 source_spec_id: SPEC-001
 source_decision_id: DECISION-367DD9BF
-updated_at: 2026-08-02T04:16:50.483744+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-367DD9BF
+work_group_revision: 1
 ---
 
 # 하트비트 가이드 문서 docs/heartbeat.md 작성

@@ -58,6 +58,7 @@ const assetStatusLabels: Record<ManagedAssetStatus, string> = {
 const triggerLabels: Record<ManagedAssetSyncTrigger, string> = {
   project_open: "프로젝트 열기",
   manual_refresh: "수동 새로 고침",
+  migration: "스키마 전환",
 };
 
 export function SettingsView({

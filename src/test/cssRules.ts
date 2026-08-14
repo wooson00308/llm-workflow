@@ -49,10 +49,10 @@ function collectRules(css: string): Rule[] {
 
 const rules = collectRules(cssText.replace(/\/\*[\s\S]*?\*\//g, ""));
 
-export function declarationsOf(selector: string) {
-  const matched = rules.filter((rule) => rule.selector === selector);
+function declarationsFromRules(sourceRules: Rule[], selector: string, sourceName: string) {
+  const matched = sourceRules.filter((rule) => rule.selector === selector);
   if (matched.length !== 1) {
-    throw new Error(`\`${selector}\` 규칙이 App.css에 ${matched.length}개 있습니다. 정확히 하나여야 합니다.`);
+    throw new Error(`\`${selector}\` 규칙이 ${sourceName}에 ${matched.length}개 있습니다. 정확히 하나여야 합니다.`);
   }
 
   const found = new Map<string, string>();
@@ -63,4 +63,12 @@ export function declarationsOf(selector: string) {
     if (property) found.set(property, declaration.slice(colon + 1).replace(/\s+/g, " ").trim());
   }
   return found;
+}
+
+export function declarationsFrom(css: string, selector: string, sourceName = "CSS") {
+  return declarationsFromRules(collectRules(css.replace(/\/\*[\s\S]*?\*\//g, "")), selector, sourceName);
+}
+
+export function declarationsOf(selector: string) {
+  return declarationsFromRules(rules, selector, "App.css");
 }

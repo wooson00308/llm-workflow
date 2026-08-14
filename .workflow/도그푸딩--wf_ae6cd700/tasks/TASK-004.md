@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-004
 title: HEARTBEAT.md 파서와 앱 관리 잡 블록 엔진 구현
-status: completed
+status: verified
 source_spec_id: SPEC-002
 source_decision_id: DECISION-1265B3C7
-updated_at: 2026-08-02T04:17:05.538827+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-1265B3C7
+work_group_revision: 1
 ---
 
 # HEARTBEAT.md 파서와 앱 관리 잡 블록 엔진 구현

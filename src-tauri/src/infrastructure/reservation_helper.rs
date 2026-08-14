@@ -12,11 +12,11 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const RESERVATION_HELPER_STEM: &str = "wf-reserve";
 const RESERVATION_HELPER_LABEL: &str = "예약 헬퍼";
 const VERSION_PREFIX: &str = "# reservation_helper_version:";
-pub(crate) const RESERVATION_HELPER_VERSION: u32 = 2;
+pub(crate) const RESERVATION_HELPER_VERSION: u32 = 3;
 
 const RESERVATION_HELPER_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# reservation_helper_version: 2
+# reservation_helper_version: 3
 # LLM Workflow runtime reservation helper.
 # Usage: sh .workflow/rules/wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>
 set -u
@@ -56,9 +56,10 @@ expires_of() {
 prompt_for() {
   case "$1" in
     planner) role_step="Immediately after verifying ownership, create your result specification file with status: draft and its source references, exactly as the role contract orders, so the writing is visible while you compose. " ;;
+    architect) role_step="For a new approval, immediately create the result work-group file with status: preparing and its source references, exactly as the role contract orders, so architecture progress is visible before you compose tasks. " ;;
     *) role_step="" ;;
   esac
-  printf '%s' "You are the $1 role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$1.md, and the active workflow documents. The runtime already reserved target $2 with lease $3. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${role_step}Use result prefix $4 for any new SPEC or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
+  printf '%s' "You are the $1 role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$1.md, and the active workflow documents. The runtime already reserved target $2 with lease $3. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${role_step}Use result prefix $4 for any new SPEC, GROUP, or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
 }
 
 [ "${1:-}" = acquire ] && [ "$#" -eq 4 ] || usage
@@ -109,7 +110,7 @@ exit 1
 
 const RESERVATION_HELPER_PS1: &str = r#"# LLM Workflow runtime reservation helper.
 # managed_by: workflow-labs
-# reservation_helper_version: 2
+# reservation_helper_version: 3
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-reserve.ps1 acquire <role> <agent> <minutes>
 param(
   [string]$Command = '',
@@ -134,8 +135,10 @@ function Get-RolePrompt([string]$Target, [string]$LeaseId, [string]$ResultPrefix
   $roleStep = ''
   if ($Role -ceq 'planner') {
     $roleStep = 'Immediately after verifying ownership, create your result specification file with status: draft and its source references, exactly as the role contract orders, so the writing is visible while you compose. '
+  } elseif ($Role -ceq 'architect') {
+    $roleStep = 'For a new approval, immediately create the result work-group file with status: preparing and its source references, exactly as the role contract orders, so architecture progress is visible before you compose tasks. '
   }
-  return "You are the $Role role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$Role.md, and the active workflow documents. The runtime already reserved target $Target with lease $LeaseId. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${roleStep}Use result prefix $ResultPrefix for any new SPEC or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
+  return "You are the $Role role for one pre-reserved LLM Workflow target. Read .workflow/project.yml, .workflow/rules/workflow.md, .workflow/rules/roles/$Role.md, and the active workflow documents. The runtime already reserved target $Target with lease $LeaseId. Verify ownership first with wf-claim renew using that target and lease; do not acquire again. ${roleStep}Use result prefix $ResultPrefix for any new SPEC, GROUP, or TASK document identifiers, stop if its result path already exists, write the role report, then release the same lease."
 }
 
 if ($Command -cne 'acquire') { Stop-Usage }
@@ -257,14 +260,45 @@ mod tests {
 
     fn write_task(control: &Path, id: &str) {
         let tasks = control.join("wf-demo/tasks");
+        let groups = control.join("wf-demo/groups");
+        let decisions = control.join("wf-demo/decisions");
         fs::create_dir_all(&tasks).expect("tasks root");
+        fs::create_dir_all(&groups).expect("groups root");
+        fs::create_dir_all(&decisions).expect("decisions root");
+        let group = groups.join("GROUP-DEFAULT.md");
+        if !group.is_file() {
+            fs::write(
+                &group,
+                "---\nschema: workflow-labs/work-group@1\nid: GROUP-DEFAULT\nstatus: active\nrevision: 1\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\n---\n",
+            )
+            .expect("default group");
+        }
+        let approval = decisions.join("DECISION-DEFAULT.md");
+        if !approval.is_file() {
+            fs::write(
+                &approval,
+                "---\nschema: workflow-labs/decision@1\nid: DECISION-DEFAULT\nspec_id: SPEC-DEFAULT\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n",
+            )
+            .expect("source approval");
+        }
         fs::write(
             tasks.join(format!("{id}.md")),
             format!(
-                "---\nschema: workflow-labs/task@1\nid: {id}\nstatus: todo\nscope_files: [src/{id}.rs]\n---\n"
+                "---\nschema: workflow-labs/task@1\nid: {id}\nstatus: todo\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\nscope_files: [src/{id}.rs]\n---\n"
             ),
         )
         .expect("task");
+    }
+
+    fn write_approval(control: &Path, id: &str) {
+        let decisions = control.join("wf-demo/decisions");
+        fs::create_dir_all(&decisions).expect("decisions root");
+        fs::create_dir_all(control.join("wf-demo/groups")).expect("groups root");
+        fs::write(
+            decisions.join(format!("{id}.md")),
+            format!("---\nschema: workflow-labs/decision@1\nid: {id}\nspec_id: SPEC-001\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n"),
+        )
+        .expect("approval");
     }
 
     fn run_reservation(project_root: &Path, arguments: &[&str]) -> (i32, String, String) {
@@ -355,6 +389,24 @@ mod tests {
     }
 
     #[test]
+    fn architect_handoff_requires_a_preparing_work_group_before_tasks() {
+        let (root, control) = project();
+        write_approval(&control, "DECISION-001");
+
+        let (code, stdout, stderr) =
+            run_reservation(root.path(), &["acquire", "architect", "dispatcher-a", "30"]);
+        let reservation: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("architect reservation JSON");
+        let prompt = reservation["rolePrompt"].as_str().expect("role prompt");
+
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert_eq!(reservation["targetId"], "DECISION-001");
+        assert!(prompt.contains("work-group file with status: preparing"));
+        assert!(prompt.contains("SPEC, GROUP, or TASK"));
+    }
+
+    #[test]
     fn racing_reservations_create_only_one_lease_for_one_target() {
         let (root, control) = project();
         write_task(&control, "TASK-001");
@@ -411,7 +463,7 @@ mod tests {
         assert!(helper.is_file());
         assert!(fs::read_to_string(&helper)
             .expect("reservation helper")
-            .contains("# reservation_helper_version: 2"));
+            .contains("# reservation_helper_version: 3"));
         let other = control.join("rules").join(if cfg!(windows) {
             "wf-reserve.sh"
         } else {
@@ -421,7 +473,7 @@ mod tests {
         fs::write(&other, foreign).expect("other platform helper");
         install_reservation_helper(&control).expect("current platform install");
         assert_eq!(fs::read_to_string(other).expect("other helper"), foreign);
-        assert_eq!(RESERVATION_HELPER_VERSION, 2);
+        assert_eq!(RESERVATION_HELPER_VERSION, 3);
     }
 
     #[test]
@@ -431,7 +483,7 @@ mod tests {
         let future = fs::read_to_string(&helper)
             .expect("reservation helper")
             .replace(
-                "# reservation_helper_version: 2",
+                "# reservation_helper_version: 3",
                 "# reservation_helper_version: 999",
             );
         fs::write(&helper, &future).expect("future helper");

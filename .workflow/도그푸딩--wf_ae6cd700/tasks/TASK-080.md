@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-080
 title: 프로젝트 잡 파일 하나를 통째로 쓰는 인프라를 만든다
-status: completed
+status: verified
 source_spec_id: SPEC-024
 source_decision_id: DECISION-3C8F1A42
-depends_on: [TASK-064]
-updated_at: 2026-08-04T11:43:10.438303+00:00
+depends_on:
+- TASK-064
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:20:00Z, kind: created }
-  - { at: 2026-08-04T09:29:40Z, kind: in_progress }
-  - { at: 2026-08-04T09:36:10Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:10.438303+00:00, kind: completed }
+- at: 2026-08-04T09:20:00Z
+  kind: created
+- at: 2026-08-04T09:29:40Z
+  kind: in_progress
+- at: 2026-08-04T09:36:10Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:10.438303+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-3C8F1A42
+work_group_revision: 1
 ---
 
 # 프로젝트 잡 파일 하나를 통째로 쓰는 인프라를 만든다

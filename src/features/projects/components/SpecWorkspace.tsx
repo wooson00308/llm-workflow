@@ -6,10 +6,11 @@ import type {
   SpecDecisionOutcome,
   SpecDocument,
   TaskEvent,
+  WorkGroupSummary,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
-import { statusLabels as taskStatusLabels, taskColumns } from "./DevelopmentBoard";
+import { taskColumns } from "./DevelopmentBoard";
 import { DocumentReader } from "./DocumentReader";
 
 interface Props {
@@ -46,7 +47,7 @@ const FOLLOW_UP_FACTS = [
 const FOLLOW_UP_CONFIRM_NOTE = "이 기획서에 후속 기획 요청을 기록합니다. 결정 기록은 되돌릴 수 없습니다.";
 
 /** 배지가 무엇을 센 값인지 밝히는 문장. 보드 레인의 `LANE_BASIS_NOTE`와 같은 어법이다. */
-const TASK_COUNT_BASIS_NOTE = "이 기획서를 출처로 적은 개발 작업 전체를 셉니다";
+const TASK_COUNT_BASIS_NOTE = "현재 작업 그룹을 참조하는 AI 실행 태스크 전체를 셉니다";
 
 const knownTaskStatuses = new Set<string>(taskColumns.map((column) => column.status));
 
@@ -105,8 +106,8 @@ export function SpecWorkspace({
           <h1>기획서 검토</h1>
           <p>LLM이 정리한 요구사항을 읽고, 사용자 결정으로 다음 단계를 여세요.</p>
         </div>
-        <span className={workflow.counts.decisions > 0 ? "needs-action" : ""}>
-          <strong>{workflow.counts.decisions}</strong><small>내 선택 대기</small>
+        <span className={workflow.items.specs.some((item) => item.status === "user_review") ? "needs-action" : ""}>
+          <strong>{workflow.items.specs.filter((item) => item.status === "user_review").length}</strong><small>내 선택 대기</small>
         </span>
       </div>
 
@@ -166,7 +167,11 @@ export function SpecWorkspace({
                   {statusLabels[activeStatus ?? ""] ?? activeStatus}
                 </span>
               </header>
-              <SpecTaskCounts specId={document.summary.id} tasks={workflow.items.tasks} />
+              <SpecWorkGroupProgress
+                groups={workflow.items.workGroups}
+                specId={document.summary.id}
+                tasks={workflow.items.tasks}
+              />
               <article className="spec-paper embedded">
                 {/* 문서가 바뀌면 다시 평문에서 시작한다. 이 자리는 문서만 갈아 끼우므로 `key`가 그 몫이다. */}
                 <DocumentReader body={document.body} key={document.summary.fileName} />
@@ -321,49 +326,64 @@ function SpecDecisionHistory({ events }: { events: TaskEvent[] }) {
   );
 }
 
-/**
- * 이 기획서에서 나온 개발 작업의 상태별 건수.
- *
- * 세는 집합은 `workflow.items.tasks` 전체이고 묶는 열쇠는 `sourceSpecId`다. 보드의 기획서별 레인이
- * 쓰는 것과 같은 값이라(`laneKeyOf`) 두 자리의 수치가 어긋나지 않는다. 새 조회도 새 payload도 없다.
- *
- * 판정이 아니라 집계이므로 무엇을 센 값인지 화면이 문장으로 밝히고, 다섯 상태 밖의 값도 조용히
- * 빠뜨리지 않고 따로 센다(SPEC-039 R5). 파생 작업이 없는 기획서에는 없다고 말한다 — 배지 줄이
- * 통째로 사라지면 "아직 없다"와 "이 화면이 그것을 말하지 않는다"가 같아 보인다.
- */
-function SpecTaskCounts({ specId, tasks }: { specId: string; tasks: WorkflowItemSummary[] }) {
-  const counts = useMemo(() => countTasksOfSpec(specId, tasks), [specId, tasks]);
+/** 기획서의 작업 그룹 상태와 AI 검증 진척을 한 줄로 보여 준다. */
+function SpecWorkGroupProgress({ groups, specId, tasks }: {
+  groups: WorkGroupSummary[];
+  specId: string;
+  tasks: WorkflowItemSummary[];
+}) {
+  const group = groups.find((candidate) => candidate.sourceSpecId === specId) ?? null;
+  const counts = useMemo(
+    () => group ? countTasksOfGroup(group.id, tasks) : { byStatus: {}, total: 0, unknown: 0 },
+    [group, tasks],
+  );
 
   return (
-    <section aria-label="파생 개발 작업" className="spec-task-counts">
-      {counts.total === 0 ? (
-        <p className="spec-task-counts-empty">이 기획서에서 나온 개발 작업이 아직 없습니다.</p>
+    <section aria-label="작업 그룹 진행" className="spec-task-counts">
+      {!group ? (
+        <p className="spec-task-counts-empty">승인 뒤 아키텍트가 작업 그룹을 만들면 진행 상태가 여기에 나타납니다.</p>
       ) : (
-        <p className="spec-task-counts-list">
-          {taskColumns.map((column) => (
-            <span key={column.status}>{taskStatusLabels[column.status]} {counts.byStatus[column.status]}</span>
-          ))}
-          {counts.unknown > 0 && <span>규격 밖 {counts.unknown}</span>}
-        </p>
+        <>
+          <p className="spec-task-counts-list">
+            <span>{workGroupStatusLabel(group)}</span>
+            <span>AI 검증 완료 {counts.byStatus.verified ?? 0} / {counts.total}</span>
+            {counts.unknown > 0 && <span>규격 밖 {counts.unknown}</span>}
+          </p>
+          <small>{group.id} · revision {group.revision}</small>
+        </>
       )}
-      <small>{TASK_COUNT_BASIS_NOTE}</small>
+      {group && <small>{TASK_COUNT_BASIS_NOTE}</small>}
     </section>
   );
 }
 
-function countTasksOfSpec(specId: string, tasks: WorkflowItemSummary[]) {
+function countTasksOfGroup(groupId: string, tasks: WorkflowItemSummary[]) {
   const byStatus: Record<string, number> = Object.fromEntries(taskColumns.map((column) => [column.status, 0]));
   let total = 0;
   let unknown = 0;
 
   for (const task of tasks) {
-    if (task.sourceSpecId?.trim() !== specId) continue;
+    if (task.workGroupId !== groupId) continue;
     total += 1;
     if (knownTaskStatuses.has(task.status)) byStatus[task.status] += 1;
     else unknown += 1;
   }
 
   return { byStatus, total, unknown };
+}
+
+function workGroupStatusLabel(group: WorkGroupSummary) {
+  return {
+    completed: "사용자 QA 완료",
+    rework: "아키텍트 재분류 대기",
+    preparing: "아키텍트 구성 중",
+    preparing_stalled: "구성 중단 의심",
+    blocked: "개발 막힘",
+    developing: "개발 중",
+    qa_ready: "사용자 QA 대기",
+    automatic_completed: "AI 검증 완료",
+    configuration_error: "구성 확인 필요",
+  }[group.displayStatus];
 }
 
 /**

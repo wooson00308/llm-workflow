@@ -2,17 +2,40 @@
 schema: workflow-labs/task@1
 id: TASK-147
 title: 런타임과 서비스의 기기 상태 및 업데이트 계약을 제공한다
-status: completed
+status: verified
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
-depends_on: [TASK-S051-02, TASK-S051-05]
-scope_files: [../../Git/claude-heartbeat/docs/runtime-management-contract.md, ../../Git/claude-heartbeat/src/heartbeat/agent_cli.py, ../../Git/claude-heartbeat/src/heartbeat/agent_contract.py, ../../Git/claude-heartbeat/src/heartbeat/agent_store.py, ../../Git/claude-heartbeat/src/heartbeat/cli.py, ../../Git/claude-heartbeat/src/heartbeat/legacy_migration.py, ../../Git/claude-heartbeat/src/heartbeat/runtime_management.py, ../../Git/claude-heartbeat/src/heartbeat/service/__init__.py, ../../Git/claude-heartbeat/src/heartbeat/service/base.py, ../../Git/claude-heartbeat/src/heartbeat/service/launchd.py, ../../Git/claude-heartbeat/src/heartbeat/service/systemd.py, ../../Git/claude-heartbeat/src/heartbeat/service/task_scheduler.py, ../../Git/claude-heartbeat/tests/test_agent_runtime_management.py]
-updated_at: 2026-08-08T10:17:53.133635+00:00
+depends_on:
+- TASK-S051-02
+- TASK-S051-05
+scope_files:
+- ../../Git/claude-heartbeat/docs/runtime-management-contract.md
+- ../../Git/claude-heartbeat/src/heartbeat/agent_cli.py
+- ../../Git/claude-heartbeat/src/heartbeat/agent_contract.py
+- ../../Git/claude-heartbeat/src/heartbeat/agent_store.py
+- ../../Git/claude-heartbeat/src/heartbeat/cli.py
+- ../../Git/claude-heartbeat/src/heartbeat/legacy_migration.py
+- ../../Git/claude-heartbeat/src/heartbeat/runtime_management.py
+- ../../Git/claude-heartbeat/src/heartbeat/service/__init__.py
+- ../../Git/claude-heartbeat/src/heartbeat/service/base.py
+- ../../Git/claude-heartbeat/src/heartbeat/service/launchd.py
+- ../../Git/claude-heartbeat/src/heartbeat/service/systemd.py
+- ../../Git/claude-heartbeat/src/heartbeat/service/task_scheduler.py
+- ../../Git/claude-heartbeat/tests/test_agent_runtime_management.py
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-07T16:08:52Z, kind: created }
-  - { at: 2026-08-08T08:51:00Z, kind: in_progress }
-  - { at: 2026-08-08T09:08:00Z, kind: qa_waiting }
-  - { at: 2026-08-08T10:17:53.133635+00:00, kind: completed }
+- at: 2026-08-07T16:08:52Z
+  kind: created
+- at: 2026-08-08T08:51:00Z
+  kind: in_progress
+- at: 2026-08-08T09:08:00Z
+  kind: qa_waiting
+- at: 2026-08-08T10:17:53.133635+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-DC3ED4B7
+work_group_revision: 1
 ---
 
 # 런타임과 서비스의 기기 상태 및 업데이트 계약을 제공한다

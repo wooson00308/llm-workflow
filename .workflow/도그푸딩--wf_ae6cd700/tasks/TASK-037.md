@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-037
 title: 개발 작업의 선행 선언을 읽어 충족 여부와 영원히 열리지 않는 선언을 작업 상세 payload에 싣는다
-status: completed
+status: verified
 source_spec_id: SPEC-013
 source_decision_id: DECISION-73D4BC1B
-updated_at: 2026-08-03T12:42:56Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T05:05:00Z, kind: created }
-  - { at: 2026-08-03T09:05:30Z, kind: in_progress }
-  - { at: 2026-08-03T09:17:36Z, kind: qa_waiting }
+- at: 2026-08-03T05:05:00Z
+  kind: created
+- at: 2026-08-03T09:05:30Z
+  kind: in_progress
+- at: 2026-08-03T09:17:36Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-73D4BC1B
+work_group_revision: 1
 ---
 
 # 개발 작업의 선행 선언을 읽어 충족 여부와 영원히 열리지 않는 선언을 작업 상세 payload에 싣는다

@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-056
 title: 후속 기획서가 없는 수정 요청이 기획자 대기 물량이 되고 두 판정이 같은 결론을 낸다
-status: completed
+status: verified
 source_spec_id: SPEC-018
 source_decision_id: DECISION-1224D86C
-depends_on: [TASK-055]
-updated_at: 2026-08-03T12:42:56Z
+depends_on:
+- TASK-055
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T09:30:00Z, kind: created }
-  - { at: 2026-08-03T10:08:00Z, kind: in_progress }
-  - { at: 2026-08-03T10:18:00Z, kind: qa_waiting }
+- at: 2026-08-03T09:30:00Z
+  kind: created
+- at: 2026-08-03T10:08:00Z
+  kind: in_progress
+- at: 2026-08-03T10:18:00Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-1224D86C
+work_group_revision: 1
 ---
 
 # 후속 기획서가 없는 수정 요청이 기획자 대기 물량이 되고 두 판정이 같은 결론을 낸다

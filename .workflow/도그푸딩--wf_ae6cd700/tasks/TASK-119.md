@@ -2,17 +2,29 @@
 schema: workflow-labs/task@1
 id: TASK-119
 title: 막힘의 구조 사실이 작업 상세에서 평문 문장이 된다
-status: completed
+status: verified
 source_spec_id: SPEC-039
 source_decision_id: DECISION-BAD86692
-depends_on: [TASK-117]
-scope_files: [src/features/projects/components/DevelopmentBoard.tsx, src/features/projects/components/DevelopmentBoard.test.tsx, src/App.css]
-updated_at: 2026-08-05T16:45:30.007273+00:00
+depends_on:
+- TASK-117
+scope_files:
+- src/features/projects/components/DevelopmentBoard.tsx
+- src/features/projects/components/DevelopmentBoard.test.tsx
+- src/App.css
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T06:47:00Z, kind: created }
-  - { at: 2026-08-05T09:07:00Z, kind: in_progress }
-  - { at: 2026-08-05T09:20:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:45:30.007273+00:00, kind: completed }
+- at: 2026-08-05T06:47:00Z
+  kind: created
+- at: 2026-08-05T09:07:00Z
+  kind: in_progress
+- at: 2026-08-05T09:20:00Z
+  kind: qa_waiting
+- at: 2026-08-05T16:45:30.007273+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-BAD86692
+work_group_revision: 1
 ---
 
 # 막힘의 구조 사실이 작업 상세에서 평문 문장이 된다

@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-093
 title: 목록 payload의 작업 항목에 source_spec_id를 싣는다
-status: completed
+status: verified
 source_spec_id: SPEC-029
 source_decision_id: DECISION-DD348ED0
-updated_at: 2026-08-04T11:42:09.356322+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T11:30:00Z, kind: created }
-  - { at: 2026-08-04T11:36:13Z, kind: in_progress }
-  - { at: 2026-08-04T11:39:07Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:09.356322+00:00, kind: completed }
+- at: 2026-08-04T11:30:00Z
+  kind: created
+- at: 2026-08-04T11:36:13Z
+  kind: in_progress
+- at: 2026-08-04T11:39:07Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:09.356322+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-DD348ED0
+work_group_revision: 1
 ---
 
 # 목록 payload의 작업 항목에 source_spec_id를 싣는다

@@ -121,8 +121,8 @@ fn synchronize_with_hooks<B, A, R>(
     project_root: &Path,
     control_root: &Path,
     before_commit: B,
-    mut after_replacement: A,
-    mut after_rollback_isolation: R,
+    after_replacement: A,
+    after_rollback_isolation: R,
 ) -> Result<ManagedAssetSyncResult, ManagedProjectAssetsError>
 where
     B: FnOnce(),
@@ -135,6 +135,27 @@ where
         Err(error) => return Err(error.into()),
     };
 
+    synchronize_under_lock_with_hooks(
+        project_root,
+        control_root,
+        before_commit,
+        after_replacement,
+        after_rollback_isolation,
+    )
+}
+
+fn synchronize_under_lock_with_hooks<B, A, R>(
+    project_root: &Path,
+    control_root: &Path,
+    before_commit: B,
+    mut after_replacement: A,
+    mut after_rollback_isolation: R,
+) -> Result<ManagedAssetSyncResult, ManagedProjectAssetsError>
+where
+    B: FnOnce(),
+    A: FnMut(usize, &Path),
+    R: FnMut(&str, &Path, &Path),
+{
     let plans = match preflight(project_root, control_root)? {
         Preflight::Ready(plans) => plans,
         Preflight::Conflict { plans, conflicts } => {
@@ -531,6 +552,22 @@ pub fn install_managed_project_assets(
     control_root: &Path,
 ) -> Result<(), ManagedProjectAssetsError> {
     let result = synchronize_managed_project_assets(project_root, control_root)?;
+    finish_managed_project_asset_install(result)
+}
+
+/// 프로젝트 쓰기 잠금을 이미 보유한 마이그레이션 경로가 같은 동기화·롤백 구현을 사용한다.
+/// 호출자가 잠금을 보유하지 않으면 외부 쓰기와 경쟁하므로 이 함수는 crate 내부에서만 노출한다.
+pub(crate) fn install_managed_project_assets_under_lock(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<(), ManagedProjectAssetsError> {
+    let result = synchronize_under_lock_with_hooks(
+        project_root,
+        control_root,
+        || {},
+        |_, _| {},
+        |_, _, _| {},
+    )?;
     finish_managed_project_asset_install(result)
 }
 
@@ -942,7 +979,8 @@ mod tests {
     use super::{
         append_rollback_context, finish_managed_project_asset_install,
         synchronize_managed_project_assets, synchronize_with_before_commit, synchronize_with_hooks,
-        ManagedProjectAssetsError, RollbackOutcome,
+        ManagedProjectAssetsError, RollbackOutcome, ARCHITECT_RULES_VERSION, CLAIM_HELPER,
+        CONDITION_SCRIPT, DEVELOPER_RULES_VERSION, PLANNER_RULES_VERSION, WORKFLOW_RULES_VERSION,
     };
     use crate::domain::project::{
         ManagedAssetRollbackFailure, ManagedAssetRollbackRecovery, ManagedAssetStatus,
@@ -956,6 +994,15 @@ mod tests {
         let root = tempdir().expect("root");
         let control = root.path().join(".workflow");
         (root, control)
+    }
+
+    fn replace_version(source: &str, prefix: &str, from: u32, to: u32) -> String {
+        let from = format!("{prefix} {from}");
+        assert!(
+            source.contains(&from),
+            "missing managed version marker: {from}"
+        );
+        source.replacen(&from, &format!("{prefix} {to}"), 1)
     }
 
     #[test]
@@ -1007,12 +1054,32 @@ mod tests {
         assert_eq!(
             versions,
             vec![
-                ("workflow_rules", 22, 22),
-                ("planner_rules", 11, 11),
-                ("architect_rules", 15, 15),
-                ("developer_rules", 16, 16),
-                ("claim_helper", 1, 1),
-                ("condition_script", 18, 18),
+                (
+                    "workflow_rules",
+                    WORKFLOW_RULES_VERSION,
+                    WORKFLOW_RULES_VERSION,
+                ),
+                (
+                    "planner_rules",
+                    PLANNER_RULES_VERSION,
+                    PLANNER_RULES_VERSION,
+                ),
+                (
+                    "architect_rules",
+                    ARCHITECT_RULES_VERSION,
+                    ARCHITECT_RULES_VERSION,
+                ),
+                (
+                    "developer_rules",
+                    DEVELOPER_RULES_VERSION,
+                    DEVELOPER_RULES_VERSION,
+                ),
+                ("claim_helper", CLAIM_HELPER.version, CLAIM_HELPER.version),
+                (
+                    "condition_script",
+                    CONDITION_SCRIPT.version,
+                    CONDITION_SCRIPT.version,
+                ),
             ]
         );
         assert!(root.path().join("AGENTS.md").is_file());
@@ -1024,16 +1091,30 @@ mod tests {
     #[test]
     fn every_role_uses_its_own_version_for_updates_and_future_conflicts() {
         for (id, relative_path, current) in [
-            ("planner_rules", "rules/roles/planner.md", 11),
-            ("architect_rules", "rules/roles/architect.md", 15),
-            ("developer_rules", "rules/roles/developer.md", 16),
+            (
+                "planner_rules",
+                "rules/roles/planner.md",
+                PLANNER_RULES_VERSION,
+            ),
+            (
+                "architect_rules",
+                "rules/roles/architect.md",
+                ARCHITECT_RULES_VERSION,
+            ),
+            (
+                "developer_rules",
+                "rules/roles/developer.md",
+                DEVELOPER_RULES_VERSION,
+            ),
         ] {
             let (root, control) = roots();
             synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
             let path = control.join(relative_path);
-            let lower = fs::read_to_string(&path).expect("role").replace(
-                &format!("rules_version: {current}"),
-                &format!("rules_version: {}", current - 1),
+            let lower = replace_version(
+                &fs::read_to_string(&path).expect("role"),
+                "rules_version:",
+                current,
+                current - 1,
             );
             fs::write(&path, lower).expect("lower role");
 
@@ -1048,9 +1129,11 @@ mod tests {
             assert_eq!(state.installed_version, Some(current), "{id}");
             assert_eq!(state.provided_version, Some(current), "{id}");
 
-            let future = fs::read_to_string(&path).expect("role").replace(
-                &format!("rules_version: {current}"),
-                &format!("rules_version: {}", current + 1),
+            let future = replace_version(
+                &fs::read_to_string(&path).expect("role"),
+                "rules_version:",
+                current,
+                current + 1,
             );
             fs::write(&path, &future).expect("future role");
             let conflict = synchronize_managed_project_assets(root.path(), &control)
@@ -1096,12 +1179,12 @@ mod tests {
         let (root, control) = roots();
         synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
         let script = condition_script_path(&control);
-        let old = fs::read_to_string(&script)
-            .expect("condition script")
-            .replace(
-                "# condition_script_version: 18",
-                "# condition_script_version: 15",
-            );
+        let old = replace_version(
+            &fs::read_to_string(&script).expect("condition script"),
+            "# condition_script_version:",
+            CONDITION_SCRIPT.version,
+            CONDITION_SCRIPT.version - 1,
+        );
         fs::write(&script, old).expect("old condition script");
 
         let updated = synchronize_managed_project_assets(root.path(), &control).expect("update");
@@ -1111,17 +1194,20 @@ mod tests {
             .find(|asset| asset.id == "condition_script")
             .expect("condition script state");
         assert_eq!(updated.status, ManagedAssetSyncStatus::Updated);
-        assert_eq!(state.installed_version, Some(18));
+        assert_eq!(state.installed_version, Some(CONDITION_SCRIPT.version));
         assert!(fs::read_to_string(&script)
             .expect("updated condition script")
-            .contains("# condition_script_version: 18"));
+            .contains(&format!(
+                "# condition_script_version: {}",
+                CONDITION_SCRIPT.version
+            )));
 
-        let future = fs::read_to_string(&script)
-            .expect("condition script")
-            .replace(
-                "# condition_script_version: 18",
-                "# condition_script_version: 999",
-            );
+        let future = replace_version(
+            &fs::read_to_string(&script).expect("condition script"),
+            "# condition_script_version:",
+            CONDITION_SCRIPT.version,
+            999,
+        );
         fs::write(&script, &future).expect("future condition script");
         let conflict =
             synchronize_managed_project_assets(root.path(), &control).expect("future conflict");
@@ -1132,7 +1218,7 @@ mod tests {
             .expect("future condition script state");
         assert_eq!(conflict.status, ManagedAssetSyncStatus::Conflict);
         assert_eq!(state.installed_version, Some(999));
-        assert_eq!(state.provided_version, Some(18));
+        assert_eq!(state.provided_version, Some(CONDITION_SCRIPT.version));
         assert_eq!(fs::read_to_string(script).expect("future kept"), future);
     }
 
@@ -1171,9 +1257,19 @@ mod tests {
             };
             let sentinel_current = fs::read_to_string(&sentinel).expect("sentinel");
             let sentinel_old = if id == "workflow_rules" {
-                sentinel_current.replace("rules_version: 15", "rules_version: 14")
+                replace_version(
+                    &sentinel_current,
+                    "rules_version:",
+                    DEVELOPER_RULES_VERSION,
+                    DEVELOPER_RULES_VERSION - 1,
+                )
             } else {
-                sentinel_current.replace("rules_version: 22", "rules_version: 21")
+                replace_version(
+                    &sentinel_current,
+                    "rules_version:",
+                    WORKFLOW_RULES_VERSION,
+                    WORKFLOW_RULES_VERSION - 1,
+                )
             };
             fs::write(&sentinel, &sentinel_old).expect("old sentinel");
             let target = root.path().join(relative_path);
@@ -1239,14 +1335,20 @@ mod tests {
         let (root, control) = roots();
         synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
         let rules = control.join("rules/workflow.md");
-        let old_rules = fs::read_to_string(&rules)
-            .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
+        let old_rules = replace_version(
+            &fs::read_to_string(&rules).expect("rules"),
+            "rules_version:",
+            WORKFLOW_RULES_VERSION,
+            WORKFLOW_RULES_VERSION - 1,
+        );
         fs::write(&rules, &old_rules).expect("old rules");
         let architect = control.join("rules/roles/architect.md");
-        let future = fs::read_to_string(&architect)
-            .expect("architect")
-            .replace("rules_version: 15", "rules_version: 16");
+        let future = replace_version(
+            &fs::read_to_string(&architect).expect("architect"),
+            "rules_version:",
+            ARCHITECT_RULES_VERSION,
+            ARCHITECT_RULES_VERSION + 1,
+        );
         fs::write(&architect, &future).expect("future architect");
 
         let result =
@@ -1263,8 +1365,8 @@ mod tests {
             .find(|asset| asset.id == "architect_rules")
             .expect("architect state");
         assert_eq!(state.status, ManagedAssetStatus::Conflict);
-        assert_eq!(state.installed_version, Some(16));
-        assert_eq!(state.provided_version, Some(15));
+        assert_eq!(state.installed_version, Some(ARCHITECT_RULES_VERSION + 1));
+        assert_eq!(state.provided_version, Some(ARCHITECT_RULES_VERSION));
     }
 
     #[test]
@@ -1272,9 +1374,12 @@ mod tests {
         let (root, control) = roots();
         synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
         let rules = control.join("rules/workflow.md");
-        let old_rules = fs::read_to_string(&rules)
-            .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
+        let old_rules = replace_version(
+            &fs::read_to_string(&rules).expect("rules"),
+            "rules_version:",
+            WORKFLOW_RULES_VERSION,
+            WORKFLOW_RULES_VERSION - 1,
+        );
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(claim_helper_path(&control), "user script\n").expect("unmanaged helper");
 
@@ -1297,12 +1402,18 @@ mod tests {
         synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
         let rules = control.join("rules/workflow.md");
         let planner = control.join("rules/roles/planner.md");
-        let old_rules = fs::read_to_string(&rules)
-            .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
-        let old_planner = fs::read_to_string(&planner)
-            .expect("planner")
-            .replace("rules_version: 11", "rules_version: 10");
+        let old_rules = replace_version(
+            &fs::read_to_string(&rules).expect("rules"),
+            "rules_version:",
+            WORKFLOW_RULES_VERSION,
+            WORKFLOW_RULES_VERSION - 1,
+        );
+        let old_planner = replace_version(
+            &fs::read_to_string(&planner).expect("planner"),
+            "rules_version:",
+            PLANNER_RULES_VERSION,
+            PLANNER_RULES_VERSION - 1,
+        );
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(&planner, &old_planner).expect("old planner");
 
@@ -1328,12 +1439,18 @@ mod tests {
         synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
         let rules = control.join("rules/workflow.md");
         let planner = control.join("rules/roles/planner.md");
-        let old_rules = fs::read_to_string(&rules)
-            .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
-        let old_planner = fs::read_to_string(&planner)
-            .expect("planner")
-            .replace("rules_version: 11", "rules_version: 10");
+        let old_rules = replace_version(
+            &fs::read_to_string(&rules).expect("rules"),
+            "rules_version:",
+            WORKFLOW_RULES_VERSION,
+            WORKFLOW_RULES_VERSION - 1,
+        );
+        let old_planner = replace_version(
+            &fs::read_to_string(&planner).expect("planner"),
+            "rules_version:",
+            PLANNER_RULES_VERSION,
+            PLANNER_RULES_VERSION - 1,
+        );
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(&planner, &old_planner).expect("old planner");
 
@@ -1369,12 +1486,18 @@ mod tests {
         synchronize_managed_project_assets(root.path(), &control).expect("initial sync");
         let rules = control.join("rules/workflow.md");
         let planner = control.join("rules/roles/planner.md");
-        let old_rules = fs::read_to_string(&rules)
-            .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
-        let old_planner = fs::read_to_string(&planner)
-            .expect("planner")
-            .replace("rules_version: 11", "rules_version: 10");
+        let old_rules = replace_version(
+            &fs::read_to_string(&rules).expect("rules"),
+            "rules_version:",
+            WORKFLOW_RULES_VERSION,
+            WORKFLOW_RULES_VERSION - 1,
+        );
+        let old_planner = replace_version(
+            &fs::read_to_string(&planner).expect("planner"),
+            "rules_version:",
+            PLANNER_RULES_VERSION,
+            PLANNER_RULES_VERSION - 1,
+        );
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(&planner, &old_planner).expect("old planner");
         let open_rules = RefCell::new(None);
@@ -1480,18 +1603,30 @@ mod tests {
         let planner = control.join("rules/roles/planner.md");
         let architect = control.join("rules/roles/architect.md");
         let developer = control.join("rules/roles/developer.md");
-        let old_rules = fs::read_to_string(&rules)
-            .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
-        let old_planner = fs::read_to_string(&planner)
-            .expect("planner")
-            .replace("rules_version: 11", "rules_version: 10");
-        let old_architect = fs::read_to_string(&architect)
-            .expect("architect")
-            .replace("rules_version: 15", "rules_version: 14");
-        let old_developer = fs::read_to_string(&developer)
-            .expect("developer")
-            .replace("rules_version: 15", "rules_version: 14");
+        let old_rules = replace_version(
+            &fs::read_to_string(&rules).expect("rules"),
+            "rules_version:",
+            WORKFLOW_RULES_VERSION,
+            WORKFLOW_RULES_VERSION - 1,
+        );
+        let old_planner = replace_version(
+            &fs::read_to_string(&planner).expect("planner"),
+            "rules_version:",
+            PLANNER_RULES_VERSION,
+            PLANNER_RULES_VERSION - 1,
+        );
+        let old_architect = replace_version(
+            &fs::read_to_string(&architect).expect("architect"),
+            "rules_version:",
+            ARCHITECT_RULES_VERSION,
+            ARCHITECT_RULES_VERSION - 1,
+        );
+        let old_developer = replace_version(
+            &fs::read_to_string(&developer).expect("developer"),
+            "rules_version:",
+            DEVELOPER_RULES_VERSION,
+            DEVELOPER_RULES_VERSION - 1,
+        );
         fs::write(&rules, &old_rules).expect("old rules");
         fs::write(&planner, &old_planner).expect("old planner");
         fs::write(&architect, &old_architect).expect("old architect");

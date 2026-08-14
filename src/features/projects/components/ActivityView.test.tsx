@@ -33,10 +33,11 @@ const primary: WorkflowSummary = {
   name: "Feature",
   status: "active",
   createdAt: "2026-07-30T00:00:00Z",
-  counts: { ideas: 1, specs: 1, decisions: 0, tasks: 1, reports: 0 },
+  counts: { ideas: 1, specs: 1, decisions: 0, workGroups: 0, tasks: 1, reports: 0 },
   items: {
     ideas: [item("IDEA-001", "첫 생각")],
     specs: [item("SPEC-001", "첫 기획서")],
+    workGroups: [],
     tasks: [item("TASK-001", "첫 작업")],
   },
 };
@@ -49,6 +50,7 @@ const second: WorkflowSummary = {
   items: {
     ideas: [],
     specs: [item("SPEC-001", "두 번째 워크플로우의 기획서"), item("SPEC-009", "저쪽 기획서")],
+    workGroups: [],
     tasks: [],
   },
 };
@@ -289,7 +291,7 @@ function recorded(id: string, title: string, events: TaskEvent[]): WorkflowItemS
 }
 
 function workflowWith(items: Partial<WorkflowSummary["items"]>): WorkflowSummary {
-  return { ...primary, items: { ideas: [], specs: [], tasks: [], ...items } };
+  return { ...primary, items: { ideas: [], specs: [], workGroups: [], tasks: [], ...items } };
 }
 
 function renderFeed(workflow: WorkflowSummary, onOpenDocument = vi.fn()) {
@@ -336,7 +338,7 @@ describe("ActivityView 최근 활동", () => {
       specs: [recorded("SPEC-001", "첫 기획서", [{ kind: "approved", at: "2026-08-02T03:00:00Z" }])],
     }));
 
-    expect(marks()).toEqual(["QA 대기", "승인", "생성"]);
+    expect(marks()).toEqual(["기존 QA 대기", "승인", "생성"]);
     expect(within(feed()).getAllByRole("listitem").map((entry) => entry.textContent)).toEqual([
       expect.stringContaining("TASK-001"),
       expect.stringContaining("SPEC-001"),
@@ -362,13 +364,16 @@ describe("ActivityView 최근 활동", () => {
     renderFeed(workflowWith({
       tasks: [recorded("TASK-001", "첫 작업", eventKinds.map((entry, index) => ({
         kind: entry.kind,
-        at: `2026-08-0${index + 1}T00:00:00Z`,
+        at: `2026-08-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
       })))],
     }));
 
     expect(marks()).toEqual([...eventKinds].reverse().map((entry) => entry.label));
     // 사용자 재개는 QA 반려와 다른 이름으로 선다. 둘 다 작업을 준비 상태로 되돌리지만 다른 사실이다.
-    expect(marks()).toEqual(["아키텍트 수정", "정의 수정 요청", "사용자 재개", "반려", "완료", "QA 대기", "막힘", "시작", "생성"]);
+    expect(marks()).toEqual([
+      "아키텍트 수정", "정의 수정 요청", "사용자 재개", "반려", "기존 완료", "기존 QA 대기",
+      "v2 검증 전환", "AI 검증 완료", "막힘", "시작", "생성",
+    ]);
   });
 
   it("shows approval, revision request and rejection from specification decisions", () => {
@@ -459,7 +464,7 @@ describe("ActivityView 최근 활동", () => {
       ])],
     }));
 
-    expect(marks()).toEqual(["QA 대기"]);
+    expect(marks()).toEqual(["기존 QA 대기"]);
     expect(feed().textContent).not.toContain("teleported");
   });
 
@@ -472,6 +477,7 @@ describe("ActivityView 최근 활동", () => {
       items: {
         ideas: [],
         specs: [recorded("SPEC-009", "저쪽 기획서", [{ kind: "approved", at: "2026-08-02T00:00:00Z" }])],
+        workGroups: [],
         tasks: [],
       },
     };

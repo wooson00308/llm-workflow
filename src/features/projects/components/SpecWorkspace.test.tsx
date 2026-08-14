@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SpecDocument, TaskEvent, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import type { SpecDocument, TaskEvent, WorkGroupSummary, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
 import { SpecWorkspace } from "./SpecWorkspace";
 
 const document: SpecDocument = {
@@ -98,11 +98,32 @@ function derivedTask(id: string, status: string, sourceSpecId: string | null): W
     dueAt: null,
     excerpt: "",
     sourceSpecId,
+    workGroupId: sourceSpecId ? `GROUP-${sourceSpecId}` : null,
+    workGroupRevision: sourceSpecId ? 1 : null,
   };
 }
 
 function workflowWithTasks(tasks: WorkflowItemSummary[]): WorkflowSummary {
-  return { ...workflow, items: { ...workflow.items, tasks } };
+  const group: WorkGroupSummary = {
+    fileName: "GROUP-SPEC-001.md",
+    id: "GROUP-SPEC-001",
+    title: "승인 흐름",
+    status: "active",
+    displayStatus: "developing",
+    revision: 1,
+    qaMode: "user",
+    sourceSpecId: "SPEC-001",
+    sourceDecisionId: "DECISION-001",
+    sourceQaDecisionId: null,
+    updatedAt: "2026-08-01T00:00:00Z",
+    description: "",
+    scenarios: [],
+  };
+  return {
+    ...workflow,
+    counts: { ...workflow.counts, workGroups: 1, tasks: tasks.length },
+    items: { ...workflow.items, workGroups: [group], tasks },
+  };
 }
 
 const workflow: WorkflowSummary = {
@@ -111,8 +132,8 @@ const workflow: WorkflowSummary = {
   name: "Feature",
   status: "active",
   createdAt: "2026-07-30T00:00:00Z",
-  counts: { ideas: 0, specs: 1, decisions: 1, tasks: 0, reports: 0 },
-  items: { ideas: [], specs: [document.summary], tasks: [] },
+  counts: { ideas: 0, specs: 1, decisions: 1, workGroups: 0, tasks: 0, reports: 0 },
+  items: { ideas: [], specs: [document.summary], workGroups: [], tasks: [] },
 };
 
 /**
@@ -386,7 +407,7 @@ describe("SpecWorkspace", () => {
     expect(screen.queryByText(/요약이 없/)).not.toBeInTheDocument();
   });
 
-  it("breaks the derived tasks down by status and says what it counted", () => {
+  it("shows the work group's derived state and verified progress", () => {
     render(
       <SpecWorkspace
         busy={false}
@@ -396,9 +417,9 @@ describe("SpecWorkspace", () => {
         onSelect={vi.fn()}
         workflow={workflowWithTasks([
           derivedTask("TASK-001", "todo", "SPEC-001"),
-          derivedTask("TASK-002", "qa_waiting", "SPEC-001"),
-          derivedTask("TASK-003", "completed", "SPEC-001"),
-          derivedTask("TASK-004", "completed", "SPEC-001"),
+          derivedTask("TASK-002", "in_progress", "SPEC-001"),
+          derivedTask("TASK-003", "verified", "SPEC-001"),
+          derivedTask("TASK-004", "verified", "SPEC-001"),
           // 다른 기획서에서 나온 작업과 출처가 없는 작업은 이 배지가 세지 않는다.
           derivedTask("TASK-005", "todo", "SPEC-002"),
           derivedTask("TASK-006", "todo", null),
@@ -406,14 +427,13 @@ describe("SpecWorkspace", () => {
       />,
     );
 
-    const counts = screen.getByRole("region", { name: "파생 개발 작업" });
-    expect([...counts.querySelectorAll("span")].map((entry) => entry.textContent)).toEqual([
-      "준비 1", "진행 중 0", "막힘 0", "QA 대기 1", "완료 2",
-    ]);
-    expect(within(counts).getByText("이 기획서를 출처로 적은 개발 작업 전체를 셉니다")).toBeInTheDocument();
+    const progress = screen.getByRole("region", { name: "작업 그룹 진행" });
+    expect(within(progress).getByText("개발 중")).toBeInTheDocument();
+    expect(within(progress).getByText("AI 검증 완료 2 / 4")).toBeInTheDocument();
+    expect(within(progress).getByText("현재 작업 그룹을 참조하는 AI 실행 태스크 전체를 셉니다")).toBeInTheDocument();
   });
 
-  it("keeps an off-contract task status out of the five and still in view", () => {
+  it("keeps an off-contract task status out of verified progress and still in view", () => {
     render(
       <SpecWorkspace
         busy={false}
@@ -428,9 +448,9 @@ describe("SpecWorkspace", () => {
       />,
     );
 
-    const counts = screen.getByRole("region", { name: "파생 개발 작업" });
-    expect(within(counts).getByText("규격 밖 1")).toBeInTheDocument();
-    expect(within(counts).getByText("준비 1")).toBeInTheDocument();
+    const progress = screen.getByRole("region", { name: "작업 그룹 진행" });
+    expect(within(progress).getByText("규격 밖 1")).toBeInTheDocument();
+    expect(within(progress).getByText("AI 검증 완료 0 / 2")).toBeInTheDocument();
   });
 
   it("says a spec has no derived task instead of dropping the row", () => {
@@ -445,9 +465,8 @@ describe("SpecWorkspace", () => {
       />,
     );
 
-    const counts = screen.getByRole("region", { name: "파생 개발 작업" });
-    expect(within(counts).getByText("이 기획서에서 나온 개발 작업이 아직 없습니다.")).toBeInTheDocument();
-    expect(within(counts).getByText("이 기획서를 출처로 적은 개발 작업 전체를 셉니다")).toBeInTheDocument();
+    const progress = screen.getByRole("region", { name: "작업 그룹 진행" });
+    expect(within(progress).getByText("승인 뒤 아키텍트가 작업 그룹을 만들면 진행 상태가 여기에 나타납니다.")).toBeInTheDocument();
   });
 
   // 화면이 여는 조합이 TASK-127이 쓰기 경로에 세운 표와 같은지. 표보다 넓게 열면 사용자가 버튼을

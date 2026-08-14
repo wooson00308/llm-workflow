@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-053
 title: 역할 잡 편집 폼이 제한 없음을 고르게 하고 데몬이 인정하지 않는 값을 화면에서 막는다
-status: completed
+status: verified
 source_spec_id: SPEC-017
 source_decision_id: DECISION-EC07DE7E
-depends_on: [TASK-052, TASK-030]
-updated_at: 2026-08-04T11:45:28.046069+00:00
+depends_on:
+- TASK-052
+- TASK-030
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T08:40:00Z, kind: created }
-  - { at: 2026-08-03T10:02:00Z, kind: in_progress }
-  - { at: 2026-08-03T10:13:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:45:28.046069+00:00, kind: completed }
+- at: 2026-08-03T08:40:00Z
+  kind: created
+- at: 2026-08-03T10:02:00Z
+  kind: in_progress
+- at: 2026-08-03T10:13:00Z
+  kind: qa_waiting
+- at: 2026-08-04T11:45:28.046069+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-EC07DE7E
+work_group_revision: 1
 ---
 
 # 역할 잡 편집 폼이 제한 없음을 고르게 하고 데몬이 인정하지 않는 값을 화면에서 막는다

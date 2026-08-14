@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-063
 title: 두 번째 slug 픽스처로 남의 잡 증발을 재현하는 회귀 테스트를 남긴다
-status: completed
+status: verified
 source_spec_id: SPEC-022
 source_decision_id: DECISION-7A3E5B90
-updated_at: 2026-08-04T11:43:26.357380+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:37:00Z, kind: created }
-  - { at: 2026-08-04T08:44:03Z, kind: in_progress }
-  - { at: 2026-08-04T08:52:30Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:26.357380+00:00, kind: completed }
+- at: 2026-08-04T08:37:00Z
+  kind: created
+- at: 2026-08-04T08:44:03Z
+  kind: in_progress
+- at: 2026-08-04T08:52:30Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:26.357380+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-7A3E5B90
+work_group_revision: 1
 ---
 
 # 두 번째 slug 픽스처로 남의 잡 증발을 재현하는 회귀 테스트를 남긴다

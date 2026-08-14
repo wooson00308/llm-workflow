@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-084
 title: 잡 파일에는 있는데 데몬이 집었다는 증거가 없는 상태를 화면에 드러낸다
-status: completed
+status: verified
 source_spec_id: SPEC-024
 source_decision_id: DECISION-3C8F1A42
-depends_on: [TASK-083]
-updated_at: 2026-08-04T11:42:11.207608+00:00
+depends_on:
+- TASK-083
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:20:00Z, kind: created }
-  - { at: 2026-08-04T10:57:30Z, kind: in_progress }
-  - { at: 2026-08-04T11:10:20Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:11.207608+00:00, kind: completed }
+- at: 2026-08-04T09:20:00Z
+  kind: created
+- at: 2026-08-04T10:57:30Z
+  kind: in_progress
+- at: 2026-08-04T11:10:20Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:11.207608+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-3C8F1A42
+work_group_revision: 1
 ---
 
 # 잡 파일에는 있는데 데몬이 집었다는 증거가 없는 상태를 화면에 드러낸다

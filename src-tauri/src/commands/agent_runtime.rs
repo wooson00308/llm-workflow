@@ -13,6 +13,7 @@ use tauri::Manager;
 
 use crate::application::agent_runtime_config_service::{
     AgentRuntimeConfigService, ConfigFailure, MigrationPreview, MigrationRequest, PolicySnapshot,
+    ProjectConsent,
 };
 use crate::application::agent_runtime_install_service::{
     AgentRuntimeInstallService, InstallApplication, InstallFailure, InstallPlan, RuntimeInspection,
@@ -148,6 +149,43 @@ pub async fn save_agent_runtime_policy(
             .inspect(&caller)
             .compatibility;
         AgentRuntimeConfigService.save(&caller, &policy, &baseline_revision, compatibility)
+    })
+    .await
+}
+
+/// 사용자가 읽은 고지 버전으로 이 프로젝트의 실행 권한 동의를 남긴다.
+///
+/// 동의 시각은 런타임이 스스로 읽는다. 앱이 보내는 값은 프로젝트 식별자와 고지 버전뿐이다.
+#[tauri::command]
+pub async fn grant_agent_runtime_consent(
+    app: tauri::AppHandle,
+    project_id: String,
+    notice_version: u32,
+) -> Result<ProjectConsent, String> {
+    let (resource, install_root) = locations(&app)?;
+    config_blocking(move || {
+        let caller = LauncherCaller::new(launcher_path(&install_root));
+        let compatibility = AgentRuntimeInstallService::new(&resource, &install_root)
+            .inspect(&caller)
+            .compatibility;
+        AgentRuntimeConfigService.grant_consent(&caller, &project_id, notice_version, compatibility)
+    })
+    .await
+}
+
+/// 이 프로젝트의 실행 권한 동의를 철회한다. 이미 실행 중인 세션은 종료하지 않는다.
+#[tauri::command]
+pub async fn revoke_agent_runtime_consent(
+    app: tauri::AppHandle,
+    project_id: String,
+) -> Result<ProjectConsent, String> {
+    let (resource, install_root) = locations(&app)?;
+    config_blocking(move || {
+        let caller = LauncherCaller::new(launcher_path(&install_root));
+        let compatibility = AgentRuntimeInstallService::new(&resource, &install_root)
+            .inspect(&caller)
+            .compatibility;
+        AgentRuntimeConfigService.revoke_consent(&caller, &project_id, compatibility)
     })
     .await
 }

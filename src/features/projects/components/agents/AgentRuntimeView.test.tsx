@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentPolicySnapshot,
+  AgentProjectConsent,
   AgentRolePolicy,
   AgentRunSummary,
   AgentRuntimeActions,
@@ -10,7 +11,7 @@ import type {
   ProjectSummary,
 } from "../../domain/types";
 import { humanRuntimeMessage } from "./AgentRunDashboard";
-import { AgentRuntimeView, readinessOf } from "./AgentRuntimeView";
+import { AgentRuntimeView, EXECUTION_NOTICE_FACTS, readinessOf } from "./AgentRuntimeView";
 
 afterEach(cleanup);
 
@@ -37,6 +38,10 @@ function role(overrides: Partial<AgentRolePolicy> = {}): AgentRolePolicy {
   return { enabled: true, provider: "codex", model: null, runMode: "continuous", maxParallel: 1, intervalSeconds: 300, maxPer: null, ...overrides };
 }
 
+function consent(overrides: Partial<AgentProjectConsent> = {}): AgentProjectConsent {
+  return { status: "granted", noticeVersion: 1, grantedAt: "2026-08-13T15:00:00Z", requiredNoticeVersion: 1, detail: null, ...overrides };
+}
+
 function policy(overrides: Partial<AgentPolicySnapshot> = {}): AgentPolicySnapshot {
   return {
     policy: {
@@ -46,6 +51,7 @@ function policy(overrides: Partial<AgentPolicySnapshot> = {}): AgentPolicySnapsh
     },
     stored: true, revision: "rev-1", providers: [{ provider: "codex", status: "ready", version: "1.0" }],
     executionAllowed: true, compatibility: { kind: "compatible" },
+    consent: consent(),
     deviceCapacity: {
       observed: true, configuredMaxParallel: 8, effectiveMaxParallel: 8, recommendedMaxParallel: 5,
       logicalCpuCount: 10, totalMemoryBytes: 16_000_000_000, reservedMemoryBytes: 4_000_000_000,
@@ -72,8 +78,20 @@ function project(): ProjectSummary {
     },
     workflows: [{
       id: "wf-1", directory: "feature--wf-1", name: "Feature", status: "active", createdAt: "2026-08-11T00:00:00Z",
-      counts: { ideas: 0, specs: 1, decisions: 0, tasks: 3, reports: 0 },
-      items: { ideas: [], specs: [item("SPEC-1", "승인을 기다리는 기획", "user_review")], tasks: [item("TASK-1", "조종석 HUD 구현"), item("TASK-2", "후속 작업"), item("TASK-QA", "QA 확인 작업", "qa_waiting")] },
+      counts: { ideas: 0, specs: 1, decisions: 0, workGroups: 1, tasks: 3, reports: 0 },
+      items: {
+        ideas: [],
+        specs: [item("SPEC-1", "승인을 기다리는 기획", "user_review")],
+        workGroups: [{
+          fileName: "GROUP-1.md", id: "GROUP-1", title: "QA 확인 작업", status: "active",
+          displayStatus: "qa_ready", revision: 1, qaMode: "user", sourceSpecId: "SPEC-1",
+          sourceDecisionId: "DECISION-1", sourceQaDecisionId: null, updatedAt: "2026-08-11T00:00:00Z",
+          description: "", scenarios: [{ id: "QA-01", title: "화면 확인", body: "화면을 확인합니다." }],
+        }],
+        tasks: [item("TASK-1", "조종석 HUD 구현"), item("TASK-2", "후속 작업"), {
+          ...item("TASK-QA", "QA 확인 작업", "verified"), workGroupId: "GROUP-1", workGroupRevision: 1,
+        }],
+      },
     }],
   };
 }
@@ -83,6 +101,7 @@ function state(overrides: Partial<AgentRuntimeState> = {}): AgentRuntimeState {
     inspection: inspection(), policy: policy(), reading: false, readError: null,
     planning: null, plan: null, planError: null, applying: false, application: null, applyError: null,
     migration: null, migrationBusy: false, migrationError: null, saving: false, saveError: null,
+    consentBusy: false, consentError: null,
     runPlan: null, runRequests: [], runPlanning: false, runStarting: false, runError: null,
     queue: { projectId: "prj_1", paused: false, runs: [], errors: [], providers: [], unavailable: null },
     queueReading: false, queueError: null, pausing: false, cancelPreview: null, cancelResult: null,
@@ -96,6 +115,7 @@ function actions(overrides: Partial<AgentRuntimeActions> = {}): AgentRuntimeActi
   return {
     refresh: vi.fn().mockResolvedValue(undefined), setViewActive: vi.fn(), plan: vi.fn().mockResolvedValue(undefined), cancelPlan: vi.fn(), apply: vi.fn().mockResolvedValue(true),
     previewMigration: vi.fn().mockResolvedValue(undefined), applyMigration: vi.fn().mockResolvedValue(true), dismissMigration: vi.fn(), save: vi.fn().mockResolvedValue(true),
+    grantConsent: vi.fn().mockResolvedValue(true), revokeConsent: vi.fn().mockResolvedValue(true),
     planRun: vi.fn().mockResolvedValue(undefined), cancelRunPlan: vi.fn(), startRun: vi.fn().mockResolvedValue(true), refreshRuns: vi.fn().mockResolvedValue(undefined),
     setProjectPaused: vi.fn().mockResolvedValue(true), previewCancel: vi.fn().mockResolvedValue(undefined), dismissCancel: vi.fn(), confirmCancel: vi.fn().mockResolvedValue(true),
     previewRetry: vi.fn(), dismissRetry: vi.fn(), confirmRetry: vi.fn().mockResolvedValue(true), readRunLog: vi.fn().mockResolvedValue(undefined),
@@ -181,7 +201,7 @@ describe("AgentRuntimeView cockpit", () => {
     expect(within(dialog).getByPlaceholderText("TASK-…")).toBeInTheDocument();
   });
 
-  it("keeps user approval and QA gates separate from automatic assignment", () => {
+  it("keeps user approval and group QA gates separate from automatic assignment", () => {
     renderView();
     const section = screen.getByRole("heading", { name: "내 선택 대기" }).closest("section")!;
     expect(section).toHaveTextContent("승인을 기다리는 기획");
@@ -196,6 +216,7 @@ describe("AgentRuntimeView cockpit", () => {
       developer: { target: null, targetKind: null, candidates: [] },
     };
     empty.workflows[0].items.specs = [];
+    empty.workflows[0].items.workGroups = [];
     empty.workflows[0].items.tasks = [];
     render(<AgentRuntimeView actions={actions()} project={empty} state={state()} />);
     expect(screen.getByText(/새 작업을 기다리는 중/)).toBeInTheDocument();
@@ -688,5 +709,200 @@ describe("AgentRuntimeView diagnostic export", () => {
       expect(screen.getByRole("complementary", { name: "에이전트 상세" }))
         .not.toHaveTextContent("진단 자료를");
     });
+  });
+});
+
+describe("AgentRuntimeView execution consent", () => {
+  function runPlan() {
+    return {
+      planId: "plan-1", projectId: "prj_1", revision: "rev-1", expiresAt: "2026-08-13T16:00:00Z",
+      deviceRemaining: 3, projectRemaining: 2, billingRouteRisk: false, limits: null,
+      roles: [{ role: "developer", provider: "codex", executionMode: "once", requested: 1, granted: 1, excluded: [], manualTargets: ["TASK-1"], diagnostic: null }],
+    };
+  }
+
+  function requiring(overrides: Partial<AgentRuntimeState> = {}) {
+    return state({ policy: policy({ consent: consent({ status: "required", noticeVersion: null, grantedAt: null }) }), ...overrides });
+  }
+
+  it("puts the notice and an unticked confirmation before the first automation switch", () => {
+    renderView(requiring());
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const dialog = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+
+    for (const fact of EXECUTION_NOTICE_FACTS) expect(within(dialog).getByText(fact)).toBeInTheDocument();
+    const agree = within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ });
+    expect(agree).not.toBeChecked();
+    expect(within(dialog).getByRole("button", { name: "동의하고 자동 배정 켜기" })).toBeDisabled();
+    fireEvent.click(agree);
+    expect(within(dialog).getByRole("button", { name: "동의하고 자동 배정 켜기" })).toBeEnabled();
+  });
+
+  it("records neither the consent nor the policy when the notice is cancelled", () => {
+    const runtimeActions = actions();
+    renderView(requiring(), runtimeActions);
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const dialog = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "취소" }));
+
+    expect(runtimeActions.grantConsent).not.toHaveBeenCalled();
+    expect(runtimeActions.save).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "자동 배정 켜기" })).not.toBeInTheDocument();
+  });
+
+  it("records the consent before saving the policy, and stops when the consent fails", async () => {
+    const runtimeActions = actions();
+    renderView(requiring(), runtimeActions);
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const dialog = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "동의하고 자동 배정 켜기" }));
+
+    await waitFor(() => expect(runtimeActions.grantConsent).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(runtimeActions.save).toHaveBeenCalledWith(expect.objectContaining({ automationEnabled: true })));
+
+    cleanup();
+    const refused = actions({ grantConsent: vi.fn().mockResolvedValue(false) });
+    renderView(requiring({ consentError: "요청을 처리하지 못했습니다: consent_notice_outdated" }), refused);
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const second = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+    fireEvent.click(within(second).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(second).getByRole("button", { name: "동의하고 자동 배정 켜기" }));
+
+    await waitFor(() => expect(refused.grantConsent).toHaveBeenCalled());
+    expect(refused.save).not.toHaveBeenCalled();
+    expect(second).toHaveTextContent("앱을 업데이트한 뒤 다시 동의해 주세요");
+  });
+
+  it("leaves a project that already consented on the existing flow", () => {
+    const runtimeActions = actions();
+    renderView(state(), runtimeActions);
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const dialog = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+
+    expect(within(dialog).queryByRole("checkbox", { name: /실행 권한에 동의/ })).not.toBeInTheDocument();
+    // 참여 역할을 바꾸는 것은 동의를 다시 묻는 사유가 아니다.
+    fireEvent.click(within(dialog).getAllByRole("checkbox")[0]);
+    expect(within(dialog).queryByRole("checkbox", { name: /실행 권한에 동의/ })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "자동 배정 켜기" })).toBeEnabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "자동 배정 켜기" }));
+    expect(runtimeActions.grantConsent).not.toHaveBeenCalled();
+
+    // 실행 도구를 바꿔도 마찬가지다. 동의는 프로젝트 하나에 한 번이다.
+    cleanup();
+    const other = actions();
+    renderView(state({ policy: policy({ providers: [{ provider: "claude", status: "ready", version: "2.0" }] }) }), other);
+    fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+    expect(within(screen.getByRole("dialog", { name: "직접 배정" })).queryByRole("checkbox", { name: /실행 권한에 동의/ })).not.toBeInTheDocument();
+  });
+
+  it("never treats an unread consent as given, and separates the two unread cases", () => {
+    renderView(state({ policy: policy({ consent: consent({ status: "unsupported", noticeVersion: null, grantedAt: null }) }) }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const unsupported = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+    expect(unsupported).toHaveTextContent("실행 환경이 실행 권한 동의를 지원하지 않습니다");
+    expect(within(unsupported).queryByRole("checkbox", { name: /실행 권한에 동의/ })).not.toBeInTheDocument();
+    expect(within(unsupported).queryByRole("button", { name: /자동 배정 켜기$/ })).not.toBeInTheDocument();
+
+    cleanup();
+    renderView(state({ policy: policy({ consent: consent({ status: "unreadable", noticeVersion: null, grantedAt: null, detail: "런타임을 실행하지 못했습니다." }) }) }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    const unreadable = screen.getByRole("dialog", { name: "자동 배정 켜기" });
+    expect(unreadable).toHaveTextContent("동의 상태를 확인하지 못했습니다");
+    expect(unreadable).toHaveTextContent("런타임을 실행하지 못했습니다.");
+    expect(unreadable).not.toHaveTextContent("실행 환경이 실행 권한 동의를 지원하지 않습니다");
+
+    // 직접 배정도 같게 멈춘다. 확인도 시작도 열리지 않는다.
+    fireEvent.click(within(unreadable).getByRole("button", { name: "취소" }));
+    fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+    const direct = screen.getByRole("dialog", { name: "직접 배정" });
+    expect(direct).toHaveTextContent("동의 상태를 확인하지 못했습니다");
+    expect(within(direct).queryByRole("button", { name: "시작 조건 확인" })).not.toBeInTheDocument();
+    expect(within(direct).queryByRole("button", { name: /직접 배정 시작$/ })).not.toBeInTheDocument();
+  });
+
+  it("asks for the same consent when a direct assignment is confirmed", async () => {
+    const runtimeActions = actions();
+    renderView(requiring({ runPlan: runPlan() }), runtimeActions);
+    fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+    const dialog = screen.getByRole("dialog", { name: "직접 배정" });
+
+    for (const fact of EXECUTION_NOTICE_FACTS) expect(within(dialog).getByText(fact)).toBeInTheDocument();
+    const start = within(dialog).getByRole("button", { name: "동의하고 직접 배정 시작" });
+    expect(start).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "취소" }));
+    expect(runtimeActions.startRun).not.toHaveBeenCalled();
+    expect(runtimeActions.grantConsent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+    const reopened = screen.getByRole("dialog", { name: "직접 배정" });
+    fireEvent.click(within(reopened).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(reopened).getByRole("button", { name: "동의하고 직접 배정 시작" }));
+    await waitFor(() => expect(runtimeActions.grantConsent).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(runtimeActions.startRun).toHaveBeenCalled());
+  });
+
+  it("keeps the direct assignment open and offers the notice when the runtime waits for consent", () => {
+    renderView(state({ runPlan: runPlan(), runError: "execution_consent_required" }));
+    fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+    const dialog = screen.getByRole("dialog", { name: "직접 배정" });
+
+    expect(dialog).toHaveTextContent("실행 권한 동의 필요");
+    expect(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "동의하고 직접 배정 시작" })).toBeInTheDocument();
+    // 설치 필요·로그인 필요·권한 부족과 다른 문구여야 사용자가 고칠 자리를 찾는다.
+    expect(humanRuntimeMessage("execution_consent_required")).toBe("실행 권한 동의 필요");
+    for (const other of ["executable_missing", "login_required", "permission_denied"]) {
+      expect(humanRuntimeMessage(other)).not.toBe("실행 권한 동의 필요");
+    }
+  });
+
+  it("shows the recorded consent in advanced settings and warns about running sessions before revoking", async () => {
+    const runtimeActions = actions();
+    renderView(state(), runtimeActions);
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    const drawer = screen.getByRole("dialog", { name: "고급 설정" });
+
+    expect(within(drawer).getByText("실행 권한 동의")).toBeInTheDocument();
+    expect(drawer).toHaveTextContent("동의함");
+    expect(drawer).toHaveTextContent("고지 버전");
+    expect(within(drawer).getByText("고지 전문 다시 읽기")).toBeInTheDocument();
+    for (const fact of EXECUTION_NOTICE_FACTS) expect(within(drawer).getByText(fact)).toBeInTheDocument();
+
+    fireEvent.click(within(drawer).getByRole("button", { name: "동의 철회" }));
+    const confirm = screen.getByRole("dialog", { name: "실행 권한 동의 철회" });
+    expect(confirm).toHaveTextContent("이미 실행 중인 세션은 그대로 이어집니다");
+    expect(confirm).toHaveTextContent("실행 취소");
+    expect(confirm).toHaveTextContent("다시 동의해야 합니다");
+    fireEvent.click(within(confirm).getByRole("button", { name: "동의 철회" }));
+    await waitFor(() => expect(runtimeActions.revokeConsent).toHaveBeenCalled());
+  });
+
+  it("records consent without saving a policy when automation is already on", async () => {
+    const runtimeActions = actions();
+    const enabled = policy({ consent: consent({ status: "required", noticeVersion: null, grantedAt: null }) });
+    enabled.policy = { ...enabled.policy, automationEnabled: true };
+    renderView(state({ policy: enabled }), runtimeActions);
+
+    expect(screen.getByText("실행 권한 동의 필요")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "고지 읽고 동의" }));
+    const dialog = screen.getByRole("dialog", { name: "실행 권한 동의" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "동의하고 계속" }));
+
+    await waitFor(() => expect(runtimeActions.grantConsent).toHaveBeenCalledWith(1));
+    expect(runtimeActions.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps the paid-session warning and the billing route notice next to the consent gate", () => {
+    renderView(requiring());
+    fireEvent.click(screen.getByRole("checkbox", { name: "자동 배정 켜기" }));
+    expect(screen.getByRole("dialog", { name: "자동 배정 켜기" })).toHaveTextContent("여러 유료 세션이 동시에 실행될 수 있습니다");
+
+    cleanup();
+    renderView(state({ policy: policy({ providers: [{ provider: "codex", status: "billing_route_acknowledgement_required", version: "1.0" }] }) }));
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    expect(screen.getByRole("dialog", { name: "고급 설정" })).toHaveTextContent("과금 경로 확인 필요");
   });
 });

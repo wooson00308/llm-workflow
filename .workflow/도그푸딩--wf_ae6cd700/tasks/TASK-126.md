@@ -2,17 +2,27 @@
 schema: workflow-labs/task@1
 id: TASK-126
 title: 프로세스 예산이 역할별로 갈려 착지 실측 위에 다시 선다
-status: completed
+status: verified
 source_spec_id: SPEC-041
 source_decision_id: DECISION-7354DF56
-depends_on: [TASK-125]
-scope_files: [src-tauri/src/infrastructure/heartbeat_condition.rs]
-updated_at: 2026-08-05T16:46:10.596956+00:00
+depends_on:
+- TASK-125
+scope_files:
+- src-tauri/src/infrastructure/heartbeat_condition.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T09:30:00Z, kind: created }
-  - { at: 2026-08-05T15:05:02Z, kind: in_progress }
-  - { at: 2026-08-05T15:19:34Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:46:10.596956+00:00, kind: completed }
+- at: 2026-08-05T09:30:00Z
+  kind: created
+- at: 2026-08-05T15:05:02Z
+  kind: in_progress
+- at: 2026-08-05T15:19:34Z
+  kind: qa_waiting
+- at: 2026-08-05T16:46:10.596956+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-7354DF56
+work_group_revision: 1
 ---
 
 # 프로세스 예산이 역할별로 갈려 착지 실측 위에 다시 선다

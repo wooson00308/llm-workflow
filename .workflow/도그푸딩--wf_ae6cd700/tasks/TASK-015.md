@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-015
 title: 관리 블록 읽기 실패를 잡 없음과 구분하고 그 상태에서 저장을 막는다
-status: completed
+status: verified
 source_spec_id: SPEC-005
 source_decision_id: DECISION-02EBD5DB
-updated_at: 2026-08-03T02:30:56.603188+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:30:56.603188+00:00, kind: completed }
+- at: 2026-08-03T02:30:56.603188+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-02EBD5DB
+work_group_revision: 1
 ---
 
 # 관리 블록 읽기 실패를 잡 없음과 구분하고 그 상태에서 저장을 막는다

@@ -10,11 +10,10 @@ import type {
   SpecDecisionOutcome,
   AgentRuntimeActions,
   AgentRuntimeState,
-  TaskQaBatchEntry,
-  TaskQaOutcome,
   TaskDocument,
-  TaskRevisionRequestOutcome,
   SpecDocument,
+  WorkGroupQaSubmission,
+  WorkGroupQaSubmissionResult,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
@@ -22,12 +21,13 @@ import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
 import { ActivityView } from "./ActivityView";
-import { AgentRuntimeView } from "./agents/AgentRuntimeView";
+import { AgentRuntimeView, ExecutionConsentDialog } from "./agents/AgentRuntimeView";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
+import { QaWorkbench } from "./qa/QaWorkbench";
 import { SettingsView } from "./SettingsView";
 import { SpecWorkspace } from "./SpecWorkspace";
 
@@ -63,24 +63,8 @@ interface Props {
     workflowDirectory: string,
     fileName: string,
   ): Promise<TaskDocument | null>;
-  onTaskQa(
-    workflowDirectory: string,
-    fileName: string,
-    outcome: TaskQaOutcome,
-    comment: string,
-  ): Promise<boolean>;
-  onTaskQaBatch(
-    workflowDirectory: string,
-    fileNames: string[],
-    comment: string,
-  ): Promise<TaskQaBatchEntry[] | null>;
-  onTaskRevisionRequest?(
-    workflowDirectory: string,
-    fileName: string,
-    expectedUpdatedAt: string,
-    reason: string,
-    requestId: string,
-  ): Promise<TaskRevisionRequestOutcome>;
+  /** 작업 그룹 revision 전체에 사용자 QA 결정 하나를 기록한다. */
+  onWorkGroupQaSubmit?(submission: WorkGroupQaSubmission): Promise<WorkGroupQaSubmissionResult | null>;
   /**
    * 에이전트 화면의 상태와 조작. 주인이 작업 공간 훅이라 화면을 옮겨 다녀도 진행 표시가 남는다.
    * 선택인 것은 이 껍데기를 그리는 검사 리터럴이 아직 이 묶음을 모르기 때문이다.
@@ -94,7 +78,7 @@ interface Props {
 const stages = [
   { key: "ideas", label: "아이디어", icon: "idea" as const },
   { key: "specs", label: "기획서", icon: "stamp" as const },
-  { key: "tasks", label: "개발", icon: "board" as const },
+  { key: "workGroups", label: "개발", icon: "board" as const },
   { key: "reports", label: "완료", icon: "archive" as const },
 ] as const;
 
@@ -103,6 +87,7 @@ const viewLabels = {
   ideas: "아이디어",
   specs: "기획서",
   tasks: "개발",
+  qa: "품질 확인",
   archive: "기록",
   activity: "활동",
   agents: "에이전트",
@@ -127,9 +112,7 @@ export function WorkspaceShell({
   onReadIdea,
   onReadSpec,
   onReadTask,
-  onTaskRevisionRequest = async () => ({ ok: false, message: "정의 수정 요청 조작이 연결되지 않았습니다." }),
-  onTaskQa,
-  onTaskQaBatch,
+  onWorkGroupQaSubmit = async () => null,
   onRefresh,
   onSwitchProject,
 }: Props) {
@@ -143,6 +126,7 @@ export function WorkspaceShell({
     | "ideas"
     | "specs"
     | "tasks"
+    | "qa"
     | "archive"
     | "activity"
     | "agents"
@@ -153,6 +137,13 @@ export function WorkspaceShell({
   const [specLoading, setSpecLoading] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [consentOpen, setConsentOpen] = useState(false);
+  // 품질 확인 작업대를 열 때 함께 넘길 기능 묶음. 그룹 id는 워크플로우 안에서만 유일할 수 있으므로
+  // 디렉터리와 함께 보관한다. 같은 id를 쓰는 다른 워크플로우로 이동해도 그 기능이 잘못 열리지 않는다.
+  const [qaFeatureTarget, setQaFeatureTarget] = useState<{
+    workflowDirectory: string;
+    groupId: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!project.workflows.some((item) => item.directory === selectedDirectory)) {
@@ -179,6 +170,29 @@ export function WorkspaceShell({
     () => project.workflows.find((item) => item.directory === selectedDirectory),
     [project.workflows, selectedDirectory],
   );
+
+  /*
+   * 오늘 화면이 함께 세는 품질 확인 대기 기능. 개발 화면과 품질 확인 작업대가 쓰는 판정 모듈을 그대로
+   * 불러 세 화면이 같은 수를 말한다. 지금 확인할 수 있는 묶음만 담기므로 아직 열 수 없는 기능은
+   * 목록에도 건수에도 들어가지 않는다.
+   */
+  const readyQaFeatures = useMemo(
+    () => workflow?.items.workGroups.filter((group) => group.qaMode === "user" && group.displayStatus === "qa_ready") ?? [],
+    [workflow],
+  );
+  const pendingSpecs = useMemo(
+    () => workflow?.items.specs.filter((item) => item.status === "user_review") ?? [],
+    [workflow],
+  );
+  // 기획서 승인과 그룹 QA만 사용자 판단이다. 태스크 상태는 이 수치에 들어가지 않는다.
+  const decisionCount = pendingSpecs.length + readyQaFeatures.length;
+
+  /** 기능 하나를 지정해 품질 확인 작업대를 연다. 중간 화면을 거치지 않는다. */
+  function openQaFeature(featureKey: string) {
+    if (!workflow) return;
+    setQaFeatureTarget({ workflowDirectory: workflow.directory, groupId: featureKey });
+    setView("qa");
+  }
 
   async function addIdea(content: string) {
     if (!workflow) return false;
@@ -263,6 +277,17 @@ export function WorkspaceShell({
   const writable = project.compatibility === "current";
   const managedNotice = managedRulesNotice(managedAssets);
 
+  /*
+   * 자동 배정을 이미 켜 둔 사용자는 에이전트 화면을 열 이유가 없어 그 안의 동의 요구를 만나지 못한다.
+   * 프로젝트를 열 때 읽어 둔 동의 상태를 여기서 읽어 첫 화면에서 알린다. 에이전트 화면을 보고 있는
+   * 동안에는 그리지 않는다. 그 화면이 같은 안내를 이미 담고 있어 두 번 보일 이유가 없다.
+   */
+  const runtimeConsent = agentRuntime?.policy?.consent ?? null;
+  const consentAttention =
+    view !== "agents" &&
+    (agentRuntime?.policy?.policy.automationEnabled ?? false) &&
+    runtimeConsent?.status === "required";
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -277,6 +302,7 @@ export function WorkspaceShell({
           <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
           <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
           <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
+          <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인</button>
           <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
           <button className={view === "activity" ? "active" : ""} onClick={() => setView("activity")}><Icon name="activity" />활동</button>
         </nav>
@@ -291,7 +317,7 @@ export function WorkspaceShell({
             >
               <span className="workflow-dot" />
               <span>{item.name}</span>
-              <small>{item.counts.tasks}</small>
+              <small>{item.counts.workGroups}</small>
             </button>
           ))}
           {showWorkflowForm && (
@@ -385,6 +411,13 @@ export function WorkspaceShell({
             </div>
           )}
 
+          {consentAttention && (
+            <section className="agent-runtime-attention" role="status">
+              <div><strong>실행 권한 동의 필요</strong><p>자동 배정이 켜져 있지만 실행 권한에 동의하기 전에는 새 세션을 시작하지 않습니다.</p></div>
+              <button className="secondary-button agent-compact-action" onClick={() => setConsentOpen(true)} type="button">고지 읽고 동의</button>
+            </section>
+          )}
+
           {view === "today" && (
             <>
               <div className="today-heading">
@@ -421,13 +454,21 @@ export function WorkspaceShell({
 
               <div className="lower-grid">
                 <section className="attention-card">
-                  <div className="section-heading"><div><p className="eyebrow warm">NEEDS YOU</p><h2>내 선택 대기</h2></div><span className="count-badge">{workflow?.counts.decisions ?? 0}</span></div>
-                  {workflow?.counts.decisions ? (
+                  <div className="section-heading"><div><p className="eyebrow warm">NEEDS YOU</p><h2>내 선택 대기</h2></div><span className="count-badge">{decisionCount}</span></div>
+                  {decisionCount > 0 ? (
                     <div className="attention-list">
-                      {workflow.items.specs.filter((item) => item.status === "user_review").map((item) => (
+                      {pendingSpecs.map((item) => (
                         <button key={item.fileName} onClick={() => void openSpecWorkspace(item)}>
                           <span><strong>{item.title}</strong><small>{item.id} · 기획서 승인 필요</small></span>
                           <b>검토하기 →</b>
+                        </button>
+                      ))}
+                      {/* 기능 하나가 한 줄이다. 작업 식별자와 개발 상태 수치는 여기서 말하지 않는다 —
+                          이 자리는 무엇을 확인할지만 고르는 자리이고, 항목별 상세는 작업대가 맡는다. */}
+                      {readyQaFeatures.map((feature) => (
+                        <button key={feature.id} onClick={() => openQaFeature(feature.id)}>
+                          <span><strong>{feature.title}</strong><small>확인 항목 {feature.scenarios.length}개 · 품질 확인 필요</small></span>
+                          <b>품질 확인 시작 →</b>
                         </button>
                       ))}
                     </div>
@@ -465,7 +506,24 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard activeLeases={project.activeLeases} busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskRevisionRequest={(fileName, expectedUpdatedAt, reason, requestId) => onTaskRevisionRequest(workflow.directory, fileName, expectedUpdatedAt, reason, requestId)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
+          {workflow && view === "tasks" && (
+            <DevelopmentBoard
+              key={workflow.directory}
+              onReadTask={(fileName) => onReadTask(workflow.directory, fileName)}
+              workflow={workflow}
+            />
+          )}
+
+          {workflow && view === "qa" && (
+            <QaWorkbench
+              initialFeatureKey={qaFeatureTarget?.workflowDirectory === workflow.directory
+                ? qaFeatureTarget.groupId
+                : null}
+              key={workflow.directory}
+              onSubmit={onWorkGroupQaSubmit}
+              workflow={workflow}
+            />
+          )}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
@@ -522,6 +580,17 @@ export function WorkspaceShell({
           onClose={() => setSearchOpen(false)}
           onOpen={(result) => void openSearchResult(result)}
           project={project}
+        />
+      )}
+
+      {/* 동의만 남기고 정책은 저장하지 않는다. 고지 문구와 확인 항목과 동의 호출은 에이전트 화면이
+          내보내는 것을 그대로 쓴다. */}
+      {consentOpen && agentRuntime && agentRuntimeActions && runtimeConsent && (
+        <ExecutionConsentDialog
+          actions={agentRuntimeActions}
+          consent={runtimeConsent}
+          onClose={() => setConsentOpen(false)}
+          state={agentRuntime}
         />
       )}
 
@@ -600,7 +669,9 @@ function ArchiveView({
   const specs = workflow.items.specs.filter((item) =>
     ["approved", "rejected"].includes(item.status),
   );
-  const tasks = workflow.items.tasks.filter((item) => item.status === "completed");
+  const groups = workflow.items.workGroups.filter((group) =>
+    ["completed", "automatic_completed"].includes(group.displayStatus),
+  );
   return (
     <section className="archive-view">
       <p className="eyebrow">ARCHIVE</p>
@@ -618,11 +689,14 @@ function ArchiveView({
           {specs.length === 0 && <p className="archive-empty">아직 결정 기록이 없습니다.</p>}
         </section>
         <section>
-          <div className="section-heading"><h2>완료된 개발 작업</h2><span>{tasks.length}</span></div>
-          {tasks.map((item) => (
-            <article key={item.fileName}><span className="status-pill status-completed">완료</span><strong>{item.title}</strong><small>{item.id}</small></article>
+          <div className="section-heading"><h2>완료된 작업 그룹</h2><span>{groups.length}</span></div>
+          {groups.map((group) => (
+            <article key={group.fileName}>
+              <span className="status-pill status-completed">{group.displayStatus === "automatic_completed" ? "AI 검증 완료" : "사용자 QA 완료"}</span>
+              <strong>{group.title}</strong><small>{group.id} · revision {group.revision}</small>
+            </article>
           ))}
-          {tasks.length === 0 && <p className="archive-empty">아직 완료 기록이 없습니다.</p>}
+          {groups.length === 0 && <p className="archive-empty">아직 완료된 작업 그룹이 없습니다.</p>}
         </section>
       </div>
     </section>

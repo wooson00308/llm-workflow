@@ -28,8 +28,7 @@ pub fn run() {
             commands::projects::list_run_reports,
             commands::projects::read_report,
             commands::projects::record_spec_decision,
-            commands::projects::record_task_qa,
-            commands::projects::confirm_task_qa_batch,
+            commands::projects::submit_work_group_qa,
             commands::projects::resume_task,
             commands::projects::record_task_revision_request,
             commands::projects::migrate_project,
@@ -48,6 +47,8 @@ pub fn run() {
             commands::agent_runtime::repair_agent_runtime,
             commands::agent_runtime::read_agent_runtime_policy,
             commands::agent_runtime::save_agent_runtime_policy,
+            commands::agent_runtime::grant_agent_runtime_consent,
+            commands::agent_runtime::revoke_agent_runtime_consent,
             commands::agent_runtime::preview_agent_runtime_migration,
             commands::agent_runtime::apply_agent_runtime_migration,
             commands::agent_runtime::plan_agent_run,
@@ -62,4 +63,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    /// 커맨드는 등록 목록에 있어야만 화면이 부를 수 있다. 목록은 매크로 인자여서 실행 중에 셀 수
+    /// 없으므로 등록 원문에서 그 구간을 잘라 확인한다.
+    #[test]
+    fn the_consent_commands_are_registered_where_the_screen_can_call_them() {
+        let source = include_str!("lib.rs");
+        let registered = source
+            .split_once("generate_handler![")
+            .and_then(|(_, rest)| rest.split_once("])"))
+            .map(|(list, _)| list)
+            .expect("등록 목록");
+
+        assert!(registered.contains("commands::agent_runtime::grant_agent_runtime_consent"));
+        assert!(registered.contains("commands::agent_runtime::revoke_agent_runtime_consent"));
+        assert!(registered.contains("commands::projects::submit_work_group_qa"));
+        assert!(!registered.contains("commands::projects::record_task_qa"));
+        assert!(!registered.contains("commands::projects::confirm_task_qa_batch"));
+        assert!(!registered.contains("commands::projects::submit_task_qa"));
+    }
 }

@@ -41,6 +41,8 @@
 .agent-switch input:focus-visible + span { outline: 2px solid var(--green); outline-offset: 2px; }
 .agent-runtime-attention { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 10px; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, #d9903d 10%, var(--paper)); }
 .agent-runtime-attention p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+/* 작업 공간 껍데기에서는 다른 배너와 같은 자리에 서므로 그쪽 여백 규칙을 따른다. */
+.workspace-content > .agent-runtime-attention { margin-top: 0; margin-bottom: 20px; }
 .agent-operations { display: grid; gap: 12px; margin-top: 18px; }
 .agent-ops-section { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
 .agent-ops-section > header { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0 16px; border-bottom: 1px solid var(--line); }
@@ -83,6 +85,13 @@
 .agent-candidate-option span strong, .agent-candidate-option span small { display: block; }
 .agent-candidate-option span small, .agent-role-toggle small { margin-top: 2px; color: var(--muted); font-size: 11px; }
 .agent-dialog-note { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.agent-consent-notice { margin: 14px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.agent-consent-notice > strong { font-size: 13px; }
+.agent-consent-notice ul, .agent-consent-notice-list { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.agent-consent-check { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; font-size: 12px; }
+.agent-consent-facts { list-style: none; margin: 0 0 10px; padding: 0; }
+.agent-consent-facts li { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; font-size: 12px; }
+.agent-consent-facts span { color: var(--muted); text-align: right; }
 .agent-runtime-plan-summary { list-style: none; margin: 14px 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
 .agent-runtime-plan-summary li { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; font-size: 13px; }
 .agent-runtime-plan-summary li + li { border-top: 1px solid var(--line); }
@@ -544,30 +553,25 @@ svg { width: 20px; height: 20px; }
 .development-summary .result-count { margin-left: auto; color: #a0a39a; }
 .task-detail-back { margin-bottom: 12px; }
 .task-detail-heading { align-items: flex-end; }
-/* 상태 배지와 시작 가능 여부가 한 상자 안에 나란히 선다. `.view-heading > span`의 상자를 그대로
-   쓰되 안쪽 배지가 제 색을 갖도록 여백과 정렬만 갈아 끼운다. */
-.task-detail-heading > .task-detail-state { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; text-align: left; }
-.task-start-state { display: inline-flex; align-items: center; min-height: 20px; padding: 3px 7px; border-radius: 99px; font-size: 11px; font-weight: 750; letter-spacing: .02em; white-space: nowrap; }
-.task-start-state.startable { color: #286042; background: #dfeee4; }
-.task-start-state.waiting { color: #805415; background: #f5e7c9; }
-.task-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) var(--qa-panel-width, 340px); overflow: hidden; border: 1px solid #deddd4; border-radius: 15px; background: var(--paper); }
-.task-detail-layout.resizing { cursor: col-resize; user-select: none; }
-.task-detail-document { min-width: 0; border-right: 1px solid #e2e0d8; }
-.qa-panel-resize { position: absolute; top: 0; bottom: 0; left: -5px; width: 10px; cursor: col-resize; }
-.qa-panel-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; border-radius: 2px; background: transparent; transition: background .15s ease; }
-.qa-panel-resize:hover::after, .qa-panel-resize:focus-visible::after, .task-detail-layout.resizing .qa-panel-resize::after { background: rgba(49,91,68,.4); }
-.task-detail-meta { display: flex; gap: 18px; padding: 11px 16px; border-bottom: 1px solid #e5e3dc; color: #858980; background: #f5f4ee; font-size: 11px; }
-.task-detail-document .spec-paper { min-height: 460px; max-height: 620px; }
-.task-qa-panel { position: relative; padding: 22px 18px; background: #f1efe7; }
-.task-qa-panel h2 { margin: 0; color: #343a34; font-size: 17px; }
-.task-qa-panel > p:not(.eyebrow) { margin: 9px 0 18px; color: #737a72; font-size: 11px; line-height: 1.65; }
-.task-qa-walkthrough { margin: 0 0 18px; padding: 12px 13px; border: 1px solid #dfe3da; border-radius: 10px; background: #fbfbf6; }
-.task-qa-panel .task-qa-walkthrough h2 { margin: 0 0 8px; padding-bottom: 0; border-bottom: 0; color: #3d4a40; font-size: 12px; }
-.task-qa-walkthrough p, .task-qa-walkthrough li { color: #575b52; font-size: 11px; line-height: 1.7; }
-.task-qa-panel label { display: block; margin-bottom: 7px; color: #4c6457; font-size: 11px; font-weight: 700; }
-.task-qa-panel textarea { width: 100%; min-height: 150px; padding: 11px; resize: vertical; border: 1px solid #c8d4cb; border-radius: 10px; outline: 0; background: #fbfdfb; font-size: 11px; line-height: 1.65; }
-.task-qa-panel textarea:focus { border-color: #6f8c79; box-shadow: 0 0 0 3px rgba(72, 111, 84, .09); }
-.task-qa-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 11px; }
+.task-detail-heading > .status-pill { flex: 0 0 auto; }
+.task-detail-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.task-detail-view > .task-detail-overview { margin-top: 10px; }
+.task-detail-summary, .task-detail-group { min-width: 0; padding: 20px; border: 1px solid #deddd4; border-radius: 15px; background: var(--paper); }
+.task-detail-summary { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 14px; align-items: start; }
+.task-detail-summary > svg { width: 42px; height: 42px; padding: 10px; border-radius: 12px; color: #50677b; background: #e8eef3; }
+.task-detail-summary h2, .task-detail-group h2 { margin: 4px 0 0; color: #343a34; font-size: 17px; }
+.task-detail-summary p:not(.eyebrow), .task-detail-group-missing p { margin: 8px 0 0; color: #737a72; font-size: 12px; line-height: 1.7; }
+.task-detail-summary-verified { border-color: #c7dbc9; background: #f5faf5; }
+.task-detail-summary-verified > svg { color: #356047; background: #dfeee4; }
+.task-detail-summary-blocked { border-color: #e3c7c3; background: #fff8f7; }
+.task-detail-summary-blocked > svg { color: #8a3f38; background: #f3dfdc; }
+.task-detail-group-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.task-detail-group dl { display: grid; gap: 8px; margin: 18px 0 0; }
+.task-detail-group dl > div { display: flex; justify-content: space-between; gap: 16px; padding-top: 8px; border-top: 1px solid #ecebe4; font-size: 12px; }
+.task-detail-group dt { color: #8b8f86; }
+.task-detail-group dd { margin: 0; color: #4b504a; font-weight: 700; overflow-wrap: anywhere; text-align: right; }
+.task-detail-group.needs-attention { border-color: #e4cab6; background: #fff9f3; }
+.task-detail-group.needs-attention .eyebrow, .task-detail-group.needs-attention h2 { color: #754a30; }
 .confirm-warning { margin: 11px 0 0; padding: 10px 12px; border: 1px solid #e4cab6; border-radius: 9px; color: #754a30; background: #fff7ef; font-size: 11px; line-height: 1.5; }
 .stamp-button.armed { position: relative; overflow: hidden; border-color: #8a4a24; background: #a05427; }
 .secondary-button.armed { position: relative; overflow: hidden; border-color: #d9b98a; color: #7a5620; background: #f7ead1; }
@@ -597,7 +601,6 @@ svg { width: 20px; height: 20px; }
 .task-card > div { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
 .task-card > div small { color: #a4a69e; font-size: 11px; }
 .task-card > strong { display: block; margin-top: 9px; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
-.task-card > p { display: -webkit-box; margin: 5px 0 0; overflow: hidden; color: #85887f; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .task-card > footer { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: #a2a49c; font-size: 11px; }
 .task-card > footer svg { width: 11px; }
 .task-column-empty { display: grid; min-height: 64px; place-items: center; align-content: center; border: 1px dashed #d4d3ca; border-radius: 9px; color: #aaaca4; }
@@ -618,35 +621,6 @@ svg { width: 20px; height: 20px; }
 .qa-session-card > footer span { padding: 3px 7px; border-radius: 99px; color: #5e7480; background: #eef3f5; font-size: 9px; }
 .qa-session-card > footer button { min-height: 30px; margin-left: auto; padding: 6px 10px; font-size: 10px; }
 .qa-session-empty { margin: 0; padding: 12px; border: 1px dashed #cbd7dd; border-radius: 9px; color: #78878e; background: rgba(255,255,255,.55); font-size: 10px; line-height: 1.55; }
-.qa-session-view { min-width: 0; max-width: 820px; margin: 0 auto; }
-.qa-session-back { margin-bottom: 12px; }
-.qa-session-heading { margin-bottom: 14px; }
-.qa-session-heading > span { display: grid; flex: 0 0 auto; min-width: 64px; place-items: center; padding: 9px 12px; border: 1px solid #d7e0e6; border-radius: 10px; color: #506c7b; background: #eef4f7; }
-.qa-session-heading > span strong, .qa-session-heading > span small { display: block; }
-.qa-session-heading > span strong { font-size: 16px; }
-.qa-session-heading > span small { margin-top: 2px; color: #7d8c94; font-size: 9px; }
-.qa-session-steps { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.qa-session-steps > li { display: grid; min-width: 0; grid-template-columns: 26px minmax(0, 1fr); gap: 11px; padding: 13px 14px; border: 1px solid #deded6; border-radius: 11px; background: var(--paper); }
-.qa-session-steps > li > span { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; color: #486b80; background: #e5eef3; font-size: 10px; font-weight: 800; }
-.qa-session-steps > li > div { min-width: 0; }
-.qa-session-steps strong { color: #3f4641; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.qa-session-steps p { margin: 5px 0 7px; color: #777d77; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
-.qa-session-steps button { padding: 0; color: #6d7f89; font-size: 9px; }
-.qa-session-no-steps { margin: 0; padding: 14px; border: 1px dashed #d7d8d0; border-radius: 10px; color: #7d8179; background: #f6f5ef; font-size: 10px; line-height: 1.55; }
-.qa-session-evidence { margin-top: 9px; border: 1px solid #e0e1da; border-radius: 10px; background: #f3f3ee; }
-.qa-session-evidence > summary { padding: 10px 13px; color: #727870; cursor: pointer; font-size: 10px; font-weight: 700; }
-.qa-session-evidence ul { display: grid; gap: 5px; margin: 0; padding: 0 28px 12px; color: #858980; font-size: 9px; line-height: 1.5; }
-.qa-session-finish { display: grid; gap: 10px; margin-top: 14px; padding: 15px; border: 1px solid #d5ded8; border-radius: 12px; background: #f2f5f1; }
-.qa-session-finish h2 { margin: 0; color: #3d4941; font-size: 13px; }
-.qa-session-finish > div:first-child p { margin: 4px 0 0; color: #778078; font-size: 10px; line-height: 1.55; }
-.qa-session-finish label { color: #596b5e; font-size: 10px; font-weight: 700; }
-.qa-session-finish label small { color: #929a93; font-size: 9px; font-weight: 500; }
-.qa-session-finish textarea { width: 100%; min-height: 76px; padding: 10px; resize: vertical; border: 1px solid #cad4cc; border-radius: 9px; outline: 0; background: #fff; font-size: 10px; line-height: 1.55; }
-.qa-session-finish textarea:focus { border-color: #6f8c79; box-shadow: 0 0 0 3px rgba(72,111,84,.09); }
-.qa-session-finish-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.qa-session-finish-actions button { min-height: 32px; padding: 7px 11px; font-size: 10px; }
-.qa-session-error { margin: 0; padding: 10px 12px; border: 1px solid #e0c1bd; border-radius: 9px; color: #7f4f49; background: #fff3f1; font-size: 10px; line-height: 1.5; }
-.qa-session-error ul { margin: 5px 0 0; padding-left: 18px; }
 
 @media (max-width: 560px) {
   .development-view .task-board { grid-template-columns: minmax(0, 1fr); }
@@ -657,24 +631,32 @@ svg { width: 20px; height: 20px; }
 }
 
 @media (max-width: 720px) {
-  .qa-session-hub > header, .qa-session-heading { align-items: flex-start; }
+  .qa-session-hub > header { align-items: flex-start; }
   .qa-session-card > footer button { width: 100%; margin-left: 0; }
-  .qa-session-finish-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
-  .qa-session-finish-actions button { width: 100%; }
 }
 
 /* Development spec lanes */
 .task-lane-controls { display: flex; align-items: center; margin-bottom: 12px; }
 .task-lane-controls button { padding: 7px 11px; border: 1px solid #dbdad1; border-radius: 9px; color: #888b83; background: #efeee8; font-size: 11px; font-weight: 700; cursor: pointer; }
-.task-lane-controls button[aria-pressed="true"] { color: #3f5145; background: var(--paper); box-shadow: 0 1px 4px rgba(47,49,44,.08); }
+.task-lane-controls button:hover { color: #3f5145; background: var(--paper); box-shadow: 0 1px 4px rgba(47,49,44,.08); }
 .task-lane-note { margin: 0 0 12px; color: #a0a39a; font-size: 11px; }
 .task-lane { min-width: 0; margin-bottom: 14px; padding: 12px; border: 1px solid #dcdbd2; border-radius: 14px; background: rgba(242,241,235,.55); }
 .task-lane-header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 2px 3px 12px; }
-.task-lane-header strong { font-size: 11px; }
-.task-lane-header small { margin-left: 6px; color: #a4a69e; font-size: 11px; }
+.task-lane-identity { display: grid; min-width: 0; gap: 2px; }
+.task-lane-header strong { font-size: 13px; line-height: 1.25; }
+.task-lane-header small { color: #a4a69e; font-size: 10px; line-height: 1.3; overflow-wrap: anywhere; }
 .task-lane-counts { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 0 auto; color: #7e8178; font-size: 11px; }
 .task-lane-counts em { color: #a0a39a; font-style: normal; }
 .task-lane-signal { padding: 4px 9px; border-radius: 999px; color: #3f5145; background: rgba(77,120,93,.14); font-size: 11px; font-weight: 700; }
+.task-lane-signal.group-status-rework,
+.task-lane-signal.group-status-configuration_error { color: #854f32; background: #f6e7dc; }
+.task-lane-signal.group-status-blocked,
+.task-lane-signal.group-status-preparing_stalled { color: #8b3c3c; background: #f4dfdf; }
+.task-lane-signal.group-status-preparing { color: #665b3d; background: #f1ead8; }
+.task-lane-signal.group-status-developing { color: #3f6184; background: #deeaf5; }
+.task-lane-signal.group-status-qa_ready { color: #604c7d; background: #eae2f3; }
+.task-lane-signal.group-status-completed,
+.task-lane-signal.group-status-automatic_completed { color: #286042; background: #dfeee4; }
 .task-lane-hidden { margin: 0; color: #a0a39a; font-size: 11px; }
 .task-lane-toggle { padding: 4px 9px; border: 1px solid #dbdad1; border-radius: 999px; color: #888b83; background: var(--paper); font-size: 11px; font-weight: 700; cursor: pointer; }
 /* `.task-board`의 min-width가 950px이라 좁은 창에서 레인 테두리 밖으로 열이 빠져나간다. 레인 안에서
@@ -684,25 +666,9 @@ svg { width: 20px; height: 20px; }
 .task-lane.collapsed { padding-bottom: 4px; }
 .task-lane.collapsed .task-lane-header { padding-bottom: 2px; }
 
-/* Lane batch QA */
+/* Lane quality check entry */
 /* 신호와 같은 초록 계열로 두어 "이 레인이 통째로 QA 가능하다"는 사실과 그 액션이 한 덩어리로 읽힌다. */
 .task-lane-batch { padding: 4px 9px; border: 1px solid #b9cdbf; border-radius: 999px; color: #315b44; background: rgba(77,120,93,.14); font-size: 11px; font-weight: 700; cursor: pointer; }
-.lane-qa-overlay { position: fixed; z-index: 100; inset: 0; display: grid; place-items: start center; padding: min(12vh, 100px) 22px 40px; background: rgba(31, 34, 29, .28); backdrop-filter: blur(5px); }
-.lane-qa-dialog { width: min(560px, 100%); max-height: min(76vh, 640px); padding: 18px 19px 16px; overflow: auto; border: 1px solid rgba(201, 202, 192, .9); border-radius: 18px; background: #fbfaf6; box-shadow: 0 30px 90px rgba(33, 36, 31, .2); }
-.lane-qa-dialog h2 { margin: 0; font-size: 13px; }
-.lane-qa-dialog label[for] { display: block; margin-top: 13px; color: #858980; font-size: 11px; }
-.lane-qa-dialog textarea { width: 100%; min-height: 78px; margin-top: 6px; padding: 10px 11px; border: 1px solid #dcdbd2; border-radius: 11px; color: #30352e; background: #fff; font-family: inherit; font-size: 11px; line-height: 1.6; resize: vertical; }
-.lane-qa-note { margin: 7px 0 0; color: #a0a39a; font-size: 11px; }
-.lane-qa-targets { margin: 12px 0 0; padding: 7px 0; max-height: 232px; overflow: auto; border: 1px solid #dcdbd2; border-radius: 11px; background: #fff; list-style: none; }
-.lane-qa-targets label { display: flex; align-items: center; gap: 9px; padding: 6px 12px; cursor: pointer; }
-.lane-qa-targets strong { flex: 0 0 auto; color: #858980; font-size: 11px; }
-.lane-qa-targets span { min-width: 0; overflow: hidden; color: #4b504a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.lane-qa-result { margin-top: 11px; padding: 10px 12px; border: 1px solid #d5ddd5; border-radius: 9px; background: #edf2ec; font-size: 11px; line-height: 1.5; }
-.lane-qa-result strong { color: #315b44; font-size: 11px; }
-.lane-qa-failures { margin: 8px 0 0; padding: 0; list-style: none; }
-.lane-qa-failures li { display: flex; gap: 8px; padding: 4px 0; border-top: 1px solid #dbe3da; }
-.lane-qa-failures strong { flex: 0 0 auto; color: #8d4b3c; }
-.lane-qa-failures span { min-width: 0; color: #754a30; }
 
 /* Development list */
 .task-list { overflow-x: auto; border: 1px solid #dcdbd2; border-radius: 14px; background: var(--paper); }
@@ -1217,32 +1183,12 @@ svg { width: 20px; height: 20px; }
   .update-settings-card { grid-column: auto; }
   .custom-rules-preview-grid { grid-template-columns: 1fr; }
   .flow-hint { max-width: 270px; overflow: hidden; text-overflow: ellipsis; }
-  .task-detail-layout { grid-template-columns: 1fr; }
-  .task-detail-document { border-right: 0; border-bottom: 1px solid #e2e0d8; }
-  .qa-panel-resize { display: none; }
+  .task-detail-overview { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
-
-/* Task dependencies */
-.task-dependencies { padding: 12px 16px; border-bottom: 1px solid #e5e3dc; background: #faf9f3; }
-.task-dependencies > header { display: flex; align-items: center; gap: 9px; }
-.task-dependencies > header strong { color: #4c6457; font-size: 11px; font-weight: 700; }
-/* 항목이 낱말에서 문장으로 바뀌어 가로로 흐르지 않는다. 한 줄에 하나씩, id 옆에 문장이 선다. */
-.task-dependencies ul { display: flex; flex-direction: column; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }
-.task-dependency { display: flex; align-items: baseline; gap: 8px; padding: 6px 9px; border-radius: 8px; color: #626b64; background: #e8ebe7; font-size: 11px; line-height: 1.5; }
-.task-dependency > strong { flex: none; font-weight: 700; }
-/* 겹친 경로는 무공백으로 길어 상자를 넘길 수 있다. 카드 요약과 같은 어법으로 끊어 접는다. */
-.task-dependency > p, .task-overlap > p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.task-dependency.state-satisfied { color: #286042; background: #dfeee4; }
-.task-dependency.state-pending { color: #805415; background: #f5e7c9; }
-.task-dependency.state-missing, .task-dependency.state-cyclic { color: #8a3f38; background: #f3dfdc; }
-.task-dependency-error { margin: 10px 0 0; color: #8a3f38; font-size: 11px; line-height: 1.5; }
-/* 겹침은 기다리면 풀리는 상태다. 영구 실패의 붉은 톤이 아니라 대기 톤을 쓴다. */
-.task-overlap { display: flex; align-items: baseline; gap: 8px; padding: 6px 9px; border-radius: 8px; color: #805415; background: #f5e7c9; font-size: 11px; line-height: 1.5; }
-.task-overlap > strong { flex: none; font-weight: 700; }
 
 /* Agents */
 .agents-view { container-name: agents; container-type: inline-size; display: grid; gap: 12px; }

@@ -8,16 +8,23 @@ import type {
   AgentRuntimeActions,
   AgentRuntimeState,
   ProjectSummary,
-  WorkflowItemSummary,
 } from "../../domain/types";
 import type { RunSignal, RunSignalKind, ToolCategory } from "../../domain/runActivity";
-import { actionableQaFileNames } from "../DevelopmentBoard";
 import {
   idleSeconds,
   isRunIdle,
   redactSecrets,
   summarizeRunActivity,
 } from "../../domain/runActivity";
+// 고지 문구와 그 버전은 동의 화면을 처음 만든 자리에 함께 둔다. 여기서 다시 쓰면 사용자가 읽은
+// 문구와 기록된 고지 버전이 어긋날 수 있어, 한 벌만 두고 읽어 쓴다. 두 파일이 서로를 참조하지만
+// 참조는 모두 렌더 시점에만 일어나므로 모듈이 비어 있는 순간을 지나지 않는다.
+import {
+  EXECUTION_NOTICE_VERSION,
+  ExecutionNotice,
+  consentBlockMessage,
+  consentFailureMessage,
+} from "./AgentRuntimeView";
 
 const ROLE_ORDER = ["planner", "architect", "developer"] as const;
 const roleLabels: Record<string, string> = {
@@ -185,16 +192,22 @@ export function AgentRunDashboard({
 
 function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
   actions: AgentRuntimeActions;
-  itemMap: Map<string, WorkflowItemSummary>;
+  itemMap: Map<string, NamedWorkflowItem>;
   onClose(): void;
   project: ProjectSummary;
   state: AgentRuntimeState;
 }) {
   const [role, setRole] = useState<(typeof ROLE_ORDER)[number]>("developer");
   const [target, setTarget] = useState("");
+  const [agreed, setAgreed] = useState(false);
   const candidates = eligibleQueue(project, itemMap).filter((item) => item.role === role);
   const selected = target || candidates[0]?.id || "";
   const plannedRole = state.runPlan?.roles.find((item) => item.role === role);
+  const consent = state.policy?.consent ?? null;
+  const blocked = consent ? consentBlockMessage(consent) : null;
+  // 앱이 읽어 둔 상태가 동의로 남아 있어도 실행 환경이 시작 직전에 다시 판정하므로, 거절당한
+  // 뒤에는 그 자리에서 고지를 다시 보여 준다. 그러지 않으면 사용자가 동의할 자리가 없다.
+  const consentRequired = consent?.status === "required" || (state.runError !== null && isConsentRequired(state.runError));
   useDismissOnEscape(onClose);
 
   async function plan() {
@@ -202,10 +215,17 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
     await actions.planRun([request]);
   }
 
+  async function start() {
+    if (consentRequired && !(await actions.grantConsent(EXECUTION_NOTICE_VERSION))) return;
+    if (await actions.startRun()) onClose();
+  }
+
   return (
     <div className="agent-overlay" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section aria-labelledby="direct-assign-title" aria-modal="true" className="agent-dialog" role="dialog">
         <header><div><p className="eyebrow">DIRECT ASSIGN</p><h2 id="direct-assign-title">직접 배정</h2></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
+        {blocked && <p className="agent-error" role="status">{blocked}</p>}
+        {!blocked && consentRequired && <ExecutionNotice checked={agreed} onChange={setAgreed} />}
         <label>역할<select onChange={(event) => { actions.cancelRunPlan(); setRole(event.target.value as typeof role); setTarget(""); }} value={role}>{ROLE_ORDER.map((value) => <option key={value} value={value}>{roleLabels[value]}</option>)}</select></label>
         <fieldset><legend>배정할 작업</legend>
           {candidates.length > 0 ? candidates.map((item) => (
@@ -214,8 +234,9 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
         </fieldset>
         <details><summary>고급 직접 지정</summary><label>작업 ID<input onChange={(event) => { actions.cancelRunPlan(); setTarget(event.target.value); }} placeholder="TASK-…" value={target} /></label></details>
         {state.runError && <p className="agent-error" role="status">{humanRuntimeMessage(state.runError)}</p>}
+        {state.consentError && <p className="agent-error" role="status">{consentFailureMessage(state.consentError)}</p>}
         {plannedRole && <p className="agent-dialog-note">{plannedRole.granted > 0 ? "안전 조건 확인 완료" : exclusionLabel(plannedRole.excluded)}</p>}
-        <footer><button className="secondary-button" onClick={onClose} type="button">취소</button>{plannedRole?.granted ? <button className="stamp-button" disabled={state.runStarting} onClick={() => void actions.startRun().then((ok) => { if (ok) onClose(); })} type="button">{state.runStarting ? "배정 중" : "배정 시작"}</button> : <button className="stamp-button" disabled={!selected || state.runPlanning} onClick={() => void plan()} type="button">{state.runPlanning ? "확인 중" : "시작 조건 확인"}</button>}</footer>
+        <footer><button className="secondary-button" onClick={onClose} type="button">취소</button>{blocked ? null : plannedRole?.granted ? <button className="stamp-button" disabled={state.runStarting || state.consentBusy || (consentRequired && !agreed)} onClick={() => void start()} type="button">{state.runStarting ? "배정 중" : consentRequired ? "동의하고 직접 배정 시작" : "배정 시작"}</button> : <button className="stamp-button" disabled={!selected || state.runPlanning} onClick={() => void plan()} type="button">{state.runPlanning ? "확인 중" : "시작 조건 확인"}</button>}</footer>
       </section>
     </div>
   );
@@ -223,7 +244,7 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
 
 function DetailDrawer({ actions, itemMap, onClose, project, queueItem, run, state }: {
   actions: AgentRuntimeActions;
-  itemMap: Map<string, WorkflowItemSummary>;
+  itemMap: Map<string, NamedWorkflowItem>;
   onClose(): void;
   project: ProjectSummary;
   queueItem: QueueItem | null;
@@ -390,7 +411,7 @@ function SignalRow({ signal }: { signal: RunSignal }) {
 }
 
 function HistoryDrawer({ itemMap, onClose, runs }: {
-  itemMap: Map<string, WorkflowItemSummary>;
+  itemMap: Map<string, NamedWorkflowItem>;
   onClose(): void;
   runs: AgentRunSummary[];
 }) {
@@ -416,11 +437,21 @@ function RetryDialog({ actions, state }: { actions: AgentRuntimeActions; state: 
   return <div className="agent-overlay"><section aria-label="실행 재시도 확인" aria-modal="true" className="agent-dialog" role="dialog"><header><div><p className="eyebrow">RETRY</p><h2>이 작업을 다시 배정할까요?</h2></div><button aria-label="닫기" autoFocus onClick={actions.dismissRetry} type="button">×</button></header><p className="agent-dialog-note">현재 자격과 실행 한도를 다시 확인한 뒤 새 세션으로 시작합니다.</p>{state.controlError && <p className="agent-error">{humanRuntimeMessage(state.controlError)}</p>}<footer><button className="secondary-button" onClick={actions.dismissRetry} type="button">취소</button><button className="stamp-button" disabled={state.controllingRunId !== null} onClick={() => void actions.confirmRetry()} type="button">다시 배정</button></footer></section></div>;
 }
 
+interface NamedWorkflowItem {
+  id: string;
+  title: string;
+}
+
 function workflowItems(project: ProjectSummary) {
-  const items = new Map<string, WorkflowItemSummary>();
+  const items = new Map<string, NamedWorkflowItem>();
   for (const workflow of project.workflows) {
     for (const group of [workflow.items.ideas, workflow.items.specs, workflow.items.tasks]) {
       for (const item of group) items.set(item.id, item);
+    }
+    for (const group of workflow.items.workGroups) {
+      items.set(group.id, group);
+      items.set(group.sourceDecisionId, group);
+      if (group.sourceQaDecisionId) items.set(group.sourceQaDecisionId, group);
     }
   }
   return items;
@@ -434,12 +465,16 @@ function workflowDirectoryOf(project: ProjectSummary, targetId: string | null) {
   if (!targetId) return null;
   const owner = project.workflows.find((workflow) =>
     [workflow.items.ideas, workflow.items.specs, workflow.items.tasks]
-      .some((group) => group.some((item) => item.id === targetId)),
+      .some((group) => group.some((item) => item.id === targetId))
+      || workflow.items.workGroups.some((group) =>
+        group.id === targetId
+        || group.sourceDecisionId === targetId
+        || group.sourceQaDecisionId === targetId),
   );
   return owner?.directory ?? null;
 }
 
-function eligibleQueue(project: ProjectSummary, items: Map<string, WorkflowItemSummary>): QueueItem[] {
+function eligibleQueue(project: ProjectSummary, items: Map<string, NamedWorkflowItem>): QueueItem[] {
   const detail = project.pendingDetail;
   if (!detail) return [];
   return ROLE_ORDER.flatMap((role) => detail[role].candidates
@@ -448,15 +483,12 @@ function eligibleQueue(project: ProjectSummary, items: Map<string, WorkflowItemS
 }
 
 function userDecisions(project: ProjectSummary) {
-  // "내 선택 대기"는 지금 누를 수 있는 것만 센다. 통째 QA 관문에 잠긴 작업까지 세면 개발
-  // 화면은 "할 QA 없음"이라 답해 두 화면이 어긋난다. 잠긴 묶음은 개발 화면이 예고 카드로 보인다.
   return project.workflows.flatMap((workflow) => {
-    const actionableQa = actionableQaFileNames(workflow.items.tasks);
     return [
       ...workflow.items.specs.filter((item) => item.status === "user_review").map((item) => ({ id: item.id, title: item.title, kind: "기획 승인" })),
-      ...workflow.items.tasks
-        .filter((item) => item.status === "qa_waiting" && actionableQa.has(item.fileName))
-        .map((item) => ({ id: item.id, title: item.title, kind: "QA 확인" })),
+      ...workflow.items.workGroups
+        .filter((group) => group.displayStatus === "qa_ready")
+        .map((group) => ({ id: group.id, title: group.title, kind: "그룹 QA 확인" })),
     ];
   });
 }
@@ -483,7 +515,7 @@ function activeOrder(a: AgentRunSummary, b: AgentRunSummary) {
   return a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0;
 }
 
-function titleOf(id: string | null, items: Map<string, WorkflowItemSummary>) { return id ? items.get(id)?.title ?? id : "작업 확인 중"; }
+function titleOf(id: string | null, items: Map<string, NamedWorkflowItem>) { return id ? items.get(id)?.title ?? id : "작업 확인 중"; }
 function nextCheckLabel(state: AgentRuntimeState) { const next = state.queue?.automation?.roles.map((role) => role.nextPollAt).filter((value): value is string => Boolean(value)).sort()[0]; return next ? new Date(next).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "자동"; }
 function runningDuration(startedAt: string | null) { if (!startedAt) return "시작 중"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)); return seconds < 60 ? "1분 미만" : `${Math.floor(seconds / 60)}분`; }
 function finishedDuration(startedAt: string | null, finishedAt: string | null) { if (!startedAt || !finishedAt) return "시간 기록 없음"; const seconds = Math.max(0, Math.floor((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)); return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분`; }
@@ -500,7 +532,16 @@ function providerReadinessLabel(status: string) {
     : "실행 도구 확인이 필요합니다.";
 }
 
+/**
+ * 동의 부족으로 시작하지 못했다는 사유인지. 실행 도구 설치나 로그인, 권한 부족과 사유 코드가
+ * 다르므로 문자열 하나로 판정한다.
+ */
+export function isConsentRequired(message: string) {
+  return /execution_consent_required/.test(message);
+}
+
 export function humanRuntimeMessage(message: string) {
+  if (isConsentRequired(message)) return "실행 권한 동의 필요";
   if (/project_not_configured/.test(message)) return "이 프로젝트의 에이전트 설정을 먼저 저장해 주세요.";
   if (/model_unavailable|model.+(?:not available|unsupported)/i.test(message)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다.";
   if (/limit_reached/.test(message)) return "현재 실행 자리가 모두 사용 중입니다.";

@@ -2,17 +2,32 @@
 schema: workflow-labs/task@1
 id: TASK-123
 title: 앱이 launchctl로 등록된 서비스를 내리고 다시 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-036
 source_decision_id: DECISION-3D9A30F2
-depends_on: [TASK-122]
-scope_files: [src-tauri/src/infrastructure/launchctl.rs, src-tauri/src/infrastructure/mod.rs, src-tauri/src/application/heartbeat_service_control.rs, src-tauri/src/application/mod.rs, src-tauri/src/commands/heartbeat.rs, src-tauri/src/lib.rs]
-updated_at: 2026-08-05T16:44:14.779197+00:00
+depends_on:
+- TASK-122
+scope_files:
+- src-tauri/src/infrastructure/launchctl.rs
+- src-tauri/src/infrastructure/mod.rs
+- src-tauri/src/application/heartbeat_service_control.rs
+- src-tauri/src/application/mod.rs
+- src-tauri/src/commands/heartbeat.rs
+- src-tauri/src/lib.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T07:22:00Z, kind: created }
-  - { at: 2026-08-05T14:12:00Z, kind: in_progress }
-  - { at: 2026-08-05T14:45:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:44:14.779197+00:00, kind: completed }
+- at: 2026-08-05T07:22:00Z
+  kind: created
+- at: 2026-08-05T14:12:00Z
+  kind: in_progress
+- at: 2026-08-05T14:45:00Z
+  kind: qa_waiting
+- at: 2026-08-05T16:44:14.779197+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-3D9A30F2
+work_group_revision: 1
 ---
 
 # 앱이 launchctl로 등록된 서비스를 내리고 다시 올린다

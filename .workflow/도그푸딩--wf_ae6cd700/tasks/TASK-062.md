@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-062
 title: 설치 마법사의 접힘을 저장소에 배선하고 화면 동작을 테스트로 고정한다
-status: completed
+status: verified
 source_spec_id: SPEC-019
 source_decision_id: DECISION-284DCE8B
-depends_on: [TASK-061]
-updated_at: 2026-08-04T09:45:52.662943+00:00
+depends_on:
+- TASK-061
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:15:00Z, kind: created }
-  - { at: 2026-08-04T08:32:57Z, kind: in_progress }
-  - { at: 2026-08-04T08:41:30Z, kind: qa_waiting }
-  - { at: 2026-08-04T09:45:52.662943+00:00, kind: completed }
+- at: 2026-08-04T08:15:00Z
+  kind: created
+- at: 2026-08-04T08:32:57Z
+  kind: in_progress
+- at: 2026-08-04T08:41:30Z
+  kind: qa_waiting
+- at: 2026-08-04T09:45:52.662943+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-284DCE8B
+work_group_revision: 1
 ---
 
 # 설치 마법사의 접힘을 저장소에 배선하고 화면 동작을 테스트로 고정한다

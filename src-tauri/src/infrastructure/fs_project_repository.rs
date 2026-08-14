@@ -14,18 +14,25 @@ use crate::domain::project::{
     ManagedAssetSyncStatus, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
     ProjectSummary, ReportDocument, SaveCustomRulesRequest, SaveCustomRulesResult,
     SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
-    TaskDocument, TaskEvent, TaskOverlapBlock, TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome,
-    TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
-    TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
-    TaskScopeDeclaration, TaskScopeStatus, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
+    TaskDocument, TaskEvent, TaskOverlapBlock, TaskResumeRecovery, TaskResumeRequest,
+    TaskResumeResult, TaskResumeStatus, TaskRevisionRequest, TaskRevisionRequestInput,
+    TaskRevisionRequestResult, TaskRevisionRequestStatus, TaskScopeDeclaration, TaskScopeStatus,
+    WorkGroupDisplayStatus, WorkGroupQaMode, WorkGroupQaOutcome, WorkGroupQaScenario,
+    WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkGroupQaSubmissionStatus,
+    WorkGroupStatus, WorkGroupSummary, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
     WorkflowItems, WorkflowManifest, WorkflowReportSummary, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+};
+#[cfg(test)]
+use crate::domain::project::{
+    TaskQaBatchEntry, TaskQaBatchResult, TaskQaOutcome, TaskQaSubmission, TaskQaSubmissionEntry,
+    TaskQaSubmissionEntryResult, TaskQaSubmissionFailure, TaskQaSubmissionResult,
 };
 use crate::infrastructure::custom_rules::{
     prepare_custom_rules_preview, read_custom_rules, save_custom_rules, CustomRulesError,
 };
 use crate::infrastructure::managed_project_assets::{
-    install_managed_project_assets, synchronize_managed_project_assets,
-    validate_managed_project_assets, ManagedProjectAssetsError,
+    install_managed_project_assets, install_managed_project_assets_under_lock,
+    synchronize_managed_project_assets, validate_managed_project_assets, ManagedProjectAssetsError,
 };
 use crate::infrastructure::project_write_lock::{ProjectWriteLock, ProjectWriteLockError};
 use crate::infrastructure::reservation_helper::{
@@ -33,7 +40,7 @@ use crate::infrastructure::reservation_helper::{
     RESERVATION_HELPER_VERSION,
 };
 use crate::infrastructure::role_eligibility::{
-    pending_role_work, TaskRevisionRequestCandidate, WorkflowInput,
+    pending_role_work, GroupQaRevisionCandidate, TaskRevisionRequestCandidate, WorkflowInput,
 };
 
 const CONTROL_DIRECTORY: &str = ".workflow";
@@ -41,10 +48,17 @@ const PROJECT_MANIFEST: &str = "project.yml";
 const WORKFLOW_MANIFEST: &str = "workflow.yml";
 const RUNTIME_DIRECTORY: &str = ".runtime";
 const MIGRATION_LOCK_FILE: &str = "migration.lock";
-const WORKFLOW_DIRECTORIES: [&str; 6] =
-    ["ideas", "specs", "decisions", "tasks", "reports", "state"];
+const WORKFLOW_DIRECTORIES: [&str; 7] = [
+    "ideas",
+    "specs",
+    "decisions",
+    "tasks",
+    "groups",
+    "reports",
+    "state",
+];
 /// 개발 작업 `history` 항목의 `kind`로 인정하는 값. 이 밖의 값은 항목째 버린다.
-const TASK_EVENT_KINDS: [&str; 7] = [
+const TASK_EVENT_KINDS: [&str; 9] = [
     "created",
     "in_progress",
     "blocked",
@@ -52,7 +66,11 @@ const TASK_EVENT_KINDS: [&str; 7] = [
     "completed",
     "revision_requested",
     "resumed",
+    "verified",
+    "migrated_verified",
 ];
+const WORK_GROUP_SCHEMA: &str = "workflow-labs/work-group@1";
+const GROUP_QA_DECISION_SCHEMA: &str = "workflow-labs/group-qa-decision@1";
 /// 사용자가 막힌 작업을 다시 연 사실을 남기는 앱 소유 감사 기록의 스키마(SPEC-054 R9).
 /// 기획서 결정·QA 결정과 다른 식별자이므로 두 판정 어디에도 섞이지 않는다.
 const TASK_RESUME_SCHEMA: &str = "workflow-labs/task-resume@1";
@@ -92,7 +110,25 @@ pub enum ProjectError {
     #[error("QA 대기 상태인 개발 작업만 확인할 수 있습니다.")]
     TaskNotAwaitingQa,
     #[error("개발 수정 요청에는 코멘트를 입력해 주세요.")]
+    #[cfg(test)]
     QaCommentRequired,
+    #[error("작업 문서가 그사이 변경되었습니다. 문서를 다시 열어 확인한 뒤 제출해 주세요.")]
+    #[cfg(test)]
+    TaskQaStale,
+    #[error("사용자 품질 확인이 가능한 작업 그룹이 아닙니다.")]
+    WorkGroupNotAwaitingQa,
+    #[error("작업 그룹이 그사이 변경되었습니다. 품질 확인을 다시 열어 주세요.")]
+    WorkGroupQaStale,
+    #[error("작업 그룹 QA 요청 식별자를 입력해 주세요.")]
+    WorkGroupQaRequestIdRequired,
+    #[error("작업 그룹 QA 요청 식별자는 200자 이하여야 합니다.")]
+    WorkGroupQaRequestIdTooLong,
+    #[error("작업 그룹의 모든 확인 항목에 결과를 입력해 주세요.")]
+    WorkGroupQaScenarioMismatch,
+    #[error("문제 있는 확인 항목에는 코멘트를 입력해 주세요.")]
+    WorkGroupQaCommentRequired,
+    #[error("확인 항목 코멘트는 2,000자 이하여야 합니다.")]
+    WorkGroupQaCommentTooLong,
     #[error("막힌 상태인 개발 작업만 재개할 수 있습니다.")]
     TaskNotBlocked,
     #[error("작업 문서가 그사이 변경되었습니다. 문서를 다시 열어 확인한 뒤 재개해 주세요.")]
@@ -523,6 +559,7 @@ impl FileSystemProjectRepository {
         ))
     }
 
+    #[cfg(test)]
     pub fn record_task_qa(
         &self,
         root: &Path,
@@ -552,6 +589,7 @@ impl FileSystemProjectRepository {
     /// 목록을 통째로 받아 건별로 QA 확인을 기록한다. 확인 전용이라 `outcome` 자리가 없다.
     /// 한 건이 실패해도 멈추지 않고, `Err`로 끝나는 것은 프로젝트 전체를 읽지 못하는 경우뿐이다.
     /// 리스는 보지 않는다 — 일괄이 단건보다 엄격해지면 같은 작업이 자리에 따라 다르게 찍힌다.
+    #[cfg(test)]
     pub fn confirm_task_qa_batch(
         &self,
         root: &Path,
@@ -601,6 +639,200 @@ impl FileSystemProjectRepository {
                 read_active_leases(&control_root)?,
             ),
             results,
+        })
+    }
+
+    /// 작업별 결과와 메모를 한 번에 받아 건별로 QA를 기록한다. 기록 규칙 자체는 단건 경로가 쓰는
+    /// `record_one_task_qa` 하나가 그대로 쥐고 있고, 이 경로는 그 앞에서 갱신 시각을 대조하고 건별
+    /// 실패를 종류로 나누는 일만 더한다. 한 건이 실패해도 멈추지 않으며, `Err`로 끝나는 것은
+    /// 프로젝트 전체를 읽지 못하는 경우뿐이다. 리스는 보지 않는다 — 기존 두 QA 통로와 같다.
+    #[cfg(test)]
+    pub fn submit_task_qa(
+        &self,
+        root: &Path,
+        submission: &TaskQaSubmission,
+    ) -> Result<TaskQaSubmissionResult, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        install_all_managed_project_assets(&root, &control_root)?;
+        let workflow_root =
+            registered_workflow_root(&control_root, &project, &submission.workflow_directory)?;
+
+        let results = submission
+            .entries
+            .iter()
+            .map(|entry| submit_one_task_qa(&workflow_root, entry))
+            .collect();
+
+        Ok(TaskQaSubmissionResult {
+            summary: summary_from_manifest(
+                &root,
+                project,
+                SchemaCompatibility::Current,
+                read_active_leases(&control_root)?,
+            ),
+            results,
+        })
+    }
+
+    pub fn submit_work_group_qa(
+        &self,
+        root: &Path,
+        submission: &WorkGroupQaSubmission,
+    ) -> Result<WorkGroupQaSubmissionResult, ProjectError> {
+        validate_work_group_request_id(&submission.request_id)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        install_all_managed_project_assets(&root, &control_root)?;
+        let workflow_root =
+            registered_workflow_root(&control_root, &project, &submission.workflow_directory)?;
+
+        let (decision_file_name, group_id, group_revision, outcome, status) = {
+            let _lock = ProjectWriteLock::acquire(&control_root)?;
+            let (group_records, _) = read_work_group_qa_records(&workflow_root);
+            if let Some(existing) = group_records
+                .iter()
+                .find(|record| record.request_id == submission.request_id.trim())
+            {
+                validate_markdown_file_name(&submission.file_name)?;
+                if let Ok(requested_group_id) =
+                    work_group_id_of(&workflow_root, &submission.file_name)
+                {
+                    if existing.group_id != requested_group_id {
+                        return Err(ProjectError::Persist(
+                            "같은 QA 요청 식별자가 다른 작업 그룹에 사용되었습니다.".to_owned(),
+                        ));
+                    }
+                }
+                (
+                    existing.file_name.clone(),
+                    existing.group_id.clone(),
+                    existing.group_revision,
+                    work_group_outcome(&existing.outcome),
+                    WorkGroupQaSubmissionStatus::AlreadyRecorded,
+                )
+            } else {
+                validate_work_group_qa_entries(submission)?;
+                let group_path =
+                    safe_markdown_file(&workflow_root.join("groups"), &submission.file_name)?;
+                let (tasks, _) = read_task_documents(&workflow_root.join("tasks"));
+                let leases = read_active_leases(&control_root)?;
+                let (_, legacy_records) = read_work_group_qa_records(&workflow_root);
+                let group = parse_work_group(
+                    &group_path,
+                    &tasks,
+                    &leases,
+                    &group_records,
+                    &legacy_records,
+                )
+                .ok_or(ProjectError::WorkGroupNotAwaitingQa)?;
+                if group.revision != submission.expected_revision
+                    || group.updated_at != submission.expected_updated_at
+                {
+                    return Err(ProjectError::WorkGroupQaStale);
+                }
+                let assigned_tasks = tasks
+                    .iter()
+                    .filter(|task| task.work_group_id.as_deref() == Some(group.id.as_str()))
+                    .collect::<Vec<_>>();
+                if assigned_tasks.is_empty()
+                    || assigned_tasks.iter().any(|task| {
+                        !task_is_valid_for_group(
+                            task,
+                            group.revision,
+                            &group.source_spec_id,
+                            &group.source_decision_id,
+                        ) || task.status != "verified"
+                    })
+                {
+                    return Err(ProjectError::WorkGroupNotAwaitingQa);
+                }
+                if group.status != WorkGroupStatus::Active
+                    || group.qa_mode != WorkGroupQaMode::User
+                    || group.display_status != WorkGroupDisplayStatus::QaReady
+                {
+                    return Err(ProjectError::WorkGroupNotAwaitingQa);
+                }
+                validate_work_group_scenario_entries(&group.scenarios, submission)?;
+                let outcome = if submission
+                    .entries
+                    .iter()
+                    .all(|entry| entry.outcome == WorkGroupQaOutcome::Confirmed)
+                {
+                    WorkGroupQaOutcome::Confirmed
+                } else {
+                    WorkGroupQaOutcome::RevisionRequested
+                };
+                let decision_id = format!("GROUP-QA-{}", compact_uuid()[..8].to_uppercase());
+                let file_name = format!("{decision_id}.md");
+                let created_at = Utc::now().to_rfc3339();
+                let outcome_value = match outcome {
+                    WorkGroupQaOutcome::Confirmed => "confirmed",
+                    WorkGroupQaOutcome::RevisionRequested => "revision_requested",
+                };
+                let mut body = String::from("# 작업 그룹 품질 확인\n");
+                for entry in &submission.entries {
+                    let title = group
+                        .scenarios
+                        .iter()
+                        .find(|scenario| scenario.id == entry.scenario_id)
+                        .map(|scenario| scenario.title.as_str())
+                        .unwrap_or_default();
+                    let entry_outcome = match entry.outcome {
+                        WorkGroupQaOutcome::Confirmed => "confirmed",
+                        WorkGroupQaOutcome::RevisionRequested => "revision_requested",
+                    };
+                    body.push_str(&format!(
+                        "\n## {} · {}\n\n- 결과: {}\n- 코멘트: {}\n",
+                        entry.scenario_id,
+                        title,
+                        entry_outcome,
+                        if entry.comment.trim().is_empty() {
+                            "없음"
+                        } else {
+                            entry.comment.trim()
+                        }
+                    ));
+                }
+                let decision = format!(
+                    "---\nschema: {GROUP_QA_DECISION_SCHEMA}\nid: {}\ngroup_id: {}\ngroup_revision: {}\noutcome: {outcome_value}\nrequest_id: {}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{body}",
+                    yaml_scalar(&decision_id),
+                    yaml_scalar(&group.id),
+                    group.revision,
+                    yaml_scalar(submission.request_id.trim()),
+                );
+                write_text_atomically(
+                    &workflow_root.join("decisions").join(&file_name),
+                    &decision,
+                )?;
+                (
+                    file_name,
+                    group.id,
+                    group.revision,
+                    outcome,
+                    WorkGroupQaSubmissionStatus::Recorded,
+                )
+            }
+        };
+
+        Ok(WorkGroupQaSubmissionResult {
+            summary: summary_from_manifest(
+                &root,
+                project,
+                SchemaCompatibility::Current,
+                read_active_leases(&control_root)?,
+            ),
+            decision_file_name,
+            group_id,
+            group_revision,
+            outcome,
+            status,
         })
     }
 
@@ -695,6 +927,27 @@ impl FileSystemProjectRepository {
     }
 
     pub fn migrate(&self, root: &Path) -> Result<ProjectSummary, ProjectError> {
+        self.migrate_with(root, write_text_atomically)
+    }
+
+    fn migrate_with(
+        &self,
+        root: &Path,
+        write_document: impl FnMut(&Path, &str) -> Result<(), ProjectError>,
+    ) -> Result<ProjectSummary, ProjectError> {
+        self.migrate_with_hooks(
+            root,
+            write_document,
+            install_all_managed_project_assets_under_lock,
+        )
+    }
+
+    fn migrate_with_hooks(
+        &self,
+        root: &Path,
+        mut write_document: impl FnMut(&Path, &str) -> Result<(), ProjectError>,
+        mut install_assets: impl FnMut(&Path, &Path) -> Result<(), ProjectError>,
+    ) -> Result<ProjectSummary, ProjectError> {
         let root = canonical_project_root(root)?;
         let control_root = root.join(CONTROL_DIRECTORY);
         let project_manifest_path = control_root.join(PROJECT_MANIFEST);
@@ -708,64 +961,572 @@ impl FileSystemProjectRepository {
             SchemaCompatibility::MigrationRequired => {}
         }
 
-        let _lock = ProjectWriteLock::acquire(&control_root)?;
+        let lock = ProjectWriteLock::acquire(&control_root)?;
         if !read_active_leases(&control_root)?.is_empty() {
             return Err(ProjectError::ActiveLeases);
         }
-        backup_manifests(&control_root, &project)?;
-
-        while project.schema_version < PROJECT_SCHEMA_VERSION {
-            project = migrate_one_version(project)?;
+        let document_plan = match project.schema_version {
+            // Version 0 was the pre-release manifest. Its field layout is compatible with v1.
+            0 | 1 => plan_documents_v1_to_v2(&control_root, &project)?,
+            version => {
+                return Err(ProjectError::MissingMigration(
+                    version,
+                    PROJECT_SCHEMA_VERSION,
+                ))
+            }
+        };
+        // 문서 변환 전체와 관리 자산 충돌을 먼저 검증한 뒤에만 어느 정본도 바꾼다.
+        validate_all_managed_project_assets(&root, &control_root)?;
+        let backup_root = backup_project_documents(&control_root, &project)?;
+        let migration_result = (|| {
+            install_assets(&root, &control_root)?;
+            apply_migration_document_plan(document_plan, &mut write_document)?;
+            project.schema_version = PROJECT_SCHEMA_VERSION;
+            write_document(&project_manifest_path, &serde_yaml::to_string(&project)?)
+        })();
+        if let Err(error) = migration_result {
+            restore_project_documents(&root, &control_root, &backup_root, &project)?;
+            return Err(error);
         }
-        write_yaml_atomically(&project_manifest_path, &project)?;
+
+        drop(lock);
+        let active_leases = read_active_leases(&control_root)?;
 
         Ok(summary_from_manifest(
             &root,
             project,
             SchemaCompatibility::Current,
-            Vec::new(),
+            active_leases,
         ))
     }
 }
 
-fn backup_manifests(
+fn backup_project_documents(
     control_root: &Path,
     project: &ProjectManifest,
 ) -> Result<PathBuf, ProjectError> {
     let backup_root = control_root
         .join(RUNTIME_DIRECTORY)
         .join("migrations")
-        .join(Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
+        .join(format!(
+            "{}-{}",
+            Utc::now().format("%Y%m%dT%H%M%SZ"),
+            &compact_uuid()[..8]
+        ));
     fs::create_dir_all(&backup_root)?;
     fs::copy(
         control_root.join(PROJECT_MANIFEST),
         backup_root.join(PROJECT_MANIFEST),
     )?;
-    for workflow in &project.workflows {
-        let source = control_root
-            .join(&workflow.directory)
-            .join(WORKFLOW_MANIFEST);
+    let rules_root = control_root.join("rules");
+    if rules_root.is_dir() {
+        copy_directory_recursively(&rules_root, &backup_root.join("rules"))?;
+    }
+    let project_root = control_root.parent().ok_or_else(|| {
+        ProjectError::Persist("프로젝트 루트 없이 마이그레이션 백업을 만들 수 없습니다".to_owned())
+    })?;
+    let root_files_backup = backup_root.join("project-root");
+    fs::create_dir_all(&root_files_backup)?;
+    for file_name in ["AGENTS.md", "CLAUDE.md"] {
+        let source = project_root.join(file_name);
         if source.is_file() {
-            let target_directory = backup_root.join(&workflow.directory);
-            fs::create_dir_all(&target_directory)?;
-            fs::copy(source, target_directory.join(WORKFLOW_MANIFEST))?;
+            fs::copy(source, root_files_backup.join(file_name))?;
+        }
+    }
+    for workflow in &project.workflows {
+        let source = control_root.join(&workflow.directory);
+        if source.is_dir() {
+            copy_directory_recursively(&source, &backup_root.join(&workflow.directory))?;
         }
     }
     Ok(backup_root)
 }
 
-fn migrate_one_version(mut project: ProjectManifest) -> Result<ProjectManifest, ProjectError> {
-    match project.schema_version {
-        // Version 0 was the pre-release manifest. Its field layout is compatible with v1.
-        0 => {
-            project.schema_version = 1;
-            Ok(project)
+fn copy_directory_recursively(source: &Path, target: &Path) -> Result<(), ProjectError> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ProjectError::Persist(format!(
+                "마이그레이션 백업에서 심볼릭 링크를 허용하지 않습니다: {}",
+                source_path.display()
+            )));
         }
-        version => Err(ProjectError::MissingMigration(
-            version,
-            PROJECT_SCHEMA_VERSION,
-        )),
+        if metadata.is_dir() {
+            copy_directory_recursively(&source_path, &target_path)?;
+        } else if metadata.is_file() {
+            fs::copy(source_path, target_path)?;
+        }
     }
+    Ok(())
+}
+
+fn restore_project_documents(
+    project_root: &Path,
+    control_root: &Path,
+    backup_root: &Path,
+    project: &ProjectManifest,
+) -> Result<(), ProjectError> {
+    fs::copy(
+        backup_root.join(PROJECT_MANIFEST),
+        control_root.join(PROJECT_MANIFEST),
+    )?;
+    restore_optional_directory(&backup_root.join("rules"), &control_root.join("rules"))?;
+    for file_name in ["AGENTS.md", "CLAUDE.md"] {
+        restore_optional_file(
+            &backup_root.join("project-root").join(file_name),
+            &project_root.join(file_name),
+        )?;
+    }
+    for workflow in &project.workflows {
+        let target = control_root.join(&workflow.directory);
+        if target.exists() {
+            fs::remove_dir_all(&target)?;
+        }
+        copy_directory_recursively(&backup_root.join(&workflow.directory), &target)?;
+    }
+    Ok(())
+}
+
+fn restore_optional_directory(backup: &Path, target: &Path) -> Result<(), ProjectError> {
+    remove_path_if_present(target)?;
+    if backup.is_dir() {
+        copy_directory_recursively(backup, target)?;
+    }
+    Ok(())
+}
+
+fn restore_optional_file(backup: &Path, target: &Path) -> Result<(), ProjectError> {
+    remove_path_if_present(target)?;
+    if backup.is_file() {
+        fs::copy(backup, target)?;
+    }
+    Ok(())
+}
+
+fn remove_path_if_present(path: &Path) -> Result<(), ProjectError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+struct MigrationTaskDocument {
+    path: PathBuf,
+    contents: String,
+    title: String,
+    group_id: String,
+    source_spec_id: String,
+    source_decision_id: String,
+    source_spec_was_explicit: bool,
+    source_decision_was_explicit: bool,
+    walkthrough: Option<String>,
+}
+
+struct MigrationDocumentPlan {
+    directories: Vec<PathBuf>,
+    writes: Vec<(PathBuf, String)>,
+}
+
+/// v1 문서를 전부 읽고 변환 결과를 메모리에 만든 뒤에만 쓰기 시작한다. 따라서 형식 오류나 그룹 id
+/// 충돌은 원본 문서가 하나도 바뀌기 전에 끝난다. 쓰기 도중 I/O가 실패하면 호출자가 전체 백업을
+/// 복원한다.
+fn plan_documents_v1_to_v2(
+    control_root: &Path,
+    project: &ProjectManifest,
+) -> Result<MigrationDocumentPlan, ProjectError> {
+    let migrated_at = Utc::now().to_rfc3339();
+    let mut writes: Vec<(PathBuf, String)> = Vec::new();
+    let mut directories = Vec::new();
+
+    for workflow in &project.workflows {
+        let workflow_root = control_root.join(&workflow.directory);
+        let groups_root = workflow_root.join("groups");
+        if groups_root.exists() && fs::read_dir(&groups_root)?.next().is_some() {
+            return Err(ProjectError::Persist(format!(
+                "v1 워크플로우의 groups 디렉터리가 비어 있지 않습니다: {}",
+                groups_root.display()
+            )));
+        }
+        directories.push(groups_root.clone());
+
+        let mut task_paths: Vec<PathBuf> = fs::read_dir(workflow_root.join("tasks"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("md")
+            })
+            .collect();
+        task_paths.sort();
+        let mut migrated_tasks = Vec::new();
+        for path in task_paths {
+            migrated_tasks.push(migrate_v1_task_document(&path, &migrated_at)?);
+        }
+
+        let spec_titles = read_markdown_summaries(&workflow_root.join("specs"), "draft")
+            .into_iter()
+            .map(|spec| (spec.id, spec.title))
+            .collect::<HashMap<_, _>>();
+        let decision_specs = read_decision_documents(&workflow_root)
+            .0
+            .into_iter()
+            .map(|decision| (decision.id, decision.spec_id))
+            .collect::<HashMap<_, _>>();
+        let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, task) in migrated_tasks.iter().enumerate() {
+            grouped
+                .entry(task.group_id.clone())
+                .or_default()
+                .push(index);
+        }
+        let mut group_ids = grouped.keys().cloned().collect::<Vec<_>>();
+        group_ids.sort();
+        for group_id in group_ids {
+            let indexes = grouped.get(&group_id).expect("group index exists").clone();
+            let first_source_decision = migrated_tasks[indexes[0]].source_decision_id.clone();
+            if indexes
+                .iter()
+                .any(|index| migrated_tasks[*index].source_decision_id != first_source_decision)
+            {
+                return Err(ProjectError::Persist(format!(
+                    "서로 다른 원천이 같은 작업 그룹 id로 변환됩니다: {group_id}"
+                )));
+            }
+            let explicit_specs = indexes
+                .iter()
+                .filter_map(|index| {
+                    let task = &migrated_tasks[*index];
+                    task.source_spec_was_explicit
+                        .then_some(task.source_spec_id.clone())
+                })
+                .collect::<HashSet<_>>();
+            if explicit_specs.len() > 1 {
+                return Err(ProjectError::Persist(format!(
+                    "같은 작업 그룹에 서로 다른 기획서 원천이 선언되어 있습니다: {group_id}"
+                )));
+            }
+            let first = &migrated_tasks[indexes[0]];
+            let resolved_source_spec = explicit_specs
+                .into_iter()
+                .next()
+                .or_else(|| {
+                    first
+                        .source_decision_was_explicit
+                        .then(|| decision_specs.get(&first_source_decision).cloned())
+                        .flatten()
+                })
+                .unwrap_or_else(|| {
+                    if first.source_decision_was_explicit {
+                        format!("LEGACY-{first_source_decision}")
+                    } else {
+                        first.source_spec_id.clone()
+                    }
+                });
+            for index in &indexes {
+                set_migration_task_source_spec(&mut migrated_tasks[*index], &resolved_source_spec)?;
+            }
+            let first = &migrated_tasks[indexes[0]];
+            let title = spec_titles
+                .get(&first.source_spec_id)
+                .cloned()
+                .unwrap_or_else(|| first.title.clone());
+            let mut scenarios = Vec::new();
+            for index in &indexes {
+                let task = &migrated_tasks[*index];
+                if let Some(body) = task.walkthrough.as_ref() {
+                    scenarios.push((task.title.clone(), body.clone()));
+                }
+            }
+            let qa_mode = if scenarios.is_empty() {
+                "automatic"
+            } else {
+                "user"
+            };
+            let mut body = format!(
+                "# {title}\n\n## 기능 설명\n\n기존 개발 작업을 기획서 기준의 작업 그룹으로 전환했습니다.\n"
+            );
+            for (index, (scenario_title, scenario_body)) in scenarios.iter().enumerate() {
+                body.push_str(&format!(
+                    "\n### QA-{:02} · {}\n\n{}\n",
+                    index + 1,
+                    scenario_title,
+                    scenario_body.trim()
+                ));
+            }
+            let group_document = format!(
+                "---\nschema: {WORK_GROUP_SCHEMA}\nid: {}\ntitle: {}\nstatus: active\nrevision: 1\nqa_mode: {qa_mode}\nsource_spec_id: {}\nsource_decision_id: {}\ncreated_at: {migrated_at}\nupdated_at: {migrated_at}\n---\n\n{body}",
+                yaml_scalar(&group_id),
+                yaml_scalar(&title),
+                yaml_scalar(&first.source_spec_id),
+                yaml_scalar(&first.source_decision_id),
+            );
+            writes.push((groups_root.join(format!("{group_id}.md")), group_document));
+        }
+        for task in migrated_tasks {
+            writes.push((task.path, task.contents));
+        }
+
+        let workflow_manifest_path = workflow_root.join(WORKFLOW_MANIFEST);
+        let mut workflow_manifest: WorkflowManifest =
+            serde_yaml::from_str(&fs::read_to_string(&workflow_manifest_path)?)?;
+        if workflow_manifest.schema_version > 1 {
+            return Err(ProjectError::FutureSchema);
+        }
+        workflow_manifest.schema_version = 2;
+        writes.push((
+            workflow_manifest_path,
+            serde_yaml::to_string(&workflow_manifest)?,
+        ));
+        writes.push((
+            workflow_root.join("README.md"),
+            workflow_readme(&workflow.name, &workflow.id),
+        ));
+    }
+
+    Ok(MigrationDocumentPlan {
+        directories,
+        writes,
+    })
+}
+
+fn apply_migration_document_plan(
+    plan: MigrationDocumentPlan,
+    write_document: &mut impl FnMut(&Path, &str) -> Result<(), ProjectError>,
+) -> Result<(), ProjectError> {
+    for directory in plan.directories {
+        fs::create_dir_all(directory)?;
+    }
+    for (path, contents) in plan.writes {
+        write_document(&path, &contents)?;
+    }
+    Ok(())
+}
+
+fn set_migration_task_source_spec(
+    task: &mut MigrationTaskDocument,
+    source_spec_id: &str,
+) -> Result<(), ProjectError> {
+    let (metadata, body) = split_frontmatter(&task.contents);
+    let mut metadata = metadata
+        .and_then(|value| value.as_mapping().cloned())
+        .ok_or_else(|| {
+            ProjectError::Persist(format!(
+                "변환된 작업 문서 프론트매터를 다시 읽을 수 없습니다: {}",
+                task.path.display()
+            ))
+        })?;
+    mapping_set_text(&mut metadata, "source_spec_id", source_spec_id);
+    mapping_set_text(
+        &mut metadata,
+        "source_decision_id",
+        &task.source_decision_id,
+    );
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(metadata))?;
+    task.contents = format!("---\n{}---\n{}", yaml, body);
+    task.source_spec_id = source_spec_id.to_owned();
+    Ok(())
+}
+
+fn migrate_v1_task_document(
+    path: &Path,
+    migrated_at: &str,
+) -> Result<MigrationTaskDocument, ProjectError> {
+    let source = fs::read_to_string(path)?.replace("\r\n", "\n");
+    let (metadata, body) = split_frontmatter(&source);
+    let mut metadata = metadata
+        .and_then(|value| value.as_mapping().cloned())
+        .ok_or_else(|| {
+            ProjectError::Persist(format!(
+                "작업 문서 프론트매터를 읽을 수 없습니다: {}",
+                path.display()
+            ))
+        })?;
+    if mapping_text(&metadata, "schema").as_deref() != Some("workflow-labs/task@1") {
+        return Err(ProjectError::Persist(format!(
+            "지원하지 않는 작업 문서 스키마입니다: {}",
+            path.display()
+        )));
+    }
+    let id = mapping_text(&metadata, "id")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("TASK")
+                .to_owned()
+        });
+    let title = mapping_text(&metadata, "title")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+        .or_else(|| markdown_title(&body))
+        .unwrap_or_else(|| id.clone());
+    let source_spec = mapping_text(&metadata, "source_spec_id")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned());
+    let source_decision = mapping_text(&metadata, "source_decision_id")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned());
+    let source_spec_was_explicit = source_spec.is_some();
+    let source_decision_was_explicit = source_decision.is_some();
+    let (group_id, source_spec_id, source_decision_id) = if let Some(decision) = source_decision {
+        let synthetic_spec = format!("LEGACY-{decision}");
+        (
+            format!("GROUP-{}", migration_identifier(&decision)),
+            source_spec.unwrap_or(synthetic_spec),
+            decision,
+        )
+    } else if let Some(spec) = source_spec {
+        (
+            format!("GROUP-{}-LEGACY", migration_identifier(&spec)),
+            spec.clone(),
+            format!("LEGACY-{spec}"),
+        )
+    } else {
+        (
+            format!("GROUP-{}-LEGACY", migration_identifier(&id)),
+            format!("LEGACY-{id}"),
+            format!("LEGACY-{id}"),
+        )
+    };
+    let status = mapping_text(&metadata, "status").unwrap_or_else(|| "todo".to_owned());
+    if !matches!(
+        status.as_str(),
+        "todo" | "in_progress" | "blocked" | "qa_waiting" | "completed" | "verified"
+    ) {
+        return Err(ProjectError::Persist(format!(
+            "지원하지 않는 작업 상태입니다: {id} ({status})"
+        )));
+    }
+    let converted_to_verified = status == "qa_waiting" || status == "completed";
+    if converted_to_verified {
+        mapping_set_text(&mut metadata, "status", "verified");
+        append_migration_history(&mut metadata, migrated_at, &id)?;
+    }
+    mapping_set_text(&mut metadata, "source_spec_id", &source_spec_id);
+    mapping_set_text(&mut metadata, "source_decision_id", &source_decision_id);
+    mapping_set_text(&mut metadata, "work_group_id", &group_id);
+    mapping_set_u64(&mut metadata, "work_group_revision", 1);
+    mapping_set_text(&mut metadata, "updated_at", migrated_at);
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(metadata))?;
+    let contents = format!("---\n{}---\n{}", yaml, body);
+    let walkthrough = migrated_user_walkthrough(&title, &body);
+    Ok(MigrationTaskDocument {
+        path: path.to_owned(),
+        contents,
+        title,
+        group_id,
+        source_spec_id,
+        source_decision_id,
+        source_spec_was_explicit,
+        source_decision_was_explicit,
+        walkthrough,
+    })
+}
+
+fn mapping_text(metadata: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    metadata
+        .get(serde_yaml::Value::String(key.to_owned()))?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn mapping_set_text(metadata: &mut serde_yaml::Mapping, key: &str, value: &str) {
+    metadata.insert(
+        serde_yaml::Value::String(key.to_owned()),
+        serde_yaml::Value::String(value.to_owned()),
+    );
+}
+
+fn mapping_set_u64(metadata: &mut serde_yaml::Mapping, key: &str, value: u64) {
+    metadata.insert(
+        serde_yaml::Value::String(key.to_owned()),
+        serde_yaml::Value::Number(value.into()),
+    );
+}
+
+fn append_migration_history(
+    metadata: &mut serde_yaml::Mapping,
+    migrated_at: &str,
+    task_id: &str,
+) -> Result<(), ProjectError> {
+    let key = serde_yaml::Value::String("history".to_owned());
+    let history = metadata
+        .entry(key)
+        .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+    let Some(history) = history.as_sequence_mut() else {
+        return Err(ProjectError::Persist(format!(
+            "작업 {task_id}의 history가 목록이 아니어서 migrated_verified 이력을 보존할 수 없습니다"
+        )));
+    };
+    let mut entry = serde_yaml::Mapping::new();
+    mapping_set_text(&mut entry, "at", migrated_at);
+    mapping_set_text(&mut entry, "kind", "migrated_verified");
+    history.push(serde_yaml::Value::Mapping(entry));
+    Ok(())
+}
+
+fn migration_identifier(value: &str) -> String {
+    let mut output = String::new();
+    let mut separated = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+            output.push(character);
+            separated = false;
+        } else if !separated {
+            output.push('-');
+            separated = true;
+        }
+    }
+    let output = output.trim_matches('-');
+    if output.is_empty() {
+        "UNKNOWN".to_owned()
+    } else {
+        output.to_owned()
+    }
+}
+
+fn migrated_user_walkthrough(title: &str, body: &str) -> Option<String> {
+    let section = body
+        .split_once(TASK_WALKTHROUGH_HEADING)
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    let section = section.split("\n## ").next().unwrap_or_default();
+    let mut in_fence = false;
+    let kept = section
+        .lines()
+        .filter_map(|line| {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                return None;
+            }
+            if in_fence {
+                return None;
+            }
+            (!contains_internal_qa_instruction(line)).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    let scenario = WorkGroupQaScenario {
+        id: "QA-MIGRATION".to_owned(),
+        title: title.to_owned(),
+        body: kept.clone(),
+    };
+    (!kept.is_empty() && scenario_is_user_safe(&scenario)).then_some(kept)
 }
 
 fn canonical_project_root(root: &Path) -> Result<PathBuf, ProjectError> {
@@ -806,6 +1567,17 @@ fn install_all_managed_project_assets(
     // 예약 자산의 미래 버전·비관리 파일은 기존 자산을 바꾸기 전에 막는다.
     validate_reservation_helper(control_root).map_err(reservation_asset_error)?;
     install_managed_project_assets(project_root, control_root)?;
+    install_reservation_helper(control_root).map_err(reservation_asset_error)
+}
+
+/// 마이그레이션은 프로젝트 쓰기 잠금을 이미 보유한다. 같은 잠금을 다시 잡지 않으면서도 일반 쓰기
+/// 경로와 동일한 관리 자산 preflight·snapshot·rollback을 거친 뒤 예약 헬퍼까지 확정한다.
+fn install_all_managed_project_assets_under_lock(
+    project_root: &Path,
+    control_root: &Path,
+) -> Result<(), ProjectError> {
+    validate_reservation_helper(control_root).map_err(reservation_asset_error)?;
+    install_managed_project_assets_under_lock(project_root, control_root)?;
     install_reservation_helper(control_root).map_err(reservation_asset_error)
 }
 
@@ -1056,6 +1828,7 @@ fn summary_from_manifest(
                 items: &workflow.items,
                 approved_decisions: &workflow.approved_decisions,
                 task_revision_requests: &workflow.task_revision_requests,
+                group_qa_revision_requests: &workflow.group_qa_revision_requests,
                 definition_error_tasks: &workflow.definition_error_tasks,
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
@@ -1103,6 +1876,8 @@ struct PreparedWorkflow {
     /// 아키텍트 판정이 보는 작업 정의 수정 요청. 요청 기록과 대상 작업을 한번 읽은
     /// 결과로 조립한다.
     task_revision_requests: Vec<TaskRevisionRequestCandidate>,
+    /// 현재 revision에서 반려됐고 아직 다음 revision이 답하지 않은 그룹 QA 결정.
+    group_qa_revision_requests: Vec<GroupQaRevisionCandidate>,
     /// 현재 `definition_error`로 막힌 작업 id. 작업 문서를 훑을 때 함께 읽는다.
     definition_error_tasks: HashSet<String>,
     /// 같은 기획서에 더 늦은 결정이 없는 `outcome: revision_requested` 결정의 id(SPEC-018 R1).
@@ -1128,6 +1903,8 @@ impl PreparedWorkflow {
         let (tasks, graph) = read_task_documents(&root.join("tasks"));
         let (mut items, nondraft_spec_sources) =
             workflow_items(&root, &decisions, &qa_events, tasks, leases);
+        items.work_groups = read_work_groups(&root, &items.tasks, leases);
+        let group_qa_revision_requests = group_qa_revision_candidates(&root, &items.work_groups);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
         let revision_records = read_all_revision_request_records(&root);
@@ -1147,6 +1924,7 @@ impl PreparedWorkflow {
             items,
             approved_decisions,
             task_revision_requests,
+            group_qa_revision_requests,
             definition_error_tasks,
             revision_requested_decisions,
             unsatisfied_dependencies,
@@ -1236,6 +2014,7 @@ fn validate_decision(outcome: &SpecDecisionOutcome, comment: &str) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_task_qa(outcome: &TaskQaOutcome, comment: &str) -> Result<(), ProjectError> {
     let trimmed = comment.trim();
     if matches!(outcome, TaskQaOutcome::RevisionRequested) && trimmed.is_empty() {
@@ -1247,9 +2026,74 @@ fn validate_task_qa(outcome: &TaskQaOutcome, comment: &str) -> Result<(), Projec
     Ok(())
 }
 
+fn validate_work_group_request_id(request_id: &str) -> Result<(), ProjectError> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(ProjectError::WorkGroupQaRequestIdRequired);
+    }
+    if request_id.chars().count() > 200 {
+        return Err(ProjectError::WorkGroupQaRequestIdTooLong);
+    }
+    Ok(())
+}
+
+fn validate_work_group_qa_entries(submission: &WorkGroupQaSubmission) -> Result<(), ProjectError> {
+    for entry in &submission.entries {
+        if entry.comment.chars().count() > 2_000 {
+            return Err(ProjectError::WorkGroupQaCommentTooLong);
+        }
+        if entry.outcome == WorkGroupQaOutcome::RevisionRequested && entry.comment.trim().is_empty()
+        {
+            return Err(ProjectError::WorkGroupQaCommentRequired);
+        }
+    }
+    Ok(())
+}
+
+fn validate_work_group_scenario_entries(
+    scenarios: &[WorkGroupQaScenario],
+    submission: &WorkGroupQaSubmission,
+) -> Result<(), ProjectError> {
+    let expected = scenarios
+        .iter()
+        .map(|scenario| scenario.id.as_str())
+        .collect::<HashSet<_>>();
+    let actual = submission
+        .entries
+        .iter()
+        .map(|entry| entry.scenario_id.as_str())
+        .collect::<HashSet<_>>();
+    if expected.len() != scenarios.len()
+        || actual.len() != submission.entries.len()
+        || expected != actual
+    {
+        return Err(ProjectError::WorkGroupQaScenarioMismatch);
+    }
+    Ok(())
+}
+
+fn work_group_outcome(value: &str) -> WorkGroupQaOutcome {
+    if value == "confirmed" {
+        WorkGroupQaOutcome::Confirmed
+    } else {
+        WorkGroupQaOutcome::RevisionRequested
+    }
+}
+
+fn work_group_id_of(workflow_root: &Path, file_name: &str) -> Result<String, ProjectError> {
+    let path = safe_markdown_file(&workflow_root.join("groups"), file_name)?;
+    let contents = fs::read_to_string(path)?.replace("\r\n", "\n");
+    let (metadata, _) = split_frontmatter(&contents);
+    if yaml_text(metadata.as_ref(), "schema").as_deref() != Some(WORK_GROUP_SCHEMA) {
+        return Err(ProjectError::WorkGroupNotAwaitingQa);
+    }
+    yaml_text(metadata.as_ref(), "id").ok_or(ProjectError::WorkGroupNotAwaitingQa)
+}
+
 /// QA 한 건을 기록한다. 결정 문서를 쓰고 작업 문서의 상태와 `history`를 갱신한 뒤 작업 id를 준다.
 /// 단건 경로와 일괄 경로가 이 함수 하나를 함께 쓴다 — QA 기록 규칙이 지켜지는 자리를 둘로 늘리지
 /// 않는 것이 뽑은 이유다. 판정 순서와 에러 종류는 뽑기 전과 같다.
+#[cfg(test)]
 fn record_one_task_qa(
     workflow_root: &Path,
     file_name: &str,
@@ -1285,6 +2129,59 @@ fn record_one_task_qa(
     write_text_atomically(&task_path, &updated)?;
 
     Ok(task.id)
+}
+
+/// 제출 항목 한 건을 기록하고 그 결말을 결과 항목으로 만든다. 실패해도 `Err`를 내지 않는다 —
+/// 한 건의 실패는 요청 전체의 실패가 아니고, 화면은 성공한 건과 나란히 이 결과를 읽는다.
+///
+/// 판정은 메모 검사, 갱신 시각 대조, 기록 순서다. 대조를 `record_one_task_qa` 앞에 두는 것이
+/// 이 함수가 있는 이유다. 안에서 하면 단건 통로의 판정까지 함께 바뀐다.
+#[cfg(test)]
+fn submit_one_task_qa(
+    workflow_root: &Path,
+    entry: &TaskQaSubmissionEntry,
+) -> TaskQaSubmissionEntryResult {
+    let failed =
+        |failure: TaskQaSubmissionFailure, error: ProjectError| TaskQaSubmissionEntryResult {
+            file_name: entry.file_name.clone(),
+            task_id: task_id_of(workflow_root, &entry.file_name),
+            recorded: false,
+            failure: Some(failure),
+            message: Some(error.to_string()),
+        };
+
+    if let Err(error) = validate_task_qa(&entry.outcome, &entry.comment) {
+        return failed(TaskQaSubmissionFailure::RecordFailed, error);
+    }
+
+    let task = safe_markdown_file(&workflow_root.join("tasks"), &entry.file_name)
+        .and_then(|path| read_markdown_document(&path, "todo"));
+    let task = match task {
+        Ok((task, _)) => task,
+        Err(error) => return failed(TaskQaSubmissionFailure::RecordFailed, error),
+    };
+    if task.updated_at.as_deref() != Some(entry.expected_updated_at.as_str()) {
+        return failed(TaskQaSubmissionFailure::Stale, ProjectError::TaskQaStale);
+    }
+
+    match record_one_task_qa(
+        workflow_root,
+        &entry.file_name,
+        &entry.outcome,
+        &entry.comment,
+    ) {
+        Ok(task_id) => TaskQaSubmissionEntryResult {
+            file_name: entry.file_name.clone(),
+            task_id: Some(task_id),
+            recorded: true,
+            failure: None,
+            message: None,
+        },
+        Err(error @ ProjectError::TaskNotAwaitingQa) => {
+            failed(TaskQaSubmissionFailure::NotAwaitingQa, error)
+        }
+        Err(error) => failed(TaskQaSubmissionFailure::RecordFailed, error),
+    }
 }
 
 fn validate_task_resume(request: &TaskResumeRequest) -> Result<(), ProjectError> {
@@ -1568,6 +2465,7 @@ fn task_resume_recorded(workflow_root: &Path, task_id: &str, request_id: &str) -
 }
 
 /// 실패한 건의 작업 id. 문서를 읽지 못하면 `None`이고, 파일 이름에서 추정하지 않는다.
+#[cfg(test)]
 fn task_id_of(workflow_root: &Path, file_name: &str) -> Option<String> {
     let task_path = safe_markdown_file(&workflow_root.join("tasks"), file_name).ok()?;
     read_markdown_document(&task_path, "todo")
@@ -1680,13 +2578,8 @@ fn registered_workflow_root(
 }
 
 fn safe_markdown_file(directory: &Path, file_name: &str) -> Result<PathBuf, ProjectError> {
+    validate_markdown_file_name(file_name)?;
     let relative = Path::new(file_name);
-    let mut components = relative.components();
-    let is_single_normal =
-        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
-    if !is_single_normal || relative.extension().and_then(|value| value.to_str()) != Some("md") {
-        return Err(ProjectError::UnsafeDocumentFile(file_name.to_owned()));
-    }
     let path = directory.join(relative);
     if !path.is_file() {
         return Err(ProjectError::DocumentNotFound(file_name.to_owned()));
@@ -1695,6 +2588,17 @@ fn safe_markdown_file(directory: &Path, file_name: &str) -> Result<PathBuf, Proj
         return Err(ProjectError::UnsafeDocumentFile(file_name.to_owned()));
     }
     Ok(path)
+}
+
+fn validate_markdown_file_name(file_name: &str) -> Result<(), ProjectError> {
+    let relative = Path::new(file_name);
+    let mut components = relative.components();
+    let is_single_normal =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if !is_single_normal || relative.extension().and_then(|value| value.to_str()) != Some("md") {
+        return Err(ProjectError::UnsafeDocumentFile(file_name.to_owned()));
+    }
+    Ok(())
 }
 
 /// 이미 읽어 둔 결정과 작업을 받는다. 이 함수가 여는 디렉터리는 `specs/`와 `ideas/` 둘뿐이고
@@ -1729,8 +2633,777 @@ fn workflow_items(
             ideas,
             specs,
             tasks,
+            work_groups: Vec::new(),
         },
         nondraft_sources,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct GroupQaDecisionRecord {
+    id: String,
+    file_name: String,
+    group_id: String,
+    group_revision: u32,
+    outcome: String,
+    request_id: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyTaskQaRecord {
+    file_name: String,
+    task_id: String,
+    outcome: String,
+    created_at: String,
+}
+
+/// 작업 그룹 결정과 v1 작업 QA 기록은 감사 디렉터리를 공유하지만 스키마로 명확히 갈린다.
+fn read_work_group_qa_records(
+    workflow_root: &Path,
+) -> (Vec<GroupQaDecisionRecord>, Vec<LegacyTaskQaRecord>) {
+    let mut group_records = Vec::new();
+    let mut task_records = Vec::new();
+    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
+        return (group_records, task_records);
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("md")
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let (metadata, _) = split_frontmatter(&contents.replace("\r\n", "\n"));
+        if yaml_text(metadata.as_ref(), "created_by").as_deref() != Some("user") {
+            continue;
+        }
+        match yaml_text(metadata.as_ref(), "schema").as_deref() {
+            Some(GROUP_QA_DECISION_SCHEMA) => {
+                let Some(id) = yaml_text(metadata.as_ref(), "id") else {
+                    continue;
+                };
+                if id.trim().is_empty() {
+                    continue;
+                }
+                let Some(group_id) = yaml_text(metadata.as_ref(), "group_id") else {
+                    continue;
+                };
+                if group_id.trim().is_empty() {
+                    continue;
+                }
+                let Some(group_revision) = yaml_u32(metadata.as_ref(), "group_revision") else {
+                    continue;
+                };
+                if group_revision == 0 {
+                    continue;
+                }
+                let Some(outcome) = yaml_text(metadata.as_ref(), "outcome") else {
+                    continue;
+                };
+                if outcome != "confirmed" && outcome != "revision_requested" {
+                    continue;
+                }
+                let Some(request_id) = yaml_text(metadata.as_ref(), "request_id") else {
+                    continue;
+                };
+                if request_id.trim().is_empty() {
+                    continue;
+                }
+                let Some(created_at) = yaml_text(metadata.as_ref(), "created_at") else {
+                    continue;
+                };
+                if DateTime::parse_from_rfc3339(&created_at).is_err() {
+                    continue;
+                }
+                group_records.push(GroupQaDecisionRecord {
+                    id,
+                    file_name: path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    group_id,
+                    group_revision,
+                    outcome,
+                    request_id,
+                    created_at,
+                });
+            }
+            Some("workflow-labs/qa-decision@1") => {
+                let Some(task_id) = yaml_text(metadata.as_ref(), "task_id") else {
+                    continue;
+                };
+                let Some(outcome) = yaml_text(metadata.as_ref(), "outcome") else {
+                    continue;
+                };
+                if outcome != "confirmed" && outcome != "revision_requested" {
+                    continue;
+                }
+                let Some(created_at) = yaml_text(metadata.as_ref(), "created_at") else {
+                    continue;
+                };
+                if DateTime::parse_from_rfc3339(&created_at).is_err() {
+                    continue;
+                }
+                task_records.push(LegacyTaskQaRecord {
+                    file_name: path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    task_id,
+                    outcome,
+                    created_at,
+                });
+            }
+            _ => {}
+        }
+    }
+    (group_records, task_records)
+}
+
+fn latest_group_qa_decision<'a>(
+    records: &'a [GroupQaDecisionRecord],
+    group_id: &str,
+    revision: u32,
+) -> Option<&'a GroupQaDecisionRecord> {
+    records
+        .iter()
+        .filter(|record| record.group_id == group_id && record.group_revision == revision)
+        .max_by(|left, right| {
+            parse_event_instant(&left.created_at)
+                .cmp(&parse_event_instant(&right.created_at))
+                .then_with(|| left.file_name.cmp(&right.file_name))
+        })
+}
+
+fn group_qa_revision_candidates(
+    workflow_root: &Path,
+    groups: &[WorkGroupSummary],
+) -> Vec<GroupQaRevisionCandidate> {
+    let (records, _) = read_work_group_qa_records(workflow_root);
+    let mut candidates = groups
+        .iter()
+        .filter_map(|group| {
+            let decision = latest_group_qa_decision(&records, &group.id, group.revision)?;
+            (decision.outcome == "revision_requested").then(|| GroupQaRevisionCandidate {
+                id: decision.id.clone(),
+                group_id: group.id.clone(),
+                created_at: decision.created_at.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        parse_event_instant(&left.created_at)
+            .cmp(&parse_event_instant(&right.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    candidates
+}
+
+fn legacy_task_qa_is_confirmed(records: &[LegacyTaskQaRecord], task_id: &str) -> bool {
+    records
+        .iter()
+        .filter(|record| record.task_id == task_id)
+        .max_by(|left, right| {
+            parse_event_instant(&left.created_at)
+                .cmp(&parse_event_instant(&right.created_at))
+                .then_with(|| left.file_name.cmp(&right.file_name))
+        })
+        .is_some_and(|record| record.outcome == "confirmed")
+}
+
+fn read_work_groups(
+    workflow_root: &Path,
+    tasks: &[WorkflowItemSummary],
+    leases: &[AgentLeaseSummary],
+) -> Vec<WorkGroupSummary> {
+    let (group_decisions, legacy_task_decisions) = read_work_group_qa_records(workflow_root);
+    let mut paths: Vec<PathBuf> = fs::read_dir(workflow_root.join("groups"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().and_then(|value| value.to_str()) == Some("md")
+                && matches!(fs::symlink_metadata(path), Ok(metadata) if metadata.file_type().is_file())
+        })
+        .collect();
+    paths.sort();
+    let mut groups = paths
+        .into_iter()
+        .filter_map(|path| {
+            parse_work_group(
+                &path,
+                tasks,
+                leases,
+                &group_decisions,
+                &legacy_task_decisions,
+            )
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        parse_event_instant(&right.updated_at)
+            .cmp(&parse_event_instant(&left.updated_at))
+            .then_with(|| left.file_name.cmp(&right.file_name))
+    });
+    groups
+}
+
+fn parse_work_group(
+    path: &Path,
+    tasks: &[WorkflowItemSummary],
+    leases: &[AgentLeaseSummary],
+    group_decisions: &[GroupQaDecisionRecord],
+    legacy_task_decisions: &[LegacyTaskQaRecord],
+) -> Option<WorkGroupSummary> {
+    let contents = fs::read_to_string(path).ok()?.replace("\r\n", "\n");
+    let (metadata, body) = split_frontmatter(&contents);
+    let metadata = metadata.as_ref()?;
+    if yaml_text(Some(metadata), "schema").as_deref() != Some(WORK_GROUP_SCHEMA) {
+        return None;
+    }
+    let fallback_id = path.file_stem()?.to_str()?.to_owned();
+    let explicit_id = yaml_text(Some(metadata), "id");
+    let id = explicit_id.clone().unwrap_or(fallback_id);
+    let title = yaml_text(Some(metadata), "title")
+        .or_else(|| markdown_title(&body))
+        .unwrap_or_else(|| id.clone());
+    let source_spec_id = yaml_text(Some(metadata), "source_spec_id").unwrap_or_default();
+    let source_decision_id = yaml_text(Some(metadata), "source_decision_id").unwrap_or_default();
+    let declared_source_qa_decision_id = yaml_text(Some(metadata), "source_qa_decision_id");
+    let revision = yaml_u32(Some(metadata), "revision").unwrap_or_default();
+    let explicit_updated_at = yaml_text(Some(metadata), "updated_at");
+    let updated_at = explicit_updated_at
+        .clone()
+        .or_else(|| yaml_text(Some(metadata), "created_at"))
+        .unwrap_or_default();
+    let (status, status_valid) = match yaml_text(Some(metadata), "status").as_deref() {
+        Some("preparing") => (WorkGroupStatus::Preparing, true),
+        Some("active") => (WorkGroupStatus::Active, true),
+        _ => (WorkGroupStatus::Active, false),
+    };
+    let (qa_mode, qa_mode_valid) = match yaml_text(Some(metadata), "qa_mode").as_deref() {
+        Some("user") => (WorkGroupQaMode::User, true),
+        Some("automatic") => (WorkGroupQaMode::Automatic, true),
+        _ => (WorkGroupQaMode::User, false),
+    };
+    let (description, scenarios, scenario_ids_unique) = parse_work_group_body(&body);
+    let assigned_tasks = tasks
+        .iter()
+        .filter(|task| task.work_group_id.as_deref() == Some(id.as_str()))
+        .collect::<Vec<_>>();
+    let task_revisions_valid = !assigned_tasks.is_empty()
+        && assigned_tasks.iter().all(|task| {
+            task_is_valid_for_group(task, revision, &source_spec_id, &source_decision_id)
+        });
+    let structurally_valid = status_valid
+        && qa_mode_valid
+        && explicit_id.is_some_and(|value| !value.trim().is_empty())
+        && revision > 0
+        && !source_spec_id.is_empty()
+        && !source_decision_id.is_empty()
+        && explicit_updated_at
+            .as_deref()
+            .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok())
+        && scenario_ids_unique;
+
+    let latest_decision = latest_group_qa_decision(group_decisions, &id, revision);
+    let source_qa_decision_id = latest_decision
+        .filter(|decision| decision.outcome == "revision_requested")
+        .map(|decision| decision.id.clone())
+        .or(declared_source_qa_decision_id);
+    let display_status = if latest_decision.is_some_and(|decision| decision.outcome == "confirmed")
+        || (task_revisions_valid
+            && assigned_tasks
+                .iter()
+                .all(|task| legacy_task_qa_is_confirmed(legacy_task_decisions, &task.id)))
+    {
+        WorkGroupDisplayStatus::Completed
+    } else if latest_decision.is_some_and(|decision| decision.outcome == "revision_requested") {
+        WorkGroupDisplayStatus::Rework
+    } else if status == WorkGroupStatus::Preparing {
+        let claimed = leases.iter().any(|lease| {
+            lease.task_id.as_deref() == Some(id.as_str())
+                || lease.task_id.as_deref() == Some(source_decision_id.as_str())
+                || source_qa_decision_id
+                    .as_deref()
+                    .is_some_and(|decision_id| lease.task_id.as_deref() == Some(decision_id))
+        });
+        if claimed {
+            WorkGroupDisplayStatus::Preparing
+        } else {
+            WorkGroupDisplayStatus::PreparingStalled
+        }
+    } else if assigned_tasks.iter().any(|task| task.status == "blocked") {
+        WorkGroupDisplayStatus::Blocked
+    } else if assigned_tasks
+        .iter()
+        .any(|task| task.status == "todo" || task.status == "in_progress")
+    {
+        WorkGroupDisplayStatus::Developing
+    } else if !structurally_valid
+        || !task_revisions_valid
+        || (qa_mode == WorkGroupQaMode::User
+            && (scenarios.is_empty()
+                || scenarios
+                    .iter()
+                    .any(|scenario| !scenario_is_user_safe(scenario))))
+        || (qa_mode == WorkGroupQaMode::Automatic && !scenarios.is_empty())
+        || assigned_tasks.iter().any(|task| task.status != "verified")
+    {
+        WorkGroupDisplayStatus::ConfigurationError
+    } else if qa_mode == WorkGroupQaMode::User {
+        WorkGroupDisplayStatus::QaReady
+    } else {
+        WorkGroupDisplayStatus::AutomaticCompleted
+    };
+
+    Some(WorkGroupSummary {
+        file_name: path.file_name()?.to_str()?.to_owned(),
+        id,
+        title,
+        status,
+        display_status,
+        revision,
+        qa_mode,
+        source_spec_id,
+        source_decision_id,
+        source_qa_decision_id,
+        updated_at,
+        description,
+        scenarios,
+    })
+}
+
+fn task_is_valid_for_group(
+    task: &WorkflowItemSummary,
+    group_revision: u32,
+    source_spec_id: &str,
+    source_decision_id: &str,
+) -> bool {
+    task.work_group_revision
+        .is_some_and(|revision| revision > 0 && revision <= group_revision)
+        && task.source_spec_id.as_deref() == Some(source_spec_id)
+        && task.source_decision_id.as_deref() == Some(source_decision_id)
+}
+
+fn parse_work_group_body(body: &str) -> (String, Vec<WorkGroupQaScenario>, bool) {
+    let mut description_lines = Vec::new();
+    let mut scenarios = Vec::new();
+    let mut current: Option<(String, String, Vec<String>)> = None;
+    let mut structure_valid = true;
+    for line in body.lines() {
+        let heading = line
+            .strip_prefix("### ")
+            .and_then(|value| value.split_once(" · "));
+        if let Some((id, title)) = heading.filter(|(id, _)| id.starts_with("QA-")) {
+            let expected_number = scenarios.len() + usize::from(current.is_some()) + 1;
+            let expected_id = format!("QA-{expected_number:02}");
+            if id == expected_id && !title.trim().is_empty() {
+                if let Some((id, title, lines)) = current.take() {
+                    scenarios.push(WorkGroupQaScenario {
+                        id,
+                        title,
+                        body: lines.join("\n").trim().to_owned(),
+                    });
+                }
+                current = Some((id.to_owned(), title.trim().to_owned(), Vec::new()));
+            } else {
+                structure_valid = false;
+                if let Some((_, _, lines)) = current.as_mut() {
+                    lines.push(line.to_owned());
+                }
+            }
+        } else if line.starts_with("### QA-") {
+            structure_valid = false;
+            if let Some((_, _, lines)) = current.as_mut() {
+                lines.push(line.to_owned());
+            }
+        } else if let Some((_, _, lines)) = current.as_mut() {
+            lines.push(line.to_owned());
+        } else if !line.starts_with("# ") && line.trim() != "## 기능 설명" {
+            description_lines.push(line.to_owned());
+        }
+    }
+    if let Some((id, title, lines)) = current {
+        scenarios.push(WorkGroupQaScenario {
+            id,
+            title,
+            body: lines.join("\n").trim().to_owned(),
+        });
+    }
+    let mut seen = HashSet::new();
+    let ids_unique = scenarios
+        .iter()
+        .all(|scenario| seen.insert(scenario.id.clone()));
+    seen.clear();
+    scenarios.retain(|scenario| seen.insert(scenario.id.clone()));
+    (
+        description_lines.join("\n").trim().to_owned(),
+        scenarios,
+        structure_valid && ids_unique,
+    )
+}
+
+fn scenario_is_user_safe(scenario: &WorkGroupQaScenario) -> bool {
+    if scenario.body.trim().is_empty() || scenario.body.contains("```") {
+        return false;
+    }
+    !contains_internal_qa_instruction(&scenario.title)
+        && !contains_internal_qa_instruction(&scenario.body)
+        && scenario_describes_user_observable_flow(&scenario.body)
+}
+
+fn scenario_describes_user_observable_flow(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    let mentions_surface = [
+        "화면",
+        "페이지",
+        "창",
+        "대화상자",
+        "다이얼로그",
+        "목록",
+        "메뉴",
+        "버튼",
+        "폼",
+        "카드",
+        "패널",
+        "탭",
+        "앱",
+        "브라우저",
+        "모달",
+        "알림",
+        "토스트",
+        "배너",
+        "대시보드",
+        "설정",
+        "입력란",
+        "screen",
+        "page",
+        "window",
+        "dialog",
+        "list",
+        "menu",
+        "button",
+        "form",
+        "card",
+        "panel",
+        "tab",
+        "app",
+        "browser",
+        "modal",
+        "notice",
+        "toast",
+        "banner",
+        "dashboard",
+        "settings",
+        "field",
+    ]
+    .iter()
+    .any(|token| lowered.contains(token));
+    let mentions_action = [
+        "누르",
+        "눌",
+        "클릭",
+        "선택",
+        "입력",
+        "열",
+        "이동",
+        "저장",
+        "전환",
+        "확인",
+        "스크롤",
+        "드래그",
+        "켜",
+        "끄",
+        "바꾸",
+        "지정",
+        "돌아",
+        "tap",
+        "click",
+        "select",
+        "enter",
+        "type",
+        "open",
+        "navigate",
+        "save",
+        "switch",
+        "check",
+        "scroll",
+        "drag",
+    ]
+    .iter()
+    .any(|token| lowered.contains(token));
+    let mentions_visible_result = [
+        "보여",
+        "보이",
+        "표시",
+        "나타",
+        "사라",
+        "완료",
+        "변경",
+        "유지",
+        "결과",
+        "안내",
+        "메시지",
+        "활성",
+        "비활성",
+        "추가",
+        "삭제",
+        "선택되어",
+        "그대로",
+        "visible",
+        "appears",
+        "shows",
+        "display",
+        "hidden",
+        "disappears",
+        "complete",
+        "updated",
+        "saved",
+        "result",
+        "message",
+        "enabled",
+        "disabled",
+        "added",
+        "removed",
+    ]
+    .iter()
+    .any(|token| lowered.contains(token));
+    mentions_surface && mentions_action && mentions_visible_result
+}
+
+fn contains_internal_qa_instruction(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    let command_tokens = [
+        "npx ",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "cargo ",
+        "pytest",
+        "go test",
+        "go build",
+        "python -m ",
+        "gradle test",
+        "gradle build",
+        "gradlew test",
+        "gradlew build",
+        "dotnet test",
+        "dotnet build",
+        "curl http://",
+        "curl https://",
+        "curl -",
+        "docker run ",
+        "docker build ",
+        "docker exec ",
+        "docker compose up",
+        "docker compose run",
+        "docker compose exec",
+        "mvn test",
+        "mvn verify",
+        "mvn package",
+        "maven test",
+        "./scripts/",
+        ".\\scripts\\",
+        "swift test",
+        "xcodebuild ",
+        "bash ",
+        "zsh ",
+        "pwsh ",
+        "powershell ",
+        "make test",
+        "bun test",
+        "typecheck",
+        "type-check",
+        "tsc ",
+        "run lint",
+        "run build",
+        "lint command",
+        "build command",
+        "lint/build",
+        "terminal",
+        "터미널",
+        "명령어",
+        "command line",
+        "테스트를 실행",
+        "테스트 실행",
+        "테스트를 돌",
+        "테스트 돌",
+        "타입 검사",
+        "타입검사",
+        "lint 검사",
+        "lint를 실행",
+        "lint 실행",
+        "린트",
+        "빌드를 실행",
+        "빌드 실행",
+        "빌드를 돌",
+    ];
+    command_tokens.iter().any(|token| lowered.contains(token))
+        || lowered.lines().any(line_looks_like_cli_command)
+}
+
+fn line_looks_like_cli_command(line: &str) -> bool {
+    let mut candidate = line.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    if candidate.starts_with("$ ")
+        || candidate.starts_with("% ")
+        || candidate.starts_with(">>> ")
+        || candidate.starts_with("ps> ")
+        || (candidate.starts_with("ps ") && candidate.contains("> "))
+    {
+        return true;
+    }
+    if let Some((prompt, _)) = candidate.split_once("$ ") {
+        if prompt.contains('@') || prompt.ends_with(':') || prompt.contains('/') {
+            return true;
+        }
+    }
+    let bytes = candidate.as_bytes();
+    if bytes.len() > 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+        && candidate.contains("> ")
+    {
+        return true;
+    }
+
+    if let Some(stripped) = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|prefix| candidate.strip_prefix(prefix))
+    {
+        candidate = stripped.trim_start();
+    } else if let Some((number, rest)) = candidate.split_once(". ") {
+        if !number.is_empty() && number.chars().all(|character| character.is_ascii_digit()) {
+            candidate = rest.trim_start();
+        }
+    }
+    if let Some(command) = candidate.strip_prefix("# ") {
+        let executable = command
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches('`');
+        if is_unambiguous_cli_executable(executable)
+            || command.starts_with("go test")
+            || command.starts_with("go build")
+            || command.starts_with("swift test")
+            || command.starts_with("./")
+        {
+            return true;
+        }
+    }
+    candidate = candidate.trim_start_matches('`');
+    if candidate.starts_with("./")
+        || candidate.starts_with("../")
+        || candidate.starts_with(".\\")
+        || candidate.starts_with("/bin/")
+        || candidate.starts_with("/usr/bin/")
+    {
+        return true;
+    }
+
+    let mut words = candidate.split_whitespace();
+    let executable = words.next().unwrap_or_default().trim_matches('`');
+    let first_argument = words.next().unwrap_or_default().trim_matches('`');
+    is_unambiguous_cli_executable(executable)
+        || (executable == "swift" && candidate.starts_with("swift test"))
+        || (executable == "go"
+            && (candidate.starts_with("go test") || candidate.starts_with("go build")))
+        || (executable == "git"
+            && matches!(
+                first_argument,
+                "add"
+                    | "bisect"
+                    | "branch"
+                    | "checkout"
+                    | "clone"
+                    | "commit"
+                    | "diff"
+                    | "fetch"
+                    | "grep"
+                    | "log"
+                    | "merge"
+                    | "pull"
+                    | "push"
+                    | "rebase"
+                    | "reset"
+                    | "restore"
+                    | "show"
+                    | "status"
+                    | "switch"
+                    | "tag"
+            ))
+        || (executable == "node"
+            && (first_argument.starts_with('-')
+                || first_argument.contains('/')
+                || first_argument.ends_with(".js")
+                || first_argument.ends_with(".mjs")
+                || first_argument.ends_with(".cjs")
+                || first_argument.ends_with(".ts")))
+        || (executable == "deno"
+            && matches!(
+                first_argument,
+                "run" | "test" | "task" | "check" | "lint" | "fmt" | "compile"
+            ))
+        || (executable == "php"
+            && (first_argument.starts_with('-')
+                || first_argument.contains('/')
+                || first_argument.ends_with(".php")))
+        || (executable == "ruby"
+            && (first_argument.starts_with('-')
+                || first_argument.contains('/')
+                || first_argument.ends_with(".rb")))
+        || (executable == "make"
+            && !first_argument.is_empty()
+            && !matches!(
+                first_argument,
+                "a" | "an" | "it" | "sure" | "the" | "this" | "that"
+            ))
+}
+
+fn is_unambiguous_cli_executable(executable: &str) -> bool {
+    matches!(
+        executable,
+        "curl"
+            | "docker"
+            | "docker-compose"
+            | "mvn"
+            | "maven"
+            | "xcodebuild"
+            | "kubectl"
+            | "helm"
+            | "bash"
+            | "sh"
+            | "zsh"
+            | "pwsh"
+            | "powershell"
+            | "npm"
+            | "npx"
+            | "pnpm"
+            | "yarn"
+            | "cargo"
+            | "pytest"
+            | "gradle"
+            | "gradlew"
+            | "dotnet"
+            | "phpunit"
+            | "composer"
+            | "bundle"
+            | "rspec"
+            | "cmake"
+            | "ctest"
     )
 }
 
@@ -1996,6 +3669,9 @@ fn markdown_summary(
     let due_at = yaml_text(metadata, "due_at");
     let source_spec_id = yaml_text(metadata, "source_spec_id");
     let source_decision_id = yaml_text(metadata, "source_decision_id");
+    let work_group_id = yaml_text(metadata, "work_group_id");
+    let work_group_revision = yaml_u32(metadata, "work_group_revision");
+    let source_qa_decision_id = yaml_text(metadata, "source_qa_decision_id");
     let events = read_task_events(metadata);
     let status = yaml_text(metadata, "status").unwrap_or_else(|| default_status.to_owned());
     // QA 대기 카드에는 개발자가 쓴 확인 동선의 첫 문단을 싣는다(SPEC-056 R1). 이미 읽어 둔 같은
@@ -2014,6 +3690,9 @@ fn markdown_summary(
         due_at,
         source_spec_id,
         source_decision_id,
+        work_group_id,
+        work_group_revision,
+        source_qa_decision_id,
         // 아이디어 판정(`derive_idea_states`)만 이 값을 채운다.
         stalled_spec_ids: Vec::new(),
         events,
@@ -2372,7 +4051,7 @@ fn dependency_state(
         return TaskDependencyState::Cyclic;
     }
     // 계약에 없는 상태값도 미충족이다. 모르는 값을 충족 쪽으로 넘기지 않는다.
-    if status == "qa_waiting" || status == "completed" {
+    if status == "verified" {
         TaskDependencyState::Satisfied
     } else {
         TaskDependencyState::Pending
@@ -2498,6 +4177,13 @@ fn yaml_text(metadata: Option<&serde_yaml::Value>, key: &str) -> Option<String> 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn yaml_u32(metadata: Option<&serde_yaml::Value>, key: &str) -> Option<u32> {
+    metadata?
+        .get(key)?
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn markdown_title(body: &str) -> Option<String> {
@@ -2858,6 +4544,7 @@ fn workflow_counts(workflow_root: &Path, items: &WorkflowItems) -> WorkflowCount
             .filter(|item| item.status == "user_review")
             .count(),
         tasks: items.tasks.len(),
+        work_groups: items.work_groups.len(),
         reports: count_markdown_files(&workflow_root.join("reports")),
     }
 }
@@ -2982,12 +4669,13 @@ fn workflow_readme(name: &str, id: &str) -> String {
 1. 공통 규칙 `../rules/workflow.md`와 이 세션에 할당된 `../rules/roles/*.md` 하나를 읽습니다.
 2. 쓰기 전에 `../.runtime/migration.lock`과 겹치는 활성 lease가 없는지 확인합니다.
 3. 한 세션에서는 기획자·프로젝트 아키텍트·개발자 중 한 역할과 한 대상만 처리합니다.
-4. 아이디어는 `ideas/`, 기획서는 `specs/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.
+4. 아이디어는 `ideas/`, 기획서는 `specs/`, 작업 그룹은 `groups/`, 개발 작업은 `tasks/`, 결과는 `reports/`에 기록합니다.
 5. 사용자 결정이 필요한 기획서는 `status: user_review`로 저장합니다.
 6. `decisions/`는 앱이 승인·수정 요청·폐기를 기록하는 감사 로그입니다. 외부 LLM은 이 파일을 만들거나 덮어쓰지 않습니다.
 7. 기획서의 `revision_requested`만 기획자 재작업 대상으로 삼고 `rejected`는 종료 상태로 보존합니다.
-8. `todo`로 돌아온 개발 작업은 최신 `workflow-labs/qa-decision@1`의 테스트 플로우를 읽고 재작업합니다.
-9. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.
+8. 개발 작업은 AI 자동검증 뒤 `verified`로 끝내며 사용자 QA는 작업 그룹 단위로만 진행합니다.
+9. `workflow-labs/group-qa-decision@1` 수정 요청은 아키텍트가 새 그룹 revision과 수정 작업으로 답합니다.
+10. 앱 소유 상태 파일, 문서 식별자와 알 수 없는 기존 메타데이터를 보존합니다.
 
 ## 필수 frontmatter
 
@@ -3004,15 +4692,34 @@ updated_at: RFC3339
 
 본문에는 `기획 내용`, `요구사항 명세`, `기대효과` 섹션을 권장합니다.
 
+### 작업 그룹 (`groups/*.md`)
+
+```yaml
+schema: workflow-labs/work-group@1
+id: GROUP-DECISION-001
+title: 기능 제목
+status: preparing # preparing | active
+revision: 1
+qa_mode: user # user | automatic
+source_spec_id: SPEC-001
+source_decision_id: DECISION-001
+created_at: RFC3339
+updated_at: RFC3339
+```
+
+사용자 QA 항목은 본문에 `### QA-01 · 제목` 형식으로 화면·행동·기대 결과를 적습니다.
+
 ### 개발 작업 (`tasks/*.md`)
 
 ```yaml
 schema: workflow-labs/task@1
 id: TASK-001
 title: 작업 제목
-status: todo # todo | in_progress | blocked | qa_waiting | completed
+status: todo # todo | in_progress | blocked | verified
 source_spec_id: SPEC-001
 source_decision_id: DECISION-001
+work_group_id: GROUP-DECISION-001
+work_group_revision: 1
 updated_at: RFC3339
 due_at: YYYY-MM-DD # 선택
 ```
@@ -3045,15 +4752,19 @@ mod tests {
         CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
         ManagedAssetSyncStatus, PendingRoleWork, SaveCustomRulesRequest, SaveCustomRulesStatus,
         SchemaCompatibility, SpecDecisionOutcome, TaskDependencyState, TaskDocument, TaskQaOutcome,
-        TaskResumeRequest, TaskResumeStatus, TaskRevisionRequest, TaskRevisionRequestInput,
-        TaskRevisionRequestStatus, TaskScopeStatus, WorkflowItemSummary,
+        TaskQaSubmission, TaskQaSubmissionEntry, TaskQaSubmissionFailure, TaskResumeRequest,
+        TaskResumeStatus, TaskRevisionRequest, TaskRevisionRequestInput, TaskRevisionRequestStatus,
+        TaskScopeStatus, WorkflowItemSummary,
     };
     // 설치본 이름이 플랫폼마다 다르므로 경로를 자산 서술에서 받는다(SPEC-015 R1).
     use crate::infrastructure::claim_helper::claim_helper_path;
     use crate::infrastructure::heartbeat_condition::install_condition_script;
     use crate::infrastructure::heartbeat_condition::test_support::run_condition;
+    use crate::infrastructure::project_instructions::WORKFLOW_RULES_VERSION;
     use crate::infrastructure::project_write_lock::ProjectWriteLock;
-    use crate::infrastructure::reservation_helper::reservation_helper_path;
+    use crate::infrastructure::reservation_helper::{
+        reservation_helper_path, RESERVATION_HELPER_VERSION,
+    };
 
     #[test]
     fn slug_is_portable_and_preserves_unicode_letters() {
@@ -3089,7 +4800,15 @@ mod tests {
             .path()
             .join(".workflow")
             .join(&created.workflows[0].directory);
-        for directory in ["ideas", "specs", "decisions", "tasks", "reports", "state"] {
+        for directory in [
+            "ideas",
+            "specs",
+            "decisions",
+            "tasks",
+            "groups",
+            "reports",
+            "state",
+        ] {
             assert!(workflow_root.join(directory).is_dir());
         }
         assert!(workflow_root.join("workflow.yml").is_file());
@@ -3113,9 +4832,11 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
         let rules = root.path().join(".workflow/rules/workflow.md");
+        let current_version = format!("rules_version: {WORKFLOW_RULES_VERSION}");
+        let previous_version = format!("rules_version: {}", WORKFLOW_RULES_VERSION - 1);
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
+            .replace(&current_version, &previous_version);
         fs::write(&rules, &old).expect("old rules");
         let modified = fs::metadata(&rules)
             .and_then(|metadata| metadata.modified())
@@ -3141,9 +4862,11 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
         let rules = root.path().join(".workflow/rules/workflow.md");
+        let current_version = format!("rules_version: {WORKFLOW_RULES_VERSION}");
+        let previous_version = format!("rules_version: {}", WORKFLOW_RULES_VERSION - 1);
         let old = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
+            .replace(&current_version, &previous_version);
         fs::write(&rules, old).expect("old rules");
 
         let result = repository
@@ -3154,7 +4877,7 @@ mod tests {
         assert!(result.updated_assets.contains(&"workflow_rules".to_owned()));
         assert!(fs::read_to_string(rules)
             .expect("updated rules")
-            .contains("rules_version: 22"));
+            .contains(&current_version));
     }
 
     #[test]
@@ -3225,9 +4948,11 @@ mod tests {
             .and_then(|metadata| metadata.modified())
             .expect("custom rules mtime");
         let rules = root.path().join(".workflow/rules/workflow.md");
+        let current_version = format!("rules_version: {WORKFLOW_RULES_VERSION}");
+        let previous_version = format!("rules_version: {}", WORKFLOW_RULES_VERSION - 1);
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
+            .replace(&current_version, &previous_version);
         fs::write(&rules, old_rules).expect("old managed rules");
 
         repository.inspect(root.path()).expect("inspect project");
@@ -4465,12 +6190,6 @@ mod tests {
             .read_task(root.path(), &workflow.directory, "TASK-CONFIRMED.md")
             .expect("read task");
         assert!(detail.body.contains("실제 동작을 확인한다."));
-        let architect = root.path().join(".workflow/rules/roles/architect.md");
-        let old_architect = fs::read_to_string(&architect)
-            .expect("architect")
-            .replace("rules_version: 15", "rules_version: 14");
-        fs::write(&architect, old_architect).expect("old architect");
-
         let confirmed = repository
             .record_task_qa(
                 root.path(),
@@ -4490,9 +6209,6 @@ mod tests {
                 .status,
             "completed"
         );
-        assert!(fs::read_to_string(architect)
-            .expect("architect updated on QA")
-            .contains("rules_version: 15"));
         let confirmed_source = fs::read_to_string(&confirmed_path).expect("confirmed source");
         assert!(confirmed_source.contains("status: completed"));
         assert!(confirmed_source.contains("custom_field: keep-me"));
@@ -5048,12 +6764,6 @@ mod tests {
             .iter()
             .map(|id| batch_qa_task(root.path(), &directory, id, "qa_waiting"))
             .collect();
-        let developer = root.path().join(".workflow/rules/roles/developer.md");
-        let old_developer = fs::read_to_string(&developer)
-            .expect("developer")
-            .replace("rules_version: 16", "rules_version: 15");
-        fs::write(&developer, old_developer).expect("old developer");
-
         let result = repository
             .confirm_task_qa_batch(
                 root.path(),
@@ -5068,9 +6778,6 @@ mod tests {
             .expect("confirm batch");
 
         assert!(result.results.iter().all(|entry| entry.recorded));
-        assert!(fs::read_to_string(developer)
-            .expect("developer updated on batch QA")
-            .contains("rules_version: 16"));
         assert_eq!(
             result
                 .results
@@ -5287,6 +6994,314 @@ mod tests {
         assert!(result.results.is_empty());
         assert_eq!(result.summary.workflows.len(), 1);
         assert!(qa_decision_texts(root.path(), &directory).is_empty());
+    }
+
+    /// `batch_qa_task`가 심는 갱신 시각. 제출 항목은 사용자가 검토를 시작할 때 이 값을 읽는다.
+    const SEEDED_UPDATED_AT: &str = "2026-07-31T00:00:00Z";
+
+    fn submission_entry(
+        file_name: &str,
+        outcome: TaskQaOutcome,
+        comment: &str,
+        expected_updated_at: &str,
+    ) -> TaskQaSubmissionEntry {
+        TaskQaSubmissionEntry {
+            file_name: file_name.to_owned(),
+            outcome,
+            comment: comment.to_owned(),
+            expected_updated_at: expected_updated_at.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_submission_records_each_task_with_its_own_outcome_and_comment() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let paths: Vec<PathBuf> = ["TASK-001", "TASK-002", "TASK-003"]
+            .iter()
+            .map(|id| batch_qa_task(root.path(), &directory, id, "qa_waiting"))
+            .collect();
+
+        let result = repository
+            .submit_task_qa(
+                root.path(),
+                &TaskQaSubmission {
+                    workflow_directory: directory.clone(),
+                    entries: vec![
+                        submission_entry(
+                            "TASK-001.md",
+                            TaskQaOutcome::Confirmed,
+                            "첫 번째 확인 메모",
+                            SEEDED_UPDATED_AT,
+                        ),
+                        submission_entry(
+                            "TASK-002.md",
+                            TaskQaOutcome::RevisionRequested,
+                            "두 번째 재작업 메모",
+                            SEEDED_UPDATED_AT,
+                        ),
+                        submission_entry(
+                            "TASK-003.md",
+                            TaskQaOutcome::Confirmed,
+                            "세 번째 확인 메모",
+                            SEEDED_UPDATED_AT,
+                        ),
+                    ],
+                },
+            )
+            .expect("submit qa");
+
+        assert!(result.results.iter().all(|entry| entry.recorded));
+        assert!(result.results.iter().all(|entry| entry.failure.is_none()));
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|entry| entry.task_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("TASK-001".to_owned()),
+                Some("TASK-002".to_owned()),
+                Some("TASK-003".to_owned()),
+            ]
+        );
+
+        // 결정 문서의 스키마 줄과 작성자 줄은 단건 통로가 쓰던 값 그대로다. 통로가 늘어도 같은
+        // 결정이 다르게 기록되지 않는지를 이 단언이 지킨다.
+        let decisions = qa_decision_texts(root.path(), &directory);
+        assert_eq!(decisions.len(), 3);
+        assert!(decisions
+            .iter()
+            .all(|text| text.contains("schema: workflow-labs/qa-decision@1")
+                && text.contains("created_by: user")));
+        for (id, outcome, comment) in [
+            ("TASK-001", "confirmed", "첫 번째 확인 메모"),
+            ("TASK-002", "revision_requested", "두 번째 재작업 메모"),
+            ("TASK-003", "confirmed", "세 번째 확인 메모"),
+        ] {
+            let decision = decisions
+                .iter()
+                .find(|text| text.contains(&format!("task_id: {id}")))
+                .expect("결정 문서");
+            assert!(decision.contains(&format!("outcome: {outcome}")));
+            assert!(decision.contains(comment));
+        }
+        // 메모가 섞이지 않았는지는 각 문서가 자기 메모만 담는지로 본다.
+        for (id, other) in [
+            ("TASK-001", "두 번째 재작업 메모"),
+            ("TASK-002", "첫 번째 확인 메모"),
+        ] {
+            let decision = decisions
+                .iter()
+                .find(|text| text.contains(&format!("task_id: {id}")))
+                .expect("결정 문서");
+            assert!(!decision.contains(other));
+        }
+
+        for (path, status, kind) in [
+            (&paths[0], "status: completed", "kind: completed"),
+            (&paths[1], "status: todo", "kind: revision_requested"),
+            (&paths[2], "status: completed", "kind: completed"),
+        ] {
+            let source = fs::read_to_string(path).expect("task source");
+            assert!(source.contains(status));
+            assert_eq!(source.matches(kind).count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_submission_refuses_an_entry_whose_task_changed_since_the_review_started() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let stale = batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        batch_qa_task(root.path(), &directory, "TASK-002", "qa_waiting");
+        let before = fs::read_to_string(&stale).expect("task source");
+
+        let result = repository
+            .submit_task_qa(
+                root.path(),
+                &TaskQaSubmission {
+                    workflow_directory: directory.clone(),
+                    entries: vec![
+                        submission_entry(
+                            "TASK-001.md",
+                            TaskQaOutcome::Confirmed,
+                            "확인함",
+                            "2026-07-30T00:00:00Z",
+                        ),
+                        submission_entry(
+                            "TASK-002.md",
+                            TaskQaOutcome::Confirmed,
+                            "확인함",
+                            SEEDED_UPDATED_AT,
+                        ),
+                    ],
+                },
+            )
+            .expect("submit qa");
+
+        assert!(!result.results[0].recorded);
+        assert_eq!(
+            result.results[0].failure,
+            Some(TaskQaSubmissionFailure::Stale)
+        );
+        assert_eq!(
+            result.results[0].message.as_deref(),
+            Some(ProjectError::TaskQaStale.to_string().as_str())
+        );
+        assert!(result.results[1].recorded);
+        assert_eq!(fs::read_to_string(&stale).expect("task source"), before);
+        let decisions = qa_decision_texts(root.path(), &directory);
+        assert_eq!(decisions.len(), 1);
+        assert!(decisions[0].contains("task_id: TASK-002"));
+    }
+
+    #[test]
+    fn a_submission_records_the_rest_when_one_task_is_no_longer_awaiting_qa() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        let completed = batch_qa_task(root.path(), &directory, "TASK-002", "completed");
+        batch_qa_task(root.path(), &directory, "TASK-003", "qa_waiting");
+
+        let result = repository
+            .submit_task_qa(
+                root.path(),
+                &TaskQaSubmission {
+                    workflow_directory: directory.clone(),
+                    entries: vec![
+                        submission_entry(
+                            "TASK-001.md",
+                            TaskQaOutcome::Confirmed,
+                            "확인함",
+                            SEEDED_UPDATED_AT,
+                        ),
+                        submission_entry(
+                            "TASK-002.md",
+                            TaskQaOutcome::Confirmed,
+                            "확인함",
+                            SEEDED_UPDATED_AT,
+                        ),
+                        submission_entry(
+                            "TASK-003.md",
+                            TaskQaOutcome::RevisionRequested,
+                            "다시 확인해 주세요.",
+                            SEEDED_UPDATED_AT,
+                        ),
+                    ],
+                },
+            )
+            .expect("submit qa");
+
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|entry| (entry.file_name.as_str(), entry.recorded, entry.failure))
+                .collect::<Vec<_>>(),
+            vec![
+                ("TASK-001.md", true, None),
+                (
+                    "TASK-002.md",
+                    false,
+                    Some(TaskQaSubmissionFailure::NotAwaitingQa)
+                ),
+                ("TASK-003.md", true, None),
+            ]
+        );
+        assert_eq!(result.results[1].task_id, Some("TASK-002".to_owned()));
+        assert_eq!(
+            result.results[1].message.as_deref(),
+            Some(ProjectError::TaskNotAwaitingQa.to_string().as_str())
+        );
+        assert!(fs::read_to_string(&completed)
+            .expect("task source")
+            .contains("status: completed"));
+        assert_eq!(qa_decision_texts(root.path(), &directory).len(), 2);
+    }
+
+    #[test]
+    fn a_submission_fails_only_the_entry_whose_revision_comment_is_missing() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        let empty_reason = batch_qa_task(root.path(), &directory, "TASK-001", "qa_waiting");
+        batch_qa_task(root.path(), &directory, "TASK-002", "qa_waiting");
+        let too_long = batch_qa_task(root.path(), &directory, "TASK-003", "qa_waiting");
+        let before = fs::read_to_string(&empty_reason).expect("task source");
+
+        let result = repository
+            .submit_task_qa(
+                root.path(),
+                &TaskQaSubmission {
+                    workflow_directory: directory.clone(),
+                    entries: vec![
+                        submission_entry(
+                            "TASK-001.md",
+                            TaskQaOutcome::RevisionRequested,
+                            "   ",
+                            SEEDED_UPDATED_AT,
+                        ),
+                        submission_entry(
+                            "TASK-002.md",
+                            TaskQaOutcome::Confirmed,
+                            "",
+                            SEEDED_UPDATED_AT,
+                        ),
+                        submission_entry(
+                            "TASK-003.md",
+                            TaskQaOutcome::Confirmed,
+                            &"가".repeat(2_001),
+                            SEEDED_UPDATED_AT,
+                        ),
+                    ],
+                },
+            )
+            .expect("submit qa");
+
+        assert_eq!(
+            result.results[0].failure,
+            Some(TaskQaSubmissionFailure::RecordFailed)
+        );
+        assert_eq!(
+            result.results[0].message.as_deref(),
+            Some(ProjectError::QaCommentRequired.to_string().as_str())
+        );
+        // 확인 완료는 메모 없이 기록되고, 메모 한도는 단건 통로와 같은 2,000자다.
+        assert!(result.results[1].recorded);
+        assert_eq!(
+            result.results[2].failure,
+            Some(TaskQaSubmissionFailure::RecordFailed)
+        );
+        assert_eq!(
+            result.results[2].message.as_deref(),
+            Some(ProjectError::DecisionCommentTooLong.to_string().as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(&empty_reason).expect("task source"),
+            before
+        );
+        assert!(fs::read_to_string(&too_long)
+            .expect("task source")
+            .contains("status: qa_waiting"));
+        let decisions = qa_decision_texts(root.path(), &directory);
+        assert_eq!(decisions.len(), 1);
+        assert!(decisions[0].contains("task_id: TASK-002"));
     }
 
     #[test]
@@ -5549,9 +7564,11 @@ mod tests {
             .expect("read spec");
         assert!(document.body.contains("## 기획 내용"));
         let rules = root.path().join(".workflow/rules/workflow.md");
+        let current_version = format!("rules_version: {WORKFLOW_RULES_VERSION}");
+        let previous_version = format!("rules_version: {}", WORKFLOW_RULES_VERSION - 1);
         let old_rules = fs::read_to_string(&rules)
             .expect("rules")
-            .replace("rules_version: 22", "rules_version: 21");
+            .replace(&current_version, &previous_version);
         fs::write(&rules, old_rules).expect("old rules");
 
         let decided = repository
@@ -5568,7 +7585,7 @@ mod tests {
         assert_eq!(decided.workflows[0].items.specs[0].status, "approved");
         assert!(fs::read_to_string(rules)
             .expect("rules updated on decision")
-            .contains("rules_version: 22"));
+            .contains(&current_version));
         assert_eq!(
             fs::read_to_string(spec_path).expect("original spec"),
             source
@@ -6079,11 +8096,10 @@ mod tests {
         );
     }
 
-    // SPEC-042 R8(TASK-127)의 나머지 몫. 그 승인에서 이미 파생된 작업은 후속 수정 요청이 붙어도
-    // 그대로 개발자 후보로 남는다. 개발자 판정이 결정을 아예 읽지 않는 것이 근거이고, 이것이
-    // 부작용이 아니라 기획서가 올린 약속이다.
+    // v2에서는 작업만 있고 그룹이 없는 승인은 아직 분해가 끝난 것이 아니다. 고아 작업은 개발자가
+    // 임의로 실행하지 않고 아키텍트가 그룹 구성을 끝낼 때까지 기다린다.
     #[test]
-    fn a_follow_up_revision_request_leaves_the_derived_task_to_the_developer() {
+    fn a_follow_up_revision_request_keeps_an_orphan_task_out_of_developer_work() {
         let (root, directory, _) = spec_in_state("approved");
         write_task_document(
             root.path(),
@@ -6098,8 +8114,8 @@ mod tests {
             pending_work_matching_condition_script(root.path()),
             PendingRoleWork {
                 planner: false,
-                architect: false,
-                developer: true,
+                architect: true,
+                developer: false,
             }
         );
 
@@ -6118,7 +8134,7 @@ mod tests {
             PendingRoleWork {
                 planner: true,
                 architect: false,
-                developer: true,
+                developer: false,
             }
         );
         // 파생 작업은 그대로다. 앱이 되돌리거나 닫지 않는다.
@@ -6396,7 +8412,9 @@ mod tests {
             fs::read_to_string(reservation_helper_path(&root.path().join(".workflow")))
                 .expect("reservation helper");
         assert!(reservation.contains("# managed_by: workflow-labs"));
-        assert!(reservation.contains("# reservation_helper_version: 2"));
+        assert!(reservation.contains(&format!(
+            "# reservation_helper_version: {RESERVATION_HELPER_VERSION}"
+        )));
     }
 
     #[test]
@@ -6407,12 +8425,10 @@ mod tests {
             .create_workflow(root.path(), "Feature")
             .expect("create workflow");
         let helper = reservation_helper_path(&root.path().join(".workflow"));
+        let current_version = format!("# reservation_helper_version: {RESERVATION_HELPER_VERSION}");
         let future = fs::read_to_string(&helper)
             .expect("reservation helper")
-            .replace(
-                "# reservation_helper_version: 2",
-                "# reservation_helper_version: 999",
-            );
+            .replace(&current_version, "# reservation_helper_version: 999");
         fs::write(&helper, &future).expect("future reservation helper");
 
         let error = repository
@@ -6601,36 +8617,34 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_a_dependency_that_reached_qa_or_completion() {
+    fn satisfies_only_a_dependency_that_reached_verified() {
         let (root, directory) = dependency_workflow();
-        write_task_document(root.path(), &directory, "TASK-QA", "qa_waiting", "");
-        write_task_document(root.path(), &directory, "TASK-DONE", "completed", "");
+        write_task_document(root.path(), &directory, "TASK-VERIFIED", "verified", "");
         write_task_document(
             root.path(),
             &directory,
             "TASK-001",
             "todo",
-            "depends_on: [TASK-QA, TASK-DONE]\n",
+            "depends_on: [TASK-VERIFIED]\n",
         );
 
         // 선언에 적힌 순서 그대로다. 정렬하면 아키텍트가 쓴 순서의 뜻이 사라진다.
         assert_eq!(
             declared_dependencies(root.path(), &directory, "TASK-001.md"),
-            vec![
-                dependency("TASK-QA", TaskDependencyState::Satisfied),
-                dependency("TASK-DONE", TaskDependencyState::Satisfied),
-            ]
+            vec![dependency("TASK-VERIFIED", TaskDependencyState::Satisfied)]
         );
     }
 
     #[test]
-    fn leaves_a_dependency_pending_until_it_reaches_qa() {
+    fn leaves_a_dependency_pending_until_it_reaches_verified() {
         let (root, directory) = dependency_workflow();
         // 계약에 없는 상태값도 미충족이다. 모르는 값을 충족 쪽으로 넘기지 않는다.
         let cases = [
             ("TASK-TODO", "todo"),
             ("TASK-PROGRESS", "in_progress"),
             ("TASK-BLOCKED", "blocked"),
+            ("TASK-LEGACY-QA", "qa_waiting"),
+            ("TASK-LEGACY-DONE", "completed"),
             ("TASK-UNKNOWN", "검토중"),
         ];
 
@@ -6655,7 +8669,7 @@ mod tests {
     #[test]
     fn keeps_every_entry_when_only_one_dependency_is_satisfied() {
         let (root, directory) = dependency_workflow();
-        write_task_document(root.path(), &directory, "TASK-DONE", "completed", "");
+        write_task_document(root.path(), &directory, "TASK-DONE", "verified", "");
         write_task_document(root.path(), &directory, "TASK-OPEN", "todo", "");
         write_task_document(
             root.path(),
@@ -6698,7 +8712,7 @@ mod tests {
             root.path(),
             &directory,
             "TASK-001",
-            "completed",
+            "verified",
             "depends_on: [TASK-001]\n",
         );
 
@@ -6782,7 +8796,7 @@ mod tests {
             root.path(),
             &directory,
             "TASK-002",
-            "completed",
+            "verified",
             "depends_on: [TASK-001]\n",
         );
 
@@ -6800,7 +8814,7 @@ mod tests {
             root.path(),
             &directory,
             "TASK-002",
-            "completed",
+            "verified",
             "depends_on: 없음\n",
         );
         write_task_document(
@@ -7313,7 +9327,7 @@ mod tests {
                     .map(|value| (value.id, value.state))
                     .collect::<Vec<_>>(),
                 vec![
-                    dependency("TASK-A", TaskDependencyState::Satisfied),
+                    dependency("TASK-A", TaskDependencyState::Pending),
                     dependency("TASK-B", TaskDependencyState::Missing),
                 ],
                 "{file_name}"
@@ -7482,7 +9496,7 @@ mod tests {
         );
         assert_eq!(
             declared_dependencies(root.path(), &directory, "TASK-002.md"),
-            vec![dependency("TASK-001", TaskDependencyState::Satisfied)]
+            vec![dependency("TASK-001", TaskDependencyState::Pending)]
         );
         assert_eq!(
             declared_dependencies(root.path(), &directory, "TASK-003.md"),
@@ -7494,7 +9508,7 @@ mod tests {
                 project.pending_work.architect,
                 project.pending_work.developer
             ),
-            (false, true, true)
+            (false, true, false)
         );
     }
 
@@ -7672,7 +9686,7 @@ mod tests {
         );
         assert_eq!(
             declared_dependencies(root.path(), &directory, "TASK-001.md"),
-            vec![dependency("no-id-task", TaskDependencyState::Satisfied)]
+            vec![dependency("no-id-task", TaskDependencyState::Pending)]
         );
     }
 
@@ -7799,7 +9813,7 @@ mod tests {
         assert!(
             fs::read_to_string(root.path().join(".workflow/project.yml"))
                 .expect("manifest")
-                .contains("schema_version: 1")
+                .contains("schema_version: 2")
         );
 
         // 이력과 감사 기록에 같은 사실이 있어도 활동 payload에는 한 번만 실린다.
@@ -7924,7 +9938,7 @@ mod tests {
         let source = fs::read_to_string(&manifest).expect("manifest");
         fs::write(
             &manifest,
-            source.replace("schema_version: 1", "schema_version: 2"),
+            source.replace("schema_version: 2", "schema_version: 3"),
         )
         .expect("future manifest");
         let before = task_and_decision_files(root.path(), &directory);
@@ -8144,13 +10158,28 @@ mod tests {
         let directory = project.workflows[0].directory.clone();
         blocked_task(root.path(), &directory, "depends_on: [TASK-800]\n");
         // 선행이 `blocked`이므로 재개 뒤에도 TASK-900에는 충족되지 않는다. blocked 레인은 이제
-        // 에이전트 소유이므로 미분류 선행 TASK-800 자체가 개발자 복구 대상으로 열린다.
+        // 에이전트 소유이므로 활성 그룹에 속한 선행 TASK-800 자체가 개발자 복구 대상으로 열린다.
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        write_spec(root.path(), &directory, "SPEC-800");
+        write_decision(
+            root.path(),
+            &directory,
+            "DECISION-800.md",
+            &spec_decision(
+                "DECISION-800",
+                "SPEC-800",
+                "approved",
+                "2026-08-01T00:00:00Z",
+            ),
+        );
         fs::write(
-            root.path()
-                .join(".workflow")
-                .join(&directory)
-                .join("tasks/TASK-800.md"),
-            "---\nschema: workflow-labs/task@1\nid: TASK-800\ntitle: 선행 작업\nstatus: blocked\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n선행\n",
+            workflow_root.join("groups/GROUP-800.md"),
+            "---\nschema: workflow-labs/work-group@1\nid: GROUP-800\ntitle: 선행 작업 그룹\nstatus: active\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-800\nsource_decision_id: DECISION-800\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 선행 작업 그룹\n",
+        )
+        .expect("write dependency group");
+        fs::write(
+            workflow_root.join("tasks/TASK-800.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-800\ntitle: 선행 작업\nstatus: blocked\nsource_spec_id: SPEC-800\nsource_decision_id: DECISION-800\nwork_group_id: GROUP-800\nwork_group_revision: 1\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n선행\n",
         )
         .expect("write dependency");
 
@@ -8962,18 +10991,46 @@ mod tests {
 
 #[cfg(test)]
 mod report_surface_tests {
+    use std::collections::HashMap;
     use std::fs;
 
     use pretty_assertions::assert_eq;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
-    use super::{run_reports, workflow_reports, FileSystemProjectRepository, ProjectError};
+    use super::{
+        contains_internal_qa_instruction, run_reports, scenario_describes_user_observable_flow,
+        scenario_is_user_safe, workflow_reports, FileSystemProjectRepository, ProjectError,
+        GROUP_QA_DECISION_SCHEMA,
+    };
+    use crate::domain::project::{
+        SchemaCompatibility, WorkGroupDisplayStatus, WorkGroupQaMode, WorkGroupQaOutcome,
+        WorkGroupQaScenario, WorkGroupQaSubmission, WorkGroupQaSubmissionEntry,
+        WorkGroupQaSubmissionStatus,
+    };
+    use crate::infrastructure::heartbeat_condition::condition_script_path;
+    use crate::infrastructure::reservation_helper::reservation_helper_path;
 
     /// 실행이 남긴 결과를 흉내 낸 보고서 네 개를 심는다. 이름 규칙은 실제 워크플로 파일에서 왔다 —
     /// 개발 작업 보고서는 대상 작업 식별자를, 기획·아키텍트 보고서는 예약 결과 접두어를 담은 문서
     /// 식별자를 이름에 담는다.
     const TARGET_ID: &str = "TASK-RES-20260812T130244Z-394-20260812130244-02";
     const RESULT_PREFIX: &str = "RES-20260812T124007Z-69525-20260812124007";
+
+    fn downgrade_managed_file(path: &std::path::Path, version_prefix: &str) -> String {
+        let current = fs::read_to_string(path).expect("current managed asset");
+        let version_line = current
+            .lines()
+            .find(|line| line.starts_with(version_prefix))
+            .expect("managed version line");
+        let version = version_line[version_prefix.len()..]
+            .trim()
+            .parse::<u32>()
+            .expect("managed version");
+        assert!(version > 0);
+        let previous = format!("{version_prefix} {}", version - 1);
+        fs::write(path, current.replacen(version_line, &previous, 1)).expect("old managed asset");
+        current
+    }
 
     fn workflow_with_reports() -> (tempfile::TempDir, String) {
         let root = tempdir().expect("temp project");
@@ -9180,5 +11237,1299 @@ mod report_surface_tests {
                 "{file_name}을 거절하지 않았다: {refused:?}"
             );
         }
+    }
+
+    #[test]
+    fn nondeveloper_scenarios_accept_visible_ui_flows_and_reject_cli_instructions() {
+        for command in [
+            "curl -fsS https://localhost/health",
+            "docker compose up --build",
+            "mvn test",
+            "maven test",
+            "./scripts/verify.sh",
+            ".\\scripts\\verify.ps1",
+            "swift test",
+            "xcodebuild test -scheme App",
+            "$ npm test",
+            "user@host:~/app$ cargo test",
+            "C:\\app> dotnet test",
+            "# cargo test",
+            "1. curl https://localhost/health",
+            "git status",
+            "node scripts/check.js",
+            "deno task check",
+            "php vendor/bin/check.php",
+            "phpunit --testsuite unit",
+            "composer test",
+            "ruby scripts/check.rb",
+            "bundle exec rspec",
+            "cmake --build build",
+            "ctest --test-dir build",
+            "make verify",
+        ] {
+            assert!(
+                contains_internal_qa_instruction(command),
+                "CLI instruction was accepted: {command}"
+            );
+        }
+        for visible_ui_sentence in [
+            "설정 화면에서 저장 버튼을 누르면 완료 안내가 보인다.",
+            "설정 화면에서 이메일 알림을 켜고 저장해 주세요. 저장이 끝나면 선택한 채널이 그대로 보이고 완료 안내가 나타나야 합니다.",
+            "오후 10시부터 오전 8시까지 조용한 시간을 지정해 주세요. 저장 후 같은 시간이 화면에 유지되어야 합니다.",
+            "다른 화면으로 이동했다가 알림 설정으로 돌아와 주세요. 앞에서 저장한 채널과 시간이 그대로 보여야 합니다.",
+            "기간을 최근 30일로 바꾼 뒤 다른 화면에 다녀와 주세요. 대시보드에 돌아오면 최근 30일이 그대로 선택되어야 합니다.",
+            "담당자를 한 명 선택한 뒤 대시보드를 새로 열어 주세요. 선택한 담당자만 목록에 보여야 합니다.",
+            "화면에서 Docker Compose 연결 상태를 선택하면 상세 결과가 표시된다.",
+            "도움말 페이지에서 curl 예제 링크를 클릭하면 안내 창이 나타난다.",
+            "Swift 설정 페이지에서 저장을 누르면 빌드 번호가 표시된다.",
+            "Node 상태는 화면의 진단 카드에서 선택하면 상세 결과로 표시된다.",
+            "Make the Save button visible after the user opens the Settings page.",
+        ] {
+            assert!(
+                !contains_internal_qa_instruction(visible_ui_sentence),
+                "ordinary UI sentence was mistaken for a command: {visible_ui_sentence}"
+            );
+            assert!(scenario_describes_user_observable_flow(visible_ui_sentence));
+            assert!(scenario_is_user_safe(&WorkGroupQaScenario {
+                id: "QA-01".to_owned(),
+                title: "사용자 화면 확인".to_owned(),
+                body: visible_ui_sentence.to_owned(),
+            }));
+        }
+        assert!(!scenario_describes_user_observable_flow(
+            "백엔드 로직이 올바르게 동작한다."
+        ));
+        let terminal_scenario = WorkGroupQaScenario {
+            id: "QA-01".to_owned(),
+            title: "내부 검증".to_owned(),
+            body:
+                "터미널 화면에서 실행 버튼을 눌러 docker compose up을 돌린 뒤 결과가 보여야 합니다."
+                    .to_owned(),
+        };
+        assert!(scenario_describes_user_observable_flow(
+            &terminal_scenario.body
+        ));
+        assert!(contains_internal_qa_instruction(&terminal_scenario.body));
+        assert!(!scenario_is_user_safe(&terminal_scenario));
+
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let group_path = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let group = fs::read_to_string(&group_path).expect("group").replace(
+            "설정 화면에서 저장을 누르면 완료 안내가 보인다.",
+            "docker compose up --build",
+        );
+        fs::write(group_path, group).expect("CLI-only scenario");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("CLI scenario group")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::ConfigurationError
+        );
+
+        let (title_root, title_directory) = work_group_fixture("verified", "active", "user");
+        let title_group_path = title_root
+            .path()
+            .join(".workflow")
+            .join(&title_directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let group = fs::read_to_string(&title_group_path)
+            .expect("title group")
+            .replace("QA-01 · 결과 확인", "QA-01 · npx vitest run");
+        fs::write(title_group_path, group).expect("CLI title scenario");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(title_root.path())
+                .expect("CLI title group")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::ConfigurationError
+        );
+    }
+
+    fn work_group_fixture(
+        task_status: &str,
+        group_status: &str,
+        qa_mode: &str,
+    ) -> (TempDir, String) {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "그룹 QA")
+            .expect("workflow");
+        let directory = project.workflows[0].directory.clone();
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let scenarios = if qa_mode == "automatic" {
+            String::new()
+        } else {
+            "\n### QA-01 · 결과 확인\n\n설정 화면에서 저장을 누르면 완료 안내가 보인다.\n"
+                .to_owned()
+        };
+        fs::write(
+            workflow_root.join("groups/GROUP-DECISION-1.md"),
+            format!(
+                "---\nschema: workflow-labs/work-group@1\nid: GROUP-DECISION-1\ntitle: 사용자 기능\nstatus: {group_status}\nrevision: 1\nqa_mode: {qa_mode}\nsource_spec_id: SPEC-1\nsource_decision_id: DECISION-1\ncreated_at: 2026-08-14T00:00:00Z\nupdated_at: 2026-08-14T00:00:00Z\n---\n\n# 사용자 기능\n\n## 기능 설명\n\n화면으로 확인한다.\n{scenarios}"
+            ),
+        )
+        .expect("group");
+        fs::write(
+            workflow_root.join("tasks/TASK-1.md"),
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: TASK-1\ntitle: 내부 구현\nstatus: {task_status}\nsource_spec_id: SPEC-1\nsource_decision_id: DECISION-1\nwork_group_id: GROUP-DECISION-1\nwork_group_revision: 1\nupdated_at: 2026-08-14T00:00:00Z\n---\n\n# 내부 구현\n"
+            ),
+        )
+        .expect("task");
+        (root, directory)
+    }
+
+    fn group_submission(directory: &str, outcome: WorkGroupQaOutcome) -> WorkGroupQaSubmission {
+        WorkGroupQaSubmission {
+            workflow_directory: directory.to_owned(),
+            file_name: "GROUP-DECISION-1.md".to_owned(),
+            expected_revision: 1,
+            expected_updated_at: "2026-08-14T00:00:00Z".to_owned(),
+            request_id: "request-group-1".to_owned(),
+            entries: vec![WorkGroupQaSubmissionEntry {
+                scenario_id: "QA-01".to_owned(),
+                outcome,
+                comment: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn derives_work_group_status_from_tasks_mode_and_architect_claim() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let summary = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect");
+        assert_eq!(
+            summary.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::QaReady
+        );
+        assert_eq!(summary.workflows[0].counts.work_groups, 1);
+
+        let (automatic_root, _) = work_group_fixture("verified", "active", "automatic");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(automatic_root.path())
+                .expect("automatic")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::AutomaticCompleted
+        );
+
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let group_path = workflow_root.join("groups/GROUP-DECISION-1.md");
+        let preparing = fs::read_to_string(&group_path)
+            .expect("group")
+            .replace("status: active", "status: preparing");
+        fs::write(&group_path, preparing).expect("preparing");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("stalled")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::PreparingStalled
+        );
+
+        let (duplicate_root, duplicate_directory) =
+            work_group_fixture("verified", "active", "user");
+        let duplicate_group = duplicate_root
+            .path()
+            .join(".workflow")
+            .join(&duplicate_directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let source = fs::read_to_string(&duplicate_group).expect("duplicate group");
+        fs::write(
+            &duplicate_group,
+            format!("{source}\n### QA-01 · 중복 항목\n\n같은 식별자는 허용하지 않는다.\n"),
+        )
+        .expect("duplicate scenario");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(duplicate_root.path())
+                .expect("invalid duplicate")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::ConfigurationError
+        );
+
+        for invalid_id in ["QA-02", "QA-manual"] {
+            let (invalid_root, invalid_directory) =
+                work_group_fixture("verified", "active", "user");
+            let invalid_group = invalid_root
+                .path()
+                .join(".workflow")
+                .join(&invalid_directory)
+                .join("groups/GROUP-DECISION-1.md");
+            let source = fs::read_to_string(&invalid_group)
+                .expect("invalid group")
+                .replace("QA-01", invalid_id);
+            fs::write(&invalid_group, source).expect("invalid scenario id");
+            assert_eq!(
+                FileSystemProjectRepository
+                    .inspect(invalid_root.path())
+                    .expect("invalid sequence")
+                    .workflows[0]
+                    .items
+                    .work_groups[0]
+                    .display_status,
+                WorkGroupDisplayStatus::ConfigurationError,
+                "{invalid_id} must not be accepted"
+            );
+        }
+
+        let (automatic_with_scenario_root, automatic_with_scenario_directory) =
+            work_group_fixture("verified", "active", "automatic");
+        let automatic_group = automatic_with_scenario_root
+            .path()
+            .join(".workflow")
+            .join(&automatic_with_scenario_directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let source = fs::read_to_string(&automatic_group).expect("automatic group");
+        fs::write(
+            &automatic_group,
+            format!("{source}\n### QA-01 · 사용자 항목\n\n저장을 누르면 완료 안내가 보인다.\n"),
+        )
+        .expect("automatic scenario");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(automatic_with_scenario_root.path())
+                .expect("automatic scenario conflict")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::ConfigurationError
+        );
+    }
+
+    #[test]
+    fn work_group_requires_valid_current_or_previous_task_revisions() {
+        for (case, replacement) in [
+            ("missing", None),
+            ("zero", Some("work_group_revision: 0\n")),
+            ("future", Some("work_group_revision: 2\n")),
+        ] {
+            let (root, directory) = work_group_fixture("verified", "active", "user");
+            let workflow_root = root.path().join(".workflow").join(&directory);
+            let task_path = workflow_root.join("tasks/TASK-1.md");
+            let task = fs::read_to_string(&task_path).expect("task");
+            fs::write(
+                &task_path,
+                task.replace("work_group_revision: 1\n", replacement.unwrap_or_default()),
+            )
+            .expect("invalid task revision");
+            fs::write(
+                workflow_root.join("decisions/QA-LEGACY.md"),
+                "---\nschema: workflow-labs/qa-decision@1\nid: QA-LEGACY\ntask_id: TASK-1\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-08-14T00:30:00Z\n---\n\n기존 승인\n",
+            )
+            .expect("legacy QA decision");
+            let summary = FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("inspect invalid task revision");
+            assert_eq!(
+                summary.workflows[0].items.work_groups[0].display_status,
+                WorkGroupDisplayStatus::ConfigurationError,
+                "{case} task revision must invalidate the group"
+            );
+            assert!(matches!(
+                FileSystemProjectRepository.submit_work_group_qa(
+                    root.path(),
+                    &group_submission(&directory, WorkGroupQaOutcome::Confirmed)
+                ),
+                Err(ProjectError::WorkGroupNotAwaitingQa)
+            ));
+        }
+
+        for (outcome, expected) in [
+            ("confirmed", WorkGroupDisplayStatus::Completed),
+            ("revision_requested", WorkGroupDisplayStatus::Rework),
+        ] {
+            let (root, directory) = work_group_fixture("verified", "active", "user");
+            let workflow_root = root.path().join(".workflow").join(&directory);
+            let task_path = workflow_root.join("tasks/TASK-1.md");
+            let task = fs::read_to_string(&task_path)
+                .expect("task")
+                .replace("work_group_revision: 1", "work_group_revision: 2");
+            fs::write(task_path, task).expect("future task revision");
+            fs::write(
+                workflow_root.join("decisions/GROUP-QA-EXISTING.md"),
+                format!(
+                    "---\nschema: workflow-labs/group-qa-decision@1\nid: GROUP-QA-EXISTING\ngroup_id: GROUP-DECISION-1\ngroup_revision: 1\noutcome: {outcome}\nrequest_id: request-existing-{outcome}\ncreated_by: user\ncreated_at: 2026-08-14T01:00:00Z\n---\n\n기존 결정\n"
+                ),
+            )
+            .expect("group QA decision");
+            assert_eq!(
+                FileSystemProjectRepository
+                    .inspect(root.path())
+                    .expect("decided invalid group")
+                    .workflows[0]
+                    .items
+                    .work_groups[0]
+                    .display_status,
+                expected
+            );
+        }
+
+        let (previous_root, previous_directory) = work_group_fixture("verified", "active", "user");
+        let previous_group = previous_root
+            .path()
+            .join(".workflow")
+            .join(&previous_directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let group = fs::read_to_string(&previous_group)
+            .expect("group")
+            .replace("revision: 1", "revision: 2");
+        fs::write(previous_group, group).expect("revision two group");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(previous_root.path())
+                .expect("previous task revision")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::QaReady
+        );
+
+        let (automatic_root, automatic_directory) =
+            work_group_fixture("verified", "active", "automatic");
+        let automatic_task = automatic_root
+            .path()
+            .join(".workflow")
+            .join(&automatic_directory)
+            .join("tasks/TASK-1.md");
+        let task = fs::read_to_string(&automatic_task)
+            .expect("automatic task")
+            .replace("work_group_revision: 1", "work_group_revision: 2");
+        fs::write(automatic_task, task).expect("future automatic task revision");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(automatic_root.path())
+                .expect("automatic invalid revision")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::ConfigurationError
+        );
+    }
+
+    #[test]
+    fn work_group_requires_explicit_tokens_and_matching_task_origins() {
+        for field_line in [
+            "id: GROUP-DECISION-1\n",
+            "updated_at: 2026-08-14T00:00:00Z\n",
+        ] {
+            let (root, directory) = work_group_fixture("verified", "active", "user");
+            let group_path = root
+                .path()
+                .join(".workflow")
+                .join(&directory)
+                .join("groups/GROUP-DECISION-1.md");
+            let group = fs::read_to_string(&group_path)
+                .expect("group")
+                .replace(field_line, "");
+            fs::write(group_path, group).expect("missing explicit group token");
+            assert_eq!(
+                FileSystemProjectRepository
+                    .inspect(root.path())
+                    .expect("missing group token")
+                    .workflows[0]
+                    .items
+                    .work_groups[0]
+                    .display_status,
+                WorkGroupDisplayStatus::ConfigurationError
+            );
+            assert!(matches!(
+                FileSystemProjectRepository.submit_work_group_qa(
+                    root.path(),
+                    &group_submission(&directory, WorkGroupQaOutcome::Confirmed)
+                ),
+                Err(ProjectError::WorkGroupNotAwaitingQa)
+            ));
+        }
+
+        for (from, to) in [
+            ("source_spec_id: SPEC-1", "source_spec_id: SPEC-OTHER"),
+            (
+                "source_decision_id: DECISION-1",
+                "source_decision_id: DECISION-OTHER",
+            ),
+        ] {
+            let (root, directory) = work_group_fixture("verified", "active", "user");
+            let workflow_root = root.path().join(".workflow").join(&directory);
+            let task_path = workflow_root.join("tasks/TASK-1.md");
+            let task = fs::read_to_string(&task_path)
+                .expect("task")
+                .replace(from, to);
+            fs::write(task_path, task).expect("mismatched task origin");
+            fs::write(
+                workflow_root.join("decisions/QA-LEGACY.md"),
+                "---\nschema: workflow-labs/qa-decision@1\nid: QA-LEGACY\ntask_id: TASK-1\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-08-14T00:30:00Z\n---\n\n기존 승인\n",
+            )
+            .expect("legacy QA decision");
+            assert_eq!(
+                FileSystemProjectRepository
+                    .inspect(root.path())
+                    .expect("mismatched task origin")
+                    .workflows[0]
+                    .items
+                    .work_groups[0]
+                    .display_status,
+                WorkGroupDisplayStatus::ConfigurationError
+            );
+            assert!(matches!(
+                FileSystemProjectRepository.submit_work_group_qa(
+                    root.path(),
+                    &group_submission(&directory, WorkGroupQaOutcome::Confirmed)
+                ),
+                Err(ProjectError::WorkGroupNotAwaitingQa)
+            ));
+        }
+    }
+
+    #[test]
+    fn group_decision_order_compares_rfc3339_instants_not_timestamp_text() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let decisions = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("decisions");
+        for (file_name, id, outcome, created_at) in [
+            (
+                "A.md",
+                "GROUP-QA-A",
+                "confirmed",
+                "2026-08-14T10:00:00+09:00",
+            ),
+            (
+                "B.md",
+                "GROUP-QA-B",
+                "revision_requested",
+                "2026-08-14T02:00:00Z",
+            ),
+        ] {
+            fs::write(
+                decisions.join(file_name),
+                format!(
+                    "---\nschema: workflow-labs/group-qa-decision@1\nid: {id}\ngroup_id: GROUP-DECISION-1\ngroup_revision: 1\noutcome: {outcome}\nrequest_id: {id}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n결과\n"
+                ),
+            )
+            .expect("decision");
+        }
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("inspect decisions")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::Rework
+        );
+    }
+
+    #[test]
+    fn current_revision_rejection_is_derived_as_source_qa_and_architect_work() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let group_path = workflow_root.join("groups/GROUP-DECISION-1.md");
+        fs::write(
+            workflow_root.join("decisions/GROUP-QA-REJECTED.md"),
+            "---\nschema: workflow-labs/group-qa-decision@1\nid: GROUP-QA-REJECTED\ngroup_id: GROUP-DECISION-1\ngroup_revision: 1\noutcome: revision_requested\nrequest_id: request-rejected\ncreated_by: user\ncreated_at: 2026-08-14T01:00:00Z\n---\n\n반려\n",
+        )
+        .expect("rejection");
+
+        let summary = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect rejection");
+
+        assert_eq!(
+            summary.pending_detail.architect.target.as_deref(),
+            Some("GROUP-QA-REJECTED")
+        );
+        assert_eq!(
+            summary.pending_detail.architect.target_kind.as_deref(),
+            Some("group_qa_revision")
+        );
+        assert_eq!(
+            summary.workflows[0].items.work_groups[0]
+                .source_qa_decision_id
+                .as_deref(),
+            Some("GROUP-QA-REJECTED")
+        );
+
+        let preparing = fs::read_to_string(&group_path)
+            .expect("group")
+            .replace("status: active", "status: preparing")
+            .replace("revision: 1", "revision: 2")
+            .replace(
+                "source_decision_id: DECISION-1\n",
+                "source_decision_id: DECISION-1\nsource_qa_decision_id: GROUP-QA-REJECTED\n",
+            );
+        fs::write(group_path, preparing).expect("next revision preparing group");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("preparing lineage")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .source_qa_decision_id
+                .as_deref(),
+            Some("GROUP-QA-REJECTED")
+        );
+    }
+
+    #[test]
+    fn work_group_order_compares_rfc3339_instants_not_timestamp_text() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let first_path = workflow_root.join("groups/GROUP-DECISION-1.md");
+        let first = fs::read_to_string(&first_path)
+            .expect("first group")
+            .replace(
+                "updated_at: 2026-08-14T00:00:00Z",
+                "updated_at: 2026-08-14T10:00:00+09:00",
+            );
+        fs::write(first_path, first).expect("first group offset");
+        fs::write(
+            workflow_root.join("groups/GROUP-DECISION-2.md"),
+            "---\nschema: workflow-labs/work-group@1\nid: GROUP-DECISION-2\ntitle: 더 늦은 그룹\nstatus: active\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-2\nsource_decision_id: DECISION-2\ncreated_at: 2026-08-14T00:00:00Z\nupdated_at: 2026-08-14T02:00:00Z\n---\n\n# 더 늦은 그룹\n\n## 기능 설명\n\n자동 검증 전용이다.\n",
+        )
+        .expect("second group");
+        fs::write(
+            workflow_root.join("tasks/TASK-2.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-2\ntitle: 두 번째 구현\nstatus: verified\nsource_spec_id: SPEC-2\nsource_decision_id: DECISION-2\nwork_group_id: GROUP-DECISION-2\nwork_group_revision: 1\nupdated_at: 2026-08-14T02:00:00Z\n---\n\n# 두 번째 구현\n",
+        )
+        .expect("second task");
+
+        let groups = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("ordered groups")
+            .workflows
+            .remove(0)
+            .items
+            .work_groups;
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["GROUP-DECISION-2", "GROUP-DECISION-1"]
+        );
+    }
+
+    #[test]
+    fn group_qa_is_atomic_idempotent_and_never_rewrites_tasks() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let task_before = fs::read_to_string(&task_path).expect("task before");
+        let submission = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+
+        let recorded = FileSystemProjectRepository
+            .submit_work_group_qa(root.path(), &submission)
+            .expect("record group QA");
+        assert_eq!(recorded.status, WorkGroupQaSubmissionStatus::Recorded);
+        assert_eq!(recorded.outcome, WorkGroupQaOutcome::Confirmed);
+        assert_eq!(
+            recorded.summary.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::Completed
+        );
+        assert_eq!(
+            fs::read_to_string(&task_path).expect("task after"),
+            task_before
+        );
+
+        let retried = FileSystemProjectRepository
+            .submit_work_group_qa(root.path(), &submission)
+            .expect("idempotent retry");
+        assert_eq!(retried.status, WorkGroupQaSubmissionStatus::AlreadyRecorded);
+        let mut damaged_retry = submission.clone();
+        damaged_retry.entries.clear();
+        assert_eq!(
+            FileSystemProjectRepository
+                .submit_work_group_qa(root.path(), &damaged_retry)
+                .expect("request id decides the retry")
+                .status,
+            WorkGroupQaSubmissionStatus::AlreadyRecorded
+        );
+
+        let group_path = workflow_root.join("groups/GROUP-DECISION-1.md");
+        fs::rename(&group_path, group_path.with_extension("bak"))
+            .expect("temporarily rename group");
+        let mut stale_retry = damaged_retry.clone();
+        stale_retry.expected_revision = 99;
+        stale_retry.expected_updated_at = "stale-token".to_owned();
+        assert_eq!(
+            FileSystemProjectRepository
+                .submit_work_group_qa(root.path(), &stale_retry)
+                .expect("recorded request survives a missing group")
+                .status,
+            WorkGroupQaSubmissionStatus::AlreadyRecorded
+        );
+        fs::write(&group_path, "damaged group document").expect("damaged group");
+        assert_eq!(
+            FileSystemProjectRepository
+                .submit_work_group_qa(root.path(), &stale_retry)
+                .expect("recorded request survives a damaged group")
+                .status,
+            WorkGroupQaSubmissionStatus::AlreadyRecorded
+        );
+
+        let mut unsafe_retry = stale_retry.clone();
+        unsafe_retry.file_name = "../GROUP-DECISION-1.md".to_owned();
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &unsafe_retry),
+            Err(ProjectError::UnsafeDocumentFile(_))
+        ));
+        fs::write(
+            &group_path,
+            "---\nschema: workflow-labs/work-group@1\nid: GROUP-OTHER\n---\n",
+        )
+        .expect("different valid group identity");
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &stale_retry),
+            Err(ProjectError::Persist(_))
+        ));
+
+        let decisions = fs::read_dir(workflow_root.join("decisions"))
+            .expect("decisions")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                fs::read_to_string(entry.path())
+                    .is_ok_and(|text| text.contains(GROUP_QA_DECISION_SCHEMA))
+            })
+            .count();
+        assert_eq!(decisions, 1);
+    }
+
+    #[test]
+    fn group_qa_rejects_stale_or_incomplete_submissions_without_a_decision() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        let mut stale = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        stale.expected_updated_at = "2026-08-13T00:00:00Z".to_owned();
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &stale),
+            Err(ProjectError::WorkGroupQaStale)
+        ));
+
+        let mut incomplete = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        incomplete.entries.clear();
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &incomplete),
+            Err(ProjectError::WorkGroupQaScenarioMismatch)
+        ));
+        assert_eq!(
+            fs::read_dir(workflow_root.join("decisions"))
+                .expect("decisions")
+                .count(),
+            0
+        );
+
+        let mut revision = group_submission(&directory, WorkGroupQaOutcome::RevisionRequested);
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &revision),
+            Err(ProjectError::WorkGroupQaCommentRequired)
+        ));
+        revision.entries[0].comment = "x".repeat(2_001);
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &revision),
+            Err(ProjectError::WorkGroupQaCommentTooLong)
+        ));
+
+        let mut duplicate = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        duplicate.entries.push(duplicate.entries[0].clone());
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &duplicate),
+            Err(ProjectError::WorkGroupQaScenarioMismatch)
+        ));
+        let mut unknown = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        unknown.entries[0].scenario_id = "QA-404".to_owned();
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(root.path(), &unknown),
+            Err(ProjectError::WorkGroupQaScenarioMismatch)
+        ));
+
+        let (developing_root, developing_directory) =
+            work_group_fixture("in_progress", "active", "user");
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(
+                developing_root.path(),
+                &group_submission(&developing_directory, WorkGroupQaOutcome::Confirmed)
+            ),
+            Err(ProjectError::WorkGroupNotAwaitingQa)
+        ));
+        let (automatic_root, automatic_directory) =
+            work_group_fixture("verified", "active", "automatic");
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(
+                automatic_root.path(),
+                &group_submission(&automatic_directory, WorkGroupQaOutcome::Confirmed)
+            ),
+            Err(ProjectError::WorkGroupNotAwaitingQa)
+        ));
+    }
+
+    #[test]
+    fn v1_migration_backs_up_documents_and_builds_deterministic_groups() {
+        let (root, directory) = work_group_fixture("qa_waiting", "active", "user");
+        let control_root = root.path().join(".workflow");
+        let workflow_root = control_root.join(&directory);
+        fs::remove_file(workflow_root.join("groups/GROUP-DECISION-1.md")).expect("remove v2 group");
+        let project_manifest = fs::read_to_string(control_root.join("project.yml"))
+            .expect("project manifest")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(control_root.join("project.yml"), project_manifest).expect("legacy project");
+        let workflow_manifest = fs::read_to_string(workflow_root.join("workflow.yml"))
+            .expect("workflow manifest")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(workflow_root.join("workflow.yml"), workflow_manifest).expect("legacy workflow");
+        let legacy_readme = "# Legacy workflow\n\nTasks end in qa_waiting or completed. Record workflow-labs/qa-decision@1 per task.\n";
+        fs::write(workflow_root.join("README.md"), legacy_readme).expect("legacy README");
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let legacy_task = fs::read_to_string(&task_path)
+            .expect("task")
+            .replace("work_group_id: GROUP-DECISION-1\n", "")
+            .replace("work_group_revision: 1\n", "");
+        fs::write(&task_path, &legacy_task).expect("legacy task");
+        let legacy_decision = "---\nschema: workflow-labs/qa-decision@1\nid: QA-LEGACY-1\ntask_id: TASK-1\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-08-14T01:00:00Z\n---\n\n기존 승인\n";
+        fs::write(
+            workflow_root.join("decisions/QA-LEGACY-1.md"),
+            legacy_decision,
+        )
+        .expect("legacy decision");
+        fs::write(
+            workflow_root.join("tasks/TASK-2.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-2\ntitle: 기획서 원천 작업\nstatus: qa_waiting\nsource_spec_id: SPEC-2\nupdated_at: 2026-08-14T00:00:00Z\n---\n\n# 기획서 원천 작업\n\n## 확인 동선\n\n설정 화면에서 저장을 누르면 완료 안내가 보인다.\n",
+        )
+        .expect("spec fallback task");
+        fs::write(
+            workflow_root.join("tasks/TASK-3.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-3\ntitle: 내부 전용 작업\nstatus: qa_waiting\nupdated_at: 2026-08-14T00:00:00Z\n---\n\n# 내부 전용 작업\n\n## 확인 동선\n\ngo test ./...\npython -m pytest를 실행한다.\ngradle test를 실행한다.\ndotnet test를 실행한다.\nbash scripts/verify.sh를 실행한다.\ncurl -fsS https://localhost/health\ndocker compose up --build\nmvn test\n./scripts/verify.sh\nswift test\nxcodebuild test -scheme App\n테스트를 돌린다.\n타입 검사를 실행한다.\nrun lint 후 run build를 수행한다.\n",
+        )
+        .expect("task fallback task");
+        fs::write(
+            workflow_root.join("ideas/IDEA-PENDING.md"),
+            "---\nschema: workflow-labs/idea@1\nid: IDEA-PENDING\ntitle: 대기 아이디어\nstatus: inbox\n---\n\n사용자가 화면에서 새 기능을 확인한다.\n",
+        )
+        .expect("pending idea");
+
+        let workflow_rules_path = control_root.join("rules/workflow.md");
+        let developer_rules_path = control_root.join("rules/roles/developer.md");
+        let condition_path = condition_script_path(&control_root);
+        let reservation_path = reservation_helper_path(&control_root);
+        let current_assets = [
+            (
+                workflow_rules_path.clone(),
+                downgrade_managed_file(&workflow_rules_path, "rules_version:"),
+            ),
+            (
+                developer_rules_path.clone(),
+                downgrade_managed_file(&developer_rules_path, "rules_version:"),
+            ),
+            (
+                condition_path.clone(),
+                downgrade_managed_file(&condition_path, "# condition_script_version:"),
+            ),
+            (
+                reservation_path.clone(),
+                downgrade_managed_file(&reservation_path, "# reservation_helper_version:"),
+            ),
+        ];
+
+        let migrated = FileSystemProjectRepository
+            .migrate(root.path())
+            .expect("migrate");
+        assert_eq!(migrated.compatibility, SchemaCompatibility::Current);
+        assert!(migrated.pending_work.planner);
+        assert!(!control_root.join(".runtime/migration.lock").exists());
+        for (path, expected) in current_assets {
+            assert_eq!(fs::read_to_string(path).expect("migrated asset"), expected);
+        }
+        assert!(workflow_root.join("groups/GROUP-DECISION-1.md").is_file());
+        assert!(workflow_root
+            .join("groups/GROUP-SPEC-2-LEGACY.md")
+            .is_file());
+        assert!(workflow_root
+            .join("groups/GROUP-TASK-3-LEGACY.md")
+            .is_file());
+        let task = fs::read_to_string(&task_path).expect("migrated task");
+        assert!(task.contains("status: verified"));
+        assert!(task.contains("work_group_id: GROUP-DECISION-1"));
+        assert!(task.contains("kind: migrated_verified"));
+        let migrated_readme =
+            fs::read_to_string(workflow_root.join("README.md")).expect("migrated README");
+        assert!(migrated_readme.contains("groups/"));
+        assert!(migrated_readme.contains("verified"));
+        assert!(!migrated_readme.contains("qa_waiting"));
+        assert!(!migrated_readme.contains("workflow-labs/qa-decision@1"));
+        assert_eq!(
+            fs::read_to_string(workflow_root.join("decisions/QA-LEGACY-1.md"))
+                .expect("preserved legacy decision"),
+            legacy_decision
+        );
+        let statuses = migrated.workflows[0]
+            .items
+            .work_groups
+            .iter()
+            .map(|group| (group.id.as_str(), (group.display_status, group.qa_mode)))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            statuses["GROUP-DECISION-1"].0,
+            WorkGroupDisplayStatus::Completed
+        );
+        assert_eq!(
+            statuses["GROUP-SPEC-2-LEGACY"].0,
+            WorkGroupDisplayStatus::QaReady
+        );
+        assert_eq!(
+            statuses["GROUP-TASK-3-LEGACY"].0,
+            WorkGroupDisplayStatus::AutomaticCompleted
+        );
+        assert_eq!(
+            statuses["GROUP-TASK-3-LEGACY"].1,
+            WorkGroupQaMode::Automatic
+        );
+
+        let backup = fs::read_dir(control_root.join(".runtime/migrations"))
+            .expect("backups")
+            .filter_map(Result::ok)
+            .next()
+            .expect("backup")
+            .path();
+        assert_eq!(
+            fs::read_to_string(backup.join(&directory).join("tasks/TASK-1.md"))
+                .expect("backed up task"),
+            legacy_task
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join(&directory).join("README.md"))
+                .expect("backed up README"),
+            legacy_readme
+        );
+    }
+
+    #[test]
+    fn malformed_group_qa_decisions_do_not_derive_group_state() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let decisions = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("decisions");
+        for (file_name, id, revision, request_id) in [
+            ("EMPTY-ID.md", "", 1, "request-empty-id"),
+            ("ZERO-REVISION.md", "GROUP-QA-ZERO", 0, "request-zero"),
+            ("EMPTY-REQUEST.md", "GROUP-QA-EMPTY", 1, ""),
+        ] {
+            fs::write(
+                decisions.join(file_name),
+                format!(
+                    "---\nschema: workflow-labs/group-qa-decision@1\nid: {id:?}\ngroup_id: GROUP-DECISION-1\ngroup_revision: {revision}\noutcome: confirmed\nrequest_id: {request_id:?}\ncreated_by: user\ncreated_at: 2026-08-14T02:00:00Z\n---\n\n손상된 결정\n"
+                ),
+            )
+            .expect("malformed decision fixture");
+        }
+
+        let summary = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect malformed decisions");
+        assert_eq!(
+            summary.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::QaReady
+        );
+        assert_eq!(summary.pending_detail.architect.target, None);
+    }
+
+    #[test]
+    fn v1_migration_resolves_shared_decision_specs_and_filters_cli_titles() {
+        let (root, directory) = work_group_fixture("qa_waiting", "active", "user");
+        let control_root = root.path().join(".workflow");
+        let workflow_root = control_root.join(&directory);
+        fs::remove_file(workflow_root.join("groups/GROUP-DECISION-1.md")).expect("remove group");
+        fs::remove_file(workflow_root.join("tasks/TASK-1.md")).expect("remove fixture task");
+        for manifest in [
+            control_root.join("project.yml"),
+            workflow_root.join("workflow.yml"),
+        ] {
+            let legacy = fs::read_to_string(&manifest)
+                .expect("manifest")
+                .replace("schema_version: 2", "schema_version: 1");
+            fs::write(manifest, legacy).expect("legacy manifest");
+        }
+        fs::write(
+            workflow_root.join("decisions/DECISION-SHARED.md"),
+            "---\nschema: workflow-labs/decision@1\nid: DECISION-SHARED\nspec_id: SPEC-FROM-DECISION\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-14T00:00:00Z\n---\n\n승인\n",
+        )
+        .expect("source decision");
+        for (id, extra) in [
+            ("TASK-A", "source_decision_id: DECISION-SHARED\n"),
+            ("TASK-B", "source_decision_id: DECISION-SHARED\n"),
+            (
+                "TASK-C",
+                "source_spec_id: SPEC-MIX\nsource_decision_id: DECISION-MIX\n",
+            ),
+            ("TASK-D", "source_decision_id: DECISION-MIX\n"),
+        ] {
+            fs::write(
+                workflow_root.join("tasks").join(format!("{id}.md")),
+                format!(
+                    "---\nschema: workflow-labs/task@1\nid: {id}\ntitle: {id}\nstatus: qa_waiting\n{extra}updated_at: 2026-08-14T00:00:00Z\n---\n\n# {id}\n"
+                ),
+            )
+            .expect("shared decision task");
+        }
+        fs::write(
+            workflow_root.join("tasks/TASK-TITLE.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-TITLE\ntitle: npx vitest run\nstatus: qa_waiting\nsource_spec_id: SPEC-TITLE\nsource_decision_id: DECISION-TITLE\nupdated_at: 2026-08-14T00:00:00Z\n---\n\n# 명령 제목\n\n## 확인 동선\n\n설정 화면에서 저장 버튼을 누르면 완료 안내가 보인다.\n",
+        )
+        .expect("CLI title task");
+
+        let migrated = FileSystemProjectRepository
+            .migrate(root.path())
+            .expect("migrate shared decisions");
+
+        for id in ["TASK-A", "TASK-B"] {
+            let task = fs::read_to_string(workflow_root.join("tasks").join(format!("{id}.md")))
+                .expect("shared task");
+            assert!(task.contains("source_spec_id: SPEC-FROM-DECISION"));
+        }
+        for id in ["TASK-C", "TASK-D"] {
+            let task = fs::read_to_string(workflow_root.join("tasks").join(format!("{id}.md")))
+                .expect("mixed task");
+            assert!(task.contains("source_spec_id: SPEC-MIX"));
+        }
+        let title_group = migrated.workflows[0]
+            .items
+            .work_groups
+            .iter()
+            .find(|group| group.id == "GROUP-DECISION-TITLE")
+            .expect("title group");
+        assert_eq!(title_group.qa_mode, WorkGroupQaMode::Automatic);
+        assert_eq!(
+            title_group.display_status,
+            WorkGroupDisplayStatus::AutomaticCompleted
+        );
+        assert!(title_group.scenarios.is_empty());
+    }
+
+    #[test]
+    fn v1_migration_restores_every_document_after_a_mid_write_failure() {
+        let (root, directory) = work_group_fixture("qa_waiting", "active", "user");
+        let control_root = root.path().join(".workflow");
+        let workflow_root = control_root.join(&directory);
+        fs::remove_file(workflow_root.join("groups/GROUP-DECISION-1.md")).expect("remove v2 group");
+
+        let project_path = control_root.join("project.yml");
+        let project_before = fs::read_to_string(&project_path)
+            .expect("project manifest")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&project_path, &project_before).expect("legacy project");
+
+        let workflow_path = workflow_root.join("workflow.yml");
+        let workflow_before = fs::read_to_string(&workflow_path)
+            .expect("workflow manifest")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&workflow_path, &workflow_before).expect("legacy workflow");
+
+        let readme_path = workflow_root.join("README.md");
+        let readme_before =
+            "# Legacy workflow\n\nTask QA uses qa_waiting and workflow-labs/qa-decision@1.\n";
+        fs::write(&readme_path, readme_before).expect("legacy README");
+
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let task_before = fs::read_to_string(&task_path)
+            .expect("task")
+            .replace("work_group_id: GROUP-DECISION-1\n", "")
+            .replace("work_group_revision: 1\n", "");
+        fs::write(&task_path, &task_before).expect("legacy task");
+
+        let decision_path = workflow_root.join("decisions/QA-LEGACY-1.md");
+        let decision_before = "---\nschema: workflow-labs/qa-decision@1\nid: QA-LEGACY-1\ntask_id: TASK-1\noutcome: confirmed\ncreated_by: user\ncreated_at: 2026-08-14T01:00:00Z\n---\n\n기존 승인\n";
+        fs::write(&decision_path, decision_before).expect("legacy decision");
+
+        let managed_paths = [
+            (control_root.join("rules/workflow.md"), "rules_version:"),
+            (
+                control_root.join("rules/roles/developer.md"),
+                "rules_version:",
+            ),
+            (
+                condition_script_path(&control_root),
+                "# condition_script_version:",
+            ),
+            (
+                reservation_helper_path(&control_root),
+                "# reservation_helper_version:",
+            ),
+        ];
+        let managed_before = managed_paths
+            .iter()
+            .map(|(path, prefix)| {
+                downgrade_managed_file(path, prefix);
+                (path.clone(), fs::read_to_string(path).expect("old asset"))
+            })
+            .collect::<Vec<_>>();
+        let agents_path = root.path().join("AGENTS.md");
+        let agents_before = fs::read_to_string(&agents_path)
+            .expect("current AGENTS")
+            .replace("## LLM Workflow", "## Legacy LLM Workflow");
+        fs::write(&agents_path, &agents_before).expect("legacy AGENTS");
+        let claude_path = root.path().join("CLAUDE.md");
+        let claude_before = fs::read_to_string(&claude_path)
+            .expect("current CLAUDE")
+            .replace("@AGENTS.md", "Read AGENTS.md manually.");
+        fs::write(&claude_path, &claude_before).expect("legacy CLAUDE");
+
+        let mut write_count = 0;
+        let error = FileSystemProjectRepository
+            .migrate_with(root.path(), |path, contents| {
+                write_count += 1;
+                super::write_text_atomically(path, contents)?;
+                if write_count == 2 {
+                    Err(ProjectError::Persist(
+                        "injected migration write failure".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("second document write must fail");
+
+        assert!(matches!(
+            error,
+            ProjectError::Persist(message) if message == "injected migration write failure"
+        ));
+        assert_eq!(write_count, 2);
+        assert_eq!(
+            fs::read_to_string(&project_path).expect("project restored"),
+            project_before
+        );
+        assert_eq!(
+            fs::read_to_string(&workflow_path).expect("workflow restored"),
+            workflow_before
+        );
+        assert_eq!(
+            fs::read_to_string(&readme_path).expect("README restored"),
+            readme_before
+        );
+        assert_eq!(
+            fs::read_to_string(&task_path).expect("task restored"),
+            task_before
+        );
+        assert_eq!(
+            fs::read_to_string(&decision_path).expect("decision restored"),
+            decision_before
+        );
+        for (path, expected) in managed_before {
+            assert_eq!(fs::read_to_string(path).expect("asset restored"), expected);
+        }
+        assert_eq!(
+            fs::read_to_string(agents_path).expect("AGENTS restored"),
+            agents_before
+        );
+        assert_eq!(
+            fs::read_to_string(claude_path).expect("CLAUDE restored"),
+            claude_before
+        );
+        assert!(!workflow_root.join("groups/GROUP-DECISION-1.md").exists());
+    }
+
+    #[test]
+    fn v1_migration_asset_conflict_leaves_every_document_unchanged() {
+        let (root, directory) = work_group_fixture("qa_waiting", "active", "user");
+        let control_root = root.path().join(".workflow");
+        let workflow_root = control_root.join(&directory);
+        fs::remove_file(workflow_root.join("groups/GROUP-DECISION-1.md")).expect("remove group");
+        let project_path = control_root.join("project.yml");
+        let project_before = fs::read_to_string(&project_path)
+            .expect("project")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&project_path, &project_before).expect("legacy project");
+        let workflow_path = workflow_root.join("workflow.yml");
+        let workflow_before = fs::read_to_string(&workflow_path)
+            .expect("workflow")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&workflow_path, &workflow_before).expect("legacy workflow");
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let task_before = fs::read_to_string(&task_path)
+            .expect("task")
+            .replace("work_group_id: GROUP-DECISION-1\n", "")
+            .replace("work_group_revision: 1\n", "");
+        fs::write(&task_path, &task_before).expect("legacy task");
+        let rules_path = control_root.join("rules/workflow.md");
+        let damaged_rules = [0xff, 0xfe, 0xfd];
+        fs::write(&rules_path, damaged_rules).expect("damaged managed rules");
+
+        let error = FileSystemProjectRepository
+            .migrate(root.path())
+            .expect_err("managed conflict must block migration");
+
+        assert!(matches!(error, ProjectError::ManagedProjectAssets(_)));
+        assert_eq!(
+            fs::read_to_string(project_path).expect("project unchanged"),
+            project_before
+        );
+        assert_eq!(
+            fs::read_to_string(workflow_path).expect("workflow unchanged"),
+            workflow_before
+        );
+        assert_eq!(
+            fs::read_to_string(task_path).expect("task unchanged"),
+            task_before
+        );
+        assert_eq!(
+            fs::read(rules_path).expect("rules unchanged"),
+            damaged_rules
+        );
+        assert!(!workflow_root.join("groups/GROUP-DECISION-1.md").exists());
+    }
+
+    #[test]
+    fn v1_migration_rolls_back_main_assets_when_reservation_step_fails() {
+        let (root, directory) = work_group_fixture("qa_waiting", "active", "user");
+        let control_root = root.path().join(".workflow");
+        let workflow_root = control_root.join(&directory);
+        fs::remove_file(workflow_root.join("groups/GROUP-DECISION-1.md")).expect("remove group");
+        let project_path = control_root.join("project.yml");
+        let project_before = fs::read_to_string(&project_path)
+            .expect("project")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&project_path, &project_before).expect("legacy project");
+        let workflow_path = workflow_root.join("workflow.yml");
+        let workflow_before = fs::read_to_string(&workflow_path)
+            .expect("workflow")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&workflow_path, &workflow_before).expect("legacy workflow");
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let task_before = fs::read_to_string(&task_path)
+            .expect("task")
+            .replace("work_group_id: GROUP-DECISION-1\n", "")
+            .replace("work_group_revision: 1\n", "");
+        fs::write(&task_path, &task_before).expect("legacy task");
+        let rules_path = control_root.join("rules/workflow.md");
+        downgrade_managed_file(&rules_path, "rules_version:");
+        let rules_before = fs::read_to_string(&rules_path).expect("old rules");
+        let reservation_path = reservation_helper_path(&control_root);
+        let reservation_before = fs::read_to_string(&reservation_path).expect("reservation");
+        fs::remove_file(root.path().join("AGENTS.md")).expect("remove AGENTS");
+        fs::remove_file(root.path().join("CLAUDE.md")).expect("remove CLAUDE");
+
+        let error = FileSystemProjectRepository
+            .migrate_with_hooks(
+                root.path(),
+                super::write_text_atomically,
+                |project_root, control_root| {
+                    super::install_managed_project_assets_under_lock(project_root, control_root)?;
+                    Err(ProjectError::Persist(
+                        "injected reservation install failure".to_owned(),
+                    ))
+                },
+            )
+            .expect_err("reservation failure must roll back migration");
+
+        assert!(matches!(
+            error,
+            ProjectError::Persist(message) if message == "injected reservation install failure"
+        ));
+        assert_eq!(
+            fs::read_to_string(project_path).expect("project restored"),
+            project_before
+        );
+        assert_eq!(
+            fs::read_to_string(workflow_path).expect("workflow restored"),
+            workflow_before
+        );
+        assert_eq!(
+            fs::read_to_string(task_path).expect("task restored"),
+            task_before
+        );
+        assert_eq!(
+            fs::read_to_string(rules_path).expect("rules restored"),
+            rules_before
+        );
+        assert_eq!(
+            fs::read_to_string(reservation_path).expect("reservation restored"),
+            reservation_before
+        );
+        assert!(!root.path().join("AGENTS.md").exists());
+        assert!(!root.path().join("CLAUDE.md").exists());
+        assert!(!workflow_root.join("groups/GROUP-DECISION-1.md").exists());
+    }
+
+    #[test]
+    fn v1_migration_rejects_non_sequence_history_without_partial_conversion() {
+        let (root, directory) = work_group_fixture("qa_waiting", "active", "user");
+        let control_root = root.path().join(".workflow");
+        let workflow_root = control_root.join(&directory);
+        fs::remove_file(workflow_root.join("groups/GROUP-DECISION-1.md")).expect("remove v2 group");
+
+        let project_path = control_root.join("project.yml");
+        let project_before = fs::read_to_string(&project_path)
+            .expect("project manifest")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&project_path, &project_before).expect("legacy project");
+
+        let workflow_path = workflow_root.join("workflow.yml");
+        let workflow_before = fs::read_to_string(&workflow_path)
+            .expect("workflow manifest")
+            .replace("schema_version: 2", "schema_version: 1");
+        fs::write(&workflow_path, &workflow_before).expect("legacy workflow");
+
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let task_before = fs::read_to_string(&task_path)
+            .expect("task")
+            .replace("work_group_id: GROUP-DECISION-1\n", "")
+            .replace("work_group_revision: 1\n", "")
+            .replace(
+                "updated_at: 2026-08-14T00:00:00Z\n---",
+                "updated_at: 2026-08-14T00:00:00Z\nhistory: broken\n---",
+            );
+        fs::write(&task_path, &task_before).expect("malformed legacy task");
+
+        let error = FileSystemProjectRepository
+            .migrate(root.path())
+            .expect_err("non-sequence history must stop migration");
+
+        assert!(matches!(
+            error,
+            ProjectError::Persist(message) if message.contains("history")
+        ));
+        assert_eq!(
+            fs::read_to_string(&project_path).expect("project restored"),
+            project_before
+        );
+        assert_eq!(
+            fs::read_to_string(&workflow_path).expect("workflow restored"),
+            workflow_before
+        );
+        assert_eq!(
+            fs::read_to_string(&task_path).expect("task restored"),
+            task_before
+        );
+        assert!(!workflow_root.join("groups/GROUP-DECISION-1.md").exists());
     }
 }

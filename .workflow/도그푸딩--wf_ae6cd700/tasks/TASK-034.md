@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-034
 title: 최근 활동 피드가 작업 전이와 기획서 결정을 한 타임라인으로 보여준다
-status: completed
+status: verified
 source_spec_id: SPEC-011
 source_decision_id: DECISION-FE4BCCC7
-updated_at: 2026-08-04T11:45:36.805607+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:45:00Z, kind: created }
-  - { at: 2026-08-03T08:13:00Z, kind: in_progress }
-  - { at: 2026-08-03T08:22:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:45:36.805607+00:00, kind: completed }
+- at: 2026-08-03T02:45:00Z
+  kind: created
+- at: 2026-08-03T08:13:00Z
+  kind: in_progress
+- at: 2026-08-03T08:22:00Z
+  kind: qa_waiting
+- at: 2026-08-04T11:45:36.805607+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-FE4BCCC7
+work_group_revision: 1
 ---
 
 # 최근 활동 피드가 작업 전이와 기획서 결정을 한 타임라인으로 보여준다

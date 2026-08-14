@@ -2,17 +2,31 @@
 schema: workflow-labs/task@1
 id: TASK-136
 title: 사용자 정의 규칙 조회와 저장 상태를 작업 공간에 연결한다
-status: completed
+status: verified
 source_spec_id: SPEC-048
 source_decision_id: DECISION-D0174726
-depends_on: [TASK-133, TASK-135]
-scope_files: [src/features/projects/application/useProjectWorkspace.test.ts, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts]
-updated_at: 2026-08-06T13:36:41.214632+00:00
+depends_on:
+- TASK-133
+- TASK-135
+scope_files:
+- src/features/projects/application/useProjectWorkspace.test.ts
+- src/features/projects/application/useProjectWorkspace.ts
+- src/features/projects/domain/types.ts
+- src/features/projects/infrastructure/tauriProjectGateway.ts
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T10:03:06Z, kind: created }
-  - { at: 2026-08-06T12:29:49Z, kind: in_progress }
-  - { at: 2026-08-06T12:44:09Z, kind: qa_waiting }
-  - { at: 2026-08-06T13:36:41.214632+00:00, kind: completed }
+- at: 2026-08-06T10:03:06Z
+  kind: created
+- at: 2026-08-06T12:29:49Z
+  kind: in_progress
+- at: 2026-08-06T12:44:09Z
+  kind: qa_waiting
+- at: 2026-08-06T13:36:41.214632+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-D0174726
+work_group_revision: 1
 ---
 
 # 사용자 정의 규칙 조회와 저장 상태를 작업 공간에 연결한다

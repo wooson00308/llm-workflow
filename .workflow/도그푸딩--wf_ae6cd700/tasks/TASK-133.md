@@ -2,17 +2,30 @@
 schema: workflow-labs/task@1
 id: TASK-133
 title: 열기와 수동 새로 고침에서만 관리 규칙을 동기화한다
-status: completed
+status: verified
 source_spec_id: SPEC-047
 source_decision_id: DECISION-6650F2D7
-depends_on: [TASK-132]
-scope_files: [src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/application/useProjectWorkspace.test.ts]
-updated_at: 2026-08-06T13:36:36.372208+00:00
+depends_on:
+- TASK-132
+scope_files:
+- src/features/projects/domain/types.ts
+- src/features/projects/infrastructure/tauriProjectGateway.ts
+- src/features/projects/application/useProjectWorkspace.ts
+- src/features/projects/application/useProjectWorkspace.test.ts
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T09:51:14Z, kind: created }
-  - { at: 2026-08-06T12:02:23Z, kind: in_progress }
-  - { at: 2026-08-06T12:07:25Z, kind: qa_waiting }
-  - { at: 2026-08-06T13:36:36.372208+00:00, kind: completed }
+- at: 2026-08-06T09:51:14Z
+  kind: created
+- at: 2026-08-06T12:02:23Z
+  kind: in_progress
+- at: 2026-08-06T12:07:25Z
+  kind: qa_waiting
+- at: 2026-08-06T13:36:36.372208+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6650F2D7
+work_group_revision: 1
 ---
 
 # 열기와 수동 새로 고침에서만 관리 규칙을 동기화한다

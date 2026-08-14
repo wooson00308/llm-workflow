@@ -2,17 +2,33 @@
 schema: workflow-labs/task@1
 id: TASK-148
 title: blocked 작업 재개를 원자적 사용자 감사 전이로 기록한다
-status: completed
+status: verified
 source_spec_id: SPEC-054
 source_decision_id: DECISION-DC3ED4B7
-depends_on: [TASK-S051-01]
-scope_files: [docs/file-contract.md, src-tauri/src/application/project_service.rs, src-tauri/src/commands/projects.rs, src-tauri/src/domain/project.rs, src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/infrastructure/project_instructions.rs, src-tauri/src/lib.rs]
-updated_at: 2026-08-08T07:53:13.588508+00:00
+depends_on:
+- TASK-S051-01
+scope_files:
+- docs/file-contract.md
+- src-tauri/src/application/project_service.rs
+- src-tauri/src/commands/projects.rs
+- src-tauri/src/domain/project.rs
+- src-tauri/src/infrastructure/fs_project_repository.rs
+- src-tauri/src/infrastructure/project_instructions.rs
+- src-tauri/src/lib.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-07T16:08:52Z, kind: created }
-  - { at: 2026-08-08T03:49:10Z, kind: in_progress }
-  - { at: 2026-08-08T04:09:16Z, kind: qa_waiting }
-  - { at: 2026-08-08T07:53:13.588508+00:00, kind: completed }
+- at: 2026-08-07T16:08:52Z
+  kind: created
+- at: 2026-08-08T03:49:10Z
+  kind: in_progress
+- at: 2026-08-08T04:09:16Z
+  kind: qa_waiting
+- at: 2026-08-08T07:53:13.588508+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-DC3ED4B7
+work_group_revision: 1
 ---
 
 # blocked 작업 재개를 원자적 사용자 감사 전이로 기록한다

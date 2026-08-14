@@ -2,17 +2,32 @@
 schema: workflow-labs/task@1
 id: TASK-114
 title: 설치 2·3단계를 앱이 대신 실행한다
-status: completed
+status: verified
 source_spec_id: SPEC-037
 source_decision_id: DECISION-6C2F2639
-depends_on: [TASK-113]
-scope_files: [src-tauri/src/application/heartbeat_setup_run_service.rs, src-tauri/src/application/mod.rs, src-tauri/src/commands/heartbeat.rs, src-tauri/src/lib.rs, src-tauri/src/infrastructure/heartbeat_setup.rs, src-tauri/src/domain/project.rs]
-updated_at: 2026-08-05T09:08:41.765526+00:00
+depends_on:
+- TASK-113
+scope_files:
+- src-tauri/src/application/heartbeat_setup_run_service.rs
+- src-tauri/src/application/mod.rs
+- src-tauri/src/commands/heartbeat.rs
+- src-tauri/src/lib.rs
+- src-tauri/src/infrastructure/heartbeat_setup.rs
+- src-tauri/src/domain/project.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T03:25:00Z, kind: created }
-  - { at: 2026-08-05T06:15:00Z, kind: in_progress }
-  - { at: 2026-08-05T06:29:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T09:08:41.765526+00:00, kind: completed }
+- at: 2026-08-05T03:25:00Z
+  kind: created
+- at: 2026-08-05T06:15:00Z
+  kind: in_progress
+- at: 2026-08-05T06:29:00Z
+  kind: qa_waiting
+- at: 2026-08-05T09:08:41.765526+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6C2F2639
+work_group_revision: 1
 ---
 
 # 설치 2·3단계를 앱이 대신 실행한다

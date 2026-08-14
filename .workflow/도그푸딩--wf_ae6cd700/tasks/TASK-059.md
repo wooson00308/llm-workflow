@@ -2,15 +2,24 @@
 schema: workflow-labs/task@1
 id: TASK-059
 title: 규칙 자산과 파일 계약이 재작업 자격·우선순위·후속 참조·lease 만료 기준을 적는다
-status: completed
+status: verified
 source_spec_id: SPEC-018
 source_decision_id: DECISION-1224D86C
-depends_on: [TASK-041, TASK-057]
-updated_at: 2026-08-03T12:54:26Z
+depends_on:
+- TASK-041
+- TASK-057
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T09:30:00Z, kind: created }
-  - { at: 2026-08-03T12:35:57Z, kind: in_progress }
-  - { at: 2026-08-03T12:45:30Z, kind: qa_waiting }
+- at: 2026-08-03T09:30:00Z
+  kind: created
+- at: 2026-08-03T12:35:57Z
+  kind: in_progress
+- at: 2026-08-03T12:45:30Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-1224D86C
+work_group_revision: 1
 ---
 
 # 규칙 자산과 파일 계약이 재작업 자격·우선순위·후속 참조·lease 만료 기준을 적는다

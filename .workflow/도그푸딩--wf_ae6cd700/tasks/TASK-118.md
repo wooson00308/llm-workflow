@@ -2,17 +2,28 @@
 schema: workflow-labs/task@1
 id: TASK-118
 title: 계약이 결정권자 요약과 확인 동선을 요구하게 하고 규칙 자산 버전을 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-038
 source_decision_id: DECISION-BCACD11B
-depends_on: [TASK-111]
-scope_files: [src-tauri/src/infrastructure/project_instructions.rs, docs/file-contract.md]
-updated_at: 2026-08-05T09:12:37.042601+00:00
+depends_on:
+- TASK-111
+scope_files:
+- src-tauri/src/infrastructure/project_instructions.rs
+- docs/file-contract.md
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T06:10:00Z, kind: created }
-  - { at: 2026-08-05T08:45:00Z, kind: in_progress }
-  - { at: 2026-08-05T08:55:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T09:12:37.042601+00:00, kind: completed }
+- at: 2026-08-05T06:10:00Z
+  kind: created
+- at: 2026-08-05T08:45:00Z
+  kind: in_progress
+- at: 2026-08-05T08:55:00Z
+  kind: qa_waiting
+- at: 2026-08-05T09:12:37.042601+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-BCACD11B
+work_group_revision: 1
 ---
 
 # 계약이 결정권자 요약과 확인 동선을 요구하게 하고 규칙 자산 버전을 올린다

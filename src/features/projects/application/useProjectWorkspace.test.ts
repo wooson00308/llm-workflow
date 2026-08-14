@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import type { Mock } from "vitest";
 import { describe, expect, it, vi } from "vitest";
 
 // 클립보드는 Tauri 플러그인을 부르는 자리라 jsdom에서 동작하지 않는다. 복사 경로가 실제로 그 모듈을
@@ -29,8 +30,9 @@ import type {
   ProjectSummary,
   RecentProjectStore,
   SaveCustomRulesResult,
-  TaskQaBatchEntry,
   TaskResumeOutcome,
+  WorkGroupQaSubmission,
+  WorkGroupQaSubmissionResult,
   WorkflowReportSummary,
   AgentInstallApplication,
   AgentInstallPlan,
@@ -57,8 +59,8 @@ const project: ProjectSummary = {
       name: "Feature",
       status: "active",
       createdAt: "2026-07-30T00:00:00Z",
-      counts: { ideas: 0, specs: 0, decisions: 0, tasks: 0, reports: 0 },
-      items: { ideas: [], specs: [], tasks: [] },
+      counts: { ideas: 0, specs: 0, decisions: 0, workGroups: 0, tasks: 0, reports: 0 },
+      items: { ideas: [], specs: [], workGroups: [], tasks: [] },
     },
   ],
 };
@@ -374,6 +376,13 @@ const agentPolicy: AgentPolicySnapshot = {
     activeRuns: 0,
     projects: [],
   },
+  consent: {
+    status: "granted",
+    noticeVersion: 1,
+    grantedAt: "2026-08-13T15:00:00Z",
+    requiredNoticeVersion: 1,
+    detail: null,
+  },
 };
 
 const agentMigration: AgentMigrationPreview = {
@@ -405,10 +414,14 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     readTask: vi.fn().mockResolvedValue(null),
     readIdea: vi.fn().mockResolvedValue(null),
     decideSpec: vi.fn().mockResolvedValue(project),
-    recordTaskQa: vi.fn().mockResolvedValue(project),
-    confirmTaskQaBatch: vi
-      .fn()
-      .mockResolvedValue({ summary: project, results: [] }),
+    submitWorkGroupQa: vi.fn().mockResolvedValue({
+      summary: project,
+      decisionFileName: "GQA-DEFAULT.md",
+      groupId: "GROUP-DEFAULT",
+      groupRevision: 1,
+      outcome: "confirmed",
+      status: "recorded",
+    }),
     resumeTask: vi
       .fn()
       .mockResolvedValue({ status: "resumed", summary: project, recovery: null }),
@@ -425,6 +438,8 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     repairAgentRuntime: vi.fn().mockResolvedValue(agentUpdateApplication),
     readAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
     saveAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
+    grantAgentRuntimeConsent: vi.fn().mockResolvedValue(agentPolicy.consent),
+    revokeAgentRuntimeConsent: vi.fn().mockResolvedValue(agentPolicy.consent),
     previewAgentRuntimeMigration: vi.fn().mockResolvedValue(agentMigration),
     applyAgentRuntimeMigration: vi.fn().mockResolvedValue(agentPolicy),
     planAgentRun: vi.fn().mockResolvedValue({
@@ -619,6 +634,45 @@ describe("useProjectWorkspace", () => {
 
     expect(gateway.synchronizeManagedAssets).not.toHaveBeenCalled();
     expect(result.current.error).toBe("조회 실패");
+    unmount();
+  });
+
+  it("v2 마이그레이션 직후 관리 규칙과 사용자 규칙을 다시 읽는다", async () => {
+    const incompatible = {
+      ...project,
+      compatibility: "migration_required" as const,
+    };
+    const calls: string[] = [];
+    const gateway = gatewayFor({
+      inspect: vi.fn().mockResolvedValue(incompatible),
+      migrate: vi.fn().mockImplementation(async () => {
+        calls.push("migrate");
+        return project;
+      }),
+      synchronizeManagedAssets: vi.fn().mockImplementation(async () => {
+        calls.push("sync");
+        return managedAssetsResult;
+      }),
+      readCustomRules: vi.fn().mockImplementation(async () => {
+        calls.push("custom-rules");
+        return absentCustomRules;
+      }),
+    });
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore: storeStub() }),
+    );
+
+    await act(() => result.current.openRecent(project.rootPath));
+    await act(() => result.current.migrate());
+
+    expect(calls).toEqual(["migrate", "sync", "custom-rules"]);
+    expect(result.current.project).toEqual(project);
+    expect(result.current.managedAssets).toEqual({
+      syncing: false,
+      result: managedAssetsResult,
+      error: null,
+      trigger: "migration",
+    });
     unmount();
   });
 
@@ -1244,30 +1298,41 @@ describe("useProjectWorkspace", () => {
     unmount();
   });
 
-  // 일괄 확인은 앱 호출 한 번이다. 건별 결과가 그대로 화면으로 가고, 요약은 응답의 것으로 바뀐다.
-  it("일괄 확인을 게이트웨이 한 번으로 부르고 건별 결과를 그대로 돌려준다", async () => {
-    const results: TaskQaBatchEntry[] = [
-      { fileName: "TASK-001.md", taskId: "TASK-001", recorded: true, message: null },
-      {
-        fileName: "TASK-002.md",
-        taskId: "TASK-002",
-        recorded: false,
-        message: "QA 대기 상태인 개발 작업만 확인할 수 있습니다.",
-      },
-    ];
-    const batched: ProjectSummary = {
+  it("작업 그룹 QA를 게이트웨이 한 번으로 기록하고 원자적 결과를 그대로 돌려준다", async () => {
+    const submission: WorkGroupQaSubmission = {
+      workflowDirectory: "feature--wf_1",
+      fileName: "GROUP-DECISION-001.md",
+      expectedRevision: 2,
+      expectedUpdatedAt: "2026-07-31T00:00:00Z",
+      requestId: "request-group-qa-1",
+      entries: [
+        { scenarioId: "QA-01", outcome: "confirmed", comment: "" },
+        {
+          scenarioId: "QA-02",
+          outcome: "revision_requested",
+          comment: "저장 버튼이 눌리지 않습니다.",
+        },
+      ],
+    };
+    const submitted: ProjectSummary = {
       ...project,
       workflows: [
         {
           ...project.workflows[0],
-          counts: { ...project.workflows[0].counts, decisions: 1 },
+          counts: { ...project.workflows[0].counts, decisions: 2 },
         },
       ],
     };
+    const recorded: WorkGroupQaSubmissionResult = {
+      summary: submitted,
+      decisionFileName: "GQA-1234.md",
+      groupId: "GROUP-DECISION-001",
+      groupRevision: 2,
+      outcome: "revision_requested",
+      status: "recorded",
+    };
     const gateway = gatewayFor({
-      confirmTaskQaBatch: vi
-        .fn()
-        .mockResolvedValue({ summary: batched, results }),
+      submitWorkGroupQa: vi.fn().mockResolvedValue(recorded),
     });
     const recentStore: RecentProjectStore = {
       load: vi.fn().mockReturnValue([]),
@@ -1278,33 +1343,32 @@ describe("useProjectWorkspace", () => {
     );
 
     await act(() => result.current.openFolder());
-    let confirmed: TaskQaBatchEntry[] | null = null;
+    let submittedResult: WorkGroupQaSubmissionResult | null = null;
     await act(async () => {
-      confirmed = await result.current.confirmTaskQaBatch(
-        "feature--wf_1",
-        ["TASK-001.md", "TASK-002.md"],
-        "한 번에 확인함",
-      );
+      submittedResult = await result.current.submitWorkGroupQa(submission);
     });
 
-    expect(gateway.confirmTaskQaBatch).toHaveBeenCalledTimes(1);
-    expect(gateway.confirmTaskQaBatch).toHaveBeenCalledWith(
-      project.rootPath,
-      "feature--wf_1",
-      ["TASK-001.md", "TASK-002.md"],
-      "한 번에 확인함",
-    );
-    expect(confirmed).toEqual(results);
-    await waitFor(() => expect(result.current.project).toEqual(batched));
+    expect(gateway.submitWorkGroupQa).toHaveBeenCalledTimes(1);
+    expect(gateway.submitWorkGroupQa).toHaveBeenCalledWith(project.rootPath, submission);
+    expect(submittedResult).toEqual(recorded);
+    await waitFor(() => expect(result.current.project).toEqual(submitted));
     expect(result.current.error).toBeNull();
     unmount();
   });
 
-  it("일괄 확인 호출이 실패하면 null과 전역 사유가 남는다", async () => {
+  it("작업 그룹 QA 호출이 실패하면 null과 전역 사유가 남는다", async () => {
+    const refreshed = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, workGroups: 1 },
+      }],
+    };
     const gateway = gatewayFor({
-      confirmTaskQaBatch: vi
+      inspect: vi.fn().mockResolvedValueOnce(project).mockResolvedValueOnce(refreshed),
+      submitWorkGroupQa: vi
         .fn()
-        .mockRejectedValue(new Error("결정 코멘트는 2,000자 이하여야 합니다.")),
+        .mockRejectedValue(new Error("프로젝트에 등록되지 않은 워크플로우입니다.")),
     });
     const recentStore: RecentProjectStore = {
       load: vi.fn().mockReturnValue([]),
@@ -1315,18 +1379,25 @@ describe("useProjectWorkspace", () => {
     );
 
     await act(() => result.current.openFolder());
-    let confirmed: TaskQaBatchEntry[] | null = [];
+    let submittedResult: WorkGroupQaSubmissionResult | null = null;
     await act(async () => {
-      confirmed = await result.current.confirmTaskQaBatch(
-        "feature--wf_1",
-        ["TASK-001.md"],
-        "너무 긴 코멘트",
-      );
+      submittedResult = await result.current.submitWorkGroupQa({
+        workflowDirectory: "feature--wf_1",
+        fileName: "GROUP-DECISION-001.md",
+        expectedRevision: 1,
+        expectedUpdatedAt: "2026-07-31T00:00:00Z",
+        requestId: "request-group-qa-failed",
+        entries: [{ scenarioId: "QA-01", outcome: "confirmed", comment: "" }],
+      });
     });
 
-    expect(confirmed).toBeNull();
+    expect(submittedResult).toBeNull();
+    expect(gateway.inspect).toHaveBeenCalledTimes(2);
+    expect(result.current.project).toEqual(refreshed);
     await waitFor(() =>
-      expect(result.current.error).toBe("결정 코멘트는 2,000자 이하여야 합니다."),
+      expect(result.current.error).toBe(
+        "프로젝트에 등록되지 않은 워크플로우입니다.",
+      ),
     );
     unmount();
   });
@@ -2779,5 +2850,186 @@ describe("런타임 자동 업데이트", () => {
     expect(bundledRuntimeIsNewer("0.9.2", "0.9.2")).toBe(false);
     expect(bundledRuntimeIsNewer("0.9.2", "0.9.4")).toBe(false);
     expect(bundledRuntimeIsNewer("dev", "0.9.2")).toBe(false);
+  });
+});
+
+describe("useProjectWorkspace 실행 권한 동의", () => {
+  const runPlan = {
+    planId: "run-plan-1",
+    projectId: project.projectId,
+    revision: "queue-rev-1",
+    expiresAt: "2026-08-13T16:00:00Z",
+    deviceRemaining: 4,
+    projectRemaining: 3,
+    billingRouteRisk: false,
+    limits: {},
+    roles: [],
+  };
+
+  it("동의를 고지 버전과 함께 보내고 성공하면 설정을 다시 읽는다", async () => {
+    const gateway = gatewayFor();
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+    const readsBefore = (gateway.readAgentRuntimePolicy as Mock).mock.calls.length;
+
+    let granted = false;
+    await act(async () => {
+      granted = await result.current.agentRuntimeActions.grantConsent(1);
+    });
+
+    expect(granted).toBe(true);
+    expect(gateway.grantAgentRuntimeConsent).toHaveBeenCalledWith(project.projectId, 1);
+    // 동의 값은 설정 조회 응답에 실려 오므로, 돌려받은 값만 넣지 않고 설정을 다시 읽는다.
+    expect((gateway.readAgentRuntimePolicy as Mock).mock.calls.length).toBe(readsBefore + 1);
+    expect(result.current.agentRuntime.consentError).toBeNull();
+    expect(result.current.agentRuntime.consentBusy).toBe(false);
+    unmount();
+  });
+
+  it("철회는 프로젝트만 보내고, 정책 저장을 부르지 않는다", async () => {
+    const gateway = gatewayFor();
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+
+    let revoked = false;
+    await act(async () => {
+      revoked = await result.current.agentRuntimeActions.revokeConsent();
+    });
+
+    expect(revoked).toBe(true);
+    expect(gateway.revokeAgentRuntimeConsent).toHaveBeenCalledWith(project.projectId);
+    expect(gateway.saveAgentRuntimePolicy).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("동의를 기록하지 못하면 사유를 남기고 거짓을 돌려준다", async () => {
+    const failure = "요청을 처리하지 못했습니다: consent_notice_outdated";
+    const gateway = gatewayFor({
+      grantAgentRuntimeConsent: vi.fn().mockRejectedValue(new Error(failure)),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+
+    let granted = true;
+    await act(async () => {
+      granted = await result.current.agentRuntimeActions.grantConsent(1);
+    });
+
+    expect(granted).toBe(false);
+    expect(result.current.agentRuntime.consentError).toBe(failure);
+    expect(result.current.agentRuntime.consentBusy).toBe(false);
+    unmount();
+  });
+
+  it("아무것도 시작하지 못한 대기는 성공으로 접지 않고 사유를 남긴다", async () => {
+    const gateway = gatewayFor({
+      planAgentRun: vi.fn().mockResolvedValue(runPlan),
+      startAgentRun: vi.fn().mockResolvedValue({
+        started: [],
+        failures: [],
+        waiting: [{ role: "developer", reason: "execution_consent_required" }],
+      }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await act(() =>
+      result.current.agentRuntimeActions.planRun([
+        { role: "developer", slots: 1, targets: ["TASK-1"] },
+      ]),
+    );
+
+    let started = true;
+    await act(async () => {
+      started = await result.current.agentRuntimeActions.startRun();
+    });
+
+    expect(started).toBe(false);
+    expect(result.current.agentRuntime.runError).toBe("execution_consent_required");
+    // 계획을 지우면 동의한 뒤 그 자리에서 다시 시작할 수 없다.
+    expect(result.current.agentRuntime.runPlan).not.toBeNull();
+    unmount();
+  });
+
+  it("동의 부족으로 거절된 재시도를 시작한 실행으로 큐에 넣지 않는다", async () => {
+    const gateway = gatewayFor({
+      retryAgentRun: vi.fn().mockResolvedValue({
+        runId: "run-2",
+        projectId: project.projectId,
+        role: "developer",
+        provider: "codex",
+        state: "unrecognized",
+        targetId: "TASK-1",
+        startedAt: null,
+        finishedAt: "2026-08-13T16:00:00Z",
+        failureStage: null,
+        reason: "execution_consent_required",
+        remaining: [],
+        previousRunId: "run-1",
+        resultPrefix: null,
+      }),
+      inspectAgentRuns: vi.fn().mockResolvedValue({
+        projectId: project.projectId,
+        paused: false,
+        runs: [
+          {
+            runId: "run-1",
+            projectId: project.projectId,
+            role: "developer",
+            provider: "codex",
+            state: "failed",
+            targetId: "TASK-1",
+            startedAt: "2026-08-13T15:00:00Z",
+            finishedAt: "2026-08-13T15:01:00Z",
+            failureStage: "role_session",
+            reason: null,
+            remaining: [],
+            previousRunId: null,
+            resultPrefix: null,
+          },
+        ],
+        errors: [],
+        providers: [],
+        unavailable: null,
+      }),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() =>
+      expect(result.current.agentRuntime.queue?.runs).toHaveLength(1),
+    );
+    act(() => result.current.agentRuntimeActions.previewRetry("run-1"));
+
+    let retried = true;
+    await act(async () => {
+      retried = await result.current.agentRuntimeActions.confirmRetry();
+    });
+
+    expect(retried).toBe(false);
+    expect(result.current.agentRuntime.controlError).toBe("execution_consent_required");
+    expect(result.current.agentRuntime.queue?.runs.map((run) => run.runId)).toEqual(["run-1"]);
+    unmount();
   });
 });

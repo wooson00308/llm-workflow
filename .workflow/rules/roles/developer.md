@@ -2,12 +2,12 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 16
+rules_version: 18
 ---
 
 # Developer role
 
-Implement one eligible task or recover one agent-owned blocked task, verify the result, then hand finished work to the user for QA.
+Implement one eligible task or recover one agent-owned blocked task, run its automated verification, and mark it verified for its work group.
 
 ## Runtime reservation handoff
 
@@ -18,11 +18,14 @@ instructions.
 
 ## Eligibility
 
-- The task must be `todo`, `in_progress`, or `blocked` without `blocked_kind: definition_error`; its dependencies must be satisfied and its source decision must remain approved.
+- The task must be `todo`, `in_progress`, or `blocked` without `blocked_kind: definition_error`, and its dependencies must be satisfied.
+- Its `source_decision_id` must still name a latest app-owned `approved` decision for the exact `source_spec_id` on the task. The decision id and specification id are one approval pair; relabeling a valid decision with another specification never qualifies. A later revision request, rejection, or approval closes work derived from the older decision.
+- The sole compatibility exception is a migrated task with no `source_decision_id`, or the exact same synthetic `LEGACY-*` source as its group, in an active deterministic `GROUP-*-LEGACY` group. Migration cannot forge a user approval; a mismatched synthetic source and every native v2 task are excluded.
+- The task must name an existing `active` work group in `work_group_id`, and `work_group_revision` must be no newer than the group's current revision. For a native v2 task, `source_spec_id` and `source_decision_id` must match that group's sources; a migrated task follows only the narrow exception above. A task written while its group is still `preparing` waits for the architect to activate that group.
 - An `in_progress` task qualifies only while no unexpired lease covers it. A missing lease file and an expired one mean the same thing here, and `.workflow/rules/workflow.md` §4 is where "unexpired" is defined. Every other condition on this list holds for it exactly as it holds for a `todo` task; none of them is loosened because the task was already started.
 - A non-definition `blocked` task qualifies only while no unexpired lease covers it. Missing-prerequisite declarations, overlapping work, and source approval are checked exactly as they are for the other states. A `definition_error` task belongs to the architect and never qualifies here.
 - No unexpired lease may cover work that overlaps the task's `scope_files`. "Overlapping work" below is that judgement.
-- If the task returned from user QA, read the latest `workflow-labs/qa-decision@1` comment and follow its test flow.
+- If the task carries `source_qa_decision_id`, read that app-owned group QA decision and implement only the corrective scope the task defines.
 
 ## Choose in this order
 
@@ -32,7 +35,7 @@ instructions.
 
 ## Taking over a stopped task
 
-- The document is already `in_progress`, so do not move it there again. Append the `in_progress` entry `.workflow/rules/workflow.md` §5 asks for, and hand off at `qa_waiting` the way any other session does.
+- The document is already `in_progress`, so do not move it there again. Append the `in_progress` entry `.workflow/rules/workflow.md` §5 asks for, and finish at `verified` the way any other session does.
 - Evaluate the stopped session's residue as `.workflow/rules/workflow.md` §4 requires, and report the split it asks for.
 - The body of the task document — its scope and its completion conditions — belongs to the architect, and a takeover does not edit it. What the stopped session failed to finish and what the task is defined to be are different things, and this line is what keeps them apart.
 - If the stopped session damaged that body, report it as an out-of-role finding and stop. Repairing it is not this role's work.
@@ -49,14 +52,14 @@ instructions.
 
 A task declares what it waits for in the optional `depends_on` frontmatter field, a list of task ids in the same workflow. A task without the key, or with an empty list, waits for nothing.
 
-Dependencies are satisfied only when every declared id names a task document whose status is `qa_waiting` or `completed`. They are unsatisfied when any of the following holds:
+Dependencies are satisfied only when every declared id names a task document whose status is `verified`. They are unsatisfied when any of the following holds:
 
 - a declared task is `todo`, `in_progress`, or `blocked`
 - a declared id has no task document
 - the declaration names the task itself, or the declarations form a cycle
 - the value cannot be read as a list
 
-The judgement is derived when read and stored nowhere, so a dependency returning to `todo` after a QA revision request makes the waiting task unsatisfied again.
+The judgement is derived when read and stored nowhere. Group QA rejection does not roll a verified dependency back; the architect creates a corrective task and orders new dependencies explicitly.
 
 Never select a task whose dependencies are unsatisfied. If only such tasks remain, change no files and report `NO_ELIGIBLE_WORK`. Do not move them to `blocked` either: `blocked` is the state of a task that was started and then hit a real impediment, not of a task whose turn has not come.
 
@@ -86,19 +89,11 @@ If you opened the specification or the decision, write in the report which part 
 
 Before you change the first product file, read the task's `## 범위 사전 검사` section against the repository as it is now. This is a short cross-read, not a second decomposition: open what the section names and see whether those files still carry the behaviour the completion conditions ask for. The architect wrote that section from the same repository, and this reading is what catches the gap between then and now.
 
-## The confirmation walkthrough
+## Keep user QA at the group boundary
 
-A task you hand to user QA carries a section headed `## 확인 동선`, written in exactly those characters. `.workflow/rules/workflow.md` §8 names it; what it holds is defined here, because you are the one who writes it.
-
-Write it into the assigned task document, in the same edit that records the `qa_waiting` transition. The task body is otherwise the architect's, and this section is the one part of it that is yours.
-
-- The minimum shape is: which screen → which action → what appears when it is right.
-- A task with no screen to look at — a contract wording change, a judgement inside a script — says so in plain words: that the work was closed by automated checks, and that the confirmation stamp means trusting those numbers. Do not leave the section empty and do not write it as though a screen existed.
-- A defect fix that has reproduction conditions writes those conditions into the walkthrough.
-- Paths, commands, and identifiers are welcome here. Reproducing something may need them, and the restrictions §8 places on the summary do not reach this section.
-- A task returned by user QA is walked again, so bring this section up to what the rework actually changed.
-
-The `## 사용자 QA 제안` heading some reports carry is free writing, not this obligation. The task document is where the user reads the walkthrough, because the app opens task bodies beside the confirmation stamp and does not open reports at all.
+- Do not add `## 확인 동선`, terminal instructions, or a user confirmation request to a task. The architect-owned work group is the only source of user QA scenarios.
+- Record commands and automated test results in the implementation report. They are evidence for the group readiness calculation, not steps the user must execute.
+- When implementation reveals that a group scenario is impossible or technically framed, report it as an architect handoff. A developer does not rewrite the group document.
 
 ## Blocking a task
 
@@ -134,7 +129,7 @@ The report body is at most 80 lines. Count it the way `.workflow/rules/workflow.
 
 Detail that does not fit goes where it already has a place. The reasoning behind one edit belongs in a code comment beside that edit, and the record of what a change contains belongs in the commit message. Do not create a new document kind or schema to hold what the limit pushed out.
 
-The `## 확인 동선` section is not one of these. It is written into the task document, as the section above describes.
+User QA scenarios are not one of these report sections. They remain in the architect-owned work group.
 
 ## Allowed
 
@@ -152,17 +147,16 @@ The `## 확인 동선` section is not one of these. It is written into the task 
 
 - Do not modify specifications, decisions, or unrelated tasks.
 - Do not broaden requirements or silently implement follow-up ideas.
-- Do not mark work `completed`; only the user's QA can complete it.
+- Do not modify a work group or write a user decision. The developer's terminal state is task `verified`.
 - Do not weaken or delete tests merely to obtain a passing result.
 
 ## Completion
 
 - Claim the task as `.workflow/rules/workflow.md` §4 describes. Move a `todo` task to `in_progress` immediately; a takeover records its new `in_progress` history entry; a `blocked` recovery moves only after the recovery check above says work can actually begin.
-- Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, `qa_waiting` when handing off. The app records `completed` and `revision_requested`.
+- Append the matching `history` entry in the same edit that changes the status: `in_progress` when starting or resuming, `blocked` when blocked, and `verified` after the report and automated checks are complete.
 - When the task you are transitioning carries the structured summary §8 defines, bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them. Updating a fact is not an occasion to reshape the section.
 - A task whose summary is plain prose, or has no summary at all, stays that way. Do not convert an existing task into the structured form.
 - Record changes, checks, risks, and handoff notes in `reports/`.
-- Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done and what was verified, and what the user is being asked to do now.
-- Before handing the task to user QA, check that the report's Korean follows `.workflow/rules/workflow.md` §9. Keep the report focused on changes, verification, risks, and user confirmation. This self-review does not affect eligibility.
-- Write the `## 확인 동선` section into the assigned task in the same edit that moves it to `qa_waiting`, as the section above describes.
-- Move the task to `qa_waiting`, release the lease, and stop.
+- Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done, what was verified, and which work-group result this evidence supports.
+- Before marking the task verified, check that the report's Korean follows `.workflow/rules/workflow.md` §9. Keep the report focused on changes, automated verification, risks, and architect handoffs. This self-review does not affect eligibility.
+- Move the task to `verified`, release the lease, and stop. Do not ask the user to run a terminal command or stamp the individual task.

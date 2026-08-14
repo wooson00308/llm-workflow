@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-045
 title: 연동의 Windows 차단을 해제하고 설치 검증을 세 러너 모두에서 돌린다
-status: completed
+status: verified
 source_spec_id: SPEC-015
 source_decision_id: DECISION-EEEEB81D
-depends_on: [TASK-044]
-updated_at: 2026-08-04T11:45:26.654391+00:00
+depends_on:
+- TASK-044
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T06:50:00Z, kind: created }
-  - { at: 2026-08-03T10:04:15Z, kind: in_progress }
-  - { at: 2026-08-03T10:13:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:45:26.654391+00:00, kind: completed }
+- at: 2026-08-03T06:50:00Z
+  kind: created
+- at: 2026-08-03T10:04:15Z
+  kind: in_progress
+- at: 2026-08-03T10:13:00Z
+  kind: qa_waiting
+- at: 2026-08-04T11:45:26.654391+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-EEEEB81D
+work_group_revision: 1
 ---
 
 # 연동의 Windows 차단을 해제하고 설치 검증을 세 러너 모두에서 돌린다

@@ -7,6 +7,7 @@ import type {
   AgentMigrationPreview,
   AgentCancelOutcome,
   AgentPolicySnapshot,
+  AgentProjectConsent,
   AgentProjectPolicy,
   AgentQueueSnapshot,
   AgentRoleSlotRequest,
@@ -34,7 +35,8 @@ import type {
   SaveCustomRulesResult,
   SpecDocument,
   TaskDocument,
-  TaskQaBatchResult,
+  WorkGroupQaSubmission,
+  WorkGroupQaSubmissionResult,
   TaskResumeRequest,
   TaskResumeResult,
   TaskRevisionRequestInput,
@@ -165,22 +167,10 @@ export const tauriProjectGateway: ProjectGateway = {
     });
   },
 
-  recordTaskQa(path, workflowDirectory, fileName, outcome, comment) {
-    return invoke<ProjectSummary>("record_task_qa", {
+  submitWorkGroupQa(path, submission: WorkGroupQaSubmission) {
+    return invoke<WorkGroupQaSubmissionResult>("submit_work_group_qa", {
       path,
-      workflowDirectory,
-      fileName,
-      outcome,
-      comment,
-    });
-  },
-
-  confirmTaskQaBatch(path, workflowDirectory, fileNames, comment) {
-    return invoke<TaskQaBatchResult>("confirm_task_qa_batch", {
-      path,
-      workflowDirectory,
-      fileNames,
-      comment,
+      submission,
     });
   },
 
@@ -283,6 +273,19 @@ export const tauriProjectGateway: ProjectGateway = {
     return invoke<AgentPolicySnapshot>("save_agent_runtime_policy", {
       policy,
       baselineRevision,
+    });
+  },
+
+  grantAgentRuntimeConsent(projectId, noticeVersion) {
+    return invoke<AgentProjectConsent>("grant_agent_runtime_consent", {
+      projectId,
+      noticeVersion,
+    });
+  },
+
+  revokeAgentRuntimeConsent(projectId) {
+    return invoke<AgentProjectConsent>("revoke_agent_runtime_consent", {
+      projectId,
     });
   },
 

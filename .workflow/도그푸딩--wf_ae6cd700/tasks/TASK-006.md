@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-006
 title: 설정 화면 연동 섹션 읽기 전용 표시와 상태 조회 커맨드 연결
-status: completed
+status: verified
 source_spec_id: SPEC-002
 source_decision_id: DECISION-1265B3C7
-updated_at: 2026-08-02T04:17:08.476897+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-1265B3C7
+work_group_revision: 1
 ---
 
 # 설정 화면 연동 섹션 읽기 전용 표시와 상태 조회 커맨드 연결

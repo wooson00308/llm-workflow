@@ -8,6 +8,7 @@ export interface WorkflowCounts {
   ideas: number;
   specs: number;
   decisions: number;
+  workGroups: number;
   tasks: number;
   reports: number;
 }
@@ -25,6 +26,7 @@ export interface WorkflowSummary {
 export interface WorkflowItems {
   ideas: WorkflowItemSummary[];
   specs: WorkflowItemSummary[];
+  workGroups: WorkGroupSummary[];
   tasks: WorkflowItemSummary[];
 }
 
@@ -49,6 +51,12 @@ export interface WorkflowItemSummary {
   sourceSpecId?: string | null;
   /** 개발 작업이 어떤 승인 결정에서 나왔는지. 아이디어·기획서에서는 늘 null이다. */
   sourceDecisionId?: string | null;
+  /** 개발 작업이 어떤 작업 그룹에 속하는지. 작업 이외 문서에서는 늘 null이다. */
+  workGroupId?: string | null;
+  /** 개발 작업이 따라가는 작업 그룹 구성 revision. 작업 이외 문서에서는 늘 null이다. */
+  workGroupRevision?: number | null;
+  /** 그룹 QA 반려 뒤 만들어진 수정 작업이 어떤 결정을 근거로 하는지. */
+  sourceQaDecisionId?: string | null;
   /**
    * 중단 의심의 근거. 아이디어가 반영중인데 선점한 미만료 lease가 없을 때 걸려 있는 draft 기획서의
    * 문서 id다. 비어 있지 않다는 것과 중단 의심은 같은 뜻이다. 기획서·개발 작업 항목에서는 비어 있다.
@@ -146,21 +154,73 @@ export type SpecDecisionOutcome =
   | "revision_requested"
   | "rejected";
 
-export type TaskQaOutcome = "confirmed" | "revision_requested";
+export type WorkGroupDocumentStatus = "preparing" | "active";
 
-export interface TaskQaBatchEntry {
-  fileName: string;
-  /** 문서를 읽지 못하면 null. 추정으로 채우지 않는다. */
-  taskId: string | null;
-  recorded: boolean;
-  /** 실패 사유. 성공이면 null. */
-  message: string | null;
+/** 작업 그룹 문서와 현재 작업·결정·lease를 함께 읽어 백엔드가 파생한 사용자 표시 상태. */
+export type WorkGroupDisplayStatus =
+  | "completed"
+  | "rework"
+  | "preparing"
+  | "preparing_stalled"
+  | "blocked"
+  | "developing"
+  | "qa_ready"
+  | "automatic_completed"
+  | "configuration_error";
+
+export type WorkGroupQaMode = "user" | "automatic";
+export type WorkGroupQaOutcome = "confirmed" | "revision_requested";
+
+/** 아키텍트가 작업 그룹 문서에 적은 사용자 기능 확인 시나리오. */
+export interface WorkGroupQaScenario {
+  id: string;
+  title: string;
+  /** `### QA-01 · 제목` 아래의 Markdown 본문. 터미널·내부 테스트 절차는 계약상 들어오지 않는다. */
+  body: string;
 }
 
-export interface TaskQaBatchResult {
+/** 승인된 기획서 하나를 AI 실행 작업과 사용자 QA 사이에서 잇는 작업 그룹. */
+export interface WorkGroupSummary {
+  fileName: string;
+  id: string;
+  title: string;
+  status: WorkGroupDocumentStatus;
+  displayStatus: WorkGroupDisplayStatus;
+  revision: number;
+  qaMode: WorkGroupQaMode;
+  sourceSpecId: string;
+  sourceDecisionId: string;
+  sourceQaDecisionId: string | null;
+  updatedAt: string;
+  description: string;
+  scenarios: WorkGroupQaScenario[];
+}
+
+/** 그룹 QA에서 시나리오 하나에 남기는 결과. 한 문제라도 있으면 전체 그룹이 반려된다. */
+export interface WorkGroupQaSubmissionEntry {
+  scenarioId: string;
+  outcome: WorkGroupQaOutcome;
+  comment: string;
+}
+
+/** 한 revision의 작업 그룹 전체에 찍는 원자적 사용자 QA 결정. */
+export interface WorkGroupQaSubmission {
+  workflowDirectory: string;
+  fileName: string;
+  expectedRevision: number;
+  expectedUpdatedAt: string;
+  requestId: string;
+  entries: WorkGroupQaSubmissionEntry[];
+}
+
+/** 같은 request id 재시도는 기존 결정을 돌려주며 새 감사 기록을 만들지 않는다. */
+export interface WorkGroupQaSubmissionResult {
   summary: ProjectSummary;
-  /** 요청 순서 그대로. 화면이 목록과 나란히 읽는다. */
-  results: TaskQaBatchEntry[];
+  decisionFileName: string;
+  groupId: string;
+  groupRevision: number;
+  outcome: WorkGroupQaOutcome;
+  status: "recorded" | "already_recorded";
 }
 
 /**
@@ -314,7 +374,10 @@ export interface ManagedAssetSyncResult {
   rollbackRecoveries: ManagedAssetRollbackRecovery[];
 }
 
-export type ManagedAssetSyncTrigger = "project_open" | "manual_refresh";
+export type ManagedAssetSyncTrigger =
+  | "project_open"
+  | "manual_refresh"
+  | "migration";
 
 /** 명시적 관리 자산 동기화의 수명. 자동 조회는 이 값을 바꾸지 않는다. */
 export interface ManagedAssetsState {
@@ -1076,23 +1139,14 @@ export interface ProjectGateway {
     outcome: SpecDecisionOutcome,
     comment: string,
   ): Promise<ProjectSummary>;
-  recordTaskQa(
+  /** 현재 revision의 작업 그룹 전체에 사용자 QA 결정 하나를 원자적으로 기록한다. */
+  submitWorkGroupQa(
     path: string,
-    workflowDirectory: string,
-    fileName: string,
-    outcome: TaskQaOutcome,
-    comment: string,
-  ): Promise<ProjectSummary>;
-  /** 확인 전용이라 outcome 자리가 없다. 일괄 반려는 이 길로 열지 않는다. */
-  confirmTaskQaBatch(
-    path: string,
-    workflowDirectory: string,
-    fileNames: string[],
-    comment: string,
-  ): Promise<TaskQaBatchResult>;
+    submission: WorkGroupQaSubmission,
+  ): Promise<WorkGroupQaSubmissionResult>;
   /**
-   * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. QA 결정과 다른 통로다 — 두 조작은
-   * 남기는 기록도 뜻도 다르므로 `recordTaskQa`를 재사용하지 않는다.
+   * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. 그룹 QA 결정과 다른 통로다 — 두
+   * 조작은 남기는 기록도 뜻도 다르다.
    *
    * 사용자가 근거를 적고 확인한 자리에서만 부른다. 조회 주기가 이 메서드를 부르는 경로는 없다.
    */
@@ -1182,6 +1236,16 @@ export interface ProjectGateway {
     policy: AgentProjectPolicy,
     baselineRevision: string,
   ): Promise<AgentPolicySnapshot>;
+  /**
+   * 사용자가 읽은 고지 버전으로 이 프로젝트의 실행 권한 동의를 남긴다. 동의 시각은 실행 환경이
+   * 스스로 읽으므로 앱이 보내지 않는다.
+   */
+  grantAgentRuntimeConsent(
+    projectId: string,
+    noticeVersion: number,
+  ): Promise<AgentProjectConsent>;
+  /** 이 프로젝트의 실행 권한 동의를 철회한다. 이미 실행 중인 세션은 종료하지 않는다. */
+  revokeAgentRuntimeConsent(projectId: string): Promise<AgentProjectConsent>;
   /** 기존 역할 잡에서 새 정책을 제안한다. 파일을 읽기만 한다. */
   previewAgentRuntimeMigration(
     path: string,
@@ -1406,6 +1470,32 @@ export interface AgentProviderDiagnosis {
   modelCatalog?: { status: string; models?: Array<{ id: string; label?: string }> };
 }
 
+/**
+ * 실행 권한 동의를 확인한 결과.
+ *
+ * 확인하지 못한 것을 동의로 접지 않으려고 실패도 상태 값으로 남긴다. 실행 환경이 동의 명령을 모르는
+ * 것과 그 밖의 이유로 읽지 못한 것을 가르는 것은 화면이 두 경우를 다르게 안내하기 때문이다.
+ */
+export type AgentConsentStatus =
+  /** 유효한 동의가 있다. */
+  | "granted"
+  /** 기록이 없거나 고지 버전이 실행 환경이 요구하는 버전보다 낮다. */
+  | "required"
+  /** 이 실행 환경은 동의 명령을 모른다. */
+  | "unsupported"
+  /** 그 밖의 이유로 확인하지 못했다. */
+  | "unreadable";
+
+/** 프로젝트 하나의 실행 권한 동의 상태. 화면은 이 값을 읽어 동의 관문을 열지 결정한다. */
+export interface AgentProjectConsent {
+  status: AgentConsentStatus;
+  noticeVersion: number | null;
+  grantedAt: string | null;
+  requiredNoticeVersion: number | null;
+  /** 확인하지 못한 사유. 상태가 `unreadable`일 때만 채운다. */
+  detail: string | null;
+}
+
 export interface AgentPolicySnapshot {
   policy: AgentProjectPolicy;
   /** 저장된 설정이 없으면 기본값 제안이고 이 값이 거짓이다. */
@@ -1416,6 +1506,8 @@ export interface AgentPolicySnapshot {
   executionAllowed: boolean;
   compatibility: AgentCompatibility;
   deviceCapacity: AgentDeviceCapacity;
+  /** 이 프로젝트의 실행 권한 동의 상태. 설정 저장과는 무관하다. */
+  consent: AgentProjectConsent;
 }
 
 /** 옮기지 못한 값 하나. 조용히 버리지 않고 그대로 남긴다. */
@@ -1499,10 +1591,19 @@ export interface AgentRunSummary {
   resultPrefix: string | null;
 }
 
+/**
+ * 시작하지 못하고 기다리게 된 역할 하나. 실행 실패가 아니라 대기라서 실행 행도 오류 기록도 남지
+ * 않으므로, 사용자가 이유를 아는 길은 이 값뿐이다.
+ */
+export interface AgentRunWaiting {
+  role: string;
+  reason: string;
+}
+
 export interface AgentRunStartOutcome {
   started: AgentRunSummary[];
   failures: unknown[];
-  waiting?: unknown[];
+  waiting?: AgentRunWaiting[];
 }
 
 export interface AgentCancelPreview {
@@ -1616,6 +1717,10 @@ export interface AgentRuntimeState {
   migrationError: string | null;
   saving: boolean;
   saveError: string | null;
+  /** 동의나 철회를 실행 환경에 전달하는 중인지. */
+  consentBusy: boolean;
+  /** 동의나 철회를 기록하지 못한 사유. 조용히 넘어가지 않으려고 저장 실패와 다른 자리에 둔다. */
+  consentError: string | null;
   runPlan: AgentRunPlan | null;
   runRequests: AgentRoleSlotRequest[];
   runPlanning: boolean;
@@ -1687,6 +1792,13 @@ export interface AgentRuntimeActions {
   applyMigration(): Promise<boolean>;
   dismissMigration(): void;
   save(policy: AgentProjectPolicy): Promise<boolean>;
+  /**
+   * 사용자가 읽은 고지 버전으로 실행 권한 동의를 남기고, 성공하면 설정을 다시 읽어 화면의 동의
+   * 상태를 최신으로 만든다. 기록하지 못하면 거짓을 돌려주므로 부른 쪽이 이어지지 않는다.
+   */
+  grantConsent(noticeVersion: number): Promise<boolean>;
+  /** 실행 권한 동의를 철회한다. 이미 실행 중인 세션은 종료하지 않는다. */
+  revokeConsent(): Promise<boolean>;
   planRun(requests: AgentRoleSlotRequest[]): Promise<void>;
   cancelRunPlan(): void;
   startRun(): Promise<boolean>;
