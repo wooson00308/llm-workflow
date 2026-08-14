@@ -14,7 +14,7 @@ const relatedTaskStatusLabels: Record<string, string> = {
   todo: "준비",
   in_progress: "진행 중",
   blocked: "막힘",
-  verified: "AI 검증 완료",
+  verified: "완료",
   qa_waiting: "기존 QA 대기",
   completed: "기존 완료",
 };

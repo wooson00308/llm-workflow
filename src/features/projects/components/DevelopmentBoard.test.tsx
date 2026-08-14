@@ -138,17 +138,17 @@ function stubStorage() {
 
 describe("DevelopmentBoard", () => {
   it("groups development tasks by their actual status", () => {
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith()} />);
 
     expect(screen.getByRole("region", { name: "GROUP-DEFAULT 칸반 보드" })).toBeInTheDocument();
     expect(screen.getByText("파서 구현")).toBeInTheDocument();
     expect(screen.getAllByText("사용자 QA").length).toBeGreaterThan(0);
     expect(screen.getAllByText("진행 중").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("AI 검증 완료").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("완료").length).toBeGreaterThan(0);
   });
 
   it("shares search and status filters across view modes", () => {
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith()} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
     expect(screen.getByText("파서 구현")).toBeInTheDocument();
@@ -168,7 +168,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T04:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
@@ -176,7 +176,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("drops the due_at placement wording from the timeline header", () => {
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith()} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     expect(screen.getByText("상태 전이 기록 기준")).toBeInTheDocument();
@@ -198,13 +198,13 @@ describe("DevelopmentBoard", () => {
         { kind: "verified", at: `${todayKey}T02:00:00Z` },
       ],
     }));
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
     expect(cell.querySelectorAll(".calendar-count")).toHaveLength(2);
     expect(within(cell).getByText("시작").parentElement).toHaveTextContent("시작3");
-    expect(within(cell).getByText("AI 검증 완료").parentElement).toHaveTextContent("AI 검증 완료3");
+    expect(within(cell).getByText("완료").parentElement).toHaveTextContent("완료3");
   });
 
   it("keeps every verified task on the board and timeline", () => {
@@ -218,14 +218,14 @@ describe("DevelopmentBoard", () => {
       excerpt: "",
       events: [{ kind: "verified", at: `${todayKey}T05:00:00Z` }],
     }));
-    render(<DevelopmentBoard onReadTask={taskReader(verified[0])} workflow={workflowWith(verified)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader(verified[0])} workflow={workflowWith(verified)} />);
 
     expect(screen.getByText("4개 표시")).toBeInTheDocument();
     expect(screen.getByText("검증 완료 작업 1")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
-    expect(within(cell).getByText("AI 검증 완료").parentElement).toHaveTextContent("AI 검증 완료4");
+    expect(within(cell).getByText("완료").parentElement).toHaveTextContent("완료4");
     expect(screen.getByText("4개 표시 · 전체 이력 표시")).toBeInTheDocument();
   });
 
@@ -234,20 +234,20 @@ describe("DevelopmentBoard", () => {
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T01:00:00Z` }] },
       { ...tasks[1], dueAt: null, events: [{ kind: "verified", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const cell = () => dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
     expect(cell().querySelectorAll(".calendar-count")).toHaveLength(2);
 
     fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "verified" } });
-    expect(within(cell()).getByText("AI 검증 완료")).toBeInTheDocument();
+    expect(within(cell()).getByText("완료")).toBeInTheDocument();
     expect(within(cell()).queryByText("시작")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("combobox", { name: "상태 필터" }), { target: { value: "all" } });
     fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
     expect(within(cell()).getByText("시작")).toBeInTheDocument();
-    expect(within(cell()).queryByText("AI 검증 완료")).not.toBeInTheDocument();
+    expect(within(cell()).queryByText("완료")).not.toBeInTheDocument();
   });
 
   it("skips unreadable event times and unknown kinds without breaking the grid", () => {
@@ -262,7 +262,7 @@ describe("DevelopmentBoard", () => {
         ],
       },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
@@ -276,13 +276,13 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "verified", at }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
-    expect(within(dayCell(timeline, localKey)).getByText("AI 검증 완료")).toBeInTheDocument();
+    expect(within(dayCell(timeline, localKey)).getByText("완료")).toBeInTheDocument();
     if (localKey !== todayKey) {
-      expect(within(dayCell(timeline, todayKey)).queryByText("AI 검증 완료")).not.toBeInTheDocument();
+      expect(within(dayCell(timeline, todayKey)).queryByText("완료")).not.toBeInTheDocument();
     }
   });
 
@@ -291,7 +291,7 @@ describe("DevelopmentBoard", () => {
       { ...tasks[0], dueAt: null, events: [{ kind: "qa_waiting", at: `${todayKey}T08:00:00Z` }] },
       { ...tasks[1], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 2건` }));
 
@@ -310,7 +310,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "blocked", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={onReadTask} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={onReadTask} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
     fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
@@ -323,7 +323,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const timeline = screen.getByRole("region", { name: "개발 작업 타임라인" });
@@ -336,7 +336,7 @@ describe("DevelopmentBoard", () => {
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
       { ...tasks[1], dueAt: null, events: [{ kind: "qa_waiting", at: `${otherDayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
 
     const target = screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` });
@@ -357,7 +357,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "파서" } });
 
@@ -382,7 +382,7 @@ describe("DevelopmentBoard", () => {
         ],
       },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 2건` }));
 
@@ -393,7 +393,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     fireEvent.click(screen.getByRole("button", { name: `${dayLabel(todayKey)}, 이벤트 1건` }));
     expect(screen.getByRole("button", { name: "닫기" })).toBeInTheDocument();
@@ -405,13 +405,13 @@ describe("DevelopmentBoard", () => {
   it("reports tasks that never reach the timeline and drops the notice once they do", () => {
     const withEvents: WorkflowItemSummary = { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] };
     const view = render(
-      <DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith([withEvents, { ...tasks[1], dueAt: null }])} />,
+      <DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([withEvents, { ...tasks[1], dueAt: null }])} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     expect(screen.getByText("기록이 없어 타임라인에 표시되지 않는 작업 1건")).toBeInTheDocument();
 
     view.rerender(
-      <DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith([withEvents])} />,
+      <DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([withEvents])} />,
     );
     expect(screen.queryByText(/기록이 없어 타임라인에 표시되지 않는 작업/)).not.toBeInTheDocument();
   });
@@ -420,7 +420,7 @@ describe("DevelopmentBoard", () => {
     const items: WorkflowItemSummary[] = [
       { ...tasks[0], dueAt: null, events: [{ kind: "in_progress", at: `${todayKey}T02:00:00Z` }] },
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items)} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items)} />);
     fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
     expect(screen.queryByText("이 달에 기록된 전이가 없습니다.")).not.toBeInTheDocument();
 
@@ -434,17 +434,17 @@ describe("DevelopmentBoard", () => {
   });
 
   it.each([
-    ["todo", "AI 작업 준비 중", "AI가 아직 이 작업을 시작하지 않았습니다."],
+    ["todo", "시작을 기다리는 작업입니다", "AI가 아직 이 작업을 시작하지 않았습니다."],
     ["in_progress", "AI가 작업하고 있습니다", "사용자가 따로 실행할 절차는 없습니다."],
     ["blocked", "AI 작업이 잠시 멈췄습니다", "내부 확인과 복구는 AI가 맡습니다."],
-    ["verified", "구현과 자동검증을 마쳤습니다", "작업 그룹 전체가 품질 확인에 올라옵니다."],
+    ["verified", "작업을 마쳤습니다", "작업 그룹 단위로 품질 확인에 올라옵니다."],
   ])("explains the %s state without asking the user to run internal checks", async (status, heading, description) => {
     const item = { ...tasks[0], status };
-    render(<DevelopmentBoard onReadTask={taskReader(item)} workflow={workflowWith([item])} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader(item)} workflow={workflowWith([item])} />);
 
     fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
 
-    const verification = await screen.findByRole("region", { name: "AI 자동검증 상태" });
+    const verification = await screen.findByRole("region", { name: "작업 진행 상태" });
     expect(within(verification).getByRole("heading", { name: heading })).toBeInTheDocument();
     expect(within(verification).getByText(new RegExp(description))).toBeInTheDocument();
   });
@@ -456,7 +456,7 @@ describe("DevelopmentBoard", () => {
       workGroupRevision: 1,
     });
     const group = testGroup({ displayStatus: "qa_ready", revision: 2 });
-    render(<DevelopmentBoard onReadTask={taskReader(item)} workflow={workflowWith([item], [], [group])} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader(item)} workflow={workflowWith([item], [], [group])} />);
 
     fireEvent.click(screen.getByRole("button", { name: /카드 저장 구현/ }));
 
@@ -475,10 +475,10 @@ describe("DevelopmentBoard", () => {
       dependencyFormatError: true,
       overlapBlocks: [{ leaseTargetId: "TASK-999", sharedFiles: ["src/internal.ts"] }],
     });
-    render(<DevelopmentBoard onReadTask={onReadTask} workflow={workflowWith()} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={onReadTask} workflow={workflowWith()} />);
 
     fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
-    await screen.findByRole("region", { name: "AI 자동검증 상태" });
+    await screen.findByRole("region", { name: "작업 진행 상태" });
 
     expect(screen.queryByText(/npx vitest/)).not.toBeInTheDocument();
     expect(screen.queryByText("TASK-404")).not.toBeInTheDocument();
@@ -487,13 +487,26 @@ describe("DevelopmentBoard", () => {
     expect(screen.queryByRole("separator", { name: /검증 패널/ })).not.toBeInTheDocument();
   });
 
+  it("shows the task's decision-maker summary while keeping internals hidden", async () => {
+    const onReadTask = vi.fn().mockResolvedValue({
+      summary: tasks[0],
+      body: "# 파서 구현\n\n## 결정권자 요약\n\n### 제안\n\n문서 상태를 빠르게 읽게 만든다.\n\n## 내부 검증\n\nnpx vitest run",
+    });
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={onReadTask} workflow={workflowWith()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
+    const brief = await screen.findByRole("region", { name: "작업 요약" });
+    expect(within(brief).getByText("문서 상태를 빠르게 읽게 만든다.")).toBeInTheDocument();
+    expect(screen.queryByText(/npx vitest/)).not.toBeInTheDocument();
+  });
+
   it.each([
     ["missing group", { ...tasks[0], workGroupId: "GROUP-404" }],
     ["future group revision", { ...tasks[0], workGroupRevision: 2 }],
     ["different source spec", { ...tasks[0], sourceSpecId: "SPEC-OTHER" }],
     ["different source decision", { ...tasks[0], sourceDecisionId: "DECISION-OTHER" }],
   ])("marks a %s as needing group confirmation", async (_case, item) => {
-    render(<DevelopmentBoard onReadTask={taskReader(item)} workflow={workflowWith([tasks[0]])} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader(item)} workflow={workflowWith([tasks[0]])} />);
 
     fireEvent.click(screen.getByRole("button", { name: /파서 구현/ }));
 
@@ -502,7 +515,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("does not expose technical excerpts on task cards or the flat list", () => {
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith()} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith()} />);
 
     expect(screen.queryByText("문서 상태를 읽는다.")).not.toBeInTheDocument();
     expect(screen.queryByText("실제 흐름을 확인한다.")).not.toBeInTheDocument();
@@ -517,7 +530,7 @@ describe("DevelopmentBoard", () => {
       laneTask("TASK-101", "in_progress", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1 }),
       laneTask("TASK-102", "verified", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1 }),
     ];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items, [], [
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [
       testGroup({ id: "GROUP-A", title: "카드 등록", displayStatus: "developing" }),
     ])} />);
 
@@ -529,7 +542,7 @@ describe("DevelopmentBoard", () => {
   });
 
   it("shows architect preparation before any task exists", () => {
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith([], [], [
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
       testGroup({ status: "preparing", displayStatus: "preparing", title: "검색 개편" }),
     ])} />);
 
@@ -539,26 +552,47 @@ describe("DevelopmentBoard", () => {
   });
 
   it("distinguishes a stopped architect preparation from ordinary development", () => {
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith([], [], [
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
       testGroup({ status: "preparing", displayStatus: "preparing_stalled", title: "검색 개편" }),
     ])} />);
 
     expect(screen.getByText("구성 중단 의심")).toBeInTheDocument();
   });
 
-  it("keeps user QA controls out of the development board", () => {
+  it("opens the quality check for a qa-ready group without exposing decision controls", () => {
+    const onOpenQa = vi.fn();
     const items = [laneTask("TASK-201", "verified", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 2 })];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items, [], [
+    render(<DevelopmentBoard onOpenQa={onOpenQa} onReadTask={taskReader()} workflow={workflowWith(items, [], [
       testGroup({ revision: 2, displayStatus: "qa_ready", scenarios: [{ id: "QA-01", title: "카드 확인", body: "카드를 확인한다." }] }),
     ])} />);
 
-    expect(screen.getByText("사용자 QA 대기")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /QA 시작|품질 확인 열기|도장/ })).not.toBeInTheDocument();
+    // 입구는 열되, 확인·도장 같은 QA 결정 컨트롤은 여전히 개발 화면에 두지 않는다.
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인 시작 →" }));
+    expect(onOpenQa).toHaveBeenCalledWith("GROUP-A");
+    expect(screen.queryByRole("button", { name: /확인하고 다음|확인 완료|도장|기록하기/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps finished groups off the board and points to the archive", () => {
+    const items = [
+      laneTask("TASK-501", "in_progress", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1 }),
+      laneTask("TASK-502", "verified", "SPEC-B", { workGroupId: "GROUP-B", workGroupRevision: 1, sourceDecisionId: "DECISION-B" }),
+      laneTask("TASK-503", "verified", "SPEC-C", { workGroupId: "GROUP-C", workGroupRevision: 1, sourceDecisionId: "DECISION-C" }),
+    ];
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [
+      testGroup({ id: "GROUP-A", title: "진행 중 기능", displayStatus: "developing" }),
+      testGroup({ id: "GROUP-B", title: "QA 끝난 기능", displayStatus: "completed" }),
+      testGroup({ id: "GROUP-C", title: "자동 검증 기능", displayStatus: "automatic_completed" }),
+    ])} />);
+
+    expect(screen.getByText("진행 중 기능")).toBeInTheDocument();
+    expect(screen.queryByText("QA 끝난 기능")).not.toBeInTheDocument();
+    expect(screen.queryByText("자동 검증 기능")).not.toBeInTheDocument();
+    expect(screen.getByText("완료된 작업 그룹 2개는 기록 화면에 있습니다.")).toBeInTheDocument();
   });
 
   it("switches to the flat task board only as a secondary view", () => {
     const items = [laneTask("TASK-301", "todo", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1 })];
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={workflowWith(items, [], [testGroup()])} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [testGroup()])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "평면 태스크 보기" }));
     expect(screen.getByRole("region", { name: "개발 작업 칸반 보드" })).toBeInTheDocument();
@@ -572,11 +606,11 @@ describe("DevelopmentBoard", () => {
       [],
       [testGroup()],
     );
-    const first = render(<DevelopmentBoard onReadTask={taskReader()} workflow={summary} />);
+    const first = render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={summary} />);
     fireEvent.click(screen.getByRole("button", { name: "GROUP-A 레인 접기" }));
     first.unmount();
 
-    render(<DevelopmentBoard onReadTask={taskReader()} workflow={summary} />);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={summary} />);
     expect(screen.queryByRole("region", { name: "GROUP-A 칸반 보드" })).not.toBeInTheDocument();
     expect(JSON.parse(stored.get(LANE_COLLAPSE_KEY) ?? "{}")["feature--wf_1"]["GROUP-A"]).toBe(true);
   });

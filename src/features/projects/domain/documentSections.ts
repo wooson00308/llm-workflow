@@ -19,16 +19,18 @@ export interface SectionSplit {
   rest: string;
 }
 
-/** 결정 보드가 추측 없이 표시할 수 있는 고정 요약 값이다. */
+/**
+ * 결정 보드가 추측 없이 표시할 수 있는 고정 요약 값이다.
+ *
+ * 현행 규격은 제안·현재·변경 후에 선택인 비용과 위험까지 네 항목이다. 이전 일곱 항목 규격
+ * (사용자 결과·영향 범위·결정 요청 포함)으로 쓰인 문서도 그대로 유효하며, 보드는 그 문서에서도
+ * 같은 네 값만 읽는다. 나머지는 원문 보기가 맡는다.
+ */
 export interface DecisionSummary {
   proposal: string;
   current: string;
   after: string;
-  userResult: string;
-  changed: string;
-  unchanged: string;
   risk?: string;
-  decisionRequest: string;
 }
 
 /** 막힌 작업 문서가 명시한 현재 사유를 화면에서 그대로 사용할 수 있게 분리한 값이다. */
@@ -58,14 +60,15 @@ const STRUCTURED_SUMMARY_HEADINGS = [
   "### 결정 요청",
 ] as const;
 
-const REQUIRED_SUMMARY_HEADINGS = [
-  "### 제안",
-  "### 현재",
-  "### 변경 후",
-  "### 사용자 결과",
-  "### 영향 범위",
-  "### 결정 요청",
-] as const;
+/** 제목 배열이 이 순서들 가운데 하나와 정확히 일치할 때만 구조화 요약으로 인정한다. */
+const ACCEPTED_HEADING_SEQUENCES: readonly (readonly string[])[] = [
+  // 현행 규격
+  ["### 제안", "### 현재", "### 변경 후"],
+  ["### 제안", "### 현재", "### 변경 후", "### 비용과 위험"],
+  // 이전 일곱 항목 규격 — 문서는 유효하고, 보드는 공통 네 값만 읽는다.
+  ["### 제안", "### 현재", "### 변경 후", "### 사용자 결과", "### 영향 범위", "### 결정 요청"],
+  ["### 제안", "### 현재", "### 변경 후", "### 사용자 결과", "### 영향 범위", "### 비용과 위험", "### 결정 요청"],
+];
 
 const MARKDOWN_HEADING_PATTERN = /^ {0,3}(#{1,6})\s/;
 
@@ -137,34 +140,29 @@ export function parseDecisionSummary(section: string | null): DecisionSummary | 
   const parts = splitStructuredSummary(lines.slice(1));
   if (parts === null) return null;
 
-  const hasRisk = parts.length === STRUCTURED_SUMMARY_HEADINGS.length;
-  const expectedHeadings = hasRisk ? STRUCTURED_SUMMARY_HEADINGS : REQUIRED_SUMMARY_HEADINGS;
-  if (parts.length !== expectedHeadings.length || parts.some((part, index) => part.heading !== expectedHeadings[index])) {
-    return null;
+  const headings = parts.map((part) => part.heading as string);
+  const matched = ACCEPTED_HEADING_SEQUENCES.find(
+    (sequence) => sequence.length === headings.length && sequence.every((heading, index) => heading === headings[index]),
+  );
+  if (!matched) return null;
+
+  // 어느 규격이든 모든 항목이 값을 가져야 구조화 요약이다. 영향 범위는 옛 규격의 표식 형태를 지킨다.
+  for (const part of parts) {
+    if (part.heading === "### 영향 범위") {
+      if (impactValues(part) === null) return null;
+    } else if (!partValue(part)) {
+      return null;
+    }
   }
 
-  const proposal = partValue(parts[0]);
-  const current = partValue(parts[1]);
-  const after = partValue(parts[2]);
-  const userResult = partValue(parts[3]);
-  const impact = impactValues(parts[4]);
-  const risk = hasRisk ? partValue(parts[5]) : undefined;
-  const decisionRequest = partValue(parts[hasRisk ? 6 : 5]);
+  const byHeading = new Map(parts.map((part) => [part.heading as string, part]));
+  const proposal = partValue(byHeading.get("### 제안"));
+  const current = partValue(byHeading.get("### 현재"));
+  const after = partValue(byHeading.get("### 변경 후"));
+  const risk = partValue(byHeading.get("### 비용과 위험")) ?? undefined;
+  if (!proposal || !current || !after) return null;
 
-  if (!proposal || !current || !after || !userResult || !impact || (hasRisk && !risk) || !decisionRequest) {
-    return null;
-  }
-
-  return {
-    proposal,
-    current,
-    after,
-    userResult,
-    changed: impact.changed,
-    unchanged: impact.unchanged,
-    ...(risk ? { risk } : {}),
-    decisionRequest,
-  };
+  return { proposal, current, after, ...(risk ? { risk } : {}) };
 }
 
 /**

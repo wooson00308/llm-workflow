@@ -171,6 +171,33 @@ describe("splitSection", () => {
 });
 
 describe("parseDecisionSummary", () => {
+  it("현행 세 항목 규격을 보드 값으로 분리한다", () => {
+    const section = [
+      HEADING, "",
+      "### 제안", "요약을 세 덩어리로 줄인다.", "",
+      "### 현재", "일곱 항목이 다 보인다.", "",
+      "### 변경 후", "제안과 전후만 보여 결정이 빨라진다.",
+    ].join("\n");
+
+    expect(parseDecisionSummary(section)).toEqual({
+      proposal: "요약을 세 덩어리로 줄인다.",
+      current: "일곱 항목이 다 보인다.",
+      after: "제안과 전후만 보여 결정이 빨라진다.",
+    });
+  });
+
+  it("현행 규격의 선택 위험 항목을 함께 분리한다", () => {
+    const section = [
+      HEADING, "",
+      "### 제안", "요약을 줄인다.", "",
+      "### 현재", "정보가 많다.", "",
+      "### 변경 후", "핵심만 남는다.", "",
+      "### 비용과 위험", "옛 문서는 원문 보기로만 전체가 보인다.",
+    ].join("\n");
+
+    expect(parseDecisionSummary(section)?.risk).toBe("옛 문서는 원문 보기로만 전체가 보인다.");
+  });
+
   it("정확한 구조의 Markdown 조각을 명시적 보드 값으로 분리한다", () => {
     const section = structuredSummary().replace("구조화된 요약을 읽는다.", "  **구조화된** 요약을\n읽는다.  ");
 
@@ -178,11 +205,7 @@ describe("parseDecisionSummary", () => {
       proposal: "**구조화된** 요약을\n읽는다.",
       current: "평문 요약만 보인다.",
       after: "고정된 카드로 보인다.",
-      userResult: "판단할 내용을 빨리 찾는다.",
-      changed: "결정 보드",
-      unchanged: "원문 Markdown",
       risk: "호환성 확인이 필요하다.",
-      decisionRequest: "형식을 확인한다.",
     });
   });
 
@@ -193,10 +216,6 @@ describe("parseDecisionSummary", () => {
       proposal: "구조화된 요약을 읽는다.",
       current: "평문 요약만 보인다.",
       after: "고정된 카드로 보인다.",
-      userResult: "판단할 내용을 빨리 찾는다.",
-      changed: "결정 보드",
-      unchanged: "원문 Markdown",
-      decisionRequest: "형식을 확인한다.",
     });
     expect(summary).not.toHaveProperty("risk");
   });

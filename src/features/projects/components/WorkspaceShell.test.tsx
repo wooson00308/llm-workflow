@@ -229,11 +229,11 @@ describe("WorkspaceShell", () => {
     expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("품질 확인");
     expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
 
-    // 개발 화면은 같은 그룹을 진행 상태로만 보여 주고 QA 조작은 두지 않는다.
+    // 개발 화면은 같은 그룹에 품질 확인 입구만 열고, 확인·도장 같은 QA 결정 조작은 두지 않는다.
     fireEvent.click(screen.getByRole("button", { name: "개발" }));
     expect(screen.getByText("카드 등록 흐름")).toBeInTheDocument();
-    expect(screen.getByText("사용자 QA 대기")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /QA 시작/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "품질 확인 시작 →" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /확인 완료|기록하기/ })).not.toBeInTheDocument();
 
     // 오늘 화면의 내 선택 대기도 그대로다.
     fireEvent.click(screen.getByRole("button", { name: "오늘" }));
@@ -291,13 +291,15 @@ describe("WorkspaceShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
     fireEvent.click(screen.getByRole("button", { name: /첫 워크플로 기능/ }));
-    fireEvent.click(within(screen.getByRole("article", { name: "현재 항목" })).getByRole("button", { name: "확인 완료" }));
+    fireEvent.click(screen.getByRole("button", { name: "기대대로 동작함" }));
+    expect(screen.getByRole("button", { name: "기대대로 동작함" })).toHaveAttribute("aria-pressed", "true");
 
+    // 같은 그룹 id·revision이라도 워크플로가 다르면 임시 결정을 물려받지 않는다.
     fireEvent.click(screen.getByRole("button", { name: /Second/ }));
     expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /둘째 워크플로 기능/ }));
-    expect(screen.getByRole("article", { name: "현재 항목" })).toHaveTextContent("둘째 워크플로 화면만 확인합니다.");
-    expect(screen.getByText("확인 전")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "확인 플로우" })).toHaveTextContent("둘째 워크플로 화면만 확인합니다.");
+    expect(screen.getByRole("button", { name: "기대대로 동작함" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("does not carry a Today QA deep link into another workflow with the same group id", () => {
@@ -605,8 +607,7 @@ describe("WorkspaceShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
     fireEvent.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
-    fireEvent.click(within(screen.getByRole("article", { name: "현재 항목" })).getByRole("button", { name: "확인 완료" }));
-    fireEvent.click(screen.getByRole("button", { name: "최종 검토로 이동" }));
+    fireEvent.click(screen.getByRole("button", { name: "기대대로 동작함" }));
     fireEvent.click(screen.getByRole("button", { name: "기능 승인 기록하기" }));
 
     await waitFor(() => expect(onWorkGroupQaSubmit).toHaveBeenCalledTimes(1));
@@ -656,12 +657,63 @@ describe("WorkspaceShell", () => {
       />,
     );
 
+    // 끝난 그룹은 개발 보드에 남지 않고, 기록 화면이 정본 목록을 갖는다.
     fireEvent.click(screen.getByRole("button", { name: "개발" }));
-    expect(screen.getByText("완료 기록 1")).toBeInTheDocument();
+    expect(screen.queryByText("완료 기록 1")).not.toBeInTheDocument();
+    expect(screen.getByText("완료된 작업 그룹 4개는 기록 화면에 있습니다.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "기록" }));
     expect(screen.getByText("완료 기록 1")).toBeInTheDocument();
     expect(screen.getAllByText(/완료 기록 [1-4]/)).toHaveLength(4);
+
+    // 완료된 기능은 기록에서 한 화면으로 다시 열어 본다.
+    fireEvent.click(screen.getByRole("button", { name: /완료 기록 1/ }));
+    expect(screen.getByRole("heading", { level: 1, name: "완료 기록 1" })).toBeInTheDocument();
+    expect(screen.getByText("사용자 QA 승인")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "← 기록으로 돌아가기" }));
+    expect(screen.getAllByText(/완료 기록 [1-4]/)).toHaveLength(4);
+  });
+
+  it("jumps from the development board into the quality check for a qa-ready group", () => {
+    stubStorage();
+    const qaProject: ProjectSummary = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, workGroups: 1 },
+        items: { ...project.workflows[0].items, workGroups: [workGroup("GROUP-A", "카드 등록 흐름")] },
+      }],
+    };
+
+    render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={qaProject}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인 시작 →" }));
+
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("품질 확인");
+    expect(screen.getByRole("heading", { level: 1, name: "카드 등록 흐름" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "확인 플로우" })).toBeInTheDocument();
   });
 
   it("refreshes the project with visible interaction feedback", async () => {
@@ -856,7 +908,7 @@ describe("WorkspaceShell", () => {
     expect(screen.getByRole("region", { name: "연동" }).textContent).toBe(before);
   });
 
-  it("opens the activity view from its own sidebar menu", () => {
+  it("keeps the retired activity menu out of the sidebar", () => {
     const { container } = render(
       <WorkspaceShell
         customRules={customRules}
@@ -880,11 +932,9 @@ describe("WorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "활동" }));
-
-    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "활동" })).toHaveClass("active");
-    expect(container.querySelector(".breadcrumbs")).toHaveTextContent("활동");
+    // 활동 메뉴는 에이전트 화면으로 통합되어 사라졌다.
+    expect(screen.queryByRole("button", { name: "활동" })).not.toBeInTheDocument();
+    expect(container.querySelector(".breadcrumbs")).not.toHaveTextContent("활동");
   });
 
   it("keeps the today banner out of sight while nothing is running", () => {
@@ -916,7 +966,7 @@ describe("WorkspaceShell", () => {
 
   // R2. 배너는 요약으로 남되 막다른 길이 아니어야 하고, 대표로 지목한 워커가 전용 뷰의 첫 카드와
   // 어긋나면 사용자가 두 화면을 다른 사실로 읽는다.
-  it("leads from the today banner to the activity view it summarizes", () => {
+  it("leads from the today banner to the agents view it summarizes", () => {
     const runningProject: ProjectSummary = {
       ...project,
       activeLeases: [
@@ -966,9 +1016,8 @@ describe("WorkspaceShell", () => {
     expect(banner).toHaveTextContent("planner-claude");
     fireEvent.click(banner);
 
-    const activity = screen.getByRole("region", { name: "활동" });
-    expect(within(activity).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(within(activity).getAllByRole("listitem")[0]).getByText("planner-claude")).toBeInTheDocument();
+    // 배너의 목적지는 이제 에이전트 화면이다. 세부 목록은 그 화면의 앱 밖 세션 절이 맡는다.
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("에이전트");
   });
 
   it("opens a working settings view", () => {
@@ -1531,14 +1580,14 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
   }
 
   function summary(count: number) {
-    return screen.getByRole("button", { name: `실행 중인 세션 ${count}개, 활동 화면 열기` });
+    return screen.getByRole("button", { name: `실행 중인 세션 ${count}개, 에이전트 화면 열기` });
   }
 
   /** 완료 조건 1. 좌측 메뉴는 화면 전환 분기 바깥에 있으므로 어느 화면을 열어도 표시가 남아야 한다. */
   it("오늘이 아닌 모든 화면에서도 좌측 메뉴에 축약 표시를 남긴다", () => {
     shell({ project: running(2) });
 
-    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "도움말", "설정"]) {
+    for (const menu of ["아이디어", "기획서", "개발", "기록", "도움말", "설정"]) {
       fireEvent.click(screen.getByRole("button", { name: menu }));
       expect(summary(2)).toBeInTheDocument();
     }
@@ -1572,15 +1621,15 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
     expect(card).toHaveTextContent("IDEA-001");
   });
 
-  /** 완료 조건 4, 5. 이미 활동 화면일 때 다시 눌러도 같은 값을 넣을 뿐이라 화면이 유지돼야 한다. */
-  it("축약 표시를 누르면 활동 화면으로 이동하고 다시 눌러도 그대로 머문다", () => {
+  /** 완료 조건 4, 5. 이미 에이전트 화면일 때 다시 눌러도 같은 값을 넣을 뿐이라 화면이 유지돼야 한다. */
+  it("축약 표시를 누르면 에이전트 화면으로 이동하고 다시 눌러도 그대로 머문다", () => {
     shell({ project: running(1) });
 
     fireEvent.click(summary(1));
-    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("에이전트");
 
     fireEvent.click(summary(1));
-    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("에이전트");
   });
 
   /** 완료 조건 7. 프로젝트가 바뀌면 축약 표시는 새 프로젝트의 활성 수를 따라야 한다. */
@@ -1646,7 +1695,7 @@ describe("WorkspaceShell 막힌 작업 안내", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "개발" }));
     fireEvent.click(screen.getByRole("button", { name: /막힌 작업/ }));
-    const verification = await screen.findByRole("region", { name: "AI 자동검증 상태" });
+    const verification = await screen.findByRole("region", { name: "작업 진행 상태" });
     expect(within(verification).getByText("AI 작업이 잠시 멈췄습니다")).toBeInTheDocument();
     const group = screen.getByRole("region", { name: "소속 작업 그룹" });
     expect(within(group).getByText("막힌 작업 그룹")).toBeInTheDocument();

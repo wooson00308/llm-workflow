@@ -906,3 +906,62 @@ describe("AgentRuntimeView execution consent", () => {
     expect(screen.getByRole("dialog", { name: "고급 설정" })).toHaveTextContent("과금 경로 확인 필요");
   });
 });
+
+describe("앱 밖 세션 표시", () => {
+  const lease = (id: string, agent: string, role: string | null, taskId: string | null, heartbeatAt = "2126-01-01T00:00:00Z") => ({
+    leaseId: id, agent, role, taskId, heartbeatAt, expiresAt: "2126-01-02T00:00:00Z",
+  });
+
+  it("앱 실행이 잡지 않은 선점만 보여 주고, 정상은 행·신호 지연은 카드로 가른다", () => {
+    const withLeases = {
+      ...project(),
+      activeLeases: [
+        lease("lease-run", "app-developer", "developer", "TASK-1"),
+        lease("lease-ext", "terminal-claude", "planner", "TASK-2"),
+        lease("lease-stale", "stale-codex", "developer", "TASK-QA", "2020-01-01T00:00:00Z"),
+      ],
+    };
+    render(
+      <AgentRuntimeView
+        actions={actions()}
+        project={withLeases}
+        state={state({ queue: { projectId: "prj_1", paused: false, runs: [run("run-1", "running", "TASK-1", "2026-08-11T00:00:00Z", null)], errors: [], providers: [], unavailable: null } })}
+      />,
+    );
+
+    const section = screen.getByRole("region", { name: "앱 밖 세션" });
+    // 앱 실행이 잡은 TASK-1 선점은 진행 중 목록이 말하므로 여기 없다.
+    expect(within(section).queryByText(/app-developer/)).not.toBeInTheDocument();
+
+    // 정상 세션은 조용한 행으로 서고, 역할·ID는 구분 문자 없이 UI 요소로 나뉜다.
+    const row = within(section).getByText("terminal-claude").closest("li");
+    expect(row).toHaveClass("worker-row");
+    expect(within(row as HTMLElement).getByText("기획자")).toHaveClass("agent-role-chip");
+    expect(within(row as HTMLElement).getByText("후속 작업")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("TASK-2")).toBeInTheDocument();
+    expect(row?.textContent).not.toContain("·");
+
+    // 신호가 끊긴 세션만 카드로 승격되고, 지연은 경고 칩이 말한다.
+    const card = within(section).getByText("stale-codex").closest("li");
+    expect(card).toHaveClass("worker-card");
+    expect(within(card as HTMLElement).getByText("신호 지연")).toHaveClass("worker-alert");
+
+    // 역할 집계는 텍스트 나열이 아니라 칩 묶음이다.
+    const summary = section.querySelector(".worker-role-summary");
+    expect(summary).toHaveTextContent("개발자1");
+    expect(summary).toHaveTextContent("기획자1");
+    expect(summary?.textContent).not.toContain("·");
+  });
+
+  it("정상 세션이 여덟을 넘으면 접고 전체 보기로 편다", () => {
+    const many = Array.from({ length: 11 }, (_, index) => lease(`lease-${index}`, `agent-${index}`, "developer", null));
+    render(<AgentRuntimeView actions={actions()} project={{ ...project(), activeLeases: many }} state={state()} />);
+
+    const section = screen.getByRole("region", { name: "앱 밖 세션" });
+    expect(within(section).getAllByRole("listitem")).toHaveLength(8);
+    fireEvent.click(within(section).getByRole("button", { name: "정상 세션 3개 더 보기" }));
+    expect(within(section).getAllByRole("listitem")).toHaveLength(11);
+    fireEvent.click(within(section).getByRole("button", { name: "접기" }));
+    expect(within(section).getAllByRole("listitem")).toHaveLength(8);
+  });
+});

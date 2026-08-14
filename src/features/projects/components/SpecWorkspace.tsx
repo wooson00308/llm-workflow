@@ -346,7 +346,7 @@ function SpecWorkGroupProgress({ groups, specId, tasks }: {
         <>
           <p className="spec-task-counts-list">
             <span>{workGroupStatusLabel(group)}</span>
-            <span>AI 검증 완료 {counts.byStatus.verified ?? 0} / {counts.total}</span>
+            <span>완료 {counts.byStatus.verified ?? 0} / {counts.total}</span>
             {counts.unknown > 0 && <span>규격 밖 {counts.unknown}</span>}
           </p>
           <small>{group.id} · revision {group.revision}</small>
@@ -381,7 +381,7 @@ function workGroupStatusLabel(group: WorkGroupSummary) {
     blocked: "개발 막힘",
     developing: "개발 중",
     qa_ready: "사용자 QA 대기",
-    automatic_completed: "AI 검증 완료",
+    automatic_completed: "완료",
     configuration_error: "구성 확인 필요",
   }[group.displayStatus];
 }

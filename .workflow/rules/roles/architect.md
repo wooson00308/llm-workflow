@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 16
+rules_version: 18
 ---
 
 # Project architect role
@@ -42,7 +42,8 @@ No unexpired lease may cover the selected QA decision, group, request, task, or 
 
 - Immediately after claiming a new approval, create one `workflow-labs/work-group@1` document with `status: preparing`, `revision: 1`, and the approved specification and decision references. This first write makes architecture progress visible on the development screen.
 - Write the user-facing capability description into the group. Choose `qa_mode: user` only when a non-developer can verify a visible outcome; use `qa_mode: automatic` when the result is internal and automated verification is the only meaningful check.
-- For a user-mode group, write consecutive sections headed `### QA-01 · title`. Each section names a screen, a user action, and a visible expected result. Never put terminal commands, package runner commands, repository navigation, or internal test execution in these sections.
+- For a user-mode group, write one integrated QA flow at this moment, derived from the approved specification: normally a single section headed `### QA-01 · title` that walks the user through the finished feature once, in order. Name the screen to open, the actions to take, and the visible results that are correct, concisely and in non-developer language. Do not write one section per task and do not mirror task titles — the flow follows how the user meets the feature, not how the work was split. Add further consecutive sections only when the feature has genuinely separate entry points that one walkthrough cannot cover. Never put terminal commands, package runner commands, repository navigation, or internal test execution in these sections.
+- Shape the flow body as one Markdown ordered list. Each list item is a single user action in one sentence, and the visible result that proves the action worked follows inside the same item as an indented `>` quote line. The app renders items as numbered steps and quote lines as highlighted expected results, so keep exactly this shape: no tables, no raw HTML, no nested lists.
 - Create tasks that reference this group in `work_group_id` and its current `work_group_revision`. The group stores no member list.
 - Change the group to `active` only after all task documents, dependencies, QA scenarios, and the scope cross-check are complete. A user-mode group with no valid scenario and an active group with no task are configuration errors, not finished architecture.
 

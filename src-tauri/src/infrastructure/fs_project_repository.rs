@@ -1507,15 +1507,15 @@ fn migrated_user_walkthrough(title: &str, body: &str) -> Option<String> {
     let mut in_fence = false;
     let kept = section
         .lines()
-        .filter_map(|line| {
+        .filter(|line| {
             if line.trim_start().starts_with("```") {
                 in_fence = !in_fence;
-                return None;
+                return false;
             }
             if in_fence {
-                return None;
+                return false;
             }
-            (!contains_internal_qa_instruction(line)).then_some(line)
+            !contains_internal_qa_instruction(line)
         })
         .collect::<Vec<_>>()
         .join("\n")

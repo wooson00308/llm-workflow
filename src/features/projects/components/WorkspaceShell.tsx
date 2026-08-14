@@ -14,18 +14,19 @@ import type {
   SpecDocument,
   WorkGroupQaSubmission,
   WorkGroupQaSubmissionResult,
+  WorkGroupSummary,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
-import { ActivityView } from "./ActivityView";
 import { AgentRuntimeView, ExecutionConsentDialog } from "./agents/AgentRuntimeView";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
+import { MarkdownBody } from "./MarkdownBody";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
 import { QaWorkbench } from "./qa/QaWorkbench";
 import { SettingsView } from "./SettingsView";
@@ -89,7 +90,6 @@ const viewLabels = {
   tasks: "개발",
   qa: "품질 확인",
   archive: "기록",
-  activity: "활동",
   agents: "에이전트",
   help: "도움말",
   settings: "설정",
@@ -128,7 +128,6 @@ export function WorkspaceShell({
     | "tasks"
     | "qa"
     | "archive"
-    | "activity"
     | "agents"
     | "help"
     | "settings"
@@ -297,14 +296,20 @@ export function WorkspaceShell({
           <Icon className="chevron" name="chevron" />
         </button>
 
+        {/* 세 묶음: 결정 허브(오늘) · 작업 흐름(아이디어→품질 확인) · 지난 일(기록·활동) */}
         <nav className="primary-nav" aria-label="주요 메뉴">
-          <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Icon name="spark" />오늘</button>
-          <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
-          <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
-          <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
-          <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인</button>
-          <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
-          <button className={view === "activity" ? "active" : ""} onClick={() => setView("activity")}><Icon name="activity" />활동</button>
+          <div className="primary-nav-group">
+            <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Icon name="spark" />오늘</button>
+          </div>
+          <div className="primary-nav-group">
+            <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
+            <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
+            <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
+            <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인</button>
+          </div>
+          <div className="primary-nav-group">
+            <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
+          </div>
         </nav>
 
         <div className="workflow-nav">
@@ -330,12 +335,12 @@ export function WorkspaceShell({
 
         <div className="sidebar-footer">
           {/* 좌측 메뉴는 화면 전환 분기 바깥이라 이 자리에 두면 어떤 화면에서도 보인다. 세션이 도는지와
-              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 활동 화면이 맡는다(SPEC-050). */}
+              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 에이전트 화면이 맡는다. */}
           {project.activeLeases.length > 0 && (
             <button
-              aria-label={`실행 중인 세션 ${project.activeLeases.length}개, 활동 화면 열기`}
+              aria-label={`실행 중인 세션 ${project.activeLeases.length}개, 에이전트 화면 열기`}
               className="sidebar-activity"
-              onClick={() => setView("activity")}
+              onClick={() => setView("agents")}
               type="button"
             >
               <span className="sidebar-activity-dot" />
@@ -426,7 +431,7 @@ export function WorkspaceShell({
               </div>
 
               {project.activeLeases.length > 0 && (
-                <button className="agent-activity" onClick={() => setView("activity")} type="button">
+                <button className="agent-activity" onClick={() => setView("agents")} type="button">
                   <span className="pulse" />
                   <div><strong>{project.activeLeases[0].agent}가 문서를 작업 중입니다</strong><small>{project.activeLeases[0].taskId ?? "워크플로우 작업"} · 마이그레이션 보호 활성</small></div>
                   <span className="agent-activity-count">{project.activeLeases.length} active</span>
@@ -509,6 +514,7 @@ export function WorkspaceShell({
           {workflow && view === "tasks" && (
             <DevelopmentBoard
               key={workflow.directory}
+              onOpenQa={openQaFeature}
               onReadTask={(fileName) => onReadTask(workflow.directory, fileName)}
               workflow={workflow}
             />
@@ -526,15 +532,6 @@ export function WorkspaceShell({
           )}
 
           {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
-
-          {/* 활성 lease는 프로젝트 전역이라 워크플로우가 없어도 그릴 것이 있다. */}
-          {view === "activity" && (
-            <ActivityView
-              onOpenDocument={(result) => void openSearchResult(result)}
-              project={project}
-              workflow={workflow}
-            />
-          )}
 
           {/* 워크플로우와 무관한 화면이라 workflow 조건을 걸지 않는다.
 
@@ -647,8 +644,11 @@ function StageCard({
   stage: (typeof stages)[number];
   workflow: WorkflowSummary | undefined;
 }) {
-  const value = workflow?.counts[stage.key] ?? 0;
-  const subtitles = ["생각을 수집하는 중", "승인 가능한 문서", "실행할 작업", "검증된 결과"];
+  // "완료"는 태스크가 아니라 기능(작업 그룹) 기준으로 센다. 구현 보고서 수는 사용자 언어가 아니다.
+  const completedFeatures = workflow?.items.workGroups
+    .filter((group) => ["completed", "automatic_completed"].includes(group.displayStatus)).length ?? 0;
+  const value = stage.key === "reports" ? completedFeatures : workflow?.counts[stage.key] ?? 0;
+  const subtitles = ["생각을 수집하는 중", "승인 가능한 문서", "실행할 작업", "완료된 기능"];
   return (
     <button className={`stage-card tone-${index}`} onClick={onOpen}>
       <div className="stage-top"><span><Icon name={stage.icon} /></span><small>0{index + 1}</small></div>
@@ -666,39 +666,174 @@ function ArchiveView({
   onOpenSpec(item: WorkflowItemSummary): void;
   workflow: WorkflowSummary;
 }) {
+  // 완료된 기능은 기록 안에서 한 화면으로 다시 열어 본다. 문서는 이미 다 손안에 있다.
+  const [selectedGroup, setSelectedGroup] = useState<WorkGroupSummary | null>(null);
   const specs = workflow.items.specs.filter((item) =>
     ["approved", "rejected"].includes(item.status),
   );
   const groups = workflow.items.workGroups.filter((group) =>
     ["completed", "automatic_completed"].includes(group.displayStatus),
   );
+
+  // 두 종류의 기록을 하나의 시간순 이야기로 합친다. 쌓일수록 목록이 아니라 달력처럼 읽히게,
+  // 최신이 먼저 오고 달이 바뀔 때마다 머리글이 선다.
+  const records: ArchiveRecord[] = [
+    ...specs.map((item) => ({
+      key: item.fileName,
+      kind: (item.status === "approved" ? "spec_approved" : "spec_rejected") as ArchiveRecord["kind"],
+      title: item.title,
+      meta: item.id,
+      at: item.updatedAt,
+      spec: item,
+    })),
+    ...groups.map((group) => ({
+      key: group.fileName,
+      kind: "group_completed" as const,
+      title: group.title,
+      meta: group.displayStatus === "completed" ? `${group.id} · 사용자 QA 승인` : group.id,
+      at: group.updatedAt,
+      group,
+    })),
+  ].sort((left, right) => archiveTime(right.at) - archiveTime(left.at));
+  const months = groupRecordsByMonth(records);
+  const counts = {
+    approved: specs.filter((item) => item.status === "approved").length,
+    rejected: specs.filter((item) => item.status === "rejected").length,
+    features: groups.length,
+  };
+
+  if (selectedGroup) {
+    const groupTasks = workflow.items.tasks.filter((task) => task.workGroupId === selectedGroup.id);
+    return (
+      <section className="archive-view archive-group-detail">
+        <button className="text-button qa-scope-back" onClick={() => setSelectedGroup(null)} type="button">← 기록으로 돌아가기</button>
+        <p className="qa-feature-kicker">기능 완료 기록</p>
+        <h1>{selectedGroup.title}</h1>
+        {selectedGroup.description && <p className="qa-feature-goal">{selectedGroup.description}</p>}
+
+        <dl className="archive-group-facts">
+          <div><dt>완료 방식</dt><dd>{selectedGroup.displayStatus === "completed" ? "사용자 QA 승인" : "자동 완료"}</dd></div>
+          <div><dt>구성 버전</dt><dd>{selectedGroup.revision}</dd></div>
+          <div><dt>마지막 갱신</dt><dd>{formatArchiveDate(selectedGroup.updatedAt)}</dd></div>
+        </dl>
+
+        {selectedGroup.scenarios.length > 0 && (
+          <section aria-label="사용자 확인 플로우" className="archive-group-flow">
+            <h2>사용자 확인 플로우</h2>
+            {selectedGroup.scenarios.map((scenario) => (
+              <section className="qa-flow-section" key={scenario.id}>
+                <h2>{scenario.title}</h2>
+                <MarkdownBody body={scenario.body} />
+              </section>
+            ))}
+          </section>
+        )}
+
+        {groupTasks.length > 0 && (
+          <section aria-label="포함된 작업" className="archive-group-tasks">
+            <h2>포함된 작업 {groupTasks.length}개</h2>
+            <ul>
+              {groupTasks.map((task) => (
+                <li key={task.fileName}>
+                  <span className="status-pill status-verified">완료</span>
+                  <strong>{task.title}</strong>
+                  <small>{task.id}</small>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </section>
+    );
+  }
+
   return (
     <section className="archive-view">
       <p className="eyebrow">ARCHIVE</p>
       <h1>결정과 완료 기록</h1>
-      <p>승인·폐기된 기획서와 완료된 개발 작업을 모아봅니다.</p>
-      <div className="archive-grid">
-        <section>
-          <div className="section-heading"><h2>결정된 기획서</h2><span>{specs.length}</span></div>
-          {specs.map((item) => (
-            <button key={item.fileName} onClick={() => onOpenSpec(item)}>
-              <span className={`status-pill status-${item.status}`}>{item.status === "approved" ? "승인" : "폐기"}</span>
-              <strong>{item.title}</strong><small>{item.id}</small>
-            </button>
-          ))}
-          {specs.length === 0 && <p className="archive-empty">아직 결정 기록이 없습니다.</p>}
-        </section>
-        <section>
-          <div className="section-heading"><h2>완료된 작업 그룹</h2><span>{groups.length}</span></div>
-          {groups.map((group) => (
-            <article key={group.fileName}>
-              <span className="status-pill status-completed">{group.displayStatus === "automatic_completed" ? "AI 검증 완료" : "사용자 QA 완료"}</span>
-              <strong>{group.title}</strong><small>{group.id} · revision {group.revision}</small>
-            </article>
-          ))}
-          {groups.length === 0 && <p className="archive-empty">아직 완료된 작업 그룹이 없습니다.</p>}
-        </section>
+      <p>승인·폐기된 기획서와 완료된 기능을 시간순으로 모아봅니다.</p>
+      {records.length > 0 && (
+        <p className="archive-summary">승인 {counts.approved} · 폐기 {counts.rejected} · 완료된 기능 {counts.features}</p>
+      )}
+
+      <div className="archive-timeline">
+        {months.map(([label, items]) => (
+          <section aria-label={label} key={label}>
+            <h2>{label}</h2>
+            <ul>
+              {items.map((record) => {
+                const body = (
+                  <>
+                    <time>{archiveDay(record.at)}</time>
+                    <span className={`archive-kind kind-${record.kind}`}>{ARCHIVE_KIND_LABEL[record.kind]}</span>
+                    <strong>{record.title}</strong>
+                    <small>{record.meta}</small>
+                  </>
+                );
+                return (
+                  <li key={record.key}>
+                    <button
+                      className="archive-row"
+                      onClick={() => {
+                        if (record.spec) onOpenSpec(record.spec);
+                        else if (record.group) setSelectedGroup(record.group);
+                      }}
+                      type="button"
+                    >{body}</button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
       </div>
+      {records.length === 0 && <p className="archive-empty">아직 남은 기록이 없습니다. 기획서가 결정되거나 기능이 완료되면 여기에 쌓입니다.</p>}
     </section>
   );
+}
+
+interface ArchiveRecord {
+  key: string;
+  kind: "spec_approved" | "spec_rejected" | "group_completed";
+  title: string;
+  meta: string;
+  at: string | null;
+  spec?: WorkflowItemSummary;
+  group?: WorkGroupSummary;
+}
+
+const ARCHIVE_KIND_LABEL: Record<ArchiveRecord["kind"], string> = {
+  spec_approved: "기획 승인",
+  spec_rejected: "기획 폐기",
+  group_completed: "기능 완료",
+};
+
+function archiveTime(value: string | null) {
+  const parsed = value === null ? Number.NaN : Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function archiveDay(value: string | null) {
+  if (value === null) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : `${parsed.getDate()}일`;
+}
+
+function formatArchiveDate(value: string | null) {
+  if (value === null) return "기록 없음";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "기록 없음";
+  return `${parsed.getFullYear()}년 ${parsed.getMonth() + 1}월 ${parsed.getDate()}일`;
+}
+
+function groupRecordsByMonth(records: ArchiveRecord[]) {
+  const months = new Map<string, ArchiveRecord[]>();
+  for (const record of records) {
+    const parsed = new Date(record.at ?? Number.NaN);
+    const label = Number.isNaN(parsed.getTime())
+      ? "날짜 미상"
+      : `${parsed.getFullYear()}년 ${parsed.getMonth() + 1}월`;
+    months.set(label, [...(months.get(label) ?? []), record]);
+  }
+  return [...months.entries()];
 }

@@ -77,7 +77,7 @@ describe("BlockedTaskPanel", () => {
       expect.stringContaining("외부 공급자 승인"),
     ]);
     expect(within(targets[0]).getByText("토큰 발급")).toBeInTheDocument();
-    expect(within(targets[0]).getByText("현재 상태 AI 검증 완료")).toBeInTheDocument();
+    expect(within(targets[0]).getByText("현재 상태 완료")).toBeInTheDocument();
     expect(within(targets[1]).queryByRole("button")).not.toBeInTheDocument();
     expect(within(targets[2]).queryByRole("button")).not.toBeInTheDocument();
 

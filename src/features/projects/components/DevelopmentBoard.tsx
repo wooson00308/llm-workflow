@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
+import { MarkdownBody } from "./MarkdownBody";
 import type {
   TaskDocument,
   WorkGroupDisplayStatus,
@@ -14,19 +15,29 @@ export const taskColumns = [
   { status: "todo", title: "준비", description: "시작할 수 있는 작업", tone: "neutral" },
   { status: "in_progress", title: "진행 중", description: "LLM이 작업하는 범위", tone: "active" },
   { status: "blocked", title: "막힘", description: "해결이 필요한 장애물", tone: "danger" },
-  { status: "verified", title: "AI 검증 완료", description: "구현과 자동검증이 끝난 작업", tone: "done" },
+  { status: "verified", title: "완료", description: "작업이 끝난 태스크", tone: "done" },
 ] as const;
 
-/** 작업 상태의 이름. 열 제목(`taskColumns`의 `title`)과 달리 완료를 "최근 완료"로 부르지 않는다. */
+/**
+ * 유저 화면에서 "완료"로 통일해 읽는 태스크 상태. 검증과 QA 대기는 세션과 그룹의 내부 사정이라
+ * 상태명으로 노출하지 않는다. 옛 방식의 QA 대기·완료 상태도 팔로업이 끊기지 않게 완료로 읽는다.
+ */
+const doneTaskStatuses = new Set(["verified", "qa_waiting", "completed"]);
+
+export function boardTaskStatus(status: string) {
+  return doneTaskStatuses.has(status) ? "verified" : status;
+}
+
+/** 작업 상태의 이름. */
 export const statusLabels: Record<string, string> = {
   todo: "준비",
   in_progress: "진행 중",
   blocked: "막힘",
-  verified: "AI 검증 완료",
+  verified: "완료",
 };
 
 /** 레인 수치와 신호가 무엇을 센 값인지 밝히는 문장. 레인마다 반복하지 않고 목록 위에 한 번만 둔다. */
-const LANE_BASIS_NOTE = "작업 그룹 상태는 전체 태스크와 AI 검증 결과를 기준으로 계산됩니다";
+const LANE_BASIS_NOTE = "작업 그룹 상태는 소속 태스크의 진행 상태를 기준으로 계산됩니다";
 
 const viewModes = [
   { value: "board", label: "보드" },
@@ -38,7 +49,7 @@ export const eventKinds = [
   { kind: "created", label: "생성" },
   { kind: "in_progress", label: "시작" },
   { kind: "blocked", label: "막힘" },
-  { kind: "verified", label: "AI 검증 완료" },
+  { kind: "verified", label: "완료" },
   { kind: "migrated_verified", label: "v2 검증 전환" },
   { kind: "qa_waiting", label: "기존 QA 대기" },
   { kind: "completed", label: "기존 완료" },
@@ -53,11 +64,12 @@ export const eventKinds = [
 type ViewMode = (typeof viewModes)[number]["value"];
 
 interface Props {
+  onOpenQa(groupId: string): void;
   onReadTask(fileName: string): Promise<TaskDocument | null>;
   workflow: WorkflowSummary;
 }
 
-export function DevelopmentBoard({ onReadTask, workflow }: Props) {
+export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [laneGrouping, setLaneGrouping] = useState(true);
   const [query, setQuery] = useState("");
@@ -171,7 +183,7 @@ export function DevelopmentBoard({ onReadTask, workflow }: Props) {
       <div className="development-summary">
         <span><i className="summary-dot active" />진행 중 {count(workflow.items.tasks, "in_progress")}</span>
         <span><i className="summary-dot danger" />막힘 {count(workflow.items.tasks, "blocked")}</span>
-        <span><i className="summary-dot review" />AI 검증 완료 {count(workflow.items.tasks, "verified")}</span>
+        <span><i className="summary-dot review" />완료 {count(workflow.items.tasks, "verified")}</span>
         <span className="result-count">
           {viewMode === "calendar"
             ? `${timelineTasks.length}개 표시 · 전체 이력 표시`
@@ -195,6 +207,7 @@ export function DevelopmentBoard({ onReadTask, workflow }: Props) {
               groups={workflow.items.workGroups}
               hasFilters={hasFilters}
               onOpen={(item) => void openTask(item.fileName)}
+              onOpenQa={onOpenQa}
               onToggleCollapsed={toggleLaneCollapsed}
               statusFilter={statusFilter}
               visibleTasks={filteredTasks}
@@ -227,18 +240,20 @@ function TaskDetail({ document, group, onBack }: {
   group: WorkGroupSummary | null;
   onBack(): void;
 }) {
-  const state = taskVerificationState(document.summary.status);
+  const displayStatus = boardTaskStatus(document.summary.status);
+  const state = taskVerificationState(displayStatus);
+  const brief = decisionSummarySection(document.body);
   return (
     <section className="task-detail-view">
       <button className="text-button task-detail-back" onClick={onBack}>← 개발 작업으로</button>
       <div className="view-heading task-detail-heading">
         <div><p className="eyebrow">{document.summary.id}</p><h1>{document.summary.title}</h1><p>AI가 맡은 구현 단위의 현재 상태입니다.</p></div>
-        <span className={`status-pill status-${document.summary.status}`}>{state.label}</span>
+        <span className={`status-pill status-${displayStatus}`}>{state.label}</span>
       </div>
       <div className="task-detail-overview">
-        <section aria-label="AI 자동검증 상태" className={`task-detail-summary task-detail-summary-${document.summary.status}`}>
-          <Icon name={document.summary.status === "verified" ? "stamp" : "board"} />
-          <div><p className="eyebrow">AI VERIFICATION</p><h2>{state.heading}</h2><p>{state.description}</p></div>
+        <section aria-label="작업 진행 상태" className={`task-detail-summary task-detail-summary-${displayStatus}`}>
+          <Icon name={displayStatus === "verified" ? "stamp" : "board"} />
+          <div><p className="eyebrow">PROGRESS</p><h2>{state.heading}</h2><p>{state.description}</p></div>
         </section>
         <section aria-label="소속 작업 그룹" className={`task-detail-group ${group ? "" : "needs-attention"}`}>
           <p className="eyebrow">WORK GROUP</p>
@@ -261,21 +276,45 @@ function TaskDetail({ document, group, onBack }: {
           )}
         </section>
       </div>
+
+      <section aria-label="작업 요약" className="task-detail-brief">
+        <p className="eyebrow">BRIEF</p>
+        <h2>어떤 작업인가</h2>
+        {brief ? (
+          <MarkdownBody body={brief} />
+        ) : (
+          <p className="task-detail-brief-empty">이 작업 문서에는 결정권자 요약이 없습니다. 새로 만들어지는 작업부터는 요약이 함께 작성됩니다.</p>
+        )}
+      </section>
     </section>
   );
+}
+
+/**
+ * 작업 문서에서 결정권자 요약 절만 꺼낸다. 요약은 계약상 사용자 언어로만 쓰이므로 그대로 보여줘도
+ * 안전하고, 나머지 본문(터미널 명령·내부 검증 절차)은 계속 화면 밖에 둔다.
+ */
+function decisionSummarySection(body: string) {
+  const lines = body.split("\n");
+  const start = lines.findIndex((line) => line.trim() === "## 결정권자 요약");
+  if (start < 0) return null;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => /^## /.test(line));
+  const section = (end < 0 ? rest : rest.slice(0, end)).join("\n").trim();
+  return section || null;
 }
 
 function taskVerificationState(status: string) {
   return {
     todo: {
       label: "준비",
-      heading: "AI 작업 준비 중",
-      description: "AI가 아직 이 작업을 시작하지 않았습니다. 차례가 되면 구현과 자동검증을 함께 진행합니다.",
+      heading: "시작을 기다리는 작업입니다",
+      description: "AI가 아직 이 작업을 시작하지 않았습니다. 차례가 되면 진행 중으로 바뀝니다.",
     },
     in_progress: {
       label: "진행 중",
       heading: "AI가 작업하고 있습니다",
-      description: "AI가 기능을 구현하고 내부 자동검증을 진행하고 있습니다. 사용자가 따로 실행할 절차는 없습니다.",
+      description: "AI가 기능을 구현하고 있습니다. 사용자가 따로 실행할 절차는 없습니다.",
     },
     blocked: {
       label: "막힘",
@@ -283,13 +322,13 @@ function taskVerificationState(status: string) {
       description: "AI가 원인을 정리하고 다시 진행할 준비를 하고 있습니다. 내부 확인과 복구는 AI가 맡습니다.",
     },
     verified: {
-      label: "AI 검증 완료",
-      heading: "구현과 자동검증을 마쳤습니다",
-      description: "AI의 내부 검증이 끝났습니다. 사용자 확인이 필요한 경우에는 작업 그룹 전체가 품질 확인에 올라옵니다.",
+      label: "완료",
+      heading: "작업을 마쳤습니다",
+      description: "이 작업은 끝났습니다. 사용자 확인이 필요한 기능은 작업 그룹 단위로 품질 확인에 올라옵니다.",
     },
   }[status] ?? {
     label: "상태 확인 필요",
-    heading: "AI 검증 상태를 확인하고 있습니다",
+    heading: "상태를 읽지 못했습니다",
     description: "현재 상태를 일반적인 작업 단계로 읽을 수 없습니다. AI가 작업 기록을 다시 확인합니다.",
   };
 }
@@ -315,7 +354,7 @@ function BoardView({
   statusFilter: string;
 }) {
   const knownStatuses = new Set<string>(taskColumns.map((column) => column.status));
-  const unknown = items.filter((item) => !knownStatuses.has(item.status));
+  const unknown = items.filter((item) => !knownStatuses.has(boardTaskStatus(item.status)));
   const columns = statusFilter === "all"
     ? taskColumns
     : taskColumns.filter((column) => column.status === statusFilter);
@@ -325,7 +364,7 @@ function BoardView({
       {columns.map((column) => (
         <TaskColumn
           description={column.description}
-          items={items.filter((item) => item.status === column.status)}
+          items={items.filter((item) => boardTaskStatus(item.status) === column.status)}
           key={column.status}
           onOpen={onOpen}
           title={column.title}
@@ -346,6 +385,7 @@ function WorkGroupLaneBoard({
   groups,
   hasFilters,
   onOpen,
+  onOpenQa,
   onToggleCollapsed,
   statusFilter,
   visibleTasks,
@@ -355,11 +395,18 @@ function WorkGroupLaneBoard({
   groups: WorkGroupSummary[];
   hasFilters: boolean;
   onOpen(item: WorkflowItemSummary): void;
+  onOpenQa(groupId: string): void;
   onToggleCollapsed(key: string): void;
   statusFilter: string;
   visibleTasks: WorkflowItemSummary[];
 }) {
-  const lanes = useMemo(() => buildWorkGroupLanes(groups, allTasks, visibleTasks, hasFilters), [allTasks, groups, hasFilters, visibleTasks]);
+  // 끝난 그룹은 개발 화면의 관심사가 아니다. 기록 화면이 완료 그룹의 정본 목록을 갖는다.
+  const activeGroups = useMemo(
+    () => groups.filter((group) => group.displayStatus !== "completed" && group.displayStatus !== "automatic_completed"),
+    [groups],
+  );
+  const completedCount = groups.length - activeGroups.length;
+  const lanes = useMemo(() => buildWorkGroupLanes(activeGroups, allTasks, visibleTasks, hasFilters), [activeGroups, allTasks, hasFilters, visibleTasks]);
 
   return (
     <>
@@ -374,11 +421,19 @@ function WorkGroupLaneBoard({
                 <small>{lane.group.id} · 구성 버전 {lane.group.revision}</small>
               </div>
               <p className="task-lane-counts">
-                <span>AI 검증 완료 {lane.counts.verified} / {lane.total}</span>
+                <span>{lane.counts.verified} / {lane.total} 완료</span>
               </p>
-              <span className={`task-lane-signal group-status-${lane.group.displayStatus}`}>
-                {workGroupStatusLabel(lane.group.displayStatus)}
-              </span>
+              {lane.group.displayStatus === "qa_ready" ? (
+                <button
+                  className="task-lane-signal task-lane-qa-entry group-status-qa_ready"
+                  onClick={() => onOpenQa(lane.group.id)}
+                  type="button"
+                >품질 확인 시작 →</button>
+              ) : (
+                <span className={`task-lane-signal group-status-${lane.group.displayStatus}`}>
+                  {workGroupStatusLabel(lane.group.displayStatus)}
+                </span>
+              )}
               <button
                 aria-expanded={!laneCollapsed}
                 aria-label={`${lane.group.id} 레인 ${laneCollapsed ? "펼치기" : "접기"}`}
@@ -405,6 +460,9 @@ function WorkGroupLaneBoard({
         );
       })}
       {lanes.length === 0 && <EmptyTasks />}
+      {completedCount > 0 && (
+        <p className="task-lane-note task-lane-completed-note">완료된 작업 그룹 {completedCount}개는 기록 화면에 있습니다.</p>
+      )}
     </>
   );
 }
@@ -429,8 +487,8 @@ function buildWorkGroupLanes(
     const items = visibleTasks.filter((task) => task.workGroupId === group.id);
     return {
       group,
-      counts: Object.fromEntries(taskColumns.map((column) => [column.status, all.filter((task) => task.status === column.status).length])),
-      unknownCount: all.filter((task) => !knownStatuses.has(task.status)).length,
+      counts: Object.fromEntries(taskColumns.map((column) => [column.status, all.filter((task) => boardTaskStatus(task.status) === column.status).length])),
+      unknownCount: all.filter((task) => !knownStatuses.has(boardTaskStatus(task.status))).length,
       total: all.length,
       items,
     };
@@ -455,7 +513,7 @@ function workGroupStatusLabel(status: WorkGroupDisplayStatus) {
     blocked: "개발 막힘",
     developing: "개발 중",
     qa_ready: "사용자 QA 대기",
-    automatic_completed: "AI 검증 완료",
+    automatic_completed: "완료",
     configuration_error: "구성 확인 필요",
   }[status];
 }
@@ -469,7 +527,7 @@ function ListView({ items, onOpen }: { items: WorkflowItemSummary[]; onOpen(item
           {items.map((item) => (
             <tr key={item.fileName}>
               <td><button className="task-row-open" onClick={() => onOpen(item)}><strong>{item.title}</strong><small>{item.id}</small></button></td>
-              <td><span className={`status-pill status-${item.status}`}>{statusLabels[item.status] ?? item.status}</span></td>
+              <td><span className={`status-pill status-${boardTaskStatus(item.status)}`}>{statusLabels[boardTaskStatus(item.status)] ?? item.status}</span></td>
               <td>{formatDueDate(item.dueAt)}</td>
               <td>{formatDate(item.updatedAt)}</td>
             </tr>
@@ -622,7 +680,7 @@ function TaskColumn({
 function TaskCard({ item, onOpen }: { item: WorkflowItemSummary; onOpen(item: WorkflowItemSummary): void }) {
   return (
     <button className="task-card" onClick={() => onOpen(item)}>
-      <div><span className={`status-pill status-${item.status}`}>{statusLabels[item.status] ?? item.status}</span><small>{item.id}</small></div>
+      <div><span className={`status-pill status-${boardTaskStatus(item.status)}`}>{statusLabels[boardTaskStatus(item.status)] ?? item.status}</span><small>{item.id}</small></div>
       <strong>{item.title}</strong>
       <footer><Icon name="board" /><span>{item.dueAt ? `목표 ${formatDueDate(item.dueAt)}` : formatDate(item.updatedAt)}</span></footer>
     </button>
@@ -638,7 +696,7 @@ function tasksForDevelopment(items: WorkflowItemSummary[]) {
 }
 
 function matchesFilters(item: WorkflowItemSummary, query: string, statusFilter: string) {
-  if (statusFilter !== "all" && item.status !== statusFilter) return false;
+  if (statusFilter !== "all" && boardTaskStatus(item.status) !== statusFilter) return false;
   const normalized = query.trim().toLocaleLowerCase("ko-KR");
   if (!normalized) return true;
   return [item.title, item.id, item.excerpt]
@@ -648,7 +706,7 @@ function matchesFilters(item: WorkflowItemSummary, query: string, statusFilter: 
 }
 
 function count(items: WorkflowItemSummary[], status: string) {
-  return items.filter((item) => item.status === status).length;
+  return items.filter((item) => boardTaskStatus(item.status) === status).length;
 }
 
 function timestamp(value: string | null) {

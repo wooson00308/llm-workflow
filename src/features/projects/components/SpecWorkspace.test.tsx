@@ -299,12 +299,13 @@ describe("SpecWorkspace", () => {
       />,
     );
 
+    // 옛 일곱 항목 문서도 보드는 현행 세 덩어리(제안·전후·위험)만 보여 준다. 나머지는 원문 보기 몫이다.
     const board = screen.getByRole("region", { name: "결정 보드" });
     expect(within(board).getAllByRole("heading").map((heading) => heading.textContent)).toEqual([
-      "결정 보드", "제안", "현재", "변경 후", "사용자 결과", "영향 범위", "비용과 위험", "결정 요청",
+      "결정 보드", "제안", "현재", "변경 후", "비용과 위험",
     ]);
-    expect(within(board).getByText("이 구조와 기존 승인 조작을 함께 승인할지 판단한다.")).toBeInTheDocument();
-    expect(within(board).getByText("승인 기록과 원문 Markdown")).toBeInTheDocument();
+    expect(within(board).getByText("승인할 변화와 유지 영역을 나눠 읽는다.")).toBeInTheDocument();
+    expect(within(board).queryByText("이 구조와 기존 승인 조작을 함께 승인할지 판단한다.")).not.toBeInTheDocument();
     for (const name of ["승인 도장 찍기", "수정 요청", "기획서 폐기"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
@@ -429,7 +430,7 @@ describe("SpecWorkspace", () => {
 
     const progress = screen.getByRole("region", { name: "작업 그룹 진행" });
     expect(within(progress).getByText("개발 중")).toBeInTheDocument();
-    expect(within(progress).getByText("AI 검증 완료 2 / 4")).toBeInTheDocument();
+    expect(within(progress).getByText("완료 2 / 4")).toBeInTheDocument();
     expect(within(progress).getByText("현재 작업 그룹을 참조하는 AI 실행 태스크 전체를 셉니다")).toBeInTheDocument();
   });
 
@@ -450,7 +451,7 @@ describe("SpecWorkspace", () => {
 
     const progress = screen.getByRole("region", { name: "작업 그룹 진행" });
     expect(within(progress).getByText("규격 밖 1")).toBeInTheDocument();
-    expect(within(progress).getByText("AI 검증 완료 0 / 2")).toBeInTheDocument();
+    expect(within(progress).getByText("완료 0 / 2")).toBeInTheDocument();
   });
 
   it("says a spec has no derived task instead of dropping the row", () => {

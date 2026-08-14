@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 24
+rules_version: 26
 ---
 
 # LLM Workflow agent protocol
@@ -192,7 +192,7 @@ An architect creates one `workflow-labs/work-group@1` document under `groups/` f
 
 - A group records `id`, `source_spec_id`, `source_decision_id`, `status`, `revision`, `qa_mode`, `created_at`, and `updated_at`. `source_qa_decision_id` is added when a new revision answers a group QA rejection.
 - `status` is `preparing` while the architect writes the group and its tasks, and `active` only after that definition is complete. A stopped `preparing` group with no unexpired lease is architect recovery work; it is never replaced with another group.
-- A `qa_mode: user` group defines its walkthroughs in sections headed `### QA-01 · title`, with consecutive identifiers. Each section says which screen to open, what the user does, and what visible result is correct in non-developer language. It contains no terminal command, package runner, repository instruction, or internal automated test procedure.
+- A `qa_mode: user` group carries one integrated user QA flow, written when the group is created — sections headed `### QA-01 · title` with consecutive identifiers, normally a single section that walks the user through the whole feature once. Each section says which screen to open, what the user does, and what visible result is correct in non-developer language. Sections never mirror individual tasks, and they contain no terminal command, package runner, repository instruction, or internal automated test procedure.
 - A `qa_mode: automatic` group contains no user walkthrough. When all of its tasks are verified, agent verification closes it without a user stamp.
 - Tasks refer to the group; the group never stores a copied member list. The current composition is derived from `work_group_id` and `work_group_revision` on task documents.
 - The app records one group decision per QA submission under `decisions/` with `schema: workflow-labs/group-qa-decision@1`. It records `group_id`, `group_revision`, `outcome`, `request_id`, `created_by: user`, and `created_at`. An agent never writes or edits that decision.
@@ -322,20 +322,18 @@ A specification and a development task written from here on carry the summary as
 1. `### 제안`
 2. `### 현재`
 3. `### 변경 후`
-4. `### 사용자 결과`
-5. `### 영향 범위`
-6. `### 비용과 위험` — optional
-7. `### 결정 요청`
+4. `### 비용과 위험` — optional
 
-- `### 영향 범위` holds two markers, `- 변경:` and `- 유지:`, in that order and once each. Both carry a value; neither may be dropped and neither may be left empty.
+- `### 제안` is one sentence: what this document wants to do.
+- `### 현재` and `### 변경 후` are the before/after pair the decision is made on. `### 변경 후` states the change and the benefit the user gets from it in the same breath — there is no separate benefit heading, so a paraphrase of the change written twice is a fault, not thoroughness.
+- `### 비용과 위험` is written only when there is a real cost or risk to name. It also carries the safety facts a decision-maker checks before stamping: what stays untouched, and whether the change can be undone. With nothing to name, the heading is left out entirely — it is never written empty.
 - Every required heading carries a value. A heading standing over nothing is not a filled one.
-- `### 비용과 위험` is written only when there is a real cost or risk to name. With nothing to name, the heading is left out entirely — it is never written empty.
-- A repeated heading, a changed order, a heading at another depth, a sub-heading outside this list, or a missing impact marker is not the structured form. Neither the app nor the writing role guesses at a near-miss heading or invents a value it was not given.
+- A repeated heading, a changed order, a heading at another depth, or a sub-heading outside this list is not the structured form. Neither the app nor the writing role guesses at a near-miss heading or invents a value it was not given.
+- There is no request heading. The decision a specification asks for is always the same three stamps the app offers, and an open choice the writer could not settle means the document is not ready for review — settle it, or state the chosen default so a disagreeing user can send the document back. A development task asks the user for nothing.
 - An implementation report is outside this. Reports keep the plain summary defined above.
+- Summaries written under the earlier seven-heading form (with `### 사용자 결과`, `### 영향 범위`, and `### 결정 요청`) stay valid. The app keeps reading them; no session rewrites one except when it edits that document for its own reasons, and then it writes the current form.
 
-What each heading holds is written in the role contract that owns the document. `### 결정 요청` is the one heading whose meaning differs by kind: in a specification it names the ground on which the user approves or sends the document back, and in a development task it names the automated result the task must prove for its group.
-
-The ten-line limit above does not reach a structured summary, because the headings alone exceed it. Brevity comes from the shape instead: one short paragraph under each ordinary heading, and one item under each impact marker. A plain summary and a report summary keep the ten-line limit exactly as written above.
+The ten-line limit above does not reach a structured summary, because the headings alone exceed it. Brevity comes from the shape instead: one short paragraph under each heading. A plain summary and a report summary keep the ten-line limit exactly as written above.
 
 Everything under "What it must not contain" reaches structured values too. A value is Markdown text and nothing else: a document does not write HTML here, and the app builds no separate HTML copy, no summary cache, no image, no chart payload, no network call, and no model call out of this section. It reads the same body it already reads.
 
@@ -361,7 +359,7 @@ These conditions reach the summary section and nothing else. Worker-facing body 
 
 ### The group QA walkthrough
 
-User walkthroughs belong only to a user-mode work group. The architect writes their `### QA-01 · title` sections; a development task never carries a user QA walkthrough.
+The integrated user QA flow belongs only to a user-mode work group, and the architect writes it when the group is created. It is not a per-task checklist: a development task never carries a user QA walkthrough, and the flow is judged as one whole when the user stamps the group.
 
 ### Documents written before this section
 

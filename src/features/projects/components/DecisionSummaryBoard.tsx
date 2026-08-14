@@ -2,6 +2,10 @@ import { useId } from "react";
 import type { DecisionSummary } from "../domain/documentSections";
 import { MarkdownBody } from "./MarkdownBody";
 
+/**
+ * 결정권자 요약을 세 덩어리로 보여 주는 보드: 제안 한 문장, 현재→변경 후 전후 한 쌍,
+ * 그리고 있을 때만 비용과 위험. 결정은 항상 앱의 도장 세 개로 내리므로 별도의 요청 문구는 없다.
+ */
 export function DecisionSummaryBoard({ summary }: { summary: DecisionSummary }) {
   const id = useId();
   const titleId = `${id}-title`;
@@ -14,34 +18,17 @@ export function DecisionSummaryBoard({ summary }: { summary: DecisionSummary }) 
         <MarkdownBody body={summary.proposal} />
       </header>
 
-      <ol aria-label="변화 흐름" className="decision-summary-flow">
-        <li>
+      <div aria-label="변화 전후" className="decision-summary-compare" role="group">
+        <div className="decision-summary-before">
           <h3>현재</h3>
           <MarkdownBody body={summary.current} />
-        </li>
-        <li>
+        </div>
+        <span aria-hidden="true" className="decision-summary-arrow">→</span>
+        <div className="decision-summary-after">
           <h3>변경 후</h3>
           <MarkdownBody body={summary.after} />
-        </li>
-        <li>
-          <h3>사용자 결과</h3>
-          <MarkdownBody body={summary.userResult} />
-        </li>
-      </ol>
-
-      <section aria-labelledby={`${id}-impact`} className="decision-summary-impact">
-        <h3 id={`${id}-impact`}>영향 범위</h3>
-        <dl>
-          <div>
-            <dt>변경</dt>
-            <dd><MarkdownBody body={summary.changed} /></dd>
-          </div>
-          <div>
-            <dt>유지</dt>
-            <dd><MarkdownBody body={summary.unchanged} /></dd>
-          </div>
-        </dl>
-      </section>
+        </div>
+      </div>
 
       {summary.risk && (
         <section aria-labelledby={`${id}-risk`} className="decision-summary-risk">
@@ -49,11 +36,6 @@ export function DecisionSummaryBoard({ summary }: { summary: DecisionSummary }) 
           <MarkdownBody body={summary.risk} />
         </section>
       )}
-
-      <section aria-labelledby={`${id}-request`} className="decision-summary-request">
-        <h3 id={`${id}-request`}>결정 요청</h3>
-        <MarkdownBody body={summary.decisionRequest} />
-      </section>
     </section>
   );
 }

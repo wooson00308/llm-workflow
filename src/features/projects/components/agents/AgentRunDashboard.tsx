@@ -92,6 +92,27 @@ export function AgentRunDashboard({
   const recent = runs.filter((run) => !activeStates.has(run.state)).slice(0, 3);
   const attention = attentionItems(project, state);
   const waitingForUser = userDecisions(project);
+  // 문서 선점은 파일이 진실이다. 앱이 돌리지 않은 세션(터미널에서 직접 연 것)도 문서를 선점하면
+  // 여기서 보인다. 앱이 돌린 실행이 잡은 대상은 진행 중 목록이 이미 말하므로 겹치지 않게 뺀다.
+  const externalLeases = useMemo(() => {
+    const claimed = new Set(active.map((run) => run.targetId).filter(Boolean));
+    return project.activeLeases.filter((lease) => !lease.taskId || !claimed.has(lease.taskId));
+  }, [active, project.activeLeases]);
+  // 신호 나이와 만료 잔여는 시간이 흐르면 저절로 낡는 값이라 30초마다 다시 계산한다.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (externalLeases.length === 0) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [externalLeases.length]);
+  // 문제는 크게, 정상은 조용히. 주의가 필요한 세션만 카드로 올리고 나머지는 행으로 깔린다.
+  const attentionLeases = externalLeases.filter((lease) => leaseIsStale(lease.heartbeatAt, now));
+  const healthyLeases = externalLeases
+    .filter((lease) => !leaseIsStale(lease.heartbeatAt, now))
+    .sort((left, right) => Date.parse(right.heartbeatAt) - Date.parse(left.heartbeatAt));
+  const [healthyExpanded, setHealthyExpanded] = useState(false);
+  const visibleHealthy = healthyExpanded ? healthyLeases : healthyLeases.slice(0, HEALTHY_LEASE_FOLD);
+  const roleSummary = leaseRoleSummary(externalLeases);
 
   return (
     <div className="agent-operations">
@@ -131,6 +152,70 @@ export function AgentRunDashboard({
         </section>
       )}
 
+      {externalLeases.length > 0 && (
+        <section aria-labelledby="agent-external-heading" className="agent-ops-section agent-external-section">
+          <header><h2 id="agent-external-heading">앱 밖 세션</h2><span>{externalLeases.length}</span></header>
+          {externalLeases.length > 1 && (
+            <div className="worker-role-summary">
+              {roleSummary.map(({ label, role, count }) => (
+                <span className={roleChipClass("worker-role-count", role)} key={label}>{label}<b>{count}</b></span>
+              ))}
+            </div>
+          )}
+
+          {attentionLeases.length > 0 && (
+            <ul className="worker-list">
+              {attentionLeases.map((lease) => (
+                <li className="worker-card" key={lease.leaseId}>
+                  <div className="worker-identity">
+                    <span aria-hidden="true" className="pulse stale" />
+                    <strong>{lease.agent}</strong>
+                    <span className="worker-alert">신호 지연</span>
+                    {lease.role && <span className={roleChipClass("worker-role", lease.role)}>{roleLabels[lease.role] ?? lease.role}</span>}
+                  </div>
+                  <p className="worker-target plain">
+                    <span>{titleOf(lease.taskId, itemMap)}</span>
+                    {lease.taskId && <small>{lease.taskId}</small>}
+                  </p>
+                  <dl className="worker-times">
+                    <div><dt>마지막 신호</dt><dd>{signalAge(lease.heartbeatAt, now)}</dd></div>
+                    <div><dt>선점 만료까지</dt><dd>{remainingLabel(lease.expiresAt, now)}</dd></div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {healthyLeases.length > 0 && (
+            <ul className="worker-row-list">
+              {visibleHealthy.map((lease) => (
+                <li className="worker-row" key={lease.leaseId}>
+                  <span aria-hidden="true" className="agent-state-dot state-running" />
+                  <strong className="worker-row-agent">{lease.agent}</strong>
+                  <span className={roleChipClass("agent-role-chip worker-row-role", lease.role)}>
+                    {lease.role ? roleLabels[lease.role] ?? lease.role : "미기재"}
+                  </span>
+                  <span className="worker-row-target">
+                    <span>{titleOf(lease.taskId, itemMap)}</span>
+                    {lease.taskId && <small>{lease.taskId}</small>}
+                  </span>
+                  <time>{signalAge(lease.heartbeatAt, now)}</time>
+                </li>
+              ))}
+            </ul>
+          )}
+          {healthyLeases.length > HEALTHY_LEASE_FOLD && (
+            <button
+              className="agent-text-button worker-row-more"
+              onClick={() => setHealthyExpanded((value) => !value)}
+              type="button"
+            >
+              {healthyExpanded ? "접기" : `정상 세션 ${healthyLeases.length - HEALTHY_LEASE_FOLD}개 더 보기`}
+            </button>
+          )}
+        </section>
+      )}
+
       {queueItems.length > 0 && (
         <section aria-labelledby="agent-queue-heading" className="agent-ops-section">
           <header><h2 id="agent-queue-heading">배정 대기</h2><span>{queueItems.length}</span></header>
@@ -138,7 +223,7 @@ export function AgentRunDashboard({
             {queueItems.map((item) => (
               <li key={`${item.role}:${item.id}`}>
                 <button onClick={() => setSelectedQueue(item)} type="button">
-                  <span className="agent-role-chip">{roleLabels[item.role] ?? item.role}</span>
+                  <span className={roleChipClass("agent-role-chip", item.role)}>{roleLabels[item.role] ?? item.role}</span>
                   <span className="agent-session-copy"><strong>{item.title}</strong><small>자리가 나면 안전 조건을 다시 확인합니다</small></span>
                   <span aria-hidden="true" className="agent-row-chevron">›</span>
                 </button>
@@ -516,6 +601,47 @@ function activeOrder(a: AgentRunSummary, b: AgentRunSummary) {
 }
 
 function titleOf(id: string | null, items: Map<string, NamedWorkflowItem>) { return id ? items.get(id)?.title ?? id : "작업 확인 중"; }
+/** 정상 행을 이 개수까지만 펼쳐 둔다. 넘치는 정상 세션은 접힌 요약 한 줄이 대신 말한다. */
+const HEALTHY_LEASE_FOLD = 8;
+function leaseIsStale(heartbeatAt: string, now: number) {
+  const at = Date.parse(heartbeatAt);
+  return !Number.isNaN(at) && now - at > 10 * 60_000;
+}
+function leaseRoleSummary(leases: { role: string | null }[]) {
+  const counts = new Map<string, { role: string | null; count: number }>();
+  for (const lease of leases) {
+    const label = lease.role ? roleLabels[lease.role] ?? lease.role : "역할 미기재";
+    const entry = counts.get(label) ?? { role: lease.role, count: 0 };
+    counts.set(label, { role: entry.role, count: entry.count + 1 });
+  }
+  return [...counts.entries()].map(([label, entry]) => ({ label, ...entry }));
+}
+
+/** 파트별 색을 입힌 역할 칩 클래스. 모르는 역할은 기본 회색으로 남는다. */
+function roleChipClass(base: string, role: string | null) {
+  return role && (ROLE_ORDER as readonly string[]).includes(role) ? `${base} role-${role}` : base;
+}
+function signalAge(heartbeatAt: string, now: number) {
+  const at = Date.parse(heartbeatAt);
+  if (Number.isNaN(at)) return "기록 없음";
+  const seconds = Math.max(0, Math.floor((now - at) / 1000));
+  if (seconds < 60) return "방금";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours}시간 전` : `${Math.floor(hours / 24)}일 전`;
+}
+function remainingLabel(expiresAt: string, now: number) {
+  const at = Date.parse(expiresAt);
+  if (Number.isNaN(at)) return "기록 없음";
+  const remaining = at - now;
+  if (remaining <= 0) return "곧 만료";
+  const minutes = Math.floor(remaining / 60_000);
+  if (minutes < 1) return "1분 미만";
+  if (minutes < 60) return `${minutes}분 남음`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours}시간 남음` : `${Math.floor(hours / 24)}일 남음`;
+}
 function nextCheckLabel(state: AgentRuntimeState) { const next = state.queue?.automation?.roles.map((role) => role.nextPollAt).filter((value): value is string => Boolean(value)).sort()[0]; return next ? new Date(next).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "자동"; }
 function runningDuration(startedAt: string | null) { if (!startedAt) return "시작 중"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)); return seconds < 60 ? "1분 미만" : `${Math.floor(seconds / 60)}분`; }
 function finishedDuration(startedAt: string | null, finishedAt: string | null) { if (!startedAt || !finishedAt) return "시간 기록 없음"; const seconds = Math.max(0, Math.floor((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)); return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분`; }
