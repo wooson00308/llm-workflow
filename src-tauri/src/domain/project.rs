@@ -302,6 +302,10 @@ pub struct WorkGroupSummary {
     pub updated_at: String,
     pub description: String,
     pub scenarios: Vec<WorkGroupQaScenario>,
+    /// 이 그룹과 구성 버전의 품질 확인이 대상으로 고정한 기준 커밋 해시. 그룹이 품질 확인을 열 수
+    /// 있는 상태가 된 시점에 한 번 고정되고 그 뒤로 바뀌지 않는다. 프로젝트가 Git 작업 트리가
+    /// 아니면 `None`이며, 그 경우 그룹 상태 계산과 제출 판정은 고정 값이 없던 때와 같이 동작한다.
+    pub qa_base_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

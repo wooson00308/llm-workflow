@@ -47,6 +47,9 @@ const CONTROL_DIRECTORY: &str = ".workflow";
 const PROJECT_MANIFEST: &str = "project.yml";
 const WORKFLOW_MANIFEST: &str = "workflow.yml";
 const RUNTIME_DIRECTORY: &str = ".runtime";
+/// 그룹 품질 확인이 고정한 기준 커밋을 두는 실행 상태 디렉터리. 한 파일이 그룹 하나의 한 구성
+/// 버전을 담으므로, 새 구성 버전은 이전 버전의 고정 값을 지우지 않고 옆에 새 파일을 만든다.
+const QA_BASE_DIRECTORY: &str = "qa-base";
 const MIGRATION_LOCK_FILE: &str = "migration.lock";
 const WORKFLOW_DIRECTORIES: [&str; 7] = [
     "ideas",
@@ -119,6 +122,8 @@ pub enum ProjectError {
     WorkGroupNotAwaitingQa,
     #[error("작업 그룹이 그사이 변경되었습니다. 품질 확인을 다시 열어 주세요.")]
     WorkGroupQaStale,
+    #[error("확인 대상 코드가 그사이 변경되었습니다. 확인한 내용이 지금의 코드와 다르므로 제출하지 않았습니다. 품질 확인을 다시 진행해 주세요.")]
+    WorkGroupQaBaseChanged,
     #[error("작업 그룹 QA 요청 식별자를 입력해 주세요.")]
     WorkGroupQaRequestIdRequired,
     #[error("작업 그룹 QA 요청 식별자는 200자 이하여야 합니다.")]
@@ -724,18 +729,30 @@ impl FileSystemProjectRepository {
                 let (tasks, _) = read_task_documents(&workflow_root.join("tasks"));
                 let leases = read_active_leases(&control_root)?;
                 let (_, legacy_records) = read_work_group_qa_records(&workflow_root);
+                let qa_base = QaBasePin::new(&root, &control_root);
                 let group = parse_work_group(
                     &group_path,
                     &tasks,
                     &leases,
                     &group_records,
                     &legacy_records,
+                    &qa_base,
                 )
                 .ok_or(ProjectError::WorkGroupNotAwaitingQa)?;
                 if group.revision != submission.expected_revision
                     || group.updated_at != submission.expected_updated_at
                 {
                     return Err(ProjectError::WorkGroupQaStale);
+                }
+                // 사용자가 확인한 코드 상태와 지금의 코드 상태가 다르면 결정 문서를 만들지 않는다.
+                // 문서 최신성 거절과 다른 값으로 돌려주어, 화면이 "그룹이 바뀌었다"와 "확인 대상
+                // 코드가 바뀌었다"를 구분해 안내할 수 있게 한다.
+                if group
+                    .qa_base_commit
+                    .as_deref()
+                    .is_some_and(|pinned| qa_base.current() != Some(pinned))
+                {
+                    return Err(ProjectError::WorkGroupQaBaseChanged);
                 }
                 let assigned_tasks = tasks
                     .iter()
@@ -1807,6 +1824,9 @@ fn summary_from_manifest(
     let control_root = root.join(CONTROL_DIRECTORY);
     // 미만료 lease의 대상 id. 겹침 판정과 선점 판정이 같은 집합을 본다.
     let lease_target_ids = lease_ids(&control_root);
+    // 한 요약 안의 모든 워크플로우가 같은 공유 기준을 본다. 기준 커밋은 프로젝트 하나의 값이므로
+    // 워크플로우마다 다시 읽지 않는다.
+    let qa_base = QaBasePin::new(root, &control_root);
     let prepared: Vec<PreparedWorkflow> = manifest
         .workflows
         .iter()
@@ -1815,6 +1835,7 @@ fn summary_from_manifest(
                 control_root.join(&workflow.directory),
                 &active_leases,
                 &lease_target_ids,
+                &qa_base,
             )
         })
         .collect();
@@ -1895,6 +1916,7 @@ impl PreparedWorkflow {
         root: PathBuf,
         leases: &[AgentLeaseSummary],
         lease_target_ids: &HashSet<String>,
+        qa_base: &QaBasePin<'_>,
     ) -> Self {
         // 디렉터리마다 한 번씩만 훑는다(SPEC-033 R7). 결정 훑기가 기획서 결정 목록과 QA 이벤트를,
         // 작업 훑기가 목록 요약과 판정 노드를 함께 낸다. 선행·겹침 판정은 목록에 실리지 않는 값을
@@ -1903,7 +1925,7 @@ impl PreparedWorkflow {
         let (tasks, graph) = read_task_documents(&root.join("tasks"));
         let (mut items, nondraft_spec_sources) =
             workflow_items(&root, &decisions, &qa_events, tasks, leases);
-        items.work_groups = read_work_groups(&root, &items.tasks, leases);
+        items.work_groups = read_work_groups(&root, &items.tasks, leases, qa_base);
         let group_qa_revision_requests = group_qa_revision_candidates(&root, &items.work_groups);
         let revision_requested_decisions = latest_revision_requests(&decisions);
         let approved_decisions = latest_approvals(&decisions);
@@ -2819,10 +2841,98 @@ fn legacy_task_qa_is_confirmed(records: &[LegacyTaskQaRecord], task_id: &str) ->
         .is_some_and(|record| record.outcome == "confirmed")
 }
 
+/// 품질 확인이 대상으로 삼는 코드 상태를 그룹·구성 버전마다 한 번 고정하고, 뒤이은 판정이 같은
+/// 값을 보게 하는 자리(SPEC-RES-20260815T030040Z R9). 고정 값은 앱이 소유하는 실행 상태이므로
+/// `.workflow/.runtime/qa-base/` 아래에 두고 워크플로우 문서에는 넣지 않는다.
+///
+/// 현재 기준 커밋은 요청 한 번에 한 번만 읽는다. 상태 조회는 자주 일어나는데 그룹 대부분은 품질
+/// 확인을 열 수 있는 상태가 아니어서, 필요한 순간까지 Git을 부르지 않는다.
+struct QaBasePin<'a> {
+    project_root: &'a Path,
+    control_root: &'a Path,
+    current: std::cell::OnceCell<Option<String>>,
+}
+
+impl<'a> QaBasePin<'a> {
+    fn new(project_root: &'a Path, control_root: &'a Path) -> Self {
+        Self {
+            project_root,
+            control_root,
+            current: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// 지금 공유 기준이 가리키는 커밋. Git 작업 트리가 아니거나 커밋이 없으면 `None`이다.
+    fn current(&self) -> Option<&str> {
+        self.current
+            .get_or_init(|| current_base_commit(self.project_root))
+            .as_deref()
+    }
+
+    /// 이 그룹과 구성 버전의 고정 값. 아직 없으면 지금 기준 커밋으로 고정하고 그 값을 돌려준다.
+    /// 이미 있으면 그대로 읽어 돌려주며 다시 쓰지 않는다.
+    fn pin(&self, group_id: &str, revision: u32) -> Option<String> {
+        let path = qa_base_pin_path(self.control_root, group_id, revision)?;
+        if let Some(pinned) = read_qa_base_pin(&path) {
+            return Some(pinned);
+        }
+        let current = self.current()?.to_owned();
+        let document = format!(
+            "schema_version: 1\ngroup_id: {}\ngroup_revision: {revision}\nbase_commit: {}\npinned_at: {}\n",
+            yaml_scalar(group_id),
+            yaml_scalar(&current),
+            yaml_scalar(&Utc::now().to_rfc3339()),
+        );
+        // 고정에 실패하면 고정 값이 없는 것으로 둔다. 저장되지 않은 값을 기준으로 제출을 거절하면
+        // 다음 읽기가 다른 값을 만들어 판정이 흔들린다.
+        path.parent()
+            .is_some_and(|parent| fs::create_dir_all(parent).is_ok())
+            .then(|| write_text_atomically(&path, &document).ok())
+            .flatten()
+            .map(|()| current)
+    }
+}
+
+fn qa_base_pin_path(control_root: &Path, group_id: &str, revision: u32) -> Option<PathBuf> {
+    let safe = !group_id.is_empty()
+        && group_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    safe.then(|| {
+        control_root
+            .join(RUNTIME_DIRECTORY)
+            .join(QA_BASE_DIRECTORY)
+            .join(format!("{group_id}-{revision}.yml"))
+    })
+}
+
+fn read_qa_base_pin(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let document = serde_yaml::from_str::<serde_yaml::Value>(&contents).ok()?;
+    yaml_text(Some(&document), "base_commit")
+}
+
+/// 공유 기준의 현재 커밋. 예약 헬퍼가 사본을 만들 때 쓰는 기준과 같은 값을 같은 방법으로 읽는다.
+/// Git 작업 트리가 아니거나 아직 커밋이 없으면 `rev-parse`가 실패하고, 둘 다 고정할 기준이 없는
+/// 경우이므로 `None`으로 합쳐 다룬다.
+fn current_base_commit(project_root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!commit.is_empty()).then_some(commit)
+}
+
 fn read_work_groups(
     workflow_root: &Path,
     tasks: &[WorkflowItemSummary],
     leases: &[AgentLeaseSummary],
+    qa_base: &QaBasePin<'_>,
 ) -> Vec<WorkGroupSummary> {
     let (group_decisions, legacy_task_decisions) = read_work_group_qa_records(workflow_root);
     let mut paths: Vec<PathBuf> = fs::read_dir(workflow_root.join("groups"))
@@ -2845,6 +2955,7 @@ fn read_work_groups(
                 leases,
                 &group_decisions,
                 &legacy_task_decisions,
+                qa_base,
             )
         })
         .collect::<Vec<_>>();
@@ -2862,6 +2973,7 @@ fn parse_work_group(
     leases: &[AgentLeaseSummary],
     group_decisions: &[GroupQaDecisionRecord],
     legacy_task_decisions: &[LegacyTaskQaRecord],
+    qa_base: &QaBasePin<'_>,
 ) -> Option<WorkGroupSummary> {
     let contents = fs::read_to_string(path).ok()?.replace("\r\n", "\n");
     let (metadata, body) = split_frontmatter(&contents);
@@ -2919,7 +3031,8 @@ fn parse_work_group(
         .filter(|decision| decision.outcome == "revision_requested")
         .map(|decision| decision.id.clone())
         .or(declared_source_qa_decision_id);
-    let display_status = if latest_decision.is_some_and(|decision| decision.outcome == "confirmed")
+    let mut display_status = if latest_decision
+        .is_some_and(|decision| decision.outcome == "confirmed")
         || (task_revisions_valid
             && assigned_tasks
                 .iter()
@@ -2965,6 +3078,24 @@ fn parse_work_group(
         WorkGroupDisplayStatus::AutomaticCompleted
     };
 
+    // 품질 확인을 열 수 있는 상태가 되는 바로 이 시점이 확인 대상을 고정하는 자리다. 사용자 모드와
+    // 자동 모드가 같은 고정 값을 쓰고, 제출 판정도 여기서 실린 값을 그대로 본다.
+    let qa_base_commit = matches!(
+        display_status,
+        WorkGroupDisplayStatus::QaReady | WorkGroupDisplayStatus::AutomaticCompleted
+    )
+    .then(|| qa_base.pin(&id, revision))
+    .flatten();
+    // 자동 모드에는 사용자가 다시 확인할 자리가 없으므로, 기준이 어긋난 채로 완료로 넘기지 않고
+    // 개발 단계에 남긴다. 사용자 모드는 확인 화면을 계속 열어 두고 제출 시점에 판정한다.
+    if display_status == WorkGroupDisplayStatus::AutomaticCompleted
+        && qa_base_commit
+            .as_deref()
+            .is_some_and(|pinned| qa_base.current() != Some(pinned))
+    {
+        display_status = WorkGroupDisplayStatus::Developing;
+    }
+
     Some(WorkGroupSummary {
         file_name: path.file_name()?.to_str()?.to_owned(),
         id,
@@ -2979,6 +3110,7 @@ fn parse_work_group(
         updated_at,
         description,
         scenarios,
+        qa_base_commit,
     })
 }
 
@@ -10993,14 +11125,16 @@ mod tests {
 mod report_surface_tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::path::Path;
 
     use pretty_assertions::assert_eq;
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        contains_internal_qa_instruction, run_reports, scenario_describes_user_observable_flow,
-        scenario_is_user_safe, workflow_reports, FileSystemProjectRepository, ProjectError,
-        GROUP_QA_DECISION_SCHEMA,
+        contains_internal_qa_instruction, read_qa_base_pin, run_reports,
+        scenario_describes_user_observable_flow, scenario_is_user_safe, workflow_reports,
+        FileSystemProjectRepository, ProjectError, CONTROL_DIRECTORY, GROUP_QA_DECISION_SCHEMA,
+        QA_BASE_DIRECTORY, RUNTIME_DIRECTORY,
     };
     use crate::domain::project::{
         SchemaCompatibility, WorkGroupDisplayStatus, WorkGroupQaMode, WorkGroupQaOutcome,
@@ -11403,6 +11537,289 @@ mod report_surface_tests {
                 comment: String::new(),
             }],
         }
+    }
+
+    fn run_git(project_root: &Path, arguments: &[&str]) -> i32 {
+        std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(project_root)
+            .output()
+            .expect("run git")
+            .status
+            .code()
+            .expect("git exit code")
+    }
+
+    fn commit_base(project_root: &Path, message: &str) {
+        assert_eq!(
+            run_git(
+                project_root,
+                &[
+                    "-c",
+                    "user.email=agent@workflow-labs.test",
+                    "-c",
+                    "user.name=workflow-labs",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    message,
+                ],
+            ),
+            0
+        );
+    }
+
+    /// 기준 커밋 고정은 프로젝트가 Git 작업 트리일 때만 일어나므로, 그룹·작업 문서 준비는 기존
+    /// 픽스처를 그대로 쓰고 저장소 초기화와 첫 커밋만 더한다. 실제 프로젝트처럼 `.runtime/`은
+    /// 추적하지 않아, 고정 값을 쓰는 것 자체가 기준 커밋을 움직이지 않는다.
+    fn git_work_group_fixture(task_status: &str, qa_mode: &str) -> (TempDir, String) {
+        let (root, directory) = work_group_fixture(task_status, "active", qa_mode);
+        fs::write(root.path().join(".gitignore"), ".workflow/.runtime/\n").expect("gitignore");
+        fs::write(root.path().join("README.md"), "base\n").expect("tracked file");
+        assert_eq!(run_git(root.path(), &["init", "-b", "main"]), 0);
+        assert_eq!(run_git(root.path(), &["add", ".gitignore", "README.md"]), 0);
+        commit_base(root.path(), "base");
+        (root, directory)
+    }
+
+    /// 확인이 열린 뒤 공유 기준이 앞으로 나간 상황을 만든다.
+    fn advance_base(project_root: &Path, marker: &str) {
+        let file = format!("{marker}.txt");
+        fs::write(project_root.join(&file), "changed\n").expect("changed file");
+        assert_eq!(run_git(project_root, &["add", &file]), 0);
+        commit_base(project_root, marker);
+    }
+
+    fn qa_base_pin(project_root: &Path, group_id: &str, revision: u32) -> Option<String> {
+        read_qa_base_pin(
+            &project_root
+                .join(CONTROL_DIRECTORY)
+                .join(RUNTIME_DIRECTORY)
+                .join(QA_BASE_DIRECTORY)
+                .join(format!("{group_id}-{revision}.yml")),
+        )
+    }
+
+    fn recorded_decision_count(workflow_root: &Path) -> usize {
+        fs::read_dir(workflow_root.join("decisions"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("md"))
+            .count()
+    }
+
+    /// 완료 조건 1·2. 품질 확인을 열 수 있는 상태가 되는 시점에 기준 커밋이 고정되고, 그 뒤로 다시
+    /// 계산해도 값이 바뀌지 않는다. 아직 열 수 없는 그룹은 고정하지 않는다.
+    #[test]
+    fn work_group_pins_its_qa_base_commit_when_qa_can_open_and_never_repins_it() {
+        let (root, directory) = git_work_group_fixture("in_progress", "user");
+        let workflow_root = root.path().join(CONTROL_DIRECTORY).join(&directory);
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+
+        let developing = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect developing");
+        assert_eq!(
+            developing.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::Developing
+        );
+        assert_eq!(
+            developing.workflows[0].items.work_groups[0].qa_base_commit,
+            None
+        );
+        assert_eq!(qa_base_pin(root.path(), "GROUP-DECISION-1", 1), None);
+
+        let verified = fs::read_to_string(&task_path)
+            .expect("task")
+            .replace("status: in_progress", "status: verified");
+        fs::write(&task_path, verified).expect("verified task");
+
+        let opened = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect qa ready");
+        let group = &opened.workflows[0].items.work_groups[0];
+        assert_eq!(group.display_status, WorkGroupDisplayStatus::QaReady);
+        let pinned = group.qa_base_commit.clone().expect("pinned base commit");
+        assert_eq!(
+            qa_base_pin(root.path(), "GROUP-DECISION-1", 1).as_deref(),
+            Some(pinned.as_str())
+        );
+
+        advance_base(root.path(), "after-open");
+        let reread = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect after base moved");
+        assert_eq!(
+            reread.workflows[0].items.work_groups[0]
+                .qa_base_commit
+                .as_deref(),
+            Some(pinned.as_str())
+        );
+        assert_eq!(
+            qa_base_pin(root.path(), "GROUP-DECISION-1", 1).as_deref(),
+            Some(pinned.as_str())
+        );
+    }
+
+    /// 완료 조건 4. 확인이 열린 뒤 기준 커밋이 움직이면 제출을 기록하지 않고, 문서 최신성 거절과
+    /// 구분되는 오류를 돌려준다. 결정 문서도 작업 문서도 그대로 남는다.
+    #[test]
+    fn work_group_qa_rejects_a_submission_after_the_base_commit_moves() {
+        let (root, directory) = git_work_group_fixture("verified", "user");
+        let workflow_root = root.path().join(CONTROL_DIRECTORY).join(&directory);
+        let task_path = workflow_root.join("tasks/TASK-1.md");
+        let task_before = fs::read_to_string(&task_path).expect("task before");
+        FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("open qa");
+        let decisions_before = recorded_decision_count(&workflow_root);
+
+        advance_base(root.path(), "during-qa");
+
+        let error = FileSystemProjectRepository
+            .submit_work_group_qa(
+                root.path(),
+                &group_submission(&directory, WorkGroupQaOutcome::Confirmed),
+            )
+            .expect_err("base commit moved");
+        assert!(matches!(error, ProjectError::WorkGroupQaBaseChanged));
+        assert_eq!(recorded_decision_count(&workflow_root), decisions_before);
+        assert_eq!(
+            fs::read_to_string(&task_path).expect("task after"),
+            task_before
+        );
+    }
+
+    /// 완료 조건 3·5. 기준 커밋이 그대로면 지금처럼 결정이 기록되고, 같은 요청 식별자의 재전송은
+    /// 그 뒤 기준이 움직였더라도 이미 남은 결정을 그대로 돌려준다.
+    #[test]
+    fn work_group_qa_records_on_the_pinned_base_and_replays_a_recorded_request() {
+        let (root, directory) = git_work_group_fixture("verified", "user");
+        let submission = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+
+        let recorded = FileSystemProjectRepository
+            .submit_work_group_qa(root.path(), &submission)
+            .expect("record group QA");
+        assert_eq!(recorded.status, WorkGroupQaSubmissionStatus::Recorded);
+        assert_eq!(recorded.outcome, WorkGroupQaOutcome::Confirmed);
+
+        advance_base(root.path(), "after-record");
+
+        let retried = FileSystemProjectRepository
+            .submit_work_group_qa(root.path(), &submission)
+            .expect("replay recorded request");
+        assert_eq!(retried.status, WorkGroupQaSubmissionStatus::AlreadyRecorded);
+        assert_eq!(retried.outcome, WorkGroupQaOutcome::Confirmed);
+        assert_eq!(retried.decision_file_name, recorded.decision_file_name);
+    }
+
+    /// 완료 조건 6. 새 구성 버전은 그 시점의 기준 커밋을 새로 고정하고, 이전 버전의 고정 값은
+    /// 지우지 않고 남긴다.
+    #[test]
+    fn each_work_group_revision_pins_its_own_base_commit() {
+        let (root, directory) = git_work_group_fixture("verified", "user");
+        let group_path = root
+            .path()
+            .join(CONTROL_DIRECTORY)
+            .join(&directory)
+            .join("groups/GROUP-DECISION-1.md");
+        FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("pin first revision");
+        let first = qa_base_pin(root.path(), "GROUP-DECISION-1", 1).expect("first revision pin");
+
+        advance_base(root.path(), "rework");
+        let next = fs::read_to_string(&group_path)
+            .expect("group")
+            .replace("revision: 1", "revision: 2");
+        fs::write(&group_path, next).expect("next revision group");
+
+        let second = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("pin second revision")
+            .workflows[0]
+            .items
+            .work_groups[0]
+            .qa_base_commit
+            .clone()
+            .expect("second revision pin");
+        assert_ne!(second, first);
+        assert_eq!(
+            qa_base_pin(root.path(), "GROUP-DECISION-1", 2).as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(
+            qa_base_pin(root.path(), "GROUP-DECISION-1", 1).as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    /// 완료 조건 7. 자동 모드 그룹은 사용자가 다시 확인할 자리가 없으므로, 기준 커밋이 어긋나면
+    /// 자동 완료로 넘어가지 않는다.
+    #[test]
+    fn automatic_work_group_does_not_complete_when_the_base_commit_moves() {
+        let (root, _) = git_work_group_fixture("verified", "automatic");
+        let completed = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect automatic");
+        assert_eq!(
+            completed.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::AutomaticCompleted
+        );
+        let pinned = completed.workflows[0].items.work_groups[0]
+            .qa_base_commit
+            .clone()
+            .expect("pinned base commit");
+
+        advance_base(root.path(), "after-complete");
+
+        let held = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect after base moved");
+        assert_eq!(
+            held.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::Developing
+        );
+        assert_eq!(
+            held.workflows[0].items.work_groups[0]
+                .qa_base_commit
+                .as_deref(),
+            Some(pinned.as_str())
+        );
+    }
+
+    /// 완료 조건 8. Git 작업 트리가 아닌 프로젝트는 고정 값을 만들지 않고, 그룹 상태 계산과 제출
+    /// 판정이 이 변경 전과 같이 동작한다.
+    #[test]
+    fn work_group_qa_keeps_its_previous_behaviour_outside_a_git_work_tree() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let summary = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect non-git project");
+        assert_eq!(
+            summary.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::QaReady
+        );
+        assert_eq!(
+            summary.workflows[0].items.work_groups[0].qa_base_commit,
+            None
+        );
+        assert!(!root
+            .path()
+            .join(CONTROL_DIRECTORY)
+            .join(RUNTIME_DIRECTORY)
+            .join(QA_BASE_DIRECTORY)
+            .exists());
+
+        let recorded = FileSystemProjectRepository
+            .submit_work_group_qa(
+                root.path(),
+                &group_submission(&directory, WorkGroupQaOutcome::Confirmed),
+            )
+            .expect("record group QA without git");
+        assert_eq!(recorded.status, WorkGroupQaSubmissionStatus::Recorded);
     }
 
     #[test]
