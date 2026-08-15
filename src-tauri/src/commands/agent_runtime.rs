@@ -27,7 +27,7 @@ use crate::domain::agent_runtime::{
     Compatibility, ProjectPolicy, QueueSnapshot, RunLogPage, RunPlan, RunStartOutcome, RunSummary,
 };
 use crate::domain::agent_runtime::{UpdateApplication, UpdatePlan};
-use crate::infrastructure::agent_runtime_package::launcher_path;
+use crate::infrastructure::agent_runtime_package::{launcher_path, VERSIONS_DIRECTORY};
 use crate::infrastructure::agent_runtime_process::{self, LauncherCaller, RuntimeCallFailure};
 use crate::infrastructure::agent_runtime_release::{
     self, HttpReleaseFetcher, ReleaseCheck, DOWNLOADS_DIRECTORY,
@@ -136,7 +136,8 @@ pub async fn plan_agent_runtime_download(app: tauri::AppHandle) -> Result<Instal
     .map_err(|error| format!("런타임 내려받기를 시작하지 못했습니다: {error}"))?
 }
 
-/// 내려받아 둔 배포물로 확인받은 설치 계획을 적용한다. 오래된 계획과 확인 없는 요청은 거절한다.
+/// 내려받아 둔 배포물로 확인받은 설치 계획을 적용하고, 실행 중인 배정 프로세스를 새 버전으로
+/// 전환한다. 오래된 계획과 확인 없는 요청은 거절한다.
 #[tauri::command]
 pub async fn apply_agent_runtime_download(
     app: tauri::AppHandle,
@@ -151,9 +152,10 @@ pub async fn apply_agent_runtime_download(
             &version,
         )
         .map_err(|failure| failure.message())?;
+        let version_directory = install_root.join(VERSIONS_DIRECTORY).join(&version);
         let caller = LauncherCaller::new(launcher_path(&install_root));
         let application = AgentRuntimeInstallService::new(&staged, &install_root)
-            .apply_install(&caller, &plan_id, confirmed)
+            .apply_download(&caller, &plan_id, confirmed, &version_directory)
             .map_err(|failure| failure.message())?;
         agent_runtime_release::discard_staged(&staged);
         Ok(application)

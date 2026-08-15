@@ -371,6 +371,52 @@ impl<'a> AgentRuntimeInstallService<'a> {
         })
     }
 
+    /// 내려받아 설치한 버전으로 실행 중인 배정 프로세스까지 전환한다.
+    ///
+    /// 설치 적용은 관리형 서비스가 이미 실행 중이면 전환을 건너뛴다. 그래서 새 버전을 내려받아
+    /// 설치해도 구버전 프로세스가 계속 돌았다(2026-08-15 실측: 0.9.0 dispatcher가 세 번의
+    /// 업데이트를 지나 이틀을 더 살았다). 설치가 온전히 끝난 경우에만 업데이트 계약의 서비스
+    /// 전환과 실행 중 버전 확인을 이어 밟아, 사용자가 업데이트한 순간 실행 중인 프로세스도 그
+    /// 버전이 되게 한다. 전환 실패는 설치를 되돌리지 않는다 — 파일은 이미 제자리이고, 다음
+    /// 조회가 재시작 필요를 그대로 보여 준다.
+    pub fn apply_download(
+        &self,
+        caller: &dyn RuntimeCaller,
+        plan_id: &str,
+        confirmed: bool,
+        version_directory: &Path,
+    ) -> Result<InstallApplication, InstallFailure> {
+        let mut application = self.apply_install(caller, plan_id, confirmed)?;
+        if application.result != "success" {
+            return Ok(application);
+        }
+        let transition =
+            agent_runtime_process::plan_update(caller, self.install_root, version_directory)
+                .and_then(|plan| {
+                    agent_runtime_process::apply_update(
+                        caller,
+                        self.install_root,
+                        version_directory,
+                        &plan.plan_id,
+                        true,
+                    )
+                });
+        match transition {
+            Ok(update) => {
+                if update.result != "success" {
+                    application.result = "partial_success".to_owned();
+                    application.detail = update.detail.clone();
+                }
+                application.stages.extend(update.stages);
+            }
+            Err(failure) => {
+                application.result = "partial_success".to_owned();
+                application.detail = Some(failure.message());
+            }
+        }
+        Ok(application)
+    }
+
     /// 업데이트 계획을 런타임에게 묻는다. 실행 중 작업 수와 프로젝트 목록은 런타임이 센 값이다.
     pub fn plan_update(&self, caller: &dyn RuntimeCaller) -> Result<UpdatePlan, InstallFailure> {
         let manifest = self.manifest()?;
@@ -828,6 +874,108 @@ mod tests {
             .join("heartbeat")
             .is_file());
         assert_eq!(caller.calls.borrow()[2].0, vec!["install-service"]);
+    }
+
+    /// 내려받기 적용은 설치 뒤 실행 중인 배정 프로세스를 새 버전으로 전환한다. 설치 적용만으로는
+    /// 관리형 서비스가 이미 돌고 있을 때 전환이 생략되어, 구버전 프로세스가 계속 돌았다
+    /// (2026-08-15 실측).
+    #[test]
+    fn a_download_apply_hands_the_running_service_to_the_new_version() {
+        use crate::domain::agent_runtime::UpdateStage;
+
+        let resource = bundled("0.9.7");
+        let root = install_root();
+        let managed = status_with_service(
+            "0.9.6",
+            "registered",
+            json!(true),
+            json!(true),
+            "com.claude-heartbeat",
+            &crate::infrastructure::agent_runtime_package::launcher_path(root.path())
+                .display()
+                .to_string(),
+        );
+        let caller = answering(vec![
+            managed.clone(),
+            managed,
+            plan_body("update-plan-1", 0, json!([])),
+            json!({
+                "apiVersion": "1", "requestId": "r", "command": "update.apply",
+                "outcome": "success",
+                "data": {
+                    "planId": "update-plan-1", "result": "success",
+                    "checkedAt": "2026-08-15T09:00:00Z",
+                    "stages": [
+                        {"stage": "service_transition", "status": "ok", "detail": null},
+                        {"stage": "running_version_check", "status": "ok", "detail": null},
+                    ],
+                    "runnableVersion": "0.9.7", "recoveryActions": [], "detail": null,
+                },
+            }),
+        ]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+        let plan = service.plan_install(&caller).expect("plan");
+        let version_directory = root.path().join(VERSIONS_DIRECTORY).join("0.9.7");
+
+        let applied = service
+            .apply_download(&caller, &plan.plan_id, true, &version_directory)
+            .expect("download apply");
+
+        assert_eq!(applied.result, "success", "applied: {applied:?}");
+        let stages: Vec<_> = applied.stages.iter().map(|stage| stage.stage).collect();
+        assert_eq!(
+            &stages[stages.len() - 2..],
+            &[
+                UpdateStage::ServiceTransition,
+                UpdateStage::RunningVersionCheck
+            ],
+            "설치 뒤 업데이트 계약의 전환 단계가 이어진다"
+        );
+        let calls = caller.calls.borrow();
+        assert_eq!(calls[2].0, vec!["agent", "update", "plan"]);
+        assert_eq!(calls[3].0, vec!["agent", "update", "apply"]);
+    }
+
+    /// 전환이 거절되어도 설치는 되돌리지 않는다. 파일은 제자리이고 사유만 부분 성공으로 남는다.
+    #[test]
+    fn a_failed_handover_keeps_the_install_and_reports_partial_success() {
+        let resource = bundled("0.9.7");
+        let root = install_root();
+        let managed = status_with_service(
+            "0.9.6",
+            "registered",
+            json!(true),
+            json!(true),
+            "com.claude-heartbeat",
+            &crate::infrastructure::agent_runtime_package::launcher_path(root.path())
+                .display()
+                .to_string(),
+        );
+        let caller = answering(vec![
+            managed.clone(),
+            managed,
+            json!({
+                "apiVersion": "1", "requestId": "r", "command": "update.plan",
+                "outcome": "failure",
+                "error": {"stage": "request_validation", "code": "active_runs", "message": "실행 중 작업이 있습니다"},
+            }),
+        ]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+        let plan = service.plan_install(&caller).expect("plan");
+        let version_directory = root.path().join(VERSIONS_DIRECTORY).join("0.9.7");
+
+        let applied = service
+            .apply_download(&caller, &plan.plan_id, true, &version_directory)
+            .expect("download apply");
+
+        assert_eq!(applied.result, "partial_success");
+        assert!(applied.detail.is_some());
+        assert!(root
+            .path()
+            .join(VERSIONS_DIRECTORY)
+            .join("0.9.7")
+            .join("heartbeat")
+            .is_file());
     }
 
     #[cfg(unix)]
