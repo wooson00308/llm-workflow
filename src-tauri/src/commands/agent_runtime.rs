@@ -24,7 +24,8 @@ use crate::application::agent_runtime_run_service::{
 use crate::application::agent_runtime_status_service::{AgentRuntimeStatusService, StatusFailure};
 use crate::application::heartbeat_service::{migration_role_requests, HeartbeatService};
 use crate::domain::agent_runtime::{
-    Compatibility, ProjectPolicy, QueueSnapshot, RunLogPage, RunPlan, RunStartOutcome, RunSummary,
+    judge_isolation_support, Compatibility, IsolationSupport, ProjectPolicy, QueueSnapshot,
+    RunLogPage, RunPlan, RunStartOutcome, RunSummary,
 };
 use crate::domain::agent_runtime::{UpdateApplication, UpdatePlan};
 use crate::infrastructure::agent_runtime_package::{launcher_path, VERSIONS_DIRECTORY};
@@ -363,8 +364,8 @@ pub async fn plan_agent_run(
     let (resource, install_root) = locations(&app)?;
     run_blocking(move || {
         let caller = LauncherCaller::new(launcher_path(&install_root));
-        let compatibility = compatibility_of(&resource, &install_root, &caller);
-        AgentRuntimeRunService.plan(&caller, &project_id, &roles, &compatibility)
+        let (compatibility, isolation) = run_gate_of(&resource, &install_root, &caller);
+        AgentRuntimeRunService.plan(&caller, &project_id, &roles, &compatibility, &isolation)
     })
     .await
 }
@@ -530,6 +531,20 @@ fn compatibility_of(
     AgentRuntimeInstallService::new(resource, install_root)
         .inspect(caller)
         .compatibility
+}
+
+/// 실행 계획이 보는 두 판정. 런타임 조회는 다른 실행 명령과 같이 한 번만 한다.
+///
+/// 조회를 두 번 하면 두 판정이 서로 다른 순간의 사실을 말하게 되고, 그 사이에 런타임이 갱신되면
+/// 호환은 새 판으로 격리 지원은 옛 판으로 판정되는 상태가 생긴다.
+fn run_gate_of(
+    resource: &Path,
+    install_root: &Path,
+    caller: &LauncherCaller,
+) -> (Compatibility, IsolationSupport) {
+    let inspection = AgentRuntimeInstallService::new(resource, install_root).inspect(caller);
+    let isolation = judge_isolation_support(inspection.status.as_ref());
+    (inspection.compatibility, isolation)
 }
 
 async fn run_blocking<T, F>(work: F) -> Result<T, String>

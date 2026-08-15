@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::domain::agent_runtime::{
-    CancelPreview, Compatibility, RunPlan, RunStartOutcome, RunSummary,
+    CancelPreview, Compatibility, IsolationSupport, RunPlan, RunStartOutcome, RunSummary,
 };
 use crate::infrastructure::agent_runtime_process::{self, RuntimeCallFailure, RuntimeCaller};
 
@@ -61,6 +61,14 @@ pub enum RunFailure {
     },
     /// 이 런타임의 계약이 앱의 지원 범위 밖이다.
     Incompatible(Compatibility),
+    /// 계약은 통하지만 이 런타임이 격리 작업 사본을 다루지 못한다. 개발 역할 실행만 막힌다.
+    ///
+    /// `Incompatible`과 값을 나눈다. 화면이 "런타임 자체가 호환되지 않음"과 "격리를 지원하는 판으로
+    /// 갱신이 필요함"을 다르게 안내해야 하고, 뒤쪽은 개발 역할을 뺀 요청으로 다시 시도할 수 있다.
+    IsolationUnsupported {
+        found: Option<String>,
+        required: String,
+    },
     /// 응답이 계약의 모양이 아니다.
     OffContract {
         detail: String,
@@ -83,6 +91,20 @@ impl RunFailure {
             RunFailure::Incompatible(_) => {
                 "이 런타임은 앱이 지원하는 계약 범위 밖입니다.".to_owned()
             }
+            RunFailure::IsolationUnsupported {
+                found: Some(found),
+                required,
+            } => format!(
+                "설치된 런타임 {found}은(는) 태스크별 격리 작업 사본을 다루지 못합니다. \
+                 개발 역할 실행은 런타임을 {required} 이상으로 갱신한 뒤에 열립니다."
+            ),
+            RunFailure::IsolationUnsupported {
+                found: None,
+                required,
+            } => format!(
+                "런타임 버전을 확인하지 못해 격리 작업 사본 지원 여부를 알 수 없습니다. \
+                 개발 역할 실행은 런타임이 {required} 이상임을 확인한 뒤에 열립니다."
+            ),
             RunFailure::OffContract { detail } => {
                 format!("런타임 응답이 계약의 모양이 아닙니다: {detail}")
             }
@@ -101,8 +123,10 @@ impl AgentRuntimeRunService {
         project_id: &str,
         requests: &[RoleSlotRequest],
         compatibility: &Compatibility,
+        isolation: &IsolationSupport,
     ) -> Result<RunPlan, RunFailure> {
         guard(compatibility)?;
+        guard_isolation(requests, isolation)?;
         let data = agent_runtime_process::plan_run(caller, project_id, &roles_payload(requests))
             .map_err(RunFailure::Runtime)?;
         let plan: RunPlan = decode(data.get("plan").unwrap_or(&data))?;
@@ -218,6 +242,41 @@ fn guard(compatibility: &Compatibility) -> Result<(), RunFailure> {
     }
 }
 
+/// 격리 작업 사본을 필요로 하는 역할. 이름은 `domain::agent_runtime::POLICY_ROLES`가 정한 값이다.
+const DEVELOPER_ROLE: &str = "developer";
+
+/// 격리를 다루지 못하는 런타임에는 개발 역할이 섞인 요청을 보내지 않는다.
+///
+/// 요청에 개발 역할이 하나라도 있으면 요청 전체를 받아들이지 않는다. 슬롯 일부만 만들어 주면
+/// 사용자는 요청한 대로 실행이 잡혔다고 읽게 되고, 그 어긋남이 이 관문이 막으려는 상태다. 개발
+/// 역할을 뺀 요청으로는 그대로 다시 시도할 수 있다.
+fn guard_isolation(
+    requests: &[RoleSlotRequest],
+    isolation: &IsolationSupport,
+) -> Result<(), RunFailure> {
+    if !requests
+        .iter()
+        .any(|request| request.role == DEVELOPER_ROLE)
+    {
+        return Ok(());
+    }
+    match isolation {
+        IsolationSupport::Supported => Ok(()),
+        IsolationSupport::Unsupported { found, required } => {
+            Err(RunFailure::IsolationUnsupported {
+                found: Some(found.clone()),
+                required: required.clone(),
+            })
+        }
+        IsolationSupport::Undetermined { found, required } => {
+            Err(RunFailure::IsolationUnsupported {
+                found: found.clone(),
+                required: required.clone(),
+            })
+        }
+    }
+}
+
 /// 역할별 슬롯 요청을 계약의 모양으로 옮긴다. 한 번·반복은 저장된 역할 정책이 정하므로 싣지 않는다.
 fn roles_payload(requests: &[RoleSlotRequest]) -> Value {
     let mut roles = serde_json::Map::new();
@@ -242,7 +301,10 @@ mod tests {
     use serde_json::json;
 
     use super::{AgentRuntimeRunService, CancelOutcome, RoleSlotRequest, RunFailure};
-    use crate::domain::agent_runtime::{Compatibility, RunState};
+    use crate::domain::agent_runtime::{
+        judge_isolation_support, Compatibility, IsolationSupport, RunState, RuntimeStatus,
+        ServiceResult, ServiceState,
+    };
     use crate::infrastructure::agent_runtime_process::tests::FakeCaller;
     use crate::infrastructure::agent_runtime_process::Captured;
 
@@ -297,12 +359,60 @@ mod tests {
         }]
     }
 
+    /// 개발 역할이 섞이지 않은 요청. 격리 관문이 보지 않아야 하는 쪽이다.
+    fn slots_without_developer() -> Vec<RoleSlotRequest> {
+        vec![
+            RoleSlotRequest {
+                role: "planner".to_owned(),
+                slots: 1,
+                targets: Vec::new(),
+            },
+            RoleSlotRequest {
+                role: "architect".to_owned(),
+                slots: 1,
+                targets: Vec::new(),
+            },
+        ]
+    }
+
+    /// 설치된 판 하나로 격리 지원 판정을 만든다. 판정 자체는 도메인이 하도록 둔다.
+    fn isolation_for(installed: Option<&str>) -> IsolationSupport {
+        judge_isolation_support(Some(&RuntimeStatus {
+            result: "ok".into(),
+            checked_at: "2026-08-15T09:00:00Z".into(),
+            runtime_version: installed.map(str::to_owned),
+            installed_version: installed.map(str::to_owned),
+            running_version: installed.map(str::to_owned),
+            api_major: 1,
+            target: "macos-universal".into(),
+            install_result: "installed".into(),
+            recoverable: Some(true),
+            service: ServiceState {
+                platform: "launchd".into(),
+                result: ServiceResult::Registered,
+                registered: Some(true),
+                running: Some(true),
+                label: "com.claude-heartbeat".into(),
+                executable: "/opt/runtime/bin/heartbeat".into(),
+                recoverable: Some(true),
+                checked_at: "2026-08-15T09:00:00Z".into(),
+                evidence: vec!["launch_agents_directory".into()],
+            },
+        }))
+    }
+
     #[test]
     fn a_plan_reports_candidates_and_limits_without_starting_anything() {
         let caller = FakeCaller::new(vec![Ok(envelope(plan_body("p1")))]);
 
         let plan = AgentRuntimeRunService
-            .plan(&caller, "p1", &slots(), &Compatibility::Compatible)
+            .plan(
+                &caller,
+                "p1",
+                &slots(),
+                &Compatibility::Compatible,
+                &IsolationSupport::Supported,
+            )
             .expect("plan");
 
         assert_eq!(plan.plan_id, "plan-1");
@@ -320,7 +430,13 @@ mod tests {
         let caller = FakeCaller::new(vec![Ok(envelope(plan_body("other")))]);
 
         let failure = AgentRuntimeRunService
-            .plan(&caller, "p1", &slots(), &Compatibility::Compatible)
+            .plan(
+                &caller,
+                "p1",
+                &slots(),
+                &Compatibility::Compatible,
+                &IsolationSupport::Supported,
+            )
             .expect_err("refused");
 
         assert!(matches!(failure, RunFailure::ProjectMismatch { .. }));
@@ -370,11 +486,129 @@ mod tests {
             supported: 1,
         };
 
-        let planned = AgentRuntimeRunService.plan(&caller, "p1", &slots(), &incompatible);
+        let planned = AgentRuntimeRunService.plan(
+            &caller,
+            "p1",
+            &slots(),
+            &incompatible,
+            &IsolationSupport::Supported,
+        );
         let started = AgentRuntimeRunService.start(&caller, "p1", "plan-1", true, &incompatible);
 
         assert!(matches!(planned, Err(RunFailure::Incompatible(_))));
         assert!(matches!(started, Err(RunFailure::Incompatible(_))));
+        assert!(caller.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_runtime_that_supports_isolation_plans_developer_slots_as_before() {
+        let caller = FakeCaller::new(vec![Ok(envelope(plan_body("p1")))]);
+
+        let plan = AgentRuntimeRunService
+            .plan(
+                &caller,
+                "p1",
+                &slots(),
+                &Compatibility::Compatible,
+                &isolation_for(Some("0.10.0")),
+            )
+            .expect("plan");
+
+        assert_eq!(plan.plan_id, "plan-1");
+        assert_eq!(caller.calls.borrow().len(), 1);
+    }
+
+    /// 같은 낮은 판에서 개발 역할이 든 요청과 들지 않은 요청의 결과가 갈라지는지를 한자리에서 본다.
+    #[test]
+    fn a_runtime_without_isolation_refuses_only_the_requests_holding_a_developer_slot() {
+        let refusing = FakeCaller::new(vec![]);
+        let allowing = FakeCaller::new(vec![Ok(envelope(plan_body("p1")))]);
+        let isolation = isolation_for(Some("0.9.5"));
+
+        let refused = AgentRuntimeRunService
+            .plan(
+                &refusing,
+                "p1",
+                &slots(),
+                &Compatibility::Compatible,
+                &isolation,
+            )
+            .expect_err("refused");
+        let planned = AgentRuntimeRunService.plan(
+            &allowing,
+            "p1",
+            &slots_without_developer(),
+            &Compatibility::Compatible,
+            &isolation,
+        );
+
+        assert_eq!(
+            refused,
+            RunFailure::IsolationUnsupported {
+                found: Some("0.9.5".to_owned()),
+                required: "0.10.0".to_owned(),
+            }
+        );
+        // 기존 호환 실패와 구분되는 값이어야 화면이 갱신 안내를 따로 만들 수 있다.
+        assert!(!matches!(refused, RunFailure::Incompatible(_)));
+        assert_ne!(
+            refused.message(),
+            RunFailure::Incompatible(Compatibility::VersionOutOfRange {
+                found: "0.9.5".to_owned(),
+                minimum: "0.9.0".to_owned(),
+                maximum: "1.99.99".to_owned(),
+            })
+            .message()
+        );
+        assert!(refused.message().contains("0.10.0"));
+        // 막힌 요청은 런타임에 아무것도 보내지 않는다.
+        assert!(refusing.calls.borrow().is_empty());
+        assert!(planned.is_ok());
+        assert_eq!(allowing.calls.borrow().len(), 1);
+    }
+
+    /// 요청 하나에 개발 역할이 섞여 있으면 나머지 슬롯만 통과시키지 않는다.
+    #[test]
+    fn a_mixed_request_is_refused_as_a_whole() {
+        let caller = FakeCaller::new(vec![]);
+        let mut requests = slots_without_developer();
+        requests.extend(slots());
+
+        let refused = AgentRuntimeRunService
+            .plan(
+                &caller,
+                "p1",
+                &requests,
+                &Compatibility::Compatible,
+                &isolation_for(Some("0.9.0")),
+            )
+            .expect_err("refused");
+
+        assert!(matches!(refused, RunFailure::IsolationUnsupported { .. }));
+        assert!(caller.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_undetermined_isolation_verdict_does_not_open_developer_slots() {
+        let caller = FakeCaller::new(vec![]);
+
+        let refused = AgentRuntimeRunService
+            .plan(
+                &caller,
+                "p1",
+                &slots(),
+                &Compatibility::Compatible,
+                &isolation_for(None),
+            )
+            .expect_err("refused");
+
+        assert_eq!(
+            refused,
+            RunFailure::IsolationUnsupported {
+                found: None,
+                required: "0.10.0".to_owned(),
+            }
+        );
         assert!(caller.calls.borrow().is_empty());
     }
 
@@ -459,7 +693,13 @@ mod tests {
         ]);
 
         AgentRuntimeRunService
-            .plan(&caller, "p1", &slots(), &Compatibility::Compatible)
+            .plan(
+                &caller,
+                "p1",
+                &slots(),
+                &Compatibility::Compatible,
+                &IsolationSupport::Supported,
+            )
             .expect("plan");
         AgentRuntimeRunService
             .start(&caller, "p1", "plan-1", true, &Compatibility::Compatible)

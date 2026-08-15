@@ -24,6 +24,67 @@ pub const SUPPORTED_API_MAJOR: u32 = 1;
 pub const MINIMUM_RUNTIME_VERSION: &str = "0.9.0";
 pub const MAXIMUM_RUNTIME_VERSION: &str = "1.99.99";
 
+/// 태스크별 격리 작업 사본을 다룰 수 있는 런타임의 아래 끝.
+///
+/// 이름에 `MINIMUM_RUNTIME_VERSION`을 부분 문자열로 넣지 않는다. 릴리스 검사
+/// (`scripts/verify-agent-runtime-contract.mjs`)가 그 이름을 정규식으로 찾아 첫 일치만 쓰므로,
+/// 겹치면 함께 배포되는 런타임의 판정이 이 상수로 바뀐다.
+///
+/// 값을 0.10.0으로 둔 근거: 예약 결과의 계약 판이 2로 올라간 것은 계약 주 버전 안에서 일어난
+/// 호환되지 않는 변화이므로, 현재 0.9 계열의 다음 소수 판을 경계로 삼는다.
+pub const ISOLATION_CAPABLE_RUNTIME_VERSION: &str = "0.10.0";
+
+/// 격리 작업 사본 지원 판정. 지원·미지원·모름을 서로 다른 값으로 둔다.
+///
+/// 모름을 지원으로 접지 않는다. 격리를 확인하지 못한 런타임에서 개발 세션을 열면 사용자의 작업
+/// 공간을 그대로 쓰게 되고, 그것은 이 판정이 막으려는 상태다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum IsolationSupport {
+    /// 설치된 판이 격리를 다룰 수 있는 범위 안이다.
+    Supported,
+    /// 설치된 판이 확인됐고, 그 판은 격리를 다루지 못한다.
+    #[serde(rename_all = "camelCase")]
+    Unsupported { found: String, required: String },
+    /// 판정에 필요한 판을 읽지 못했다. `found`는 읽은 값이 아예 없으면 비어 있다.
+    #[serde(rename_all = "camelCase")]
+    Undetermined {
+        found: Option<String>,
+        required: String,
+    },
+}
+
+/// 런타임 조회 결과로 격리 지원을 판정한다. 조회하지 못했으면 입력이 없다.
+///
+/// 설치된 판이 없거나 숫자 판 모양이 아니면 지원으로 접지 않고 모름으로 둔다. 미지원과 모름은 둘 다
+/// 확인된 판과 필요한 판을 실어, 화면이 갱신 안내 문구를 만들 수 있게 한다.
+pub fn judge_isolation_support(status: Option<&RuntimeStatus>) -> IsolationSupport {
+    let required = ISOLATION_CAPABLE_RUNTIME_VERSION.to_owned();
+    let Some(installed) = status.and_then(|status| status.installed_version.as_deref()) else {
+        return IsolationSupport::Undetermined {
+            found: None,
+            required,
+        };
+    };
+    let (Some(found), Some(floor)) = (
+        numeric_parts(installed),
+        numeric_parts(ISOLATION_CAPABLE_RUNTIME_VERSION),
+    ) else {
+        return IsolationSupport::Undetermined {
+            found: Some(installed.to_owned()),
+            required,
+        };
+    };
+    if found >= floor {
+        IsolationSupport::Supported
+    } else {
+        IsolationSupport::Unsupported {
+            found: installed.to_owned(),
+            required,
+        }
+    }
+}
+
 /// 런타임이 돌려준 서비스 판정. 계약이 정한 일곱 어휘를 그대로 옮긴다.
 ///
 /// 문자열을 그대로 들고 다니지 않고 값으로 바꾸는 것은, 앱이 모르는 어휘를 만났을 때 조용히
@@ -236,8 +297,10 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        default_policy, judge, validate_policy, Compatibility, RuntimeStatus, ServiceResult,
-        ServiceState, MINIMUM_RUNTIME_VERSION, SUPPORTED_API_MAJOR,
+        default_policy, judge, judge_isolation_support, validate_policy, Compatibility,
+        IsolationSupport, RuntimeStatus, ServiceResult, ServiceState,
+        ISOLATION_CAPABLE_RUNTIME_VERSION, MAXIMUM_RUNTIME_VERSION, MINIMUM_RUNTIME_VERSION,
+        SUPPORTED_API_MAJOR,
     };
 
     fn service() -> ServiceState {
@@ -267,6 +330,83 @@ mod tests {
             recoverable: Some(true),
             service: service(),
         }
+    }
+
+    #[test]
+    fn the_isolation_floor_does_not_collide_with_the_release_check_names() {
+        assert_eq!(ISOLATION_CAPABLE_RUNTIME_VERSION, "0.10.0");
+        // 릴리스 검사가 두 이름을 정규식으로 찾고 첫 일치만 쓰므로, 새 이름이 그 문자열을 부분
+        // 문자열로 포함하면 함께 배포되는 런타임의 판정이 바뀐다.
+        assert!(!"ISOLATION_CAPABLE_RUNTIME_VERSION".contains("MINIMUM_RUNTIME_VERSION"));
+        assert!(!"ISOLATION_CAPABLE_RUNTIME_VERSION".contains("MAXIMUM_RUNTIME_VERSION"));
+    }
+
+    #[test]
+    fn the_existing_support_range_is_left_where_it_was() {
+        assert_eq!(MINIMUM_RUNTIME_VERSION, "0.9.0");
+        assert_eq!(MAXIMUM_RUNTIME_VERSION, "1.99.99");
+        assert_eq!(SUPPORTED_API_MAJOR, 1);
+    }
+
+    #[test]
+    fn a_runtime_at_or_above_the_floor_supports_isolation() {
+        for installed in ["0.10.0", "0.11.0", "1.0.0"] {
+            let verdict = judge_isolation_support(Some(&status(
+                Some(installed),
+                Some(installed),
+                SUPPORTED_API_MAJOR,
+            )));
+
+            assert_eq!(
+                verdict,
+                IsolationSupport::Supported,
+                "installed={installed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_runtime_below_the_floor_does_not_support_isolation() {
+        for installed in ["0.9.5", "0.9.0"] {
+            let verdict = judge_isolation_support(Some(&status(
+                Some(installed),
+                Some(installed),
+                SUPPORTED_API_MAJOR,
+            )));
+
+            assert_eq!(
+                verdict,
+                IsolationSupport::Unsupported {
+                    found: installed.to_owned(),
+                    required: ISOLATION_CAPABLE_RUNTIME_VERSION.to_owned(),
+                },
+                "installed={installed}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_version_is_undetermined_and_never_supported() {
+        let missing = judge_isolation_support(Some(&status(None, None, SUPPORTED_API_MAJOR)));
+        let unavailable = judge_isolation_support(None);
+        let shaped =
+            judge_isolation_support(Some(&status(Some("nightly"), None, SUPPORTED_API_MAJOR)));
+
+        assert_eq!(
+            missing,
+            IsolationSupport::Undetermined {
+                found: None,
+                required: ISOLATION_CAPABLE_RUNTIME_VERSION.to_owned(),
+            }
+        );
+        assert_eq!(unavailable, missing);
+        assert_eq!(
+            shaped,
+            IsolationSupport::Undetermined {
+                found: Some("nightly".to_owned()),
+                required: ISOLATION_CAPABLE_RUNTIME_VERSION.to_owned(),
+            }
+        );
     }
 
     #[test]
