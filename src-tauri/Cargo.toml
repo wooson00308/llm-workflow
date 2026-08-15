@@ -34,6 +34,10 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 notify = "8"
+# 게시된 런타임 릴리스를 조회·내려받는 자리(agent_runtime_release)에서만 쓴다. rustls를 쓰는
+# 것은 세 OS의 시스템 TLS 스택 차이를 빌드에서 지우기 위해서다.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
 tauri-plugin-clipboard-manager = "2"

@@ -436,6 +436,11 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
     planAgentRuntimeUpdate: vi.fn().mockResolvedValue(agentUpdatePlan),
     applyAgentRuntimeUpdate: vi.fn().mockResolvedValue(agentUpdateApplication),
     repairAgentRuntime: vi.fn().mockResolvedValue(agentUpdateApplication),
+    checkAgentRuntimeRelease: vi
+      .fn()
+      .mockResolvedValue({ version: "0.9.5", withinSupportedRange: true }),
+    planAgentRuntimeDownload: vi.fn().mockResolvedValue(agentInstallPlan),
+    applyAgentRuntimeDownload: vi.fn().mockResolvedValue(agentInstallApplication),
     readAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
     saveAgentRuntimePolicy: vi.fn().mockResolvedValue(agentPolicy),
     grantAgentRuntimeConsent: vi.fn().mockResolvedValue(agentPolicy.consent),
@@ -1450,6 +1455,56 @@ describe("useProjectWorkspace 에이전트 실행", () => {
     await act(() => result.current.agentRuntimeActions.apply());
     expect(gateway.applyAgentRuntimeInstall).toHaveBeenCalledWith(agentInstallPlan.planId, true);
     expect(gateway.inspectAgentRuntime).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it("게시된 런타임을 조회하고 내려받기 계획을 버전과 함께 적용한다", async () => {
+    const gateway = gatewayFor();
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+
+    await act(() => result.current.agentRuntimeActions.checkRelease());
+    expect(result.current.agentRuntime.releaseCheck).toEqual({
+      version: "0.9.5",
+      withinSupportedRange: true,
+    });
+
+    await act(() => result.current.agentRuntimeActions.plan("download"));
+    expect(gateway.planAgentRuntimeDownload).toHaveBeenCalledTimes(1);
+    expect(result.current.agentRuntime.plan).toEqual({
+      kind: "download",
+      plan: agentInstallPlan,
+    });
+
+    await act(() => result.current.agentRuntimeActions.apply());
+    // 적용은 계획이 실어 온 버전을 그대로 보낸다. 화면이 버전을 따로 들지 않는다.
+    expect(gateway.applyAgentRuntimeDownload).toHaveBeenCalledWith(
+      agentInstallPlan.bundledVersion,
+      agentInstallPlan.planId,
+      true,
+    );
+    unmount();
+  });
+
+  it("게시된 런타임 조회 실패는 사유를 남기고 이전 조회 결과를 지운다", async () => {
+    const gateway = gatewayFor({
+      checkAgentRuntimeRelease: vi.fn().mockRejectedValue(new Error("rate limited")),
+    });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await act(() => result.current.agentRuntimeActions.checkRelease());
+
+    expect(result.current.agentRuntime.releaseCheck).toBeNull();
+    expect(result.current.agentRuntime.releaseError).toBe("rate limited");
     unmount();
   });
 

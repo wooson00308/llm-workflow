@@ -44,6 +44,9 @@ pub fn run() {
             commands::agent_runtime::apply_agent_runtime_install,
             commands::agent_runtime::plan_agent_runtime_update,
             commands::agent_runtime::apply_agent_runtime_update,
+            commands::agent_runtime::check_agent_runtime_release,
+            commands::agent_runtime::plan_agent_runtime_download,
+            commands::agent_runtime::apply_agent_runtime_download,
             commands::agent_runtime::repair_agent_runtime,
             commands::agent_runtime::read_agent_runtime_policy,
             commands::agent_runtime::save_agent_runtime_policy,
@@ -80,6 +83,9 @@ mod tests {
 
         assert!(registered.contains("commands::agent_runtime::grant_agent_runtime_consent"));
         assert!(registered.contains("commands::agent_runtime::revoke_agent_runtime_consent"));
+        assert!(registered.contains("commands::agent_runtime::check_agent_runtime_release"));
+        assert!(registered.contains("commands::agent_runtime::plan_agent_runtime_download"));
+        assert!(registered.contains("commands::agent_runtime::apply_agent_runtime_download"));
         assert!(registered.contains("commands::projects::submit_work_group_qa"));
         assert!(!registered.contains("commands::projects::record_task_qa"));
         assert!(!registered.contains("commands::projects::confirm_task_qa_batch"));

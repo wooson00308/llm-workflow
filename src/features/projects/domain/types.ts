@@ -1223,6 +1223,19 @@ export interface ProjectGateway {
   applyAgentRuntimeUpdate(planId: string, confirmed: boolean): Promise<AgentUpdateApplication>;
   /** 복구는 업데이트와 같은 계획·적용 짝을 쓴다. 결과 모양도 같다. */
   repairAgentRuntime(planId: string, confirmed: boolean): Promise<AgentUpdateApplication>;
+  /** 게시된 최신 런타임 버전을 조회한다. 아무것도 내려받지 않는다. */
+  checkAgentRuntimeRelease(): Promise<AgentRuntimeReleaseCheck>;
+  /**
+   * 게시된 최신 런타임 배포물을 내려받아 설치 계획을 만든다. 검증은 번들 설치와 같은 경로를
+   * 지나며, 버전 디렉터리와 launcher는 바꾸지 않는다.
+   */
+  planAgentRuntimeDownload(): Promise<AgentInstallPlan>;
+  /** 내려받아 둔 배포물로 확인받은 계획을 적용한다. 버전은 계획이 실어 온 값 그대로다. */
+  applyAgentRuntimeDownload(
+    version: string,
+    planId: string,
+    confirmed: boolean,
+  ): Promise<AgentInstallApplication>;
   /** 프로젝트 하나의 역할 정책과 provider 진단을 읽는다. 읽기 전용이다. */
   readAgentRuntimePolicy(
     projectId: string,
@@ -1680,19 +1693,27 @@ export interface AgentAutomationSnapshot {
 }
 
 /** 앱이 대신 실행하는 런타임 조작 셋. 셋 다 계획을 먼저 보여주고 확인받은 뒤에만 적용한다. */
-export type AgentRuntimeOperation = "install" | "update" | "repair";
+export type AgentRuntimeOperation = "install" | "update" | "repair" | "download";
 
 /** 확인 대기 중인 계획 하나. 종류에 따라 적용이 부르는 명령과 보여줄 값이 다르다. */
 export type AgentRuntimePlan =
   | { kind: "install"; plan: AgentInstallPlan }
   | { kind: "update"; plan: AgentUpdatePlan }
-  | { kind: "repair"; plan: AgentUpdatePlan };
+  | { kind: "repair"; plan: AgentUpdatePlan }
+  | { kind: "download"; plan: AgentInstallPlan };
 
 /** 마지막 적용의 결과. 조회 주기가 지우지 않는다. */
 export type AgentRuntimeApplication =
   | { kind: "install"; result: AgentInstallApplication }
   | { kind: "update"; result: AgentUpdateApplication }
-  | { kind: "repair"; result: AgentUpdateApplication };
+  | { kind: "repair"; result: AgentUpdateApplication }
+  | { kind: "download"; result: AgentInstallApplication };
+
+/** 게시된 최신 런타임 조회 결과. 설치본과의 비교는 설치 버전을 이미 아는 화면이 한다. */
+export interface AgentRuntimeReleaseCheck {
+  version: string;
+  withinSupportedRange: boolean;
+}
 
 /**
  * 에이전트 화면의 수명. 주인이 훅인 이유는 연동 상태와 같다 — 화면은 조건부 렌더라 다른 메뉴를
@@ -1717,6 +1738,11 @@ export interface AgentRuntimeState {
   migrationError: string | null;
   saving: boolean;
   saveError: string | null;
+  /** 게시된 최신 런타임 조회 결과. 조회한 적이 없으면 null이다. */
+  releaseCheck: AgentRuntimeReleaseCheck | null;
+  checkingRelease: boolean;
+  /** 최신 런타임 조회 실패 사유. 계획·적용 실패와 다른 자리에 둔다. */
+  releaseError: string | null;
   /** 동의나 철회를 실행 환경에 전달하는 중인지. */
   consentBusy: boolean;
   /** 동의나 철회를 기록하지 못한 사유. 조용히 넘어가지 않으려고 저장 실패와 다른 자리에 둔다. */
@@ -1786,6 +1812,8 @@ export interface AgentRuntimeActions {
   /** 계획을 만든다. 아무것도 쓰지 않는다. */
   plan(operation: AgentRuntimeOperation): Promise<void>;
   cancelPlan(): void;
+  /** 게시된 최신 런타임 버전을 조회한다. 아무것도 내려받지 않는다. */
+  checkRelease(): Promise<void>;
   /** 확인 대기 중인 계획을 적용한다. 계획이 없으면 아무것도 하지 않는다. */
   apply(): Promise<boolean>;
   previewMigration(): Promise<void>;

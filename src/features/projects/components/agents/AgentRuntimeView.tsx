@@ -7,6 +7,7 @@ import type {
   AgentRuntimeState,
   ProjectSummary,
 } from "../../domain/types";
+import { bundledRuntimeIsNewer } from "../../application/useProjectWorkspace";
 import { AgentRoleSettings } from "./AgentRoleSettings";
 import { AgentRunDashboard, humanRuntimeMessage } from "./AgentRunDashboard";
 
@@ -270,7 +271,7 @@ function AdvancedDrawer({ actions, onClose, projectName, readiness, state }: {
         <header><div><p className="eyebrow">ADVANCED</p><h2>고급 설정</h2><small>{projectName}</small></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
         {state.policy && <AgentRoleSettings busy={state.reading} executionAllowed={state.policy.executionAllowed} onSave={actions.save} saveError={state.saveError} saving={state.saving} snapshot={state.policy} />}
         {state.policy && <ConsentSettings actions={actions} consent={state.policy.consent} state={state} />}
-        <details open={readiness.tone !== "ready"}><summary>실행 환경</summary><div className="agent-secondary-content"><p>{readiness.detail}</p>{readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}</div></details>
+        <details open={readiness.tone !== "ready"}><summary>실행 환경</summary><div className="agent-secondary-content"><p>{readiness.detail}</p>{readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}<RuntimeReleaseRow actions={actions} state={state} /></div></details>
         <details open={providerAttention}><summary>실행 도구</summary><ul className="agent-provider-list">{state.policy?.providers.map((provider) => <li key={provider.provider}><ProviderRow diagnosis={provider} /></li>)}</ul></details>
         <details open={migrationRequired || state.migration !== null || state.migrationError !== null}><summary>기존 설정 이전</summary><div className="agent-secondary-content"><p>앱이 관리하던 역할 잡은 중지하고, 기존 외부 서비스 파일은 그대로 보존한 채 새 자동 배정 서비스로 전환합니다. 검증에 실패하면 역할 잡과 서비스를 원래대로 복구합니다.</p><button className="secondary-button agent-compact-action" disabled={state.migrationBusy} onClick={() => void actions.previewMigration()} type="button">전환할 설정 확인</button>{state.migrationError && <p className="agent-error">{state.migrationError}</p>}{state.migration && <div className="agent-migration-preview"><strong>전환할 역할 설정</strong><ul>{Object.entries(state.migration.proposed.roles).map(([role, value]) => <li key={role}>{roleName(role)} · {value.provider} · 최대 {value.maxParallel}명</li>)}</ul><div className="agent-plan-actions"><button onClick={() => actions.dismissMigration()} type="button">취소</button><button className="stamp-button" onClick={() => void actions.applyMigration()} type="button">검증하고 전환</button></div></div>}</div></details>
       </aside>
@@ -317,6 +318,30 @@ function consentStatusLabel(status: AgentProjectConsent["status"]) {
   return { granted: "동의함", required: "동의 필요", unsupported: "실행 환경이 지원하지 않음", unreadable: "확인하지 못함" }[status];
 }
 
+/**
+ * 게시된 최신 런타임과 설치본을 비교하는 자리. 조회는 버튼을 누른 순간에만 네트워크에 나간다.
+ *
+ * 설치본이 없을 때도 받기를 여는 것은 번들이 옛 버전인 채로 남은 기기 때문이다 — 그런 기기는
+ * 번들 설치로는 최신에 도달할 수 없다. 앱 지원 범위 밖의 버전은 받기를 열지 않고 앱 업데이트로
+ * 안내한다.
+ */
+function RuntimeReleaseRow({ actions, state }: { actions: AgentRuntimeActions; state: AgentRuntimeState }) {
+  const installed = state.inspection?.status?.installedVersion ?? null;
+  const check = state.releaseCheck;
+  const newer = check !== null && (installed === null || bundledRuntimeIsNewer(check.version, installed));
+  return (
+    <div className="agent-runtime-release">
+      <button className="secondary-button agent-compact-action" disabled={state.checkingRelease} onClick={() => void actions.checkRelease()} type="button">{state.checkingRelease ? "확인 중…" : "최신 런타임 확인"}</button>
+      {check && !newer && <p>설치된 런타임이 최신입니다. (게시본 {check.version})</p>}
+      {check && newer && !check.withinSupportedRange && <p>게시된 런타임 {check.version}은 이 앱이 지원하는 범위 밖입니다. 앱을 먼저 업데이트해 주세요.</p>}
+      {check && newer && check.withinSupportedRange && (
+        <button className="secondary-button agent-compact-action" disabled={state.planning !== null} onClick={() => void actions.plan("download")} type="button">{state.planning === "download" ? "내려받는 중…" : `${check.version} 받아서 설치`}</button>
+      )}
+      {state.releaseError && <p className="agent-error">{state.releaseError}</p>}
+    </div>
+  );
+}
+
 function RuntimePlanDialog({ actions, state }: { actions: AgentRuntimeActions; state: AgentRuntimeState }) {
   useDismissOnEscape(actions.cancelPlan);
   const plan = state.plan!;
@@ -326,7 +351,7 @@ function RuntimePlanDialog({ actions, state }: { actions: AgentRuntimeActions; s
         <header><div><p className="eyebrow">RUNTIME</p><h2>실행 환경 변경</h2></div><button aria-label="닫기" onClick={() => actions.cancelPlan()} type="button">×</button></header>
         <p className="agent-dialog-note">실행 중인 세션은 유지하고 앱이 관리하는 런타임만 변경합니다.</p>
         <ul className="agent-runtime-plan-summary">
-          {plan.kind === "install" ? (
+          {plan.kind === "install" || plan.kind === "download" ? (
             <>
               <li><strong>버전</strong><span>{plan.plan.installedVersion ?? "설치 안 됨"} → {plan.plan.bundledVersion}</span></li>
               <li><strong>서비스</strong><span>{serviceActionLabel(plan.plan.serviceAction)}</span></li>
@@ -338,7 +363,7 @@ function RuntimePlanDialog({ actions, state }: { actions: AgentRuntimeActions; s
             </>
           )}
         </ul>
-        {plan.kind === "install" && plan.plan.serviceAction === "migration_required" && (
+        {(plan.kind === "install" || plan.kind === "download") && plan.plan.serviceAction === "migration_required" && (
           <p className="agent-detail-message">기존 외부 Heartbeat 서비스는 중복 등록하거나 삭제하지 않습니다. 런타임을 교체한 뒤 기존 설정 이전에서 안전한 전환을 이어갑니다.</p>
         )}
         {state.planError && <p className="agent-error">{humanRuntimeMessage(state.planError)}</p>}

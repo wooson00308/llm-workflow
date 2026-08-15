@@ -101,6 +101,7 @@ function state(overrides: Partial<AgentRuntimeState> = {}): AgentRuntimeState {
     inspection: inspection(), policy: policy(), reading: false, readError: null,
     planning: null, plan: null, planError: null, applying: false, application: null, applyError: null,
     migration: null, migrationBusy: false, migrationError: null, saving: false, saveError: null,
+    releaseCheck: null, checkingRelease: false, releaseError: null,
     consentBusy: false, consentError: null,
     runPlan: null, runRequests: [], runPlanning: false, runStarting: false, runError: null,
     queue: { projectId: "prj_1", paused: false, runs: [], errors: [], providers: [], unavailable: null },
@@ -113,7 +114,7 @@ function state(overrides: Partial<AgentRuntimeState> = {}): AgentRuntimeState {
 
 function actions(overrides: Partial<AgentRuntimeActions> = {}): AgentRuntimeActions {
   return {
-    refresh: vi.fn().mockResolvedValue(undefined), setViewActive: vi.fn(), plan: vi.fn().mockResolvedValue(undefined), cancelPlan: vi.fn(), apply: vi.fn().mockResolvedValue(true),
+    refresh: vi.fn().mockResolvedValue(undefined), setViewActive: vi.fn(), plan: vi.fn().mockResolvedValue(undefined), cancelPlan: vi.fn(), checkRelease: vi.fn().mockResolvedValue(undefined), apply: vi.fn().mockResolvedValue(true),
     previewMigration: vi.fn().mockResolvedValue(undefined), applyMigration: vi.fn().mockResolvedValue(true), dismissMigration: vi.fn(), save: vi.fn().mockResolvedValue(true),
     grantConsent: vi.fn().mockResolvedValue(true), revokeConsent: vi.fn().mockResolvedValue(true),
     planRun: vi.fn().mockResolvedValue(undefined), cancelRunPlan: vi.fn(), startRun: vi.fn().mockResolvedValue(true), refreshRuns: vi.fn().mockResolvedValue(undefined),
@@ -258,6 +259,50 @@ describe("AgentRuntimeView cockpit", () => {
     expect(dialog).toHaveTextContent("0.8.3 → 0.9.0");
     expect(dialog).toHaveTextContent("기존 외부 서비스를 보존하고 전환 준비");
     expect(dialog).toHaveTextContent("중복 등록하거나 삭제하지 않습니다");
+  });
+
+  it("checks the published runtime from the advanced drawer without downloading", () => {
+    const { runtimeActions } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    const drawer = screen.getByRole("dialog", { name: "고급 설정" });
+
+    fireEvent.click(within(drawer).getByRole("button", { name: "최신 런타임 확인" }));
+
+    expect(runtimeActions.checkRelease).toHaveBeenCalledTimes(1);
+    expect(runtimeActions.plan).not.toHaveBeenCalled();
+  });
+
+  it("offers the download only for a newer supported runtime and routes the rest", () => {
+    // 설치본(0.9.0)이 최신이면 받기를 열지 않는다.
+    const { runtimeActions, unmount } = renderView(state({
+      releaseCheck: { version: "0.9.0", withinSupportedRange: true },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    let drawer = screen.getByRole("dialog", { name: "고급 설정" });
+    expect(within(drawer).getByText(/설치된 런타임이 최신입니다/)).toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: /받아서 설치/ })).not.toBeInTheDocument();
+    unmount();
+
+    // 새 버전이 지원 범위 안이면 받기를 연다.
+    const supported = renderView(state({
+      releaseCheck: { version: "0.9.5", withinSupportedRange: true },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    drawer = screen.getByRole("dialog", { name: "고급 설정" });
+    fireEvent.click(within(drawer).getByRole("button", { name: "0.9.5 받아서 설치" }));
+    expect(supported.runtimeActions.plan).toHaveBeenCalledWith("download");
+    supported.unmount();
+
+    // 지원 범위 밖이면 받기 대신 앱 업데이트로 안내한다.
+    const outOfRange = renderView(state({
+      releaseCheck: { version: "2.0.0", withinSupportedRange: false },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    drawer = screen.getByRole("dialog", { name: "고급 설정" });
+    expect(within(drawer).getByText(/앱을 먼저 업데이트해 주세요/)).toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: /받아서 설치/ })).not.toBeInTheDocument();
+    expect(outOfRange.runtimeActions.plan).not.toHaveBeenCalled();
+    expect(runtimeActions.plan).not.toHaveBeenCalled();
   });
 
   it("shows three recent runs and opens the fixed-duration full history drawer", () => {

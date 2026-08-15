@@ -29,6 +29,9 @@ use crate::domain::agent_runtime::{
 use crate::domain::agent_runtime::{UpdateApplication, UpdatePlan};
 use crate::infrastructure::agent_runtime_package::launcher_path;
 use crate::infrastructure::agent_runtime_process::{self, LauncherCaller, RuntimeCallFailure};
+use crate::infrastructure::agent_runtime_release::{
+    self, HttpReleaseFetcher, ReleaseCheck, DOWNLOADS_DIRECTORY,
+};
 
 /// 번들 안에서 런타임 자산이 놓이는 디렉터리 이름.
 const RESOURCE_DIRECTORY: &str = "runtime";
@@ -97,6 +100,66 @@ pub async fn apply_agent_runtime_update(
             .apply_update(&caller, &plan_id, confirmed)
     })
     .await
+}
+
+/// 게시된 최신 런타임 버전을 조회한다. 아무것도 내려받지 않는다.
+#[tauri::command]
+pub async fn check_agent_runtime_release() -> Result<ReleaseCheck, String> {
+    tauri::async_runtime::spawn_blocking(|| agent_runtime_release::check(&HttpReleaseFetcher))
+        .await
+        .map_err(|error| format!("런타임 릴리스 조회를 시작하지 못했습니다: {error}"))?
+        .map_err(|failure| failure.message())
+}
+
+/// 최신 런타임 배포물을 내려받아 설치 계획을 만든다. 버전 디렉터리와 launcher는 바꾸지 않는다.
+///
+/// 내려받은 배포물은 설치 루트의 내려받기 자리에 머물고, 적용이 같은 버전을 실어 오면 그 사본을
+/// 쓴다. 계획이 만드는 검증은 번들 설치와 같다 — manifest의 대상·계약 번호·파일 해시.
+#[tauri::command]
+pub async fn plan_agent_runtime_download(app: tauri::AppHandle) -> Result<InstallPlan, String> {
+    let (_, install_root) = locations(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<InstallPlan, String> {
+        let release = agent_runtime_release::latest_release(&HttpReleaseFetcher)
+            .map_err(|failure| failure.message())?;
+        let staged = agent_runtime_release::stage_release(
+            &HttpReleaseFetcher,
+            &release,
+            &install_root.join(DOWNLOADS_DIRECTORY),
+        )
+        .map_err(|failure| failure.message())?;
+        let caller = LauncherCaller::new(launcher_path(&install_root));
+        AgentRuntimeInstallService::new(&staged, &install_root)
+            .plan_install(&caller)
+            .map_err(|failure| failure.message())
+    })
+    .await
+    .map_err(|error| format!("런타임 내려받기를 시작하지 못했습니다: {error}"))?
+}
+
+/// 내려받아 둔 배포물로 확인받은 설치 계획을 적용한다. 오래된 계획과 확인 없는 요청은 거절한다.
+#[tauri::command]
+pub async fn apply_agent_runtime_download(
+    app: tauri::AppHandle,
+    version: String,
+    plan_id: String,
+    confirmed: bool,
+) -> Result<InstallApplication, String> {
+    let (_, install_root) = locations(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<InstallApplication, String> {
+        let staged = agent_runtime_release::staged_directory(
+            &install_root.join(DOWNLOADS_DIRECTORY),
+            &version,
+        )
+        .map_err(|failure| failure.message())?;
+        let caller = LauncherCaller::new(launcher_path(&install_root));
+        let application = AgentRuntimeInstallService::new(&staged, &install_root)
+            .apply_install(&caller, &plan_id, confirmed)
+            .map_err(|failure| failure.message())?;
+        agent_runtime_release::discard_staged(&staged);
+        Ok(application)
+    })
+    .await
+    .map_err(|error| format!("런타임 설치를 시작하지 못했습니다: {error}"))?
 }
 
 /// launcher와 서비스 등록만 되돌린다. 프로젝트 설정·큐·이력 데이터베이스는 열지 않는다.

@@ -1,5 +1,6 @@
 pub mod agent_runtime_package;
 pub mod agent_runtime_process;
+pub mod agent_runtime_release;
 pub mod claim_helper;
 pub mod custom_rules;
 pub mod fs_project_repository;

@@ -153,7 +153,7 @@ pub fn judge(status: &RuntimeStatus) -> Compatibility {
 ///
 /// 계약이 정한 모양은 점으로 나뉜 숫자다. 숫자가 아닌 조각이 섞이면 범위를 판정하지 않고 범위 밖으로
 /// 두지도 않는다 — 그 경우는 호출자가 모름으로 다룬다.
-fn within_supported_range(version: &str) -> bool {
+pub fn within_supported_range(version: &str) -> bool {
     let Some(found) = numeric_parts(version) else {
         return false;
     };
@@ -166,7 +166,7 @@ fn within_supported_range(version: &str) -> bool {
     found >= minimum && found <= maximum
 }
 
-fn numeric_parts(version: &str) -> Option<Vec<u32>> {
+pub fn numeric_parts(version: &str) -> Option<Vec<u32>> {
     let parts: Option<Vec<u32>> = version.split('.').map(|part| part.parse().ok()).collect();
     let mut parts = parts?;
     parts.resize(3, 0);

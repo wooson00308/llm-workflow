@@ -176,6 +176,9 @@ const emptyAgentRuntime: AgentRuntimeState = {
   migrationError: null,
   saving: false,
   saveError: null,
+  releaseCheck: null,
+  checkingRelease: false,
+  releaseError: null,
   consentBusy: false,
   consentError: null,
   runPlan: null,
@@ -794,10 +797,12 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         const plan =
           operation === "install"
             ? { kind: "install" as const, plan: await gateway.planAgentRuntimeInstall() }
-            : {
-                kind: operation,
-                plan: await gateway.planAgentRuntimeUpdate(),
-              };
+            : operation === "download"
+              ? { kind: "download" as const, plan: await gateway.planAgentRuntimeDownload() }
+              : {
+                  kind: operation,
+                  plan: await gateway.planAgentRuntimeUpdate(),
+                };
         setAgentRuntime((current) => ({ ...current, planning: null, plan }));
       } catch (reason) {
         setAgentRuntime((current) => ({
@@ -814,6 +819,30 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const cancelAgentRuntimePlan = useCallback(() => {
     setAgentRuntime((current) => ({ ...current, plan: null, planError: null }));
   }, []);
+
+  /** 게시된 최신 런타임 버전을 조회한다. 아무것도 내려받지 않는다. */
+  const checkAgentRuntimeRelease = useCallback(async () => {
+    setAgentRuntime((current) => ({
+      ...current,
+      checkingRelease: true,
+      releaseError: null,
+    }));
+    try {
+      const releaseCheck = await gateway.checkAgentRuntimeRelease();
+      setAgentRuntime((current) => ({
+        ...current,
+        checkingRelease: false,
+        releaseCheck,
+      }));
+    } catch (reason) {
+      setAgentRuntime((current) => ({
+        ...current,
+        checkingRelease: false,
+        releaseCheck: null,
+        releaseError: messageFrom(reason),
+      }));
+    }
+  }, [gateway]);
 
   /**
    * 확인 대기 중인 계획을 적용한다. 계획이 없으면 아무것도 부르지 않는다.
@@ -832,13 +861,24 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
               kind: "install" as const,
               result: await gateway.applyAgentRuntimeInstall(pending.plan.planId, true),
             }
-          : {
-              kind: pending.kind,
-              result:
-                pending.kind === "update"
-                  ? await gateway.applyAgentRuntimeUpdate(pending.plan.planId, true)
-                  : await gateway.repairAgentRuntime(pending.plan.planId, true),
-            };
+          : pending.kind === "download"
+            ? {
+                kind: "download" as const,
+                // 내려받은 배포물은 버전 이름의 자리에 머물므로, 적용은 계획이 실어 온 버전을
+                // 그대로 돌려준다. 화면이 버전을 따로 들고 있지 않는다.
+                result: await gateway.applyAgentRuntimeDownload(
+                  pending.plan.bundledVersion,
+                  pending.plan.planId,
+                  true,
+                ),
+              }
+            : {
+                kind: pending.kind,
+                result:
+                  pending.kind === "update"
+                    ? await gateway.applyAgentRuntimeUpdate(pending.plan.planId, true)
+                    : await gateway.repairAgentRuntime(pending.plan.planId, true),
+              };
       setAgentRuntime((current) => ({
         ...current,
         applying: false,
@@ -1967,6 +2007,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       setViewActive: setAgentViewActive,
       plan: planAgentRuntime,
       cancelPlan: cancelAgentRuntimePlan,
+      checkRelease: checkAgentRuntimeRelease,
       apply: applyAgentRuntimePlan,
       previewMigration: previewAgentRuntimeMigration,
       applyMigration: applyAgentRuntimeMigration,
@@ -2001,6 +2042,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       applyAgentRuntimePlan,
       cancelAgentRuntimePlan,
       cancelAgentRunPlan,
+      checkAgentRuntimeRelease,
       closeAgentReport,
       confirmAgentRunCancel,
       confirmAgentRunRetry,

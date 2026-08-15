@@ -16,6 +16,7 @@ import type {
   AgentRunStartOutcome,
   AgentRunSummary,
   AgentRuntimeInspection,
+  AgentRuntimeReleaseCheck,
   AgentUpdateApplication,
   AgentUpdatePlan,
   CustomRulesDocument,
@@ -257,6 +258,22 @@ export const tauriProjectGateway: ProjectGateway = {
 
   repairAgentRuntime(planId, confirmed) {
     return invoke<AgentUpdateApplication>("repair_agent_runtime", {
+      planId,
+      confirmed,
+    });
+  },
+
+  checkAgentRuntimeRelease() {
+    return invoke<AgentRuntimeReleaseCheck>("check_agent_runtime_release");
+  },
+
+  planAgentRuntimeDownload() {
+    return invoke<AgentInstallPlan>("plan_agent_runtime_download");
+  },
+
+  applyAgentRuntimeDownload(version, planId, confirmed) {
+    return invoke<AgentInstallApplication>("apply_agent_runtime_download", {
+      version,
       planId,
       confirmed,
     });
