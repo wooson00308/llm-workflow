@@ -316,7 +316,12 @@ done
 exit 1
 "#;
 
-const RESERVATION_HELPER_PS1: &str = r#"# LLM Workflow runtime reservation helper.
+// Windows PowerShell 5.1은 BOM 없는 파일을 ANSI로 읽어, 본문의 한글 바이트가 따옴표 문자로
+// 오독되며 스크립트 전체가 구문 오류로 죽는다(2026-08-15 실측: 예약 전부 exit 1). BOM은 쓰기
+// 시점이 아니라 본문에 둔다 — 설치 판정이 본문과 파일을 그대로 비교하기 때문이다.
+const RESERVATION_HELPER_PS1: &str = concat!(
+    "\u{feff}",
+    r#"# LLM Workflow runtime reservation helper.
 # managed_by: workflow-labs
 # reservation_helper_version: 5
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-reserve.ps1 acquire <role> <agent> <minutes>
@@ -667,7 +672,8 @@ for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
 }
 
 exit 1
-"#;
+"#
+);
 
 #[cfg(not(windows))]
 const PLATFORM: PlatformScript = PlatformScript {
@@ -714,6 +720,14 @@ mod tests {
     use std::process::Command;
 
     use tempfile::{tempdir, TempDir};
+
+    /// Windows PowerShell 5.1은 BOM 없는 `.ps1`을 ANSI로 읽는다. 본문의 한국어가 따옴표 문자로
+    /// 오독되어 세 OS 중 Windows에서만 예약 전체가 죽었다(2026-08-15 실측). BOM이 그 계약이다.
+    #[test]
+    fn the_powershell_body_carries_a_byte_order_mark_and_the_shell_body_does_not() {
+        assert!(super::RESERVATION_HELPER_PS1.starts_with('\u{feff}'));
+        assert!(super::RESERVATION_HELPER_SH.starts_with("#!/bin/sh"));
+    }
 
     use super::{
         install_reservation_helper, reservation_helper_path, RESERVATION_HELPER,

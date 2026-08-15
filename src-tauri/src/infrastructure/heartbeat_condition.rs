@@ -1156,17 +1156,20 @@ verdict no-target 1
 /// 판정 — 도 그대로 옮긴다. 고치면 두 플랫폼의 판정이 갈라지고 `role_eligibility.rs`가 적어 둔 알려진
 /// 차이가 플랫폼마다 달라진다.
 ///
-/// 본문은 ASCII만 쓴다. 설치 경로가 BOM 없는 UTF-8로 쓰는데 Windows PowerShell 5.1은 그런 `.ps1`을
-/// 시스템 코드페이지로 읽어, 비ASCII 문자가 들어가면 본문이 깨지고 문자열 리터럴 안이었다면 판정까지
-/// 바뀐다. `sh` 본문은 한국어 주석을 그대로 갖는다 — 두 본문이 주석까지 같을 필요는 없다.
-const CONDITION_SCRIPT_PS1: &str = r#"# LLM Workflow heartbeat condition check.
+/// 본문은 BOM으로 시작한다. Windows PowerShell 5.1은 BOM 없는 `.ps1`을 시스템 코드페이지로 읽어,
+/// 비ASCII 문자가 들어가면 본문이 깨지고 문자열 리터럴 안이었다면 판정까지 바뀐다(2026-08-15 실측:
+/// 예약 헬퍼의 한국어 문자열이 따옴표 문자로 오독되어 스크립트 전체가 구문 오류). BOM을 본문에 두는
+/// 이유는 설치 판정이 본문과 파일을 그대로 비교하기 때문이며, 세 `.ps1` 관리 자산이 같은 규약을 쓴다.
+const CONDITION_SCRIPT_PS1: &str = concat!(
+    "\u{feff}",
+    r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
 # condition_script_version: 20
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
 # Run from the project root. This is the Windows twin of wf-eligible.sh and must reach the same
-# verdict for every input. ASCII only: the installer writes UTF-8 without a BOM.
+# verdict for every input. The body opens with a UTF-8 BOM so PowerShell 5.1 reads UTF-8.
 param([string]$Role = '', [string]$Output = '')
 
 $ErrorActionPreference = 'Stop'
@@ -1938,7 +1941,8 @@ switch -CaseSensitive ($Role) {
   }
 }
 Write-Verdict 'no-target' 1
-"#;
+"#
+);
 
 /// 현재 플랫폼에 설치할 구현. 런타임 분기가 아니라 컴파일 시점 분기다 — 앱은 자기가 도는 플랫폼의
 /// 자산만 쓴다(R2).
@@ -2079,6 +2083,12 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::test_support::{run_condition, run_machine_condition};
+
+    #[test]
+    fn the_powershell_body_carries_a_byte_order_mark_and_the_shell_body_does_not() {
+        assert!(super::CONDITION_SCRIPT_PS1.starts_with('\u{feff}'));
+        assert!(super::CONDITION_SCRIPT_SH.starts_with("#!/bin/sh"));
+    }
     use super::{
         condition_script_path, install_condition_script, validate_condition_script,
         ConditionScriptError, CONDITION_SCRIPT, CONDITION_SCRIPT_PS1, CONDITION_SCRIPT_SH,
@@ -2281,11 +2291,13 @@ mod tests {
         }
     }
 
-    /// PowerShell 본문은 ASCII만 쓴다. 설치가 BOM 없는 UTF-8로 쓰는데 Windows PowerShell 5.1은
-    /// 그런 `.ps1`을 시스템 코드페이지로 읽는다.
+    /// PowerShell 본문은 BOM 뒤로 ASCII만 쓴다. BOM이 인코딩을 고정하므로 비ASCII도 안전하지만,
+    /// 이 스크립트는 굳이 쓸 일이 없어 좁은 쪽을 유지한다.
     #[test]
-    fn the_powershell_implementation_is_ascii() {
-        assert!(CONDITION_SCRIPT_PS1.is_ascii());
+    fn the_powershell_implementation_is_ascii_after_its_byte_order_mark() {
+        assert!(CONDITION_SCRIPT_PS1
+            .trim_start_matches('\u{feff}')
+            .is_ascii());
     }
 
     /// 스크립트가 낼 수 있는 사유 코드 전부. 앱이 이 코드를 사용자 문장으로 옮긴다(SPEC-023

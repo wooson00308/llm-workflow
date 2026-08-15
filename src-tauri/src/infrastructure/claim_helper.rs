@@ -199,7 +199,11 @@ exit 0
 "#;
 
 /// 설치할 선점 헬퍼의 PowerShell 구현. `sh` 구현과 같은 계약을 지키고 같은 판정을 낸다.
-const CLAIM_HELPER_PS1: &str = r#"# LLM Workflow claim helper.
+/// BOM은 본문의 일부다 — Windows PowerShell 5.1이 BOM 없는 파일을 ANSI로 읽는 함정은
+/// `reservation_helper.rs`의 같은 자리 주석이 기록한다.
+const CLAIM_HELPER_PS1: &str = concat!(
+    "\u{feff}",
+    r#"# LLM Workflow claim helper.
 # managed_by: workflow-labs
 # claim_helper_version: 1
 # A session never creates, edits, or deletes a lease file itself; it calls this script.
@@ -217,7 +221,7 @@ const CLAIM_HELPER_PS1: &str = r#"# LLM Workflow claim helper.
 #   5 not the owner (lease_id mismatch on renew or release)
 #
 # This is the Windows twin of wf-claim.sh and must reach the same verdict for every input.
-# ASCII only: the installer writes UTF-8 without a BOM.
+# The body opens with a UTF-8 BOM so Windows PowerShell 5.1 reads it as UTF-8.
 #
 # Three things to know.
 # 1. Expiry is a string comparison. An expires_at outside the yyyy-MM-ddTHH:mm:ssZ form counts as
@@ -399,7 +403,8 @@ if ($command -ceq 'renew') {
 
 try { Remove-Item -LiteralPath $lease -Force } catch { exit 1 }
 exit 0
-"#;
+"#
+);
 
 /// 현재 플랫폼에 설치할 구현. 런타임 분기가 아니라 컴파일 시점 분기다 — 앱은 자기가 도는 플랫폼의
 /// 자산만 쓴다(SPEC-015 R2).
@@ -449,6 +454,12 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use tempfile::{tempdir, TempDir};
+
+    #[test]
+    fn the_powershell_body_carries_a_byte_order_mark_and_the_shell_body_does_not() {
+        assert!(super::CLAIM_HELPER_PS1.starts_with('\u{feff}'));
+        assert!(super::CLAIM_HELPER_SH.starts_with("#!/bin/sh"));
+    }
 
     use super::{
         claim_helper_path, install_claim_helper, validate_claim_helper, ClaimHelperError,
@@ -539,8 +550,8 @@ mod tests {
     }
 
     #[test]
-    fn the_powershell_implementation_is_ascii() {
-        assert!(CLAIM_HELPER_PS1.is_ascii());
+    fn the_powershell_implementation_is_ascii_after_its_byte_order_mark() {
+        assert!(CLAIM_HELPER_PS1.trim_start_matches('\u{feff}').is_ascii());
     }
 
     /// 두 구현이 같은 하위 명령과 같은 종료 코드를 문서화한다. 계약이 갈리면 여기서 드러난다.
