@@ -769,6 +769,12 @@ mod tests {
         .expect("gitignore");
         fs::write(root.path().join("README.md"), "base\n").expect("tracked file");
         assert_eq!(run_git(root.path(), &["init", "-b", "main"]).0, 0);
+        // Windows 러너의 전역 autocrlf가 사본 체크아웃에서 줄바꿈을 바꿔, 바이트 그대로를
+        // 대조하는 검사가 플랫폼마다 갈라진다. 픽스처 저장소는 변환 없이 커밋 그대로 낸다.
+        assert_eq!(
+            run_git(root.path(), &["config", "core.autocrlf", "false"]).0,
+            0
+        );
         assert_eq!(
             run_git(root.path(), &["add", ".gitignore", "README.md"]).0,
             0
@@ -1182,8 +1188,10 @@ mod tests {
                 reservation["branch"].as_str().expect("branch"),
                 format!("wf-iso/TASK-001/{lease}")
             );
+            // Windows 헬퍼는 역슬래시로 경로를 조립한다. 비교는 구분자를 접고 구성만 본다.
+            let normalized = workspace.replace('\\', "/");
             assert!(
-                workspace.ends_with(&format!(".workflow/.runtime/worktrees/TASK-001/{lease}")),
+                normalized.ends_with(&format!(".workflow/.runtime/worktrees/TASK-001/{lease}")),
                 "the copy path is built from the target and the lease alone: {workspace}"
             );
         }
@@ -1308,11 +1316,14 @@ mod tests {
             "integrated",
             "2026-08-01T00:00:00Z",
         );
+        // 끝난 사본이 한도를 확실히 넘게 채운다. 한도를 1로 두면 파일시스템의 디렉터리
+        // 오버헤드(ext4 4K 블록)만으로도 회수 뒤 판정이 실패해 플랫폼마다 결과가 갈라진다.
+        fs::write(first_copy.join("pad.bin"), vec![0u8; 256 * 1024]).expect("pad");
 
         let (code, _stdout, stderr) = run_reservation_with(
             root.path(),
             &["acquire", "developer", "dispatcher-b", "30"],
-            &storage_env("1", "1"),
+            &storage_env("64", "1"),
         );
 
         assert_eq!(code, 0, "reservation stderr: {stderr}");
