@@ -356,7 +356,14 @@ mod tests {
     }
 
     /// 릴리스 워크플로가 만드는 모양의 배포물 — `heartbeat/` 한 겹 아래에 manifest와 실행 파일.
+    /// 실행 파일 이름은 target을 따라간다. 윈도우 배포물에는 `heartbeat`가 아니라 `heartbeat.exe`가
+    /// 들어 있으므로, 픽스처가 이름을 고정하면 윈도우 검사만 배포물 없음으로 깨진다.
     fn archive_with_root(root: &str) -> Vec<u8> {
+        let launcher = if cfg!(windows) {
+            "heartbeat.exe"
+        } else {
+            "heartbeat"
+        };
         let mut buffer = std::io::Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut buffer);
@@ -366,7 +373,7 @@ mod tests {
                 .unwrap();
             writer.write_all(b"{\"schemaVersion\":1}").unwrap();
             writer
-                .start_file(format!("{root}/heartbeat"), options)
+                .start_file(format!("{root}/{launcher}"), options)
                 .unwrap();
             writer.write_all(b"runtime fixture").unwrap();
             writer.finish().unwrap();
