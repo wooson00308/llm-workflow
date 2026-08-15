@@ -878,7 +878,8 @@ mod tests {
 
     /// 내려받기 적용은 설치 뒤 실행 중인 배정 프로세스를 새 버전으로 전환한다. 설치 적용만으로는
     /// 관리형 서비스가 이미 돌고 있을 때 전환이 생략되어, 구버전 프로세스가 계속 돌았다
-    /// (2026-08-15 실측).
+    /// (2026-08-15 실측). 활성화가 설치된 픽스처 스크립트를 실제로 실행하므로 unix에서만 돈다.
+    #[cfg(unix)]
     #[test]
     fn a_download_apply_hands_the_running_service_to_the_new_version() {
         use crate::domain::agent_runtime::UpdateStage;
@@ -937,6 +938,8 @@ mod tests {
     }
 
     /// 전환이 거절되어도 설치는 되돌리지 않는다. 파일은 제자리이고 사유만 부분 성공으로 남는다.
+    /// 활성화가 설치된 픽스처 스크립트를 실제로 실행하므로 unix에서만 돈다.
+    #[cfg(unix)]
     #[test]
     fn a_failed_handover_keeps_the_install_and_reports_partial_success() {
         let resource = bundled("0.9.7");
