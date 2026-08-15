@@ -4834,8 +4834,8 @@ mod tests {
         /// 늘면 3배에서 93개가 늘어 96개가 되고 예산을 92개 넘는다.
         const ARCHITECT_PROCESS_BUDGET: usize = 4;
 
-        /// work-group v2 승인 게이트 실측 7개(3배 `awk` 3 · `date` 1 · `head` 1 · `sed` 1 · `tr` 1)
-        /// + 1. `scan_tasks`·active 그룹 표·최신 승인 표의 `awk` 셋, `scan_leases`의 `date` 하나,
+        /// work-group v2 승인 게이트 실측 7개(3배 `awk` 3 · `date` 1 · `head` 1 · `sed` 1 · `tr` 1) + 1.
+        /// `scan_tasks`·active 그룹 표·최신 승인 표의 `awk` 셋, `scan_leases`의 `date` 하나,
         /// 그리고 lease 파일 하나당 `sed`·`head`·`tr` 셋이다(이 픽스처의 lease는 1건).
         ///
         /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 9개가 되어 걸린다. 후보당 상수가 하나

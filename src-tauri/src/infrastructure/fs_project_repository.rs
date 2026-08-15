@@ -8036,7 +8036,7 @@ mod tests {
                     root.path(),
                     &directory,
                     "SPEC-001.md",
-                    outcome.clone(),
+                    outcome,
                     "막혀야 하는 조합이다",
                 )
                 .expect_err(&format!("{status} 행의 {outcome:?} 칸이 막히지 않았다"));
