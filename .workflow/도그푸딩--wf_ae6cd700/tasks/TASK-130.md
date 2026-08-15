@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-130
 title: 공통 규칙에 한국어 문체 절을 넣고 세 역할 계약과 버전 상수를 함께 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-046
 source_decision_id: DECISION-19BE9FD5
-scope_files: [src-tauri/src/infrastructure/project_instructions.rs]
-updated_at: 2026-08-06T09:18:15.857617+00:00
+scope_files:
+- src-tauri/src/infrastructure/project_instructions.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T08:44:00Z, kind: created }
-  - { at: 2026-08-06T08:49:54Z, kind: in_progress }
-  - { at: 2026-08-06T08:55:29Z, kind: qa_waiting }
-  - { at: 2026-08-06T09:18:15.857617+00:00, kind: completed }
+- at: 2026-08-06T08:44:00Z
+  kind: created
+- at: 2026-08-06T08:49:54Z
+  kind: in_progress
+- at: 2026-08-06T08:55:29Z
+  kind: qa_waiting
+- at: 2026-08-06T09:18:15.857617+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-19BE9FD5
+work_group_revision: 1
 ---
 
 # 공통 규칙에 한국어 문체 절을 넣고 세 역할 계약과 버전 상수를 함께 올린다

@@ -2,17 +2,36 @@
 schema: workflow-labs/task@1
 id: TASK-120
 title: 문서 화면이 결정권자 양식을 기본으로 그리고 원문을 토글로 남긴다
-status: completed
+status: verified
 source_spec_id: SPEC-039
 source_decision_id: DECISION-BAD86692
-depends_on: [TASK-118, TASK-119]
-scope_files: [src/features/projects/domain/documentSections.ts, src/features/projects/domain/documentSections.test.ts, src/features/projects/components/DocumentReader.tsx, src/features/projects/components/DocumentReader.test.tsx, src/features/projects/components/SpecWorkspace.tsx, src/features/projects/components/SpecWorkspace.test.tsx, src/features/projects/components/DevelopmentBoard.tsx, src/features/projects/components/DevelopmentBoard.test.tsx, src/App.css]
-updated_at: 2026-08-05T16:45:29.997782+00:00
+depends_on:
+- TASK-118
+- TASK-119
+scope_files:
+- src/features/projects/domain/documentSections.ts
+- src/features/projects/domain/documentSections.test.ts
+- src/features/projects/components/DocumentReader.tsx
+- src/features/projects/components/DocumentReader.test.tsx
+- src/features/projects/components/SpecWorkspace.tsx
+- src/features/projects/components/SpecWorkspace.test.tsx
+- src/features/projects/components/DevelopmentBoard.tsx
+- src/features/projects/components/DevelopmentBoard.test.tsx
+- src/App.css
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T06:47:00Z, kind: created }
-  - { at: 2026-08-05T10:22:00Z, kind: in_progress }
-  - { at: 2026-08-05T10:39:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:45:29.997782+00:00, kind: completed }
+- at: 2026-08-05T06:47:00Z
+  kind: created
+- at: 2026-08-05T10:22:00Z
+  kind: in_progress
+- at: 2026-08-05T10:39:00Z
+  kind: qa_waiting
+- at: 2026-08-05T16:45:29.997782+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-BAD86692
+work_group_revision: 1
 ---
 
 # 문서 화면이 결정권자 양식을 기본으로 그리고 원문을 토글로 남긴다

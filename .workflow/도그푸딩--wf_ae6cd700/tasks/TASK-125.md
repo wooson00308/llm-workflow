@@ -2,17 +2,28 @@
 schema: workflow-labs/task@1
 id: TASK-125
 title: 개발자 분기가 단일 훑기 어법으로 접혀 같은 상한 안에 들어온다
-status: completed
+status: verified
 source_spec_id: SPEC-041
 source_decision_id: DECISION-7354DF56
-scope_files: [src-tauri/src/infrastructure/heartbeat_condition.rs, src-tauri/src/infrastructure/role_eligibility.rs]
-updated_at: 2026-08-05T16:46:10.606453+00:00
+scope_files:
+- src-tauri/src/infrastructure/heartbeat_condition.rs
+- src-tauri/src/infrastructure/role_eligibility.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T09:30:00Z, kind: created }
-  - { at: 2026-08-05T09:33:00Z, kind: in_progress }
-  - { at: 2026-08-05T10:18:22Z, kind: in_progress }
-  - { at: 2026-08-05T10:40:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:46:10.606453+00:00, kind: completed }
+- at: 2026-08-05T09:30:00Z
+  kind: created
+- at: 2026-08-05T09:33:00Z
+  kind: in_progress
+- at: 2026-08-05T10:18:22Z
+  kind: in_progress
+- at: 2026-08-05T10:40:00Z
+  kind: qa_waiting
+- at: 2026-08-05T16:46:10.606453+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-7354DF56
+work_group_revision: 1
 ---
 
 # 개발자 분기가 단일 훑기 어법으로 접혀 같은 상한 안에 들어온다

@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-092
 title: dream 잡 재설정 확인 화면도 다른 프로젝트의 잡 보장을 밝힌다
-status: completed
+status: verified
 source_spec_id: SPEC-022
 source_decision_id: DECISION-4E8C1D67
-depends_on: [TASK-064, TASK-065]
-updated_at: 2026-08-04T11:42:26.506077+00:00
+depends_on:
+- TASK-064
+- TASK-065
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T10:31:00Z, kind: created }
-  - { at: 2026-08-04T10:31:00Z, kind: in_progress }
-  - { at: 2026-08-04T10:33:23Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:26.506077+00:00, kind: completed }
+- at: 2026-08-04T10:31:00Z
+  kind: created
+- at: 2026-08-04T10:31:00Z
+  kind: in_progress
+- at: 2026-08-04T10:33:23Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:26.506077+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-4E8C1D67
+work_group_revision: 1
 ---
 
 # dream 잡 재설정 확인 화면도 다른 프로젝트의 잡 보장을 밝힌다

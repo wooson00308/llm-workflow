@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-026
 title: 아이디어 전문을 읽는 앱 경로를 만들고 화면 앞단까지 배선한다
-status: completed
+status: verified
 source_spec_id: SPEC-008
 source_decision_id: DECISION-E03D1301
-updated_at: 2026-08-03T02:31:06.877388+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:31:06.877388+00:00, kind: completed }
+- at: 2026-08-03T02:31:06.877388+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-E03D1301
+work_group_revision: 1
 ---
 
 # 아이디어 전문을 읽는 앱 경로를 만들고 화면 앞단까지 배선한다

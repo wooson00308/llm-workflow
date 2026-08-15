@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-044
 title: 잡의 condition을 플랫폼에 맞게 기록하고 중복 감지가 두 조건 형태를 모두 알아본다
-status: completed
+status: verified
 source_spec_id: SPEC-015
 source_decision_id: DECISION-EEEEB81D
-depends_on: [TASK-042]
-updated_at: 2026-08-04T11:45:29.397763+00:00
+depends_on:
+- TASK-042
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T06:50:00Z, kind: created }
-  - { at: 2026-08-03T09:53:20Z, kind: in_progress }
-  - { at: 2026-08-03T10:02:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:45:29.397763+00:00, kind: completed }
+- at: 2026-08-03T06:50:00Z
+  kind: created
+- at: 2026-08-03T09:53:20Z
+  kind: in_progress
+- at: 2026-08-03T10:02:00Z
+  kind: qa_waiting
+- at: 2026-08-04T11:45:29.397763+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-EEEEB81D
+work_group_revision: 1
 ---
 
 # 잡의 condition을 플랫폼에 맞게 기록하고 중복 감지가 두 조건 형태를 모두 알아본다

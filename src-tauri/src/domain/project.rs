@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROJECT_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectManifest {
@@ -190,6 +190,7 @@ pub struct WorkflowCounts {
     pub specs: usize,
     pub decisions: usize,
     pub tasks: usize,
+    pub work_groups: usize,
     pub reports: usize,
 }
 
@@ -199,6 +200,7 @@ pub struct WorkflowItems {
     pub ideas: Vec<WorkflowItemSummary>,
     pub specs: Vec<WorkflowItemSummary>,
     pub tasks: Vec<WorkflowItemSummary>,
+    pub work_groups: Vec<WorkGroupSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -219,6 +221,12 @@ pub struct WorkflowItemSummary {
     /// 이 작업이 어떤 승인 결정에서 나왔는지. 아이디어·기획서에서는 항상 `None`이다.
     /// 앱은 이 참조로 "승인됐지만 아직 작업으로 분해되지 않은 결정"을 판정한다.
     pub source_decision_id: Option<String>,
+    /// v2에서 작업이 속한 사용자 승인 단위. 아이디어·기획서에서는 항상 `None`이다.
+    pub work_group_id: Option<String>,
+    /// 작업이 만들어진 시점의 작업 그룹 revision. 그룹 재작업 이력을 섞지 않는다.
+    pub work_group_revision: Option<u32>,
+    /// 그룹 QA 반려 뒤 만들어진 수정 작업이 답하는 그룹 QA 결정 id.
+    pub source_qa_decision_id: Option<String>,
     /// 중단 의심의 근거. 이 아이디어가 반영중인데 선점한 미만료 lease가 없을 때, 걸려 있는 `draft`
     /// 기획서의 문서 id다. 문서 id 오름차순이며 그 조합이 아니면 비어 있다. 비어 있지 않다는 것과
     /// 중단 의심은 같은 뜻이다(SPEC-012 R5). 기획서·개발 작업 항목에서는 항상 비어 있다.
@@ -239,6 +247,63 @@ pub struct TaskEvent {
     pub at: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupStatus {
+    Preparing,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupQaMode {
+    User,
+    Automatic,
+}
+
+/// 작업 그룹 문서와 현재 작업·결정을 합쳐 계산한 사용자 화면 상태.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupDisplayStatus {
+    Completed,
+    Rework,
+    Preparing,
+    PreparingStalled,
+    Blocked,
+    Developing,
+    QaReady,
+    AutomaticCompleted,
+    ConfigurationError,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupQaScenario {
+    pub id: String,
+    pub title: String,
+    /// 다음 `### QA-*` 절 전까지의 마크다운 원문. 화면은 개발 명령을 추출하지 않는다.
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupSummary {
+    pub file_name: String,
+    pub id: String,
+    pub title: String,
+    /// 문서 작성 상태. 화면 파생 상태와 구분한다.
+    pub status: WorkGroupStatus,
+    pub display_status: WorkGroupDisplayStatus,
+    pub revision: u32,
+    pub qa_mode: WorkGroupQaMode,
+    pub source_spec_id: String,
+    pub source_decision_id: String,
+    pub source_qa_decision_id: Option<String>,
+    pub updated_at: String,
+    pub description: String,
+    pub scenarios: Vec<WorkGroupQaScenario>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SpecDocument {
@@ -250,7 +315,7 @@ pub struct SpecDocument {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskDependencyState {
-    /// 선행 작업이 `qa_waiting` 또는 `completed`다. 후행이 딛고 설 코드가 트리에 있다.
+    /// 선행 작업이 AI 구현·자동검증을 마친 `verified`다.
     Satisfied,
     /// 선행 작업이 아직 그 상태에 이르지 못했다. 시간이 지나면 풀릴 수 있다.
     Pending,
@@ -341,7 +406,7 @@ pub struct ReportDocument {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecDecisionOutcome {
     Approved,
@@ -349,6 +414,7 @@ pub enum SpecDecisionOutcome {
     Rejected,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskQaOutcome {
@@ -356,6 +422,51 @@ pub enum TaskQaOutcome {
     RevisionRequested,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupQaOutcome {
+    Confirmed,
+    RevisionRequested,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupQaSubmission {
+    pub workflow_directory: String,
+    pub file_name: String,
+    pub expected_revision: u32,
+    pub expected_updated_at: String,
+    pub request_id: String,
+    pub entries: Vec<WorkGroupQaSubmissionEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupQaSubmissionEntry {
+    pub scenario_id: String,
+    pub outcome: WorkGroupQaOutcome,
+    pub comment: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupQaSubmissionStatus {
+    Recorded,
+    AlreadyRecorded,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupQaSubmissionResult {
+    pub summary: ProjectSummary,
+    pub decision_file_name: String,
+    pub group_id: String,
+    pub group_revision: u32,
+    pub outcome: WorkGroupQaOutcome,
+    pub status: WorkGroupQaSubmissionStatus,
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskQaBatchResult {
@@ -364,6 +475,7 @@ pub struct TaskQaBatchResult {
     pub results: Vec<TaskQaBatchEntry>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskQaBatchEntry {
@@ -373,6 +485,66 @@ pub struct TaskQaBatchEntry {
     pub recorded: bool,
     /// 실패 사유. 성공이면 `None`.
     pub message: Option<String>,
+}
+
+/// 작업별 결과와 메모를 한 번에 싣는 품질 확인 제출. 기존 일괄 통로는 확인 완료만 보내고 메모도 전
+/// 건이 하나를 공유하는데, 이 요청은 항목마다 결과와 메모를 따로 나른다.
+#[cfg(test)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaSubmission {
+    pub workflow_directory: String,
+    /// 화면이 보낸 순서 그대로. 결과 목록도 같은 순서로 돌아온다.
+    pub entries: Vec<TaskQaSubmissionEntry>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaSubmissionEntry {
+    pub file_name: String,
+    pub outcome: TaskQaOutcome,
+    /// 이 작업에만 붙는 메모. 다른 항목의 메모와 섞이지 않는다.
+    pub comment: String,
+    /// 사용자가 검토를 시작할 때 읽은 작업 문서의 `updated_at` 원문. 문자 단위로 같아야 기록한다.
+    pub expected_updated_at: String,
+}
+
+/// 항목 하나가 기록되지 못한 까닭. 화면이 "다시 확인해야 한다"와 "기록에 실패했다"를 가르는 값이라
+/// 사유 문자열과 따로 싣는다.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskQaSubmissionFailure {
+    /// 검토를 시작한 뒤 작업 문서가 바뀌었다.
+    Stale,
+    /// 작업이 더 이상 품질 확인 대기 상태가 아니다.
+    NotAwaitingQa,
+    /// 그 밖의 기록 실패.
+    RecordFailed,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaSubmissionEntryResult {
+    pub file_name: String,
+    /// 문서를 읽지 못하면 `None`. 추정으로 채우지 않는다.
+    pub task_id: Option<String>,
+    pub recorded: bool,
+    /// 실패 종류. 성공이면 `None`.
+    pub failure: Option<TaskQaSubmissionFailure>,
+    /// 실패 사유. 성공이면 `None`.
+    pub message: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQaSubmissionResult {
+    pub summary: ProjectSummary,
+    /// 요청 순서 그대로. 화면이 목록과 나란히 읽는다.
+    pub results: Vec<TaskQaSubmissionEntryResult>,
 }
 
 /// 잘못 분해된 작업을 고쳐 달라는 사용자 요청(SPEC-055 R2). 앱 UI의 사용자 조작만 이 요청을 만든다.

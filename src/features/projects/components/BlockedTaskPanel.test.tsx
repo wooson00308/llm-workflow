@@ -2,9 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import cssText from "./BlockedTaskPanel.css?raw";
 import type { BlockedReason } from "../domain/documentSections";
-import type { ProjectSummary, TaskDocument, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import type { ProjectSummary, TaskDocument, WorkflowItemSummary } from "../domain/types";
 import { BlockedTaskPanel, TaskRevisionRequestPanel } from "./BlockedTaskPanel";
-import { DevelopmentBoard } from "./DevelopmentBoard";
 
 afterEach(cleanup);
 
@@ -22,7 +21,7 @@ const relatedTask: WorkflowItemSummary = {
   fileName: "TASK-101.md",
   id: "TASK-101",
   title: "토큰 발급",
-  status: "qa_waiting",
+  status: "verified",
   updatedAt: "2026-08-07T15:20:00Z",
   dueAt: null,
   excerpt: "운영 토큰을 발급한다.",
@@ -35,52 +34,6 @@ const reason: BlockedReason = {
   relatedTargetsRaw: "TASK-101, TASK-없는-작업, 외부 공급자 승인",
   relatedTargets: ["TASK-101", "TASK-없는-작업", "외부 공급자 승인"],
 };
-
-function workflow(items: WorkflowItemSummary[]): WorkflowSummary {
-  return {
-    id: "wf_1",
-    directory: "feature--wf_1",
-    name: "Feature",
-    status: "active",
-    createdAt: "2026-08-07T00:00:00Z",
-    counts: { ideas: 0, specs: 0, decisions: 0, tasks: items.length, reports: 0 },
-    items: { ideas: [], specs: [], tasks: items },
-  };
-}
-
-function blockedBody(relatedTargets = reason.relatedTargetsRaw) {
-  return [
-    "# 배포 준비",
-    "",
-    "## 결정권자 요약",
-    "",
-    "배포 토큰이 없어 진행을 멈췄다.",
-    "",
-    "## 막힌 사유",
-    "",
-    "- 막힌 지점: 배포 **토큰**이 없다.",
-    "- 필요한 해결: 운영자가 토큰을 발급한다.",
-    "- 재개 조건: 토큰 확인 검사가 통과한다.",
-    `- 관련 대상: ${relatedTargets}`,
-  ].join("\n");
-}
-
-function renderBoard(
-  onReadTask: (fileName: string) => Promise<TaskDocument | null>,
-  items = [blockedTask, relatedTask],
-  activeLeases: React.ComponentProps<typeof DevelopmentBoard>["activeLeases"] = [],
-) {
-  return render(
-    <DevelopmentBoard
-      activeLeases={activeLeases}
-      busy={false}
-      onReadTask={onReadTask}
-      onTaskQa={vi.fn()}
-      onTaskQaBatch={vi.fn()}
-      workflow={workflow(items)}
-    />,
-  );
-}
 
 function expectAgentOperatedNotice(withRevisionRequest = false) {
   const notice = screen.getByRole("region", { name: "에이전트 처리 안내" });
@@ -124,7 +77,7 @@ describe("BlockedTaskPanel", () => {
       expect.stringContaining("외부 공급자 승인"),
     ]);
     expect(within(targets[0]).getByText("토큰 발급")).toBeInTheDocument();
-    expect(within(targets[0]).getByText("현재 상태 QA 대기")).toBeInTheDocument();
+    expect(within(targets[0]).getByText("현재 상태 완료")).toBeInTheDocument();
     expect(within(targets[1]).queryByRole("button")).not.toBeInTheDocument();
     expect(within(targets[2]).queryByRole("button")).not.toBeInTheDocument();
 
@@ -313,102 +266,5 @@ describe("TaskRevisionRequestPanel", () => {
       />,
     );
     expect(screen.getByText(expected)).toBeInTheDocument();
-  });
-});
-
-describe("DevelopmentBoard blocked task detail", () => {
-  it("opens an exact related task through the existing reader and replaces the detail only on success", async () => {
-    const blockedDocument: TaskDocument = { summary: blockedTask, body: blockedBody() };
-    const relatedDocument: TaskDocument = {
-      summary: relatedTask,
-      body: "# 토큰 발급\n\n## 결정권자 요약\n\n토큰 발급을 검증한다.",
-    };
-    const onReadTask = vi.fn(async (fileName: string) => (
-      fileName === blockedTask.fileName ? blockedDocument : fileName === relatedTask.fileName ? relatedDocument : null
-    ));
-    renderBoard(onReadTask);
-
-    fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
-    expect(await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" })).toBeInTheDocument();
-    expectAgentOperatedNotice(true);
-    fireEvent.click(screen.getByRole("button", { name: "TASK-101 토큰 발급 작업 열기" }));
-
-    expect(await screen.findByRole("heading", { level: 1, name: "토큰 발급" })).toBeInTheDocument();
-    expect(onReadTask).toHaveBeenCalledTimes(2);
-    expect(onReadTask).toHaveBeenNthCalledWith(2, "TASK-101.md");
-    expect(screen.queryByRole("heading", { level: 2, name: "진행이 막혔습니다" })).not.toBeInTheDocument();
-  });
-
-  it("keeps the current blocked document when a related task read fails", async () => {
-    const onReadTask = vi.fn()
-      .mockResolvedValueOnce({ summary: blockedTask, body: blockedBody("TASK-101") })
-      .mockResolvedValueOnce(null);
-    renderBoard(onReadTask);
-
-    fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
-    await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" });
-    fireEvent.click(screen.getByRole("button", { name: "TASK-101 토큰 발급 작업 열기" }));
-
-    await waitFor(() => expect(onReadTask).toHaveBeenCalledTimes(2));
-    expect(screen.getByRole("heading", { level: 1, name: "배포 준비" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 2, name: "진행이 막혔습니다" })).toBeInTheDocument();
-    expectAgentOperatedNotice(true);
-  });
-
-  it("keeps historical user-resume events readable without restoring the control", async () => {
-    const resumedTask: WorkflowItemSummary = {
-      ...blockedTask,
-      status: "todo",
-      events: [{ kind: "resumed", at: "2026-08-08T02:00:00Z" }],
-    };
-    const onReadTask = vi.fn().mockResolvedValue({ summary: resumedTask, body: blockedBody() });
-    renderBoard(onReadTask, [resumedTask]);
-
-    fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
-    expect(await screen.findByText("사용자 재개", { exact: false })).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "에이전트 처리 안내" })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("해결 근거")).not.toBeInTheDocument();
-  });
-
-  it.each(["todo", "in_progress", "qa_waiting", "completed"] as const)(
-    "does not show a preserved blocked reason while the task is %s",
-    async (status) => {
-      const item = { ...blockedTask, status };
-      const onReadTask = vi.fn().mockResolvedValue({ summary: item, body: blockedBody() });
-      renderBoard(onReadTask, [item]);
-
-      if (status === "qa_waiting") {
-        fireEvent.click(screen.getByRole("button", { name: "배포 준비 QA 시작" }));
-        fireEvent.click(screen.getByRole("button", { name: "문제 있는 단계 열기" }));
-      } else {
-        fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
-      }
-      await screen.findByRole("heading", { level: 1, name: "배포 준비" });
-
-      expect(screen.queryByRole("heading", { level: 2, name: "진행이 막혔습니다" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("region", { name: "막힌 작업 상세" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("region", { name: "에이전트 처리 안내" })).not.toBeInTheDocument();
-      if (status === "qa_waiting") expect(screen.getByLabelText("테스트 플로우와 확인 메모")).toBeInTheDocument();
-      else expect(screen.queryByLabelText("테스트 플로우와 확인 메모")).not.toBeInTheDocument();
-      if (status === "todo") expect(screen.getByRole("region", { name: "정의 수정 요청" })).toBeInTheDocument();
-      else expect(screen.queryByRole("region", { name: "정의 수정 요청" })).not.toBeInTheDocument();
-    },
-  );
-
-  it("hides the request control while the selected todo task has an active lease", async () => {
-    const todoTask = { ...blockedTask, status: "todo" };
-    const onReadTask = vi.fn().mockResolvedValue({ summary: todoTask, body: blockedBody() });
-    renderBoard(onReadTask, [todoTask], [{
-      leaseId: "lease-1",
-      agent: "developer",
-      role: "developer",
-      taskId: todoTask.id,
-      heartbeatAt: "2026-08-08T01:00:00Z",
-      expiresAt: "2026-08-08T01:10:00Z",
-    }]);
-
-    fireEvent.click(screen.getByRole("button", { name: /배포 준비/ }));
-    await screen.findByRole("heading", { level: 1, name: "배포 준비" });
-    expect(screen.queryByRole("region", { name: "정의 수정 요청" })).not.toBeInTheDocument();
   });
 });

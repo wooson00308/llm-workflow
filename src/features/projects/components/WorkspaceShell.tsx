@@ -10,24 +10,25 @@ import type {
   SpecDecisionOutcome,
   AgentRuntimeActions,
   AgentRuntimeState,
-  TaskQaBatchEntry,
-  TaskQaOutcome,
   TaskDocument,
-  TaskRevisionRequestOutcome,
   SpecDocument,
+  WorkGroupQaSubmission,
+  WorkGroupQaSubmissionResult,
+  WorkGroupSummary,
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
-import { ActivityView } from "./ActivityView";
-import { AgentRuntimeView } from "./agents/AgentRuntimeView";
+import { AgentRuntimeView, ExecutionConsentDialog } from "./agents/AgentRuntimeView";
 import { DevelopmentBoard } from "./DevelopmentBoard";
 import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
+import { MarkdownBody } from "./MarkdownBody";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
+import { QaWorkbench } from "./qa/QaWorkbench";
 import { SettingsView } from "./SettingsView";
 import { SpecWorkspace } from "./SpecWorkspace";
 
@@ -63,24 +64,8 @@ interface Props {
     workflowDirectory: string,
     fileName: string,
   ): Promise<TaskDocument | null>;
-  onTaskQa(
-    workflowDirectory: string,
-    fileName: string,
-    outcome: TaskQaOutcome,
-    comment: string,
-  ): Promise<boolean>;
-  onTaskQaBatch(
-    workflowDirectory: string,
-    fileNames: string[],
-    comment: string,
-  ): Promise<TaskQaBatchEntry[] | null>;
-  onTaskRevisionRequest?(
-    workflowDirectory: string,
-    fileName: string,
-    expectedUpdatedAt: string,
-    reason: string,
-    requestId: string,
-  ): Promise<TaskRevisionRequestOutcome>;
+  /** 작업 그룹 revision 전체에 사용자 QA 결정 하나를 기록한다. */
+  onWorkGroupQaSubmit?(submission: WorkGroupQaSubmission): Promise<WorkGroupQaSubmissionResult | null>;
   /**
    * 에이전트 화면의 상태와 조작. 주인이 작업 공간 훅이라 화면을 옮겨 다녀도 진행 표시가 남는다.
    * 선택인 것은 이 껍데기를 그리는 검사 리터럴이 아직 이 묶음을 모르기 때문이다.
@@ -94,7 +79,7 @@ interface Props {
 const stages = [
   { key: "ideas", label: "아이디어", icon: "idea" as const },
   { key: "specs", label: "기획서", icon: "stamp" as const },
-  { key: "tasks", label: "개발", icon: "board" as const },
+  { key: "workGroups", label: "개발", icon: "board" as const },
   { key: "reports", label: "완료", icon: "archive" as const },
 ] as const;
 
@@ -103,8 +88,8 @@ const viewLabels = {
   ideas: "아이디어",
   specs: "기획서",
   tasks: "개발",
+  qa: "품질 확인",
   archive: "기록",
-  activity: "활동",
   agents: "에이전트",
   help: "도움말",
   settings: "설정",
@@ -127,9 +112,7 @@ export function WorkspaceShell({
   onReadIdea,
   onReadSpec,
   onReadTask,
-  onTaskRevisionRequest = async () => ({ ok: false, message: "정의 수정 요청 조작이 연결되지 않았습니다." }),
-  onTaskQa,
-  onTaskQaBatch,
+  onWorkGroupQaSubmit = async () => null,
   onRefresh,
   onSwitchProject,
 }: Props) {
@@ -143,8 +126,8 @@ export function WorkspaceShell({
     | "ideas"
     | "specs"
     | "tasks"
+    | "qa"
     | "archive"
-    | "activity"
     | "agents"
     | "help"
     | "settings"
@@ -153,6 +136,13 @@ export function WorkspaceShell({
   const [specLoading, setSpecLoading] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [consentOpen, setConsentOpen] = useState(false);
+  // 품질 확인 작업대를 열 때 함께 넘길 기능 묶음. 그룹 id는 워크플로우 안에서만 유일할 수 있으므로
+  // 디렉터리와 함께 보관한다. 같은 id를 쓰는 다른 워크플로우로 이동해도 그 기능이 잘못 열리지 않는다.
+  const [qaFeatureTarget, setQaFeatureTarget] = useState<{
+    workflowDirectory: string;
+    groupId: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!project.workflows.some((item) => item.directory === selectedDirectory)) {
@@ -179,6 +169,29 @@ export function WorkspaceShell({
     () => project.workflows.find((item) => item.directory === selectedDirectory),
     [project.workflows, selectedDirectory],
   );
+
+  /*
+   * 오늘 화면이 함께 세는 품질 확인 대기 기능. 개발 화면과 품질 확인 작업대가 쓰는 판정 모듈을 그대로
+   * 불러 세 화면이 같은 수를 말한다. 지금 확인할 수 있는 묶음만 담기므로 아직 열 수 없는 기능은
+   * 목록에도 건수에도 들어가지 않는다.
+   */
+  const readyQaFeatures = useMemo(
+    () => workflow?.items.workGroups.filter((group) => group.qaMode === "user" && group.displayStatus === "qa_ready") ?? [],
+    [workflow],
+  );
+  const pendingSpecs = useMemo(
+    () => workflow?.items.specs.filter((item) => item.status === "user_review") ?? [],
+    [workflow],
+  );
+  // 기획서 승인과 그룹 QA만 사용자 판단이다. 태스크 상태는 이 수치에 들어가지 않는다.
+  const decisionCount = pendingSpecs.length + readyQaFeatures.length;
+
+  /** 기능 하나를 지정해 품질 확인 작업대를 연다. 중간 화면을 거치지 않는다. */
+  function openQaFeature(featureKey: string) {
+    if (!workflow) return;
+    setQaFeatureTarget({ workflowDirectory: workflow.directory, groupId: featureKey });
+    setView("qa");
+  }
 
   async function addIdea(content: string) {
     if (!workflow) return false;
@@ -263,6 +276,17 @@ export function WorkspaceShell({
   const writable = project.compatibility === "current";
   const managedNotice = managedRulesNotice(managedAssets);
 
+  /*
+   * 자동 배정을 이미 켜 둔 사용자는 에이전트 화면을 열 이유가 없어 그 안의 동의 요구를 만나지 못한다.
+   * 프로젝트를 열 때 읽어 둔 동의 상태를 여기서 읽어 첫 화면에서 알린다. 에이전트 화면을 보고 있는
+   * 동안에는 그리지 않는다. 그 화면이 같은 안내를 이미 담고 있어 두 번 보일 이유가 없다.
+   */
+  const runtimeConsent = agentRuntime?.policy?.consent ?? null;
+  const consentAttention =
+    view !== "agents" &&
+    (agentRuntime?.policy?.policy.automationEnabled ?? false) &&
+    runtimeConsent?.status === "required";
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -272,13 +296,20 @@ export function WorkspaceShell({
           <Icon className="chevron" name="chevron" />
         </button>
 
+        {/* 세 묶음: 결정 허브(오늘) · 작업 흐름(아이디어→품질 확인) · 지난 일(기록·활동) */}
         <nav className="primary-nav" aria-label="주요 메뉴">
-          <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Icon name="spark" />오늘</button>
-          <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
-          <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
-          <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
-          <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
-          <button className={view === "activity" ? "active" : ""} onClick={() => setView("activity")}><Icon name="activity" />활동</button>
+          <div className="primary-nav-group">
+            <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Icon name="spark" />오늘</button>
+          </div>
+          <div className="primary-nav-group">
+            <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
+            <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
+            <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
+            <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인</button>
+          </div>
+          <div className="primary-nav-group">
+            <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
+          </div>
         </nav>
 
         <div className="workflow-nav">
@@ -291,7 +322,7 @@ export function WorkspaceShell({
             >
               <span className="workflow-dot" />
               <span>{item.name}</span>
-              <small>{item.counts.tasks}</small>
+              <small>{item.counts.workGroups}</small>
             </button>
           ))}
           {showWorkflowForm && (
@@ -304,12 +335,12 @@ export function WorkspaceShell({
 
         <div className="sidebar-footer">
           {/* 좌측 메뉴는 화면 전환 분기 바깥이라 이 자리에 두면 어떤 화면에서도 보인다. 세션이 도는지와
-              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 활동 화면이 맡는다(SPEC-050). */}
+              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 에이전트 화면이 맡는다. */}
           {project.activeLeases.length > 0 && (
             <button
-              aria-label={`실행 중인 세션 ${project.activeLeases.length}개, 활동 화면 열기`}
+              aria-label={`실행 중인 세션 ${project.activeLeases.length}개, 에이전트 화면 열기`}
               className="sidebar-activity"
-              onClick={() => setView("activity")}
+              onClick={() => setView("agents")}
               type="button"
             >
               <span className="sidebar-activity-dot" />
@@ -385,6 +416,13 @@ export function WorkspaceShell({
             </div>
           )}
 
+          {consentAttention && (
+            <section className="agent-runtime-attention" role="status">
+              <div><strong>실행 권한 동의 필요</strong><p>자동 배정이 켜져 있지만 실행 권한에 동의하기 전에는 새 세션을 시작하지 않습니다.</p></div>
+              <button className="secondary-button agent-compact-action" onClick={() => setConsentOpen(true)} type="button">고지 읽고 동의</button>
+            </section>
+          )}
+
           {view === "today" && (
             <>
               <div className="today-heading">
@@ -393,7 +431,7 @@ export function WorkspaceShell({
               </div>
 
               {project.activeLeases.length > 0 && (
-                <button className="agent-activity" onClick={() => setView("activity")} type="button">
+                <button className="agent-activity" onClick={() => setView("agents")} type="button">
                   <span className="pulse" />
                   <div><strong>{project.activeLeases[0].agent}가 문서를 작업 중입니다</strong><small>{project.activeLeases[0].taskId ?? "워크플로우 작업"} · 마이그레이션 보호 활성</small></div>
                   <span className="agent-activity-count">{project.activeLeases.length} active</span>
@@ -421,13 +459,21 @@ export function WorkspaceShell({
 
               <div className="lower-grid">
                 <section className="attention-card">
-                  <div className="section-heading"><div><p className="eyebrow warm">NEEDS YOU</p><h2>내 선택 대기</h2></div><span className="count-badge">{workflow?.counts.decisions ?? 0}</span></div>
-                  {workflow?.counts.decisions ? (
+                  <div className="section-heading"><div><p className="eyebrow warm">NEEDS YOU</p><h2>내 선택 대기</h2></div><span className="count-badge">{decisionCount}</span></div>
+                  {decisionCount > 0 ? (
                     <div className="attention-list">
-                      {workflow.items.specs.filter((item) => item.status === "user_review").map((item) => (
+                      {pendingSpecs.map((item) => (
                         <button key={item.fileName} onClick={() => void openSpecWorkspace(item)}>
                           <span><strong>{item.title}</strong><small>{item.id} · 기획서 승인 필요</small></span>
                           <b>검토하기 →</b>
+                        </button>
+                      ))}
+                      {/* 기능 하나가 한 줄이다. 작업 식별자와 개발 상태 수치는 여기서 말하지 않는다 —
+                          이 자리는 무엇을 확인할지만 고르는 자리이고, 항목별 상세는 작업대가 맡는다. */}
+                      {readyQaFeatures.map((feature) => (
+                        <button key={feature.id} onClick={() => openQaFeature(feature.id)}>
+                          <span><strong>{feature.title}</strong><small>확인 항목 {feature.scenarios.length}개 · 품질 확인 필요</small></span>
+                          <b>품질 확인 시작 →</b>
                         </button>
                       ))}
                     </div>
@@ -465,18 +511,27 @@ export function WorkspaceShell({
             />
           )}
 
-          {workflow && view === "tasks" && <DevelopmentBoard activeLeases={project.activeLeases} busy={busy} onReadTask={(fileName) => onReadTask(workflow.directory, fileName)} onTaskRevisionRequest={(fileName, expectedUpdatedAt, reason, requestId) => onTaskRevisionRequest(workflow.directory, fileName, expectedUpdatedAt, reason, requestId)} onTaskQa={(fileName, outcome, comment) => onTaskQa(workflow.directory, fileName, outcome, comment)} onTaskQaBatch={(fileNames, comment) => onTaskQaBatch(workflow.directory, fileNames, comment)} workflow={workflow} />}
-
-          {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
-
-          {/* 활성 lease는 프로젝트 전역이라 워크플로우가 없어도 그릴 것이 있다. */}
-          {view === "activity" && (
-            <ActivityView
-              onOpenDocument={(result) => void openSearchResult(result)}
-              project={project}
+          {workflow && view === "tasks" && (
+            <DevelopmentBoard
+              key={workflow.directory}
+              onOpenQa={openQaFeature}
+              onReadTask={(fileName) => onReadTask(workflow.directory, fileName)}
               workflow={workflow}
             />
           )}
+
+          {workflow && view === "qa" && (
+            <QaWorkbench
+              initialFeatureKey={qaFeatureTarget?.workflowDirectory === workflow.directory
+                ? qaFeatureTarget.groupId
+                : null}
+              key={workflow.directory}
+              onSubmit={onWorkGroupQaSubmit}
+              workflow={workflow}
+            />
+          )}
+
+          {workflow && view === "archive" && <ArchiveView workflow={workflow} onOpenSpec={(item) => void openSpecWorkspace(item)} />}
 
           {/* 워크플로우와 무관한 화면이라 workflow 조건을 걸지 않는다.
 
@@ -522,6 +577,17 @@ export function WorkspaceShell({
           onClose={() => setSearchOpen(false)}
           onOpen={(result) => void openSearchResult(result)}
           project={project}
+        />
+      )}
+
+      {/* 동의만 남기고 정책은 저장하지 않는다. 고지 문구와 확인 항목과 동의 호출은 에이전트 화면이
+          내보내는 것을 그대로 쓴다. */}
+      {consentOpen && agentRuntime && agentRuntimeActions && runtimeConsent && (
+        <ExecutionConsentDialog
+          actions={agentRuntimeActions}
+          consent={runtimeConsent}
+          onClose={() => setConsentOpen(false)}
+          state={agentRuntime}
         />
       )}
 
@@ -578,8 +644,11 @@ function StageCard({
   stage: (typeof stages)[number];
   workflow: WorkflowSummary | undefined;
 }) {
-  const value = workflow?.counts[stage.key] ?? 0;
-  const subtitles = ["생각을 수집하는 중", "승인 가능한 문서", "실행할 작업", "검증된 결과"];
+  // "완료"는 태스크가 아니라 기능(작업 그룹) 기준으로 센다. 구현 보고서 수는 사용자 언어가 아니다.
+  const completedFeatures = workflow?.items.workGroups
+    .filter((group) => ["completed", "automatic_completed"].includes(group.displayStatus)).length ?? 0;
+  const value = stage.key === "reports" ? completedFeatures : workflow?.counts[stage.key] ?? 0;
+  const subtitles = ["생각을 수집하는 중", "승인 가능한 문서", "실행할 작업", "완료된 기능"];
   return (
     <button className={`stage-card tone-${index}`} onClick={onOpen}>
       <div className="stage-top"><span><Icon name={stage.icon} /></span><small>0{index + 1}</small></div>
@@ -597,34 +666,174 @@ function ArchiveView({
   onOpenSpec(item: WorkflowItemSummary): void;
   workflow: WorkflowSummary;
 }) {
+  // 완료된 기능은 기록 안에서 한 화면으로 다시 열어 본다. 문서는 이미 다 손안에 있다.
+  const [selectedGroup, setSelectedGroup] = useState<WorkGroupSummary | null>(null);
   const specs = workflow.items.specs.filter((item) =>
     ["approved", "rejected"].includes(item.status),
   );
-  const tasks = workflow.items.tasks.filter((item) => item.status === "completed");
+  const groups = workflow.items.workGroups.filter((group) =>
+    ["completed", "automatic_completed"].includes(group.displayStatus),
+  );
+
+  // 두 종류의 기록을 하나의 시간순 이야기로 합친다. 쌓일수록 목록이 아니라 달력처럼 읽히게,
+  // 최신이 먼저 오고 달이 바뀔 때마다 머리글이 선다.
+  const records: ArchiveRecord[] = [
+    ...specs.map((item) => ({
+      key: item.fileName,
+      kind: (item.status === "approved" ? "spec_approved" : "spec_rejected") as ArchiveRecord["kind"],
+      title: item.title,
+      meta: item.id,
+      at: item.updatedAt,
+      spec: item,
+    })),
+    ...groups.map((group) => ({
+      key: group.fileName,
+      kind: "group_completed" as const,
+      title: group.title,
+      meta: group.displayStatus === "completed" ? `${group.id} · 사용자 QA 승인` : group.id,
+      at: group.updatedAt,
+      group,
+    })),
+  ].sort((left, right) => archiveTime(right.at) - archiveTime(left.at));
+  const months = groupRecordsByMonth(records);
+  const counts = {
+    approved: specs.filter((item) => item.status === "approved").length,
+    rejected: specs.filter((item) => item.status === "rejected").length,
+    features: groups.length,
+  };
+
+  if (selectedGroup) {
+    const groupTasks = workflow.items.tasks.filter((task) => task.workGroupId === selectedGroup.id);
+    return (
+      <section className="archive-view archive-group-detail">
+        <button className="text-button qa-scope-back" onClick={() => setSelectedGroup(null)} type="button">← 기록으로 돌아가기</button>
+        <p className="qa-feature-kicker">기능 완료 기록</p>
+        <h1>{selectedGroup.title}</h1>
+        {selectedGroup.description && <p className="qa-feature-goal">{selectedGroup.description}</p>}
+
+        <dl className="archive-group-facts">
+          <div><dt>완료 방식</dt><dd>{selectedGroup.displayStatus === "completed" ? "사용자 QA 승인" : "자동 완료"}</dd></div>
+          <div><dt>구성 버전</dt><dd>{selectedGroup.revision}</dd></div>
+          <div><dt>마지막 갱신</dt><dd>{formatArchiveDate(selectedGroup.updatedAt)}</dd></div>
+        </dl>
+
+        {selectedGroup.scenarios.length > 0 && (
+          <section aria-label="사용자 확인 플로우" className="archive-group-flow">
+            <h2>사용자 확인 플로우</h2>
+            {selectedGroup.scenarios.map((scenario) => (
+              <section className="qa-flow-section" key={scenario.id}>
+                <h2>{scenario.title}</h2>
+                <MarkdownBody body={scenario.body} />
+              </section>
+            ))}
+          </section>
+        )}
+
+        {groupTasks.length > 0 && (
+          <section aria-label="포함된 작업" className="archive-group-tasks">
+            <h2>포함된 작업 {groupTasks.length}개</h2>
+            <ul>
+              {groupTasks.map((task) => (
+                <li key={task.fileName}>
+                  <span className="status-pill status-verified">완료</span>
+                  <strong>{task.title}</strong>
+                  <small>{task.id}</small>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </section>
+    );
+  }
+
   return (
     <section className="archive-view">
       <p className="eyebrow">ARCHIVE</p>
       <h1>결정과 완료 기록</h1>
-      <p>승인·폐기된 기획서와 완료된 개발 작업을 모아봅니다.</p>
-      <div className="archive-grid">
-        <section>
-          <div className="section-heading"><h2>결정된 기획서</h2><span>{specs.length}</span></div>
-          {specs.map((item) => (
-            <button key={item.fileName} onClick={() => onOpenSpec(item)}>
-              <span className={`status-pill status-${item.status}`}>{item.status === "approved" ? "승인" : "폐기"}</span>
-              <strong>{item.title}</strong><small>{item.id}</small>
-            </button>
-          ))}
-          {specs.length === 0 && <p className="archive-empty">아직 결정 기록이 없습니다.</p>}
-        </section>
-        <section>
-          <div className="section-heading"><h2>완료된 개발 작업</h2><span>{tasks.length}</span></div>
-          {tasks.map((item) => (
-            <article key={item.fileName}><span className="status-pill status-completed">완료</span><strong>{item.title}</strong><small>{item.id}</small></article>
-          ))}
-          {tasks.length === 0 && <p className="archive-empty">아직 완료 기록이 없습니다.</p>}
-        </section>
+      <p>승인·폐기된 기획서와 완료된 기능을 시간순으로 모아봅니다.</p>
+      {records.length > 0 && (
+        <p className="archive-summary">승인 {counts.approved} · 폐기 {counts.rejected} · 완료된 기능 {counts.features}</p>
+      )}
+
+      <div className="archive-timeline">
+        {months.map(([label, items]) => (
+          <section aria-label={label} key={label}>
+            <h2>{label}</h2>
+            <ul>
+              {items.map((record) => {
+                const body = (
+                  <>
+                    <time>{archiveDay(record.at)}</time>
+                    <span className={`archive-kind kind-${record.kind}`}>{ARCHIVE_KIND_LABEL[record.kind]}</span>
+                    <strong>{record.title}</strong>
+                    <small>{record.meta}</small>
+                  </>
+                );
+                return (
+                  <li key={record.key}>
+                    <button
+                      className="archive-row"
+                      onClick={() => {
+                        if (record.spec) onOpenSpec(record.spec);
+                        else if (record.group) setSelectedGroup(record.group);
+                      }}
+                      type="button"
+                    >{body}</button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
       </div>
+      {records.length === 0 && <p className="archive-empty">아직 남은 기록이 없습니다. 기획서가 결정되거나 기능이 완료되면 여기에 쌓입니다.</p>}
     </section>
   );
+}
+
+interface ArchiveRecord {
+  key: string;
+  kind: "spec_approved" | "spec_rejected" | "group_completed";
+  title: string;
+  meta: string;
+  at: string | null;
+  spec?: WorkflowItemSummary;
+  group?: WorkGroupSummary;
+}
+
+const ARCHIVE_KIND_LABEL: Record<ArchiveRecord["kind"], string> = {
+  spec_approved: "기획 승인",
+  spec_rejected: "기획 폐기",
+  group_completed: "기능 완료",
+};
+
+function archiveTime(value: string | null) {
+  const parsed = value === null ? Number.NaN : Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function archiveDay(value: string | null) {
+  if (value === null) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : `${parsed.getDate()}일`;
+}
+
+function formatArchiveDate(value: string | null) {
+  if (value === null) return "기록 없음";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "기록 없음";
+  return `${parsed.getFullYear()}년 ${parsed.getMonth() + 1}월 ${parsed.getDate()}일`;
+}
+
+function groupRecordsByMonth(records: ArchiveRecord[]) {
+  const months = new Map<string, ArchiveRecord[]>();
+  for (const record of records) {
+    const parsed = new Date(record.at ?? Number.NaN);
+    const label = Number.isNaN(parsed.getTime())
+      ? "날짜 미상"
+      : `${parsed.getFullYear()}년 ${parsed.getMonth() + 1}월`;
+    months.set(label, [...(months.get(label) ?? []), record]);
+  }
+  return [...months.entries()];
 }

@@ -2,17 +2,28 @@
 schema: workflow-labs/task@1
 id: TASK-144
 title: 막힌 사유 절을 추측 없이 읽는 로컬 파서를 만든다
-status: completed
+status: verified
 source_spec_id: SPEC-053
 source_decision_id: DECISION-6723CEE0
-depends_on: [TASK-S052-02]
-scope_files: [src/features/projects/domain/documentSections.test.ts, src/features/projects/domain/documentSections.ts]
-updated_at: 2026-08-08T03:36:33.466487+00:00
+depends_on:
+- TASK-S052-02
+scope_files:
+- src/features/projects/domain/documentSections.test.ts
+- src/features/projects/domain/documentSections.ts
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-07T15:07:37Z, kind: created }
-  - { at: 2026-08-07T16:03:48Z, kind: in_progress }
-  - { at: 2026-08-07T16:08:21Z, kind: qa_waiting }
-  - { at: 2026-08-08T03:36:33.466487+00:00, kind: completed }
+- at: 2026-08-07T15:07:37Z
+  kind: created
+- at: 2026-08-07T16:03:48Z
+  kind: in_progress
+- at: 2026-08-07T16:08:21Z
+  kind: qa_waiting
+- at: 2026-08-08T03:36:33.466487+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6723CEE0
+work_group_revision: 1
 ---
 
 # 막힌 사유 절을 추측 없이 읽는 로컬 파서를 만든다

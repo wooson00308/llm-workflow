@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-016
 title: 쓰기 전 확인 화면을 값 나열에서 차이 표시로 전환
-status: completed
+status: verified
 source_spec_id: SPEC-005
 source_decision_id: DECISION-02EBD5DB
-updated_at: 2026-08-03T02:30:58.833989+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:30:58.833989+00:00, kind: completed }
+- at: 2026-08-03T02:30:58.833989+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-02EBD5DB
+work_group_revision: 1
 ---
 
 # 쓰기 전 확인 화면을 값 나열에서 차이 표시로 전환

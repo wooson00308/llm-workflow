@@ -2,19 +2,32 @@
 schema: workflow-labs/task@1
 id: TASK-096
 title: 레인 접힘을 화면에 붙이고 저장소와 잇는다
-status: completed
+status: verified
 source_spec_id: SPEC-029
 source_decision_id: DECISION-DD348ED0
-depends_on: [TASK-094, TASK-095]
-updated_at: 2026-08-04T16:13:47.709797+00:00
+depends_on:
+- TASK-094
+- TASK-095
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T11:30:00Z, kind: created }
-  - { at: 2026-08-04T13:05:17Z, kind: in_progress }
-  - { at: 2026-08-04T15:44:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T15:57:50.151698+00:00, kind: revision_requested }
-  - { at: 2026-08-04T15:59:30Z, kind: in_progress }
-  - { at: 2026-08-04T16:04:46Z, kind: qa_waiting }
-  - { at: 2026-08-04T16:13:47.709797+00:00, kind: completed }
+- at: 2026-08-04T11:30:00Z
+  kind: created
+- at: 2026-08-04T13:05:17Z
+  kind: in_progress
+- at: 2026-08-04T15:44:00Z
+  kind: qa_waiting
+- at: 2026-08-04T15:57:50.151698+00:00
+  kind: revision_requested
+- at: 2026-08-04T15:59:30Z
+  kind: in_progress
+- at: 2026-08-04T16:04:46Z
+  kind: qa_waiting
+- at: 2026-08-04T16:13:47.709797+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-DD348ED0
+work_group_revision: 1
 ---
 
 # 레인 접힘을 화면에 붙이고 저장소와 잇는다

@@ -25,8 +25,9 @@
 use std::collections::HashSet;
 
 use crate::domain::project::{
-    PendingRoleWorkDetail, RoleWorkVerdict, WorkflowItemSummary, WorkflowItems, DECOMPOSED,
-    DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, LEASED, OVERLAP, SPEC_EXISTS, SPEC_LEASED,
+    PendingRoleWorkDetail, RoleWorkVerdict, WorkGroupStatus, WorkflowItemSummary, WorkflowItems,
+    DECOMPOSED, DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, LEASED, OVERLAP, SPEC_EXISTS,
+    SPEC_LEASED,
 };
 
 /// 워크플로우 하나의 판정 재료. 스크립트가 워크플로우 하나 안에서 아이디어↔기획서, 결정↔작업을
@@ -45,6 +46,9 @@ pub struct WorkflowInput<'a> {
     /// 아직 처리되지 않은 작업 정의 수정 요청 판정 재료. 처리 여부와 대상 작업의 상태를
     /// 이 모듈이 판정하도록 원문 값을 함께 받는다.
     pub task_revision_requests: &'a [TaskRevisionRequestCandidate],
+    /// 현재 그룹 revision의 최신 사용자 QA 결정이 `revision_requested`인 후보. 이전 revision의
+    /// 결정은 저장소가 제외하고, 이 모듈은 역할 우선순위와 lease만 판단한다.
+    pub group_qa_revision_requests: &'a [GroupQaRevisionCandidate],
     /// `status: blocked`이면서 `blocked_kind: definition_error`인 작업 id. 작업 요약 payload에는
     /// `blocked_kind`가 없으므로 파일을 읽는 저장소가 이 집합을 만든다. 아키텍트는 이 집합의 작업을
     /// 사용자 수정 요청 없이 직접 고치고, 개발자는 같은 작업을 후보에서 제외한다.
@@ -76,9 +80,20 @@ pub struct TaskRevisionRequestCandidate {
     pub handled: bool,
 }
 
+/// 아키텍트가 새 그룹 revision과 수정 작업으로 답해야 하는 그룹 QA 반려 결정 하나.
+pub struct GroupQaRevisionCandidate {
+    pub id: String,
+    pub group_id: String,
+    pub created_at: String,
+}
+
 const SPEC_APPROVAL_KIND: &str = "spec_approval";
 const TASK_REVISION_REQUEST_KIND: &str = "task_revision_request";
 const BLOCKED_TASK_KIND: &str = "blocked_task";
+const GROUP_QA_REVISION_KIND: &str = "group_qa_revision";
+const WORK_GROUP_KIND: &str = "work_group";
+const SOURCE_DECISION_NOT_APPROVED: &str = "source-decision-not-approved";
+const WORK_GROUP_UNAVAILABLE: &str = "work-group-unavailable";
 
 /// `lease_ids`는 만료 전인 lease 파일 이름 집합이다. 스크립트도 만료된 lease를 선점으로 세지
 /// 않으므로, 죽은 세션이 남긴 lease는 어느 역할에서도 그 대상을 막지 않는다.
@@ -176,7 +191,7 @@ fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) ->
     verdict
 }
 
-/// 스크립트 `architect)` 절: 그 기획서의 최신 결정인 승인 중 파생 작업이 없고 `spec_id`로 lease가
+/// 스크립트 `architect)` 절: 그 기획서의 최신 결정인 승인 중 파생 그룹이 없고 `spec_id`로 lease가
 /// 없는 것. 최신 판정과 `created_by: user` 필터는 이 함수에 오기 전에 끝난다 — 앞의 것은
 /// `latest_approvals`가, 뒤의 것은 결정 문서를 읽는 `read_spec_decisions`가 한다. 스크립트도 같은
 /// 두 판정을 `architect)` 분기 안에서 한다(SPEC-028 R4·R5).
@@ -191,9 +206,9 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
     for (decision_id, spec_id) in workflow.approved_decisions {
         let decomposed = workflow
             .items
-            .tasks
+            .work_groups
             .iter()
-            .any(|task| task.source_decision_id.as_deref() == Some(decision_id.as_str()));
+            .any(|group| group.source_decision_id == *decision_id);
         if decomposed {
             verdict.exclude(decision_id, DECOMPOSED);
             continue;
@@ -214,14 +229,38 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
     verdict
 }
 
-/// 작업 정의 수정 요청을 모든 워크플로우에서 먼저 모은 뒤, 생성 시각이 이른 순서로 판정한다.
-/// 처리할 요청이 없으면 사용자 요청 없이 고칠 수 있는 `definition_error` 작업을 보고, 그마저 없을
-/// 때만 기존 승인 분해 판정으로 넘어간다. 과거 요청을 먼저 보는 순서는 기존 감사 기록과 예약
-/// 호환성을 보존한다.
+/// 그룹 QA 반려를 모든 워크플로우에서 가장 먼저 판정한다. 그다음 작업 정의 수정, lease가 끊긴
+/// `preparing` 그룹 복구, 신규 승인 분해 순으로 넘어간다. 사용자 승인 단위의 재작업이 내부 작업
+/// 정의 수정보다 앞서고, 이미 시작된 그룹 구성이 새 승인보다 앞선다는 역할 계약의 순서다.
 fn architect_workflows_verdict(
     workflows: &[WorkflowInput<'_>],
     lease_ids: &HashSet<String>,
 ) -> RoleWorkVerdict {
+    let mut group_revisions: Vec<(&str, &GroupQaRevisionCandidate)> = workflows
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .group_qa_revision_requests
+                .iter()
+                .map(move |request| (workflow.directory, request))
+        })
+        .collect();
+    group_revisions.sort_by(|(left_directory, left), (right_directory, right)| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left_directory.cmp(right_directory))
+    });
+
+    let mut verdict = RoleWorkVerdict::default();
+    for (_, request) in group_revisions {
+        if lease_ids.contains(&request.id) || lease_ids.contains(&request.group_id) {
+            verdict.exclude(&request.id, LEASED);
+            continue;
+        }
+        verdict.select_kind(&request.id, GROUP_QA_REVISION_KIND);
+    }
+
     let mut requests: Vec<(&str, &TaskRevisionRequestCandidate)> = workflows
         .iter()
         .flat_map(|workflow| {
@@ -245,7 +284,6 @@ fn architect_workflows_verdict(
         .map(|(_, request)| request.task_id.as_str())
         .collect();
 
-    let mut verdict = RoleWorkVerdict::default();
     for (_, request) in requests {
         if lease_ids.contains(&request.id) || lease_ids.contains(&request.task_id) {
             verdict.exclude(&request.id, LEASED);
@@ -277,6 +315,35 @@ fn architect_workflows_verdict(
         verdict.target_kind = direct_corrections.target_kind;
     }
 
+    let preparing_groups = judge_workflows(workflows, |workflow| {
+        let mut preparing = RoleWorkVerdict::default();
+        let mut groups: Vec<_> = workflow.items.work_groups.iter().collect();
+        groups.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        for group in groups {
+            if group.status != WorkGroupStatus::Preparing {
+                continue;
+            }
+            let source_qa_leased = group
+                .source_qa_decision_id
+                .as_ref()
+                .is_some_and(|id| lease_ids.contains(id));
+            if lease_ids.contains(&group.id)
+                || lease_ids.contains(&group.source_decision_id)
+                || source_qa_leased
+            {
+                preparing.exclude(&group.id, LEASED);
+                continue;
+            }
+            preparing.select_kind(&group.id, WORK_GROUP_KIND);
+        }
+        preparing
+    });
+    verdict.candidates.extend(preparing_groups.candidates);
+    if verdict.target.is_none() && preparing_groups.target.is_some() {
+        verdict.target = preparing_groups.target;
+        verdict.target_kind = preparing_groups.target_kind;
+    }
+
     let approvals = judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids));
     verdict.candidates.extend(approvals.candidates);
     if verdict.target.is_none() {
@@ -301,6 +368,10 @@ fn architect_workflows_verdict(
 ///
 /// 후보가 아닌 작업은 목록에도 오르지 않는다. 스크립트도 세 후보 상태 밖의 문서와
 /// `definition_error` 작업을 후보 행으로 만들지 않으므로, 그 문서에는 낼 제외 사유가 없다.
+/// 후보 상태인 작업의 원천 결정이 더는 최신 승인이 아니면 `source-decision-not-approved`, active
+/// 그룹에 속하지 않거나 그룹보다 새 revision을 가리키면 `work-group-unavailable`로 제외한다.
+/// 전자는 승인 뒤 반려된 범위를 자동 실행하는 일을, 후자는 아키텍트가 `preparing`을 끝내기 전에
+/// 개발 세션이 시작되는 경쟁과 고아 task를 개발자가 임의로 해석하는 일을 막는다.
 ///
 /// 마지막 조건은 잡힌 lease가 있을 때만 개입한다. 활성 lease가 하나도 없으면 `overlap_blocked`가
 /// 비어 있어 판정이 이 조건이 없던 때와 같다(SPEC-032 R9).
@@ -323,6 +394,67 @@ fn developer_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
         }
         if workflow.overlap_blocked.contains(&task.id) {
             verdict.exclude(&task.id, OVERLAP);
+            continue;
+        }
+        let referenced_group = task.work_group_id.as_deref().and_then(|group_id| {
+            workflow
+                .items
+                .work_groups
+                .iter()
+                .find(|group| group.id == group_id)
+        });
+        let migrated_legacy_source = referenced_group.is_some_and(|group| {
+            let task_decision_matches = task.source_decision_id.as_deref().is_none_or(|source| {
+                source.starts_with("LEGACY-") && source == group.source_decision_id
+            });
+            let task_spec_matches = task
+                .source_spec_id
+                .as_deref()
+                .is_none_or(|source| source == group.source_spec_id);
+            let task_revision_available = task
+                .work_group_revision
+                .is_some_and(|revision| revision > 0 && revision <= group.revision);
+            group.status == WorkGroupStatus::Active
+                && group.id.starts_with("GROUP-")
+                && group.id.ends_with("-LEGACY")
+                && group.source_decision_id.starts_with("LEGACY-")
+                && !group.source_spec_id.is_empty()
+                && task_decision_matches
+                && task_spec_matches
+                && task_revision_available
+        });
+        let source_approved = task.source_decision_id.as_deref().is_some_and(|source| {
+            workflow
+                .approved_decisions
+                .iter()
+                .any(|(decision_id, spec_id)| {
+                    decision_id == source
+                        && task.source_spec_id.as_deref() == Some(spec_id.as_str())
+                })
+        }) || migrated_legacy_source;
+        if !source_approved {
+            verdict.exclude(&task.id, SOURCE_DECISION_NOT_APPROVED);
+            continue;
+        }
+        let group_available = task
+            .work_group_id
+            .as_deref()
+            .zip(task.work_group_revision)
+            .is_some_and(|(group_id, task_revision)| {
+                task_revision > 0
+                    && referenced_group.is_some_and(|group| {
+                        let native_origin_matches = task.source_spec_id.as_deref()
+                            == Some(group.source_spec_id.as_str())
+                            && task.source_decision_id.as_deref()
+                                == Some(group.source_decision_id.as_str());
+                        group.id == group_id
+                            && group.status == WorkGroupStatus::Active
+                            && group.revision >= task_revision
+                            && (native_origin_matches || migrated_legacy_source)
+                    })
+            });
+        if !group_available {
+            verdict.exclude(&task.id, WORK_GROUP_UNAVAILABLE);
             continue;
         }
         verdict.select(&task.id);
@@ -517,23 +649,149 @@ mod tests {
     }
 
     fn write_task(workflow_root: &Path, id: &str, status: &str, source_decision_id: Option<&str>) {
-        let source = source_decision_id
-            .map(|value| format!("source_decision_id: {value}\n"))
-            .unwrap_or_default();
+        ensure_default_work_group(workflow_root);
+        let source_decision_id = source_decision_id.unwrap_or("DECISION-DEFAULT");
+        if source_decision_id == "DECISION-DEFAULT" {
+            ensure_default_approval(workflow_root);
+        }
         fs::write(
             workflow_root.join(format!("tasks/{id}.md")),
-            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\n{source}updated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
         )
         .expect("write task");
     }
 
+    fn write_task_for_work_group(
+        workflow_root: &Path,
+        id: &str,
+        status: &str,
+        group_id: &str,
+        group_revision: u32,
+    ) {
+        ensure_default_approval(workflow_root);
+        write_task_with_group_source(
+            workflow_root,
+            id,
+            status,
+            group_id,
+            group_revision,
+            Some("DECISION-DEFAULT"),
+        );
+    }
+
+    fn write_task_with_group_source(
+        workflow_root: &Path,
+        id: &str,
+        status: &str,
+        group_id: &str,
+        group_revision: u32,
+        source_decision_id: Option<&str>,
+    ) {
+        let source = source_decision_id
+            .map(|source| format!("source_decision_id: {source}\n"))
+            .unwrap_or_default();
+        fs::write(
+            workflow_root.join(format!("tasks/{id}.md")),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\n{source}work_group_id: {group_id}\nwork_group_revision: {group_revision}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+        )
+        .expect("write task for work group");
+    }
+
+    fn ensure_default_work_group(workflow_root: &Path) {
+        let path = workflow_root.join("groups/GROUP-DEFAULT.md");
+        if path.is_file() {
+            return;
+        }
+        fs::create_dir_all(path.parent().expect("groups root")).expect("groups root");
+        fs::write(
+            path,
+            "---\nschema: workflow-labs/work-group@1\nid: GROUP-DEFAULT\ntitle: 기본 작업 그룹\nstatus: active\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-DEFAULT\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 기본 작업 그룹\n",
+        )
+        .expect("default work group");
+    }
+
+    fn ensure_default_approval(workflow_root: &Path) {
+        let path = workflow_root.join("decisions/DECISION-DEFAULT.md");
+        if path.is_file() {
+            return;
+        }
+        fs::create_dir_all(path.parent().expect("decisions root")).expect("decisions root");
+        fs::write(
+            path,
+            "---\nschema: workflow-labs/decision@1\nid: DECISION-DEFAULT\nspec_id: SPEC-001\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n",
+        )
+        .expect("default approval");
+    }
+
+    fn write_work_group(
+        workflow_root: &Path,
+        id: &str,
+        status: &str,
+        revision: u32,
+        source_decision_id: &str,
+        source_qa_decision_id: Option<&str>,
+    ) {
+        let source_qa = source_qa_decision_id
+            .map(|value| format!("source_qa_decision_id: {value}\n"))
+            .unwrap_or_default();
+        fs::write(
+            workflow_root.join(format!("groups/{id}.md")),
+            format!("---\nschema: workflow-labs/work-group@1\nid: {id}\ntitle: 작업 그룹\nstatus: {status}\nrevision: {revision}\nqa_mode: user\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\n{source_qa}created_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 작업 그룹\n\n### QA-01 · 화면 확인\n\n화면에서 결과를 확인한다.\n"),
+        )
+        .expect("write work group");
+    }
+
+    fn write_group_qa_revision_request(
+        workflow_root: &Path,
+        id: &str,
+        group_id: &str,
+        revision: u32,
+        at: &str,
+    ) {
+        write_group_qa_decision(
+            workflow_root,
+            id,
+            id,
+            group_id,
+            revision,
+            "revision_requested",
+            Some(&format!("REQUEST-{id}")),
+            at,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_group_qa_decision(
+        workflow_root: &Path,
+        file_name: &str,
+        id: &str,
+        group_id: &str,
+        revision: u32,
+        outcome: &str,
+        request_id: Option<&str>,
+        at: &str,
+    ) {
+        let request = request_id
+            .map(|value| format!("request_id: {value}\n"))
+            .unwrap_or_default();
+        fs::write(
+            workflow_root.join(format!("decisions/{file_name}.md")),
+            format!("---\nschema: workflow-labs/group-qa-decision@1\nid: {id}\ngroup_id: {group_id}\ngroup_revision: {revision}\noutcome: {outcome}\n{request}created_by: user\ncreated_at: {at}\n---\n\n결과를 기록합니다.\n"),
+        )
+        .expect("write group QA decision");
+    }
+
     fn write_blocked_task(workflow_root: &Path, id: &str, blocked_kind: Option<&str>) {
+        ensure_default_work_group(workflow_root);
+        if blocked_kind != Some("definition_error") {
+            ensure_default_approval(workflow_root);
+        }
         let kind = blocked_kind
             .map(|value| format!("blocked_kind: {value}\n"))
             .unwrap_or_default();
         fs::write(
             workflow_root.join(format!("tasks/{id}.md")),
-            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: blocked\nsource_spec_id: SPEC-001\n{kind}updated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: blocked\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\n{kind}updated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
         )
         .expect("write blocked task");
     }
@@ -546,9 +804,11 @@ mod tests {
         status: &str,
         declaration: &str,
     ) {
+        ensure_default_work_group(workflow_root);
+        ensure_default_approval(workflow_root);
         fs::write(
             workflow_root.join(format!("tasks/{id}.md")),
-            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\ndepends_on: {declaration}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\ndepends_on: {declaration}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
         )
         .expect("write task with declaration");
     }
@@ -556,9 +816,11 @@ mod tests {
     /// `updated_at`을 부르는 쪽이 정하는 작업. 목록 정렬과 판정 차례가 갈리는지 보는 시나리오가
     /// 쓴다.
     fn write_task_updated_at(workflow_root: &Path, id: &str, status: &str, updated_at: &str) {
+        ensure_default_work_group(workflow_root);
+        ensure_default_approval(workflow_root);
         fs::write(
             workflow_root.join(format!("tasks/{id}.md")),
-            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nupdated_at: {updated_at}\n---\n\n작업 본문\n"),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\nupdated_at: {updated_at}\n---\n\n작업 본문\n"),
         )
         .expect("write task with updated_at");
     }
@@ -566,9 +828,11 @@ mod tests {
     /// 겹침 선언을 가진 작업. `scope`는 `scope_files:` 뒤에 그대로 놓이는 원문이라 형식 오류
     /// 시나리오도 같은 헬퍼가 쓴다. 계약대로 키는 열 0에서 시작한다(SPEC-032 R1).
     fn write_task_with_scope(workflow_root: &Path, id: &str, status: &str, scope: &str) {
+        ensure_default_work_group(workflow_root);
+        ensure_default_approval(workflow_root);
         fs::write(
             workflow_root.join(format!("tasks/{id}.md")),
-            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nscope_files: {scope}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\nscope_files: {scope}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
         )
         .expect("write task with scope");
     }
@@ -647,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn an_approved_decision_without_tasks_is_architect_work() {
+    fn an_approved_decision_without_a_group_is_architect_work() {
         let (root, workflow_root) = project();
         write_decision(
             &workflow_root,
@@ -667,6 +931,263 @@ mod tests {
             detail.architect.target_kind.as_deref(),
             Some("spec_approval")
         );
+    }
+
+    #[test]
+    fn group_qa_rework_precedes_task_corrections_preparing_recovery_and_new_approval() {
+        let (root, workflow_root) = project();
+        write_work_group(
+            &workflow_root,
+            "GROUP-REWORK",
+            "active",
+            1,
+            "DECISION-ORIGINAL",
+            None,
+        );
+        write_group_qa_revision_request(
+            &workflow_root,
+            "GROUP-QA-001",
+            "GROUP-REWORK",
+            1,
+            "2026-08-01T00:00:00Z",
+        );
+        write_task(&workflow_root, "TASK-HISTORICAL", "todo", None);
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-HISTORICAL",
+            "2026-08-02T00:00:00Z",
+        );
+        write_blocked_task(&workflow_root, "TASK-DIRECT", Some("definition_error"));
+        write_work_group(
+            &workflow_root,
+            "GROUP-PREPARING",
+            "preparing",
+            1,
+            "DECISION-PREPARING",
+            None,
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-NEW",
+            "SPEC-NEW",
+            "approved",
+            "2026-08-03T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-QA-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("group_qa_revision")
+        );
+        assert_eq!(
+            candidate_lines(&detail.architect),
+            [
+                "eligible GROUP-QA-001",
+                "eligible REVISION-001",
+                "eligible TASK-DIRECT",
+                "eligible GROUP-PREPARING",
+                "decomposed DECISION-DEFAULT",
+                "eligible DECISION-NEW",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_interrupted_preparing_group_is_recovered_by_group_id() {
+        let (root, workflow_root) = project();
+        write_work_group(
+            &workflow_root,
+            "GROUP-001",
+            "preparing",
+            1,
+            "DECISION-001",
+            Some("GROUP-QA-000"),
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-001"));
+        assert_eq!(detail.architect.target_kind.as_deref(), Some("work_group"));
+        assert_eq!(candidate_lines(&detail.architect), ["eligible GROUP-001"]);
+    }
+
+    #[test]
+    fn any_live_group_source_lease_suppresses_preparing_recovery() {
+        for leased_target in ["GROUP-001", "DECISION-001", "GROUP-QA-000"] {
+            let (root, workflow_root) = project();
+            write_work_group(
+                &workflow_root,
+                "GROUP-001",
+                "preparing",
+                1,
+                "DECISION-001",
+                Some("GROUP-QA-000"),
+            );
+            write_lease(root.path(), leased_target, &future());
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(detail.architect.target, None, "{leased_target}");
+            assert_eq!(
+                candidate_lines(&detail.architect),
+                ["leased GROUP-001"],
+                "{leased_target}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_same_revision_source_qa_link_does_not_hide_the_current_rejection() {
+        let (root, workflow_root) = project();
+        write_work_group(
+            &workflow_root,
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-001",
+            Some("GROUP-QA-001"),
+        );
+        write_group_qa_revision_request(
+            &workflow_root,
+            "GROUP-QA-001",
+            "GROUP-001",
+            1,
+            "2026-08-01T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-QA-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("group_qa_revision")
+        );
+    }
+
+    #[test]
+    fn group_qa_latest_selection_matches_rfc3339_instant_and_file_name_parity() {
+        let (root, workflow_root) = project();
+        for group in ["GROUP-001", "GROUP-002", "GROUP-003"] {
+            write_work_group(&workflow_root, group, "active", 1, "DECISION-001", None);
+        }
+
+        // Equal instants use file name, even when the raw offset timestamp sorts the other way.
+        for (file, group, outcome, at) in [
+            (
+                "GROUP-QA-G1-A",
+                "GROUP-001",
+                "revision_requested",
+                "2026-08-01T09:00:00+09:00",
+            ),
+            (
+                "GROUP-QA-G1-Z",
+                "GROUP-001",
+                "confirmed",
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                "GROUP-QA-G2-A",
+                "GROUP-002",
+                "confirmed",
+                "2026-08-01T09:00:00+09:00",
+            ),
+            (
+                "GROUP-QA-G2-Z",
+                "GROUP-002",
+                "revision_requested",
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                "GROUP-QA-G3-A",
+                "GROUP-003",
+                "revision_requested",
+                "2026-08-01T01:00:00+02:00",
+            ),
+            (
+                "GROUP-QA-G3-Z",
+                "GROUP-003",
+                "confirmed",
+                "2026-08-01T00:30:00Z",
+            ),
+        ] {
+            write_group_qa_decision(
+                &workflow_root,
+                file,
+                file,
+                group,
+                1,
+                outcome,
+                Some(&format!("REQUEST-{file}")),
+                at,
+            );
+        }
+        write_group_qa_decision(
+            &workflow_root,
+            "GROUP-QA-G2-ZZ-MISSING-REQUEST",
+            "GROUP-QA-G2-ZZ-MISSING-REQUEST",
+            "GROUP-002",
+            1,
+            "revision_requested",
+            None,
+            "2026-08-03T00:00:00Z",
+        );
+        write_group_qa_decision(
+            &workflow_root,
+            "GROUP-QA-G2-ZZZ-BAD-TIME",
+            "GROUP-QA-G2-ZZZ-BAD-TIME",
+            "GROUP-002",
+            1,
+            "revision_requested",
+            Some("REQUEST-BAD-TIME"),
+            "not-an-rfc3339-instant",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-QA-G2-Z"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("group_qa_revision")
+        );
+        assert_eq!(
+            candidate_lines(&detail.architect),
+            ["eligible GROUP-QA-G2-Z"]
+        );
+    }
+
+    #[test]
+    fn a_live_decision_or_group_lease_hides_group_qa_rework() {
+        for leased_target in ["GROUP-QA-001", "GROUP-001"] {
+            let (root, workflow_root) = project();
+            write_work_group(
+                &workflow_root,
+                "GROUP-001",
+                "active",
+                1,
+                "DECISION-001",
+                None,
+            );
+            write_group_qa_revision_request(
+                &workflow_root,
+                "GROUP-QA-001",
+                "GROUP-001",
+                1,
+                "2026-08-01T00:00:00Z",
+            );
+            write_lease(root.path(), leased_target, &future());
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(detail.architect.target, None, "{leased_target}");
+            assert_eq!(
+                candidate_lines(&detail.architect),
+                ["leased GROUP-QA-001"],
+                "{leased_target}"
+            );
+        }
     }
 
     #[test]
@@ -821,8 +1342,9 @@ mod tests {
         );
         link_handled_revision_request(&workflow_root, "TASK-HANDLED", "REVISION-HANDLED");
         for (task, request, status, day) in [
-            ("TASK-QA", "REVISION-QA", "qa_waiting", "02"),
-            ("TASK-DONE", "REVISION-DONE", "completed", "03"),
+            ("TASK-VERIFIED", "REVISION-VERIFIED", "verified", "02"),
+            // v1 상태는 마이그레이션·감사 읽기 호환 대상으로만 남고 활성 수정 후보가 아니다.
+            ("TASK-LEGACY", "REVISION-LEGACY", "completed", "03"),
         ] {
             write_task(&workflow_root, task, status, None);
             write_task_revision_request(
@@ -889,7 +1411,10 @@ mod tests {
             let detail = detail_matching_condition_script(root.path());
 
             assert_eq!(detail.architect.target, None, "{leased_target}");
-            assert_eq!(candidate_lines(&detail.architect), ["leased REVISION-001"]);
+            assert_eq!(
+                candidate_lines(&detail.architect),
+                ["leased REVISION-001", "decomposed DECISION-DEFAULT"]
+            );
         }
 
         let (root, workflow_root) = project();
@@ -915,11 +1440,13 @@ mod tests {
             "approved",
             "2026-08-01T00:00:00Z",
         );
-        write_task(
+        write_work_group(
             &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-001"),
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-001",
+            None,
         );
 
         assert!(!assert_matches_condition_script(root.path()).architect);
@@ -983,11 +1510,13 @@ mod tests {
             "approved",
             "2026-08-01T00:00:00Z",
         );
-        write_task(
+        write_work_group(
             &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-001"),
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-001",
+            None,
         );
         write_decision(
             &workflow_root,
@@ -1020,11 +1549,13 @@ mod tests {
             "approved",
             "2026-08-02T00:00:00Z",
         );
-        write_task(
+        write_work_group(
             &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-002"),
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-002",
+            None,
         );
 
         assert!(!assert_matches_condition_script(root.path()).architect);
@@ -1051,11 +1582,13 @@ mod tests {
             "approved",
             "2026-08-01T00:00:00Z",
         );
-        write_task(
+        write_work_group(
             &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-002"),
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-002",
+            None,
         );
 
         assert!(assert_matches_condition_script(root.path()).architect);
@@ -1080,11 +1613,13 @@ mod tests {
             "approved",
             "2026-08-04T09:32:00Z",
         );
-        write_task(
+        write_work_group(
             &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-001"),
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-001",
+            None,
         );
         write_decision(
             &workflow_root,
@@ -1170,27 +1705,15 @@ mod tests {
     #[test]
     fn a_todo_task_is_developer_work() {
         let (root, workflow_root) = project();
-        write_task(&workflow_root, "TASK-001", "todo", Some("DECISION-001"));
-        write_decision(
-            &workflow_root,
-            "DECISION-001",
-            "SPEC-001",
-            "approved",
-            "2026-08-01T00:00:00Z",
-        );
+        write_task(&workflow_root, "TASK-001", "todo", None);
 
         assert!(assert_matches_condition_script(root.path()).developer);
     }
 
     #[test]
-    fn a_qa_waiting_task_is_not_developer_work() {
+    fn a_verified_task_is_not_developer_work() {
         let (root, workflow_root) = project();
-        write_task(
-            &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-001"),
-        );
+        write_task(&workflow_root, "TASK-001", "verified", Some("DECISION-001"));
         write_decision(
             &workflow_root,
             "DECISION-001",
@@ -1218,18 +1741,27 @@ mod tests {
         assert!(!assert_matches_condition_script(root.path()).developer);
     }
 
-    /// 선행이 `qa_waiting`·`completed`면 후행이 열린다. 선언을 보지 않던 구현도 여기서는 같은 답을
-    /// 내므로, 이 시나리오만으로는 배선을 고정하지 못한다. 아래 미충족 시나리오와 짝이다.
+    /// 선행이 AI 구현·자동검증을 마친 `verified`면 후행이 열린다. 선언을 보지 않던 구현도 여기서는
+    /// 같은 답을 내므로, 이 시나리오만으로는 배선을 고정하지 못한다. 아래 미충족 시나리오와 짝이다.
     #[test]
     fn a_todo_task_with_satisfied_dependencies_is_developer_work() {
-        for satisfied in ["qa_waiting", "completed"] {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "verified", None);
+        write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-001]");
+
+        assert!(assert_matches_condition_script(root.path()).developer);
+    }
+
+    #[test]
+    fn legacy_task_qa_states_do_not_satisfy_v2_dependencies() {
+        for legacy_status in ["qa_waiting", "completed"] {
             let (root, workflow_root) = project();
-            write_task(&workflow_root, "TASK-001", satisfied, None);
+            write_task(&workflow_root, "TASK-001", legacy_status, None);
             write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-001]");
 
             assert!(
-                assert_matches_condition_script(root.path()).developer,
-                "선행이 {satisfied}인데 후행이 열리지 않았다"
+                !assert_matches_condition_script(root.path()).developer,
+                "v1 상태 {legacy_status}가 v2 선행 완료로 읽혔다"
             );
         }
     }
@@ -1276,10 +1808,10 @@ mod tests {
         write_task_with_declaration(&workflow_root, "TASK-001", "todo", "[TASK-001]");
         assert!(!assert_matches_condition_script(root.path()).developer);
 
-        // 두 작업이 서로를 참조하는 순환. 선행이 `completed`여도 고리가 우선이다.
+        // 두 작업이 서로를 참조하는 순환. 선행이 `verified`여도 고리가 우선이다.
         let (root, workflow_root) = project();
         write_task_with_declaration(&workflow_root, "TASK-001", "todo", "[TASK-002]");
-        write_task_with_declaration(&workflow_root, "TASK-002", "completed", "[TASK-001]");
+        write_task_with_declaration(&workflow_root, "TASK-002", "verified", "[TASK-001]");
         assert!(!assert_matches_condition_script(root.path()).developer);
     }
 
@@ -1289,7 +1821,7 @@ mod tests {
     fn a_malformed_declaration_is_not_developer_work() {
         for declaration in ["TASK-001", "[\"TASK-001\"]", "[TASK-001", "[TASK-001, ]"] {
             let (root, workflow_root) = project();
-            write_task(&workflow_root, "TASK-002", "completed", None);
+            write_task(&workflow_root, "TASK-002", "verified", None);
             write_task_with_declaration(&workflow_root, "TASK-001", "todo", declaration);
 
             assert!(
@@ -1300,8 +1832,8 @@ mod tests {
     }
 
     /// 만료 lease와의 조합(TASK-055 기준 유지). 만료된 lease는 선점이 아니므로 충족된 선언을 가진
-    /// 작업은 열린다. 후반의 `in_progress` 선행은 미충족 그대로이고 — `dep_satisfied`는 여전히
-    /// `qa_waiting`·`completed`만 센다 — 그럼에도 판정이 열리는 것은 그 선행 자신이 회수 대상이기
+    /// 작업은 열린다. 후반의 `in_progress` 선행은 미충족 그대로이고 — `dep_satisfied`는 이제
+    /// `verified`만 센다 — 그럼에도 판정이 열리는 것은 그 선행 자신이 회수 대상이기
     /// 때문이다(SPEC-035 R1). 멈춘 작업 하나가 자기를 기다리는 작업까지 함께 막던 자리가 여기다.
     ///
     /// TASK-055가 세운 후반의 기대값을 이 작업이 뒤집었다. 미충족 선언이 lease가 사라져도 미충족인
@@ -1310,7 +1842,7 @@ mod tests {
     #[test]
     fn an_expired_lease_leaves_both_the_declaration_and_the_stalled_task_open() {
         let (root, workflow_root) = project();
-        write_task(&workflow_root, "TASK-001", "qa_waiting", None);
+        write_task(&workflow_root, "TASK-001", "verified", None);
         write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-001]");
         write_lease(root.path(), "TASK-002", &past());
         assert!(assert_matches_condition_script(root.path()).developer);
@@ -1327,7 +1859,7 @@ mod tests {
     #[test]
     fn a_lease_still_hides_a_task_whose_dependencies_are_satisfied() {
         let (root, workflow_root) = project();
-        write_task(&workflow_root, "TASK-001", "qa_waiting", None);
+        write_task(&workflow_root, "TASK-001", "verified", None);
         write_task_with_declaration(&workflow_root, "TASK-002", "todo", "[TASK-001]");
         write_lease(root.path(), "TASK-002", &future());
 
@@ -1703,9 +2235,9 @@ mod tests {
         assert_eq!(pending, PendingRoleWork::default());
     }
 
-    /// 판정은 워크플로우별이다. 다른 워크플로우의 결정과 작업을 짝지으면 스크립트와 갈라진다.
+    /// 판정은 워크플로우별이다. 다른 워크플로우의 결정과 그룹을 짝지으면 스크립트와 갈라진다.
     #[test]
-    fn a_task_does_not_decompose_a_decision_from_another_workflow() {
+    fn a_work_group_does_not_decompose_a_decision_from_another_workflow() {
         let root = tempdir().expect("temp project");
         let repository = FileSystemProjectRepository;
         let first = repository
@@ -1732,7 +2264,7 @@ mod tests {
             "approved",
             "2026-08-01T00:00:00Z",
         );
-        write_task(&second_root, "TASK-001", "qa_waiting", Some("DECISION-001"));
+        write_work_group(&second_root, "GROUP-001", "active", 1, "DECISION-001", None);
 
         assert!(assert_matches_condition_script(root.path()).architect);
     }
@@ -1925,12 +2457,7 @@ mod tests {
             "revision_requested",
             "2026-08-01T00:00:00Z",
         );
-        write_task(
-            &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-001"),
-        );
+        write_task(&workflow_root, "TASK-001", "verified", Some("DECISION-001"));
 
         assert!(assert_matches_condition_script(root.path()).planner);
     }
@@ -2120,11 +2647,13 @@ mod tests {
                 "2026-08-01T00:00:00Z",
             );
         }
-        write_task(
+        write_work_group(
             &workflow_root,
-            "TASK-001",
-            "qa_waiting",
-            Some("DECISION-A01"),
+            "GROUP-001",
+            "active",
+            1,
+            "DECISION-A01",
+            None,
         );
         write_lease(root.path(), "SPEC-002", &future());
 
@@ -2164,6 +2693,232 @@ mod tests {
                 "eligible TASK-004",
             ]
         );
+    }
+
+    /// v2 개발 작업은 활성 그룹의 현재 revision 범위 안에서만 실행한다. 그룹이 없거나 아직
+    /// preparing이거나, task가 그룹보다 새 revision을 가리키는 세 경우를 같은 제외 사유로
+    /// 닫는다. 대조 헬퍼가 Rust 판정과 현재 플랫폼의 SH/PowerShell JSON 후보를 함께 비교한다.
+    #[test]
+    fn developer_excludes_tasks_without_an_available_active_work_group() {
+        for (name, group) in [
+            ("orphan", None),
+            ("preparing", Some(("preparing", 1))),
+            ("newer-task-revision", Some(("active", 1))),
+        ] {
+            let (root, workflow_root) = project();
+            if let Some((status, revision)) = group {
+                write_work_group(
+                    &workflow_root,
+                    "GROUP-UNAVAILABLE",
+                    status,
+                    revision,
+                    "DECISION-001",
+                    None,
+                );
+            }
+            let task_revision = if name == "newer-task-revision" { 2 } else { 1 };
+            write_task_for_work_group(
+                &workflow_root,
+                "TASK-001",
+                "todo",
+                "GROUP-UNAVAILABLE",
+                task_revision,
+            );
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(detail.developer.target, None, "{name}");
+            assert_eq!(
+                candidate_lines(&detail.developer),
+                ["work-group-unavailable TASK-001"],
+                "{name}"
+            );
+        }
+    }
+
+    /// Active 그룹 자체는 승인 게이트를 대신하지 않는다. 원천 승인 뒤 같은 기획서에 수정 요청이
+    /// 붙으면 그 승인의 task를 닫고, source와 그룹이 둘 다 유효하지 않은 경우에도 세 구현은 source
+    /// 사유를 먼저 낸다.
+    #[test]
+    fn developer_excludes_tasks_whose_source_is_no_longer_the_latest_approval() {
+        let (root, workflow_root) = project();
+        write_decision(
+            &workflow_root,
+            "DECISION-OLD",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-NEW",
+            "SPEC-001",
+            "revision_requested",
+            "2026-08-02T00:00:00Z",
+        );
+        write_work_group(
+            &workflow_root,
+            "GROUP-ACTIVE",
+            "active",
+            1,
+            "DECISION-OLD",
+            None,
+        );
+        write_task_with_group_source(
+            &workflow_root,
+            "TASK-001",
+            "todo",
+            "GROUP-ACTIVE",
+            1,
+            Some("DECISION-OLD"),
+        );
+        write_task_with_group_source(
+            &workflow_root,
+            "TASK-002",
+            "todo",
+            "GROUP-MISSING",
+            1,
+            Some("DECISION-OLD"),
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            [
+                "source-decision-not-approved TASK-001",
+                "source-decision-not-approved TASK-002",
+            ]
+        );
+    }
+
+    /// Task와 group이 각각 유효한 최신 승인을 가리켜도 서로 다른 원천이면 그 그룹에서 실행할 수
+    /// 없다. source 승인 검사는 통과하므로 이 교차 연결은 group 사유로 닫힌다.
+    #[test]
+    fn developer_excludes_a_task_linked_to_a_group_from_another_approval() {
+        let (root, workflow_root) = project();
+        write_decision(
+            &workflow_root,
+            "DECISION-A",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-B",
+            "SPEC-002",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_work_group(&workflow_root, "GROUP-B", "active", 1, "DECISION-B", None);
+        let group_path = workflow_root.join("groups/GROUP-B.md");
+        let group = fs::read_to_string(&group_path).expect("group B");
+        fs::write(
+            group_path,
+            group.replace("source_spec_id: SPEC-001", "source_spec_id: SPEC-002"),
+        )
+        .expect("group B source spec");
+        write_task_with_group_source(
+            &workflow_root,
+            "TASK-001",
+            "todo",
+            "GROUP-B",
+            1,
+            Some("DECISION-A"),
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            ["work-group-unavailable TASK-001"]
+        );
+    }
+
+    #[test]
+    fn developer_requires_the_source_decision_and_spec_to_be_the_same_approval_pair() {
+        let (root, workflow_root) = project();
+        write_decision(
+            &workflow_root,
+            "DECISION-A",
+            "SPEC-001",
+            "approved",
+            "2026-08-02T00:00:00Z",
+        );
+        write_work_group(&workflow_root, "GROUP-A", "active", 1, "DECISION-A", None);
+        let group_path = workflow_root.join("groups/GROUP-A.md");
+        let group = fs::read_to_string(&group_path).expect("group A");
+        fs::write(
+            group_path,
+            group.replace("source_spec_id: SPEC-001", "source_spec_id: SPEC-WRONG"),
+        )
+        .expect("wrong group source spec");
+        fs::write(
+            workflow_root.join("tasks/TASK-001.md"),
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\ntitle: 작업\nstatus: todo\nsource_spec_id: SPEC-WRONG\nsource_decision_id: DECISION-A\nwork_group_id: GROUP-A\nwork_group_revision: 1\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n",
+        )
+        .expect("task with relabeled spec");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            ["source-decision-not-approved TASK-001"]
+        );
+    }
+
+    /// v1 source_spec/task fallback은 사용자 승인을 위조하지 않는다. 결정적인 legacy 그룹과 그
+    /// synthetic source가 정확히 짝을 이룰 때만, absent 또는 migration이 채운 task source를
+    /// 허용한다. 접두사만 같은 불일치 값은 일반 승인 게이트에 걸린다.
+    #[test]
+    fn developer_allows_only_the_deterministic_migration_source_exception() {
+        for (name, source, task_revision, expected) in [
+            ("absent", None, 1, "eligible TASK-001"),
+            ("matching", Some("LEGACY-SPEC-001"), 1, "eligible TASK-001"),
+            (
+                "mismatched",
+                Some("LEGACY-OTHER"),
+                1,
+                "source-decision-not-approved TASK-001",
+            ),
+            (
+                "future-revision",
+                Some("LEGACY-SPEC-001"),
+                2,
+                "source-decision-not-approved TASK-001",
+            ),
+        ] {
+            let (root, workflow_root) = project();
+            write_work_group(
+                &workflow_root,
+                "GROUP-SPEC-001-LEGACY",
+                "active",
+                1,
+                "LEGACY-SPEC-001",
+                None,
+            );
+            write_task_with_group_source(
+                &workflow_root,
+                "TASK-001",
+                "todo",
+                "GROUP-SPEC-001-LEGACY",
+                task_revision,
+                source,
+            );
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(candidate_lines(&detail.developer), [expected], "{name}");
+            assert_eq!(
+                detail.developer.target.is_some(),
+                name == "absent" || name == "matching",
+                "{name}"
+            );
+        }
     }
 
     /// 대상이 없으면 목록이 그 역할이 본 후보 전부다. 위 개발자 픽스처에서 대상 하나만 뺀 것이고,
@@ -2242,6 +2997,7 @@ mod tests {
             items: &items,
             approved_decisions: &approved,
             task_revision_requests: &[],
+            group_qa_revision_requests: &[],
             definition_error_tasks: &definition_errors,
             revision_requested_decisions: &[],
             unsatisfied_dependencies: &unsatisfied,

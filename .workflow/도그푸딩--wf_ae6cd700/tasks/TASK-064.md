@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-064
 title: 관리 블록 안 다른 프로젝트의 잡을 원문 그대로 보존한다
-status: completed
+status: verified
 source_spec_id: SPEC-022
 source_decision_id: DECISION-7A3E5B90
-depends_on: [TASK-063]
-updated_at: 2026-08-04T11:43:19.071446+00:00
+depends_on:
+- TASK-063
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:37:00Z, kind: created }
-  - { at: 2026-08-04T08:57:15Z, kind: in_progress }
-  - { at: 2026-08-04T09:09:30Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:19.071446+00:00, kind: completed }
+- at: 2026-08-04T08:37:00Z
+  kind: created
+- at: 2026-08-04T08:57:15Z
+  kind: in_progress
+- at: 2026-08-04T09:09:30Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:19.071446+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-7A3E5B90
+work_group_revision: 1
 ---
 
 # 관리 블록 안 다른 프로젝트의 잡을 원문 그대로 보존한다

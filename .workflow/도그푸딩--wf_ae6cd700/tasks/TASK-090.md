@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-090
 title: 문서뷰가 개행 한 번을 줄바꿈으로 그리는 옵트인 경로를 만든다
-status: completed
+status: verified
 source_spec_id: SPEC-027
 source_decision_id: DECISION-6F1B8C53
-updated_at: 2026-08-04T11:42:32.423949+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T10:08:00Z, kind: created }
-  - { at: 2026-08-04T10:12:29Z, kind: in_progress }
-  - { at: 2026-08-04T10:16:40Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:32.423949+00:00, kind: completed }
+- at: 2026-08-04T10:08:00Z
+  kind: created
+- at: 2026-08-04T10:12:29Z
+  kind: in_progress
+- at: 2026-08-04T10:16:40Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:32.423949+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6F1B8C53
+work_group_revision: 1
 ---
 
 # 문서뷰가 개행 한 번을 줄바꿈으로 그리는 옵트인 경로를 만든다

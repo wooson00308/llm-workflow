@@ -15,10 +15,11 @@ const workflow: WorkflowSummary = {
   name: "Feature",
   status: "active",
   createdAt: "2026-07-30T00:00:00Z",
-  counts: { ideas: 1, specs: 0, decisions: 0, tasks: 0, reports: 0 },
+  counts: { ideas: 1, specs: 0, decisions: 0, workGroups: 0, tasks: 0, reports: 0 },
   items: {
     ideas: [firstIdea],
     specs: [],
+    workGroups: [],
     tasks: [],
   },
 };

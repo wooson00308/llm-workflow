@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-048
 title: 접혀 있는 설치 판정을 설치 단계로 펼쳐 스냅샷에 싣는다
-status: completed
+status: verified
 source_spec_id: SPEC-016
 source_decision_id: DECISION-4F1083FF
-depends_on: [TASK-045]
-updated_at: 2026-08-03T12:42:56Z
+depends_on:
+- TASK-045
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T07:45:00Z, kind: created }
-  - { at: 2026-08-03T12:20:49Z, kind: in_progress }
-  - { at: 2026-08-03T12:32:29Z, kind: qa_waiting }
+- at: 2026-08-03T07:45:00Z
+  kind: created
+- at: 2026-08-03T12:20:49Z
+  kind: in_progress
+- at: 2026-08-03T12:32:29Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-4F1083FF
+work_group_revision: 1
 ---
 
 # 접혀 있는 설치 판정을 설치 단계로 펼쳐 스냅샷에 싣는다

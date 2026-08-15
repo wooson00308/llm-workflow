@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-013
 title: 잡 model 필드를 지원 모델 선택 UI로 전환 (직접 입력 경로 포함)
-status: completed
+status: verified
 source_spec_id: SPEC-004
 source_decision_id: DECISION-1D79E1AB
-updated_at: 2026-08-02T14:57:41Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-1D79E1AB
+work_group_revision: 1
 ---
 
 # 잡 model 필드를 지원 모델 선택 UI로 전환 (직접 입력 경로 포함)

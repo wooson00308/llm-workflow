@@ -2,17 +2,30 @@
 schema: workflow-labs/task@1
 id: TASK-145
 title: 막힌 사유와 관련 대상을 작업 우측 패널에 표시한다
-status: completed
+status: verified
 source_spec_id: SPEC-053
 source_decision_id: DECISION-6723CEE0
-depends_on: [TASK-144]
-scope_files: [src/features/projects/components/BlockedTaskPanel.css, src/features/projects/components/BlockedTaskPanel.test.tsx, src/features/projects/components/BlockedTaskPanel.tsx, src/features/projects/components/DevelopmentBoard.tsx]
-updated_at: 2026-08-08T03:36:44.134291+00:00
+depends_on:
+- TASK-144
+scope_files:
+- src/features/projects/components/BlockedTaskPanel.css
+- src/features/projects/components/BlockedTaskPanel.test.tsx
+- src/features/projects/components/BlockedTaskPanel.tsx
+- src/features/projects/components/DevelopmentBoard.tsx
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-07T15:07:37Z, kind: created }
-  - { at: 2026-08-07T17:03:42Z, kind: in_progress }
-  - { at: 2026-08-07T17:09:34Z, kind: qa_waiting }
-  - { at: 2026-08-08T03:36:44.134291+00:00, kind: completed }
+- at: 2026-08-07T15:07:37Z
+  kind: created
+- at: 2026-08-07T17:03:42Z
+  kind: in_progress
+- at: 2026-08-07T17:09:34Z
+  kind: qa_waiting
+- at: 2026-08-08T03:36:44.134291+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6723CEE0
+work_group_revision: 1
 ---
 
 # 막힌 사유와 관련 대상을 작업 우측 패널에 표시한다

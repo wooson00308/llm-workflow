@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-082
 title: 옛 파일에 남은 이 프로젝트의 잡을 저장할 때 치우고 남은 동안 감지한다
-status: completed
+status: verified
 source_spec_id: SPEC-024
 source_decision_id: DECISION-3C8F1A42
-depends_on: [TASK-081, TASK-077]
-updated_at: 2026-08-04T11:42:24.558340+00:00
+depends_on:
+- TASK-081
+- TASK-077
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:20:00Z, kind: created }
-  - { at: 2026-08-04T10:24:30Z, kind: in_progress }
-  - { at: 2026-08-04T10:34:20Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:24.558340+00:00, kind: completed }
+- at: 2026-08-04T09:20:00Z
+  kind: created
+- at: 2026-08-04T10:24:30Z
+  kind: in_progress
+- at: 2026-08-04T10:34:20Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:24.558340+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-3C8F1A42
+work_group_revision: 1
 ---
 
 # 옛 파일에 남은 이 프로젝트의 잡을 저장할 때 치우고 남은 동안 감지한다

@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-051
 title: 실행 한도에 제한 없음 상태를 도입하고 데몬이 한도로 인정하지 않는 값을 저장에서 막는다
-status: completed
+status: verified
 source_spec_id: SPEC-017
 source_decision_id: DECISION-EC07DE7E
-depends_on: [TASK-028]
-updated_at: 2026-08-03T12:42:56Z
+depends_on:
+- TASK-028
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T08:40:00Z, kind: created }
-  - { at: 2026-08-03T09:22:00Z, kind: in_progress }
-  - { at: 2026-08-03T09:53:00Z, kind: qa_waiting }
+- at: 2026-08-03T08:40:00Z
+  kind: created
+- at: 2026-08-03T09:22:00Z
+  kind: in_progress
+- at: 2026-08-03T09:53:00Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-EC07DE7E
+work_group_revision: 1
 ---
 
 # 실행 한도에 제한 없음 상태를 도입하고 데몬이 한도로 인정하지 않는 값을 저장에서 막는다

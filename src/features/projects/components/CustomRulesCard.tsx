@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Icon } from "../../../shared/ui/Icon";
 import type {
   CustomRuleRole,
   CustomRulesActions,
@@ -175,16 +174,19 @@ export function CustomRulesCard({ activeLeaseCount, actions, state }: Props) {
 
   return (
     <section aria-label="사용자 정의 규칙" className="settings-card custom-rules-card">
-      <header>
-        <span><Icon name="stamp" /></span>
-        <div>
-          <strong>사용자 정의 규칙</strong>
-          <small>프로젝트별 규칙 한 개를 다음 에이전트 세션에 적용합니다.</small>
-        </div>
-        <b className={`custom-rules-status status-${document?.status ?? "unread"}`}>
-          {state.reading ? "읽는 중" : statusLabel(document)}
-        </b>
-      </header>
+      <details
+        className="settings-disclosure"
+        open={needsOverwriteApproval || unsafe || Boolean(state.readError) || undefined}
+      >
+        <summary>
+          <div>
+            <strong>사용자 정의 규칙</strong>
+            <small>프로젝트별 규칙 한 개를 다음 에이전트 세션에 적용합니다.</small>
+          </div>
+          <b className={`custom-rules-status status-${document?.status ?? "unread"}`}>
+            {state.reading ? "읽는 중" : statusLabel(document)}
+          </b>
+        </summary>
 
       <div className="custom-rules-guidance">
         <p><strong>우선순위</strong> 사용자 규칙은 앱 기본 규칙과 역할 계약을 완화할 수 없습니다.</p>
@@ -407,6 +409,7 @@ export function CustomRulesCard({ activeLeaseCount, actions, state }: Props) {
           )}
         </section>
       )}
+      </details>
     </section>
   );
 }

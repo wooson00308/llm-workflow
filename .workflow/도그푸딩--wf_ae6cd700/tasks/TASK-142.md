@@ -2,16 +2,27 @@
 schema: workflow-labs/task@1
 id: TASK-142
 title: 좌측 메뉴에 활성 세션 축약 표시를 상시 노출한다
-status: completed
+status: verified
 source_spec_id: SPEC-050
 source_decision_id: DECISION-877D9096
-scope_files: [src/App.css, src/features/projects/components/WorkspaceShell.test.tsx, src/features/projects/components/WorkspaceShell.tsx]
-updated_at: 2026-08-06T15:09:14.929054+00:00
+scope_files:
+- src/App.css
+- src/features/projects/components/WorkspaceShell.test.tsx
+- src/features/projects/components/WorkspaceShell.tsx
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T14:19:00Z, kind: created }
-  - { at: 2026-08-06T14:23:45Z, kind: in_progress }
-  - { at: 2026-08-06T14:30:16Z, kind: qa_waiting }
-  - { at: 2026-08-06T15:09:14.929054+00:00, kind: completed }
+- at: 2026-08-06T14:19:00Z
+  kind: created
+- at: 2026-08-06T14:23:45Z
+  kind: in_progress
+- at: 2026-08-06T14:30:16Z
+  kind: qa_waiting
+- at: 2026-08-06T15:09:14.929054+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-877D9096
+work_group_revision: 1
 ---
 
 # 좌측 메뉴에 활성 세션 축약 표시를 상시 노출한다

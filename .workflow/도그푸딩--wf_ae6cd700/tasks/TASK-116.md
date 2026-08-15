@@ -2,17 +2,37 @@
 schema: workflow-labs/task@1
 id: TASK-116
 title: 연동 카드가 업데이트를 한 번의 조작으로 끝낸다
-status: completed
+status: verified
 source_spec_id: SPEC-037
 source_decision_id: DECISION-6C2F2639
-depends_on: [TASK-113]
-scope_files: [src/features/projects/components/integrations/HeartbeatCard.tsx, src/features/projects/components/integrations/HeartbeatUpdateGuide.tsx, src/features/projects/components/integrations/IntegrationsView.tsx, src/features/projects/components/integrations/IntegrationsView.test.tsx, src/features/projects/components/WorkspaceShell.tsx, src/features/projects/components/WorkspaceShell.test.tsx, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/application/useProjectWorkspace.test.ts, src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts, src/App.css]
-updated_at: 2026-08-05T09:08:41.750137+00:00
+depends_on:
+- TASK-113
+scope_files:
+- src/features/projects/components/integrations/HeartbeatCard.tsx
+- src/features/projects/components/integrations/HeartbeatUpdateGuide.tsx
+- src/features/projects/components/integrations/IntegrationsView.tsx
+- src/features/projects/components/integrations/IntegrationsView.test.tsx
+- src/features/projects/components/WorkspaceShell.tsx
+- src/features/projects/components/WorkspaceShell.test.tsx
+- src/features/projects/application/useProjectWorkspace.ts
+- src/features/projects/application/useProjectWorkspace.test.ts
+- src/features/projects/domain/types.ts
+- src/features/projects/infrastructure/tauriProjectGateway.ts
+- src/App.css
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T03:25:00Z, kind: created }
-  - { at: 2026-08-05T07:31:00Z, kind: in_progress }
-  - { at: 2026-08-05T07:57:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T09:08:41.750137+00:00, kind: completed }
+- at: 2026-08-05T03:25:00Z
+  kind: created
+- at: 2026-08-05T07:31:00Z
+  kind: in_progress
+- at: 2026-08-05T07:57:00Z
+  kind: qa_waiting
+- at: 2026-08-05T09:08:41.750137+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6C2F2639
+work_group_revision: 1
 ---
 
 # 연동 카드가 업데이트를 한 번의 조작으로 끝낸다

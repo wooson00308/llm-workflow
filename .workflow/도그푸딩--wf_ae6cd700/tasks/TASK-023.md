@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-023
 title: 앱이 QA 전이를 기록하고 QA 결정을 이벤트 원천으로 병합한다
-status: completed
+status: verified
 source_spec_id: SPEC-007
 source_decision_id: DECISION-AA40AF4B
-updated_at: 2026-08-03T02:31:15.929926+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-02T23:53:00Z, kind: in_progress }
-  - { at: 2026-08-03T00:16:00Z, kind: qa_waiting }
-  - { at: 2026-08-03T02:31:15.929926+00:00, kind: completed }
+- at: 2026-08-02T23:53:00Z
+  kind: in_progress
+- at: 2026-08-03T00:16:00Z
+  kind: qa_waiting
+- at: 2026-08-03T02:31:15.929926+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-AA40AF4B
+work_group_revision: 1
 ---
 
 # 앱이 QA 전이를 기록하고 QA 결정을 이벤트 원천으로 병합한다

@@ -2,20 +2,33 @@
 schema: workflow-labs/task@1
 id: TASK-131
 title: 한국어 파일 계약 문서에 확장 대응표와 전후 예문을 넣는다
-status: completed
+status: verified
 source_spec_id: SPEC-046
 source_decision_id: DECISION-19BE9FD5
-depends_on: [TASK-130]
-scope_files: [docs/file-contract.md]
-updated_at: 2026-08-06T09:18:15.845731+00:00
+depends_on:
+- TASK-130
+scope_files:
+- docs/file-contract.md
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T08:44:00Z, kind: created }
-  - { at: 2026-08-06T09:00:37Z, kind: in_progress }
-  - { at: 2026-08-06T09:05:43Z, kind: qa_waiting }
-  - { at: 2026-08-06T09:09:34.601898+00:00, kind: revision_requested }
-  - { at: 2026-08-06T09:10:30Z, kind: in_progress }
-  - { at: 2026-08-06T09:12:59Z, kind: qa_waiting }
-  - { at: 2026-08-06T09:18:15.845731+00:00, kind: completed }
+- at: 2026-08-06T08:44:00Z
+  kind: created
+- at: 2026-08-06T09:00:37Z
+  kind: in_progress
+- at: 2026-08-06T09:05:43Z
+  kind: qa_waiting
+- at: 2026-08-06T09:09:34.601898+00:00
+  kind: revision_requested
+- at: 2026-08-06T09:10:30Z
+  kind: in_progress
+- at: 2026-08-06T09:12:59Z
+  kind: qa_waiting
+- at: 2026-08-06T09:18:15.845731+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-19BE9FD5
+work_group_revision: 1
 ---
 
 # 한국어 파일 계약 문서에 확장 대응표와 전후 예문을 넣는다

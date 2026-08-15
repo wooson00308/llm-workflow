@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-035
 title: 아이디어 파생 상태를 수집됨·반영중·채택으로 판정하고 중단 의심 근거를 화면까지 나른다
-status: completed
+status: verified
 source_spec_id: SPEC-012
 source_decision_id: DECISION-9B93CEA0
-updated_at: 2026-08-03T12:42:56Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T04:00:00Z, kind: created }
-  - { at: 2026-08-03T08:42:00Z, kind: in_progress }
-  - { at: 2026-08-03T08:54:00Z, kind: qa_waiting }
+- at: 2026-08-03T04:00:00Z
+  kind: created
+- at: 2026-08-03T08:42:00Z
+  kind: in_progress
+- at: 2026-08-03T08:54:00Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-9B93CEA0
+work_group_revision: 1
 ---
 
 # 아이디어 파생 상태를 수집됨·반영중·채택으로 판정하고 중단 의심 근거를 화면까지 나른다

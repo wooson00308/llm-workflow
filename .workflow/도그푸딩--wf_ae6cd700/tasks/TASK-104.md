@@ -2,19 +2,31 @@
 schema: workflow-labs/task@1
 id: TASK-104
 title: 조건 스크립트의 반복 훑기를 없애 판정이 한도 안에서 끝나게 한다
-status: completed
+status: verified
 source_spec_id: SPEC-033
 source_decision_id: DECISION-8D3F0D0F
-depends_on: [TASK-101]
-updated_at: 2026-08-05T06:13:41.564029+00:00
+depends_on:
+- TASK-101
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T16:30:00Z, kind: created }
-  - { at: 2026-08-04T18:31:31Z, kind: in_progress }
-  - { at: 2026-08-05T03:42:18Z, kind: qa_waiting }
-  - { at: 2026-08-05T06:02:40.695324+00:00, kind: revision_requested }
-  - { at: 2026-08-05T06:06:10Z, kind: in_progress }
-  - { at: 2026-08-05T06:08:50Z, kind: qa_waiting }
-  - { at: 2026-08-05T06:13:41.564029+00:00, kind: completed }
+- at: 2026-08-04T16:30:00Z
+  kind: created
+- at: 2026-08-04T18:31:31Z
+  kind: in_progress
+- at: 2026-08-05T03:42:18Z
+  kind: qa_waiting
+- at: 2026-08-05T06:02:40.695324+00:00
+  kind: revision_requested
+- at: 2026-08-05T06:06:10Z
+  kind: in_progress
+- at: 2026-08-05T06:08:50Z
+  kind: qa_waiting
+- at: 2026-08-05T06:13:41.564029+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-8D3F0D0F
+work_group_revision: 1
 ---
 
 # 조건 스크립트의 반복 훑기를 없애 판정이 한도 안에서 끝나게 한다

@@ -2,17 +2,32 @@
 schema: workflow-labs/task@1
 id: TASK-134
 title: 설정에서 관리 규칙 버전과 마지막 동기화 결과를 보여준다
-status: completed
+status: verified
 source_spec_id: SPEC-047
 source_decision_id: DECISION-6650F2D7
-depends_on: [TASK-133]
-scope_files: [src/App.tsx, src/App.css, src/features/projects/components/WorkspaceShell.tsx, src/features/projects/components/WorkspaceShell.test.tsx, src/features/projects/components/SettingsView.tsx, src/features/projects/components/SettingsView.test.tsx]
-updated_at: 2026-08-06T13:36:36.355771+00:00
+depends_on:
+- TASK-133
+scope_files:
+- src/App.tsx
+- src/App.css
+- src/features/projects/components/WorkspaceShell.tsx
+- src/features/projects/components/WorkspaceShell.test.tsx
+- src/features/projects/components/SettingsView.tsx
+- src/features/projects/components/SettingsView.test.tsx
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T09:51:14Z, kind: created }
-  - { at: 2026-08-06T12:17:29Z, kind: in_progress }
-  - { at: 2026-08-06T12:29:45Z, kind: qa_waiting }
-  - { at: 2026-08-06T13:36:36.355771+00:00, kind: completed }
+- at: 2026-08-06T09:51:14Z
+  kind: created
+- at: 2026-08-06T12:17:29Z
+  kind: in_progress
+- at: 2026-08-06T12:29:45Z
+  kind: qa_waiting
+- at: 2026-08-06T13:36:36.355771+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6650F2D7
+work_group_revision: 1
 ---
 
 # 설정에서 관리 규칙 버전과 마지막 동기화 결과를 보여준다

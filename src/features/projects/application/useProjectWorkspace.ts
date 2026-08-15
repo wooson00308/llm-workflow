@@ -25,10 +25,10 @@ import type {
   RoleJobRequest,
   SaveCustomRulesResult,
   SpecDecisionOutcome,
-  TaskQaBatchEntry,
-  TaskQaOutcome,
   TaskResumeOutcome,
   TaskRevisionRequestOutcome,
+  WorkGroupQaSubmission,
+  WorkGroupQaSubmissionResult,
   WorkflowReportSummary,
   AgentProjectPolicy,
   AgentRunSummary,
@@ -157,6 +157,9 @@ function failureFrom(reason: unknown, jobName: string): HeartbeatRunFailure {
 }
 
 /** 프로젝트를 열기 전과 닫은 뒤의 에이전트 상태. 프로젝트가 바뀌면 이 값으로 되돌린다. */
+/** 실행 환경이 동의 부족으로 시작을 거절했다는 사유 코드. 실행 도구 실패와 다른 경로로 다룬다. */
+const CONSENT_REQUIRED = /execution_consent_required/;
+
 const emptyAgentRuntime: AgentRuntimeState = {
   inspection: null,
   policy: null,
@@ -173,6 +176,8 @@ const emptyAgentRuntime: AgentRuntimeState = {
   migrationError: null,
   saving: false,
   saveError: null,
+  consentBusy: false,
+  consentError: null,
   runPlan: null,
   runRequests: [],
   runPlanning: false,
@@ -390,8 +395,23 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     if (!plan || !project?.projectId) return false;
     setAgentRuntime((current) => ({ ...current, runStarting: true, runError: null }));
     try {
-      await gateway.startAgentRun(project.projectId, plan.planId, true);
+      const outcome = await gateway.startAgentRun(
+        project.projectId,
+        plan.planId,
+        true,
+      );
       if (activeProjectPath.current !== project.rootPath) return false;
+      // 아무것도 시작하지 못한 대기는 실패가 아니라서 실행 행도 오류 기록도 남지 않는다. 여기서
+      // 사유를 화면에 넘기지 않으면 사용자는 성공으로 읽고 대화상자를 닫는다.
+      const waiting = outcome.waiting ?? [];
+      if (outcome.started.length === 0 && waiting.length > 0) {
+        setAgentRuntime((current) => ({
+          ...current,
+          runStarting: false,
+          runError: waiting[0].reason,
+        }));
+        return false;
+      }
       setAgentRuntime((current) => ({
         ...current,
         runStarting: false,
@@ -549,6 +569,16 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     try {
       const next = await gateway.retryAgentRun(project.projectId, previous.runId);
       if (activeProjectPath.current !== project.rootPath) return false;
+      // 동의 부족으로 거절된 재시도는 실행 기록에 남지 않는다. 시작한 것처럼 큐에 넣으면 다음
+      // 조회에서 그 행이 사라지고, 사용자는 왜 아무 일도 없었는지 알 길이 없다.
+      if (next.reason !== null && CONSENT_REQUIRED.test(next.reason)) {
+        setAgentRuntime((current) => ({
+          ...current,
+          controllingRunId: null,
+          controlError: next.reason,
+        }));
+        return false;
+      }
       setAgentRuntime((current) => ({
         ...current,
         controllingRunId: null,
@@ -971,6 +1001,54 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       }
     },
     [agentRuntime.policy?.revision, gateway, project, readAgentRuntime],
+  );
+
+  /**
+   * 실행 권한 동의를 남기거나 철회한다. 두 호출 모두 갱신된 동의 값을 돌려주지만 그 값만 상태에
+   * 넣지 않고 설정을 다시 읽는다. 동의는 설정 조회 응답에 실려 오는 값이라, 한쪽만 갱신하면 같은
+   * 화면 안에서 동의 상태와 나머지 설정이 서로 다른 시점을 가리키게 된다.
+   */
+  const changeAgentRuntimeConsent = useCallback(
+    async (change: (projectId: string) => Promise<unknown>) => {
+      if (!project?.projectId) return false;
+      setAgentRuntime((current) => ({
+        ...current,
+        consentBusy: true,
+        consentError: null,
+      }));
+      try {
+        await change(project.projectId);
+        if (activeProjectPath.current !== project.rootPath) return false;
+        setAgentRuntime((current) => ({ ...current, consentBusy: false }));
+        await readAgentRuntime(project.rootPath, project.projectId);
+        return true;
+      } catch (reason) {
+        if (activeProjectPath.current !== project.rootPath) return false;
+        setAgentRuntime((current) => ({
+          ...current,
+          consentBusy: false,
+          consentError: messageFrom(reason),
+        }));
+        return false;
+      }
+    },
+    [project, readAgentRuntime],
+  );
+
+  const grantAgentRuntimeConsent = useCallback(
+    async (noticeVersion: number) =>
+      changeAgentRuntimeConsent((projectId) =>
+        gateway.grantAgentRuntimeConsent(projectId, noticeVersion),
+      ),
+    [changeAgentRuntimeConsent, gateway],
+  );
+
+  const revokeAgentRuntimeConsent = useCallback(
+    async () =>
+      changeAgentRuntimeConsent((projectId) =>
+        gateway.revokeAgentRuntimeConsent(projectId),
+      ),
+    [changeAgentRuntimeConsent, gateway],
   );
 
   const resetCustomRules = useCallback(() => {
@@ -1437,36 +1515,6 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, project],
   );
 
-  const recordTaskQa = useCallback(
-    async (
-      workflowDirectory: string,
-      fileName: string,
-      outcome: TaskQaOutcome,
-      comment: string,
-    ) => {
-      if (!project) return false;
-      setBusy(true);
-      setError(null);
-      try {
-        const next = await gateway.recordTaskQa(
-          project.rootPath,
-          workflowDirectory,
-          fileName,
-          outcome,
-          comment,
-        );
-        setProject(next);
-        return true;
-      } catch (reason) {
-        setError(messageFrom(reason));
-        return false;
-      } finally {
-        setBusy(false);
-      }
-    },
-    [gateway, project],
-  );
-
   /**
    * 막힌 작업 하나를 사용자 판단으로 개발 준비 상태로 되돌린다. QA 기록과 다른 통로다.
    *
@@ -1543,30 +1591,27 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, project],
   );
 
-  /**
-   * 일괄 확인은 앱 호출 한 번이다. 건별 실패는 돌려주는 배열에 담기고 전역 에러로 올라가지 않는다 —
-   * 전역 문구는 다음 호출이 덮는 자리라 건별 보고를 담지 못한다. `null`은 호출 자체가 실패한 것이다.
-   */
-  const confirmTaskQaBatch = useCallback(
-    async (
-      workflowDirectory: string,
-      fileNames: string[],
-      comment: string,
-    ): Promise<TaskQaBatchEntry[] | null> => {
+  /** 현재 revision의 작업 그룹 전체에 사용자 결정 하나를 원자적으로 기록한다. */
+  const submitWorkGroupQa = useCallback(
+    async (submission: WorkGroupQaSubmission): Promise<WorkGroupQaSubmissionResult | null> => {
       if (!project) return null;
       setBusy(true);
       setError(null);
       try {
-        const result = await gateway.confirmTaskQaBatch(
-          project.rootPath,
-          workflowDirectory,
-          fileNames,
-          comment,
-        );
+        const result = await gateway.submitWorkGroupQa(project.rootPath, submission);
         setProject(result.summary);
-        return result.results;
+        return result;
       } catch (reason) {
         setError(messageFrom(reason));
+        // stale revision·시나리오·태스크 검증 실패는 결정 파일을 만들지 않는다. 사용자가 예전
+        // 그룹을 계속 보고 다시 제출하지 않도록, 실패한 그 자리에서 최신 읽기 모델만 회수한다.
+        // 이 재조회 실패는 원래 쓰기 오류를 덮지 않는다.
+        try {
+          const refreshed = await gateway.inspect(project.rootPath);
+          if (activeProjectPath.current === project.rootPath) setProject(refreshed);
+        } catch {
+          // 상단 오류는 최초 제출 실패 사유를 유지한다.
+        }
         return null;
       } finally {
         setBusy(false);
@@ -1582,6 +1627,8 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     try {
       const next = await gateway.migrate(project.rootPath);
       setProject(next);
+      await synchronizeManagedAssets(next.rootPath, "migration");
+      await readCustomRules(next.rootPath);
       return true;
     } catch (reason) {
       setError(messageFrom(reason));
@@ -1589,7 +1636,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     } finally {
       setBusy(false);
     }
-  }, [gateway, project]);
+  }, [gateway, project, readCustomRules, synchronizeManagedAssets]);
 
   // 조회 실패를 화면 전체 에러로 올리지 않는다. 2.5초마다 실패가 반복되면 앱을 쓸 수 없다.
   // 쓰기 실패 문구는 조회가 지우지 않는다. 2.5초 뒤에 사라지면 사용자가 읽을 수 없다.
@@ -1925,6 +1972,8 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       applyMigration: applyAgentRuntimeMigration,
       dismissMigration: dismissAgentRuntimeMigration,
       save: saveAgentRuntimePolicy,
+      grantConsent: grantAgentRuntimeConsent,
+      revokeConsent: revokeAgentRuntimeConsent,
       planRun: planAgentRun,
       cancelRunPlan: cancelAgentRunPlan,
       startRun: startAgentRun,
@@ -1959,6 +2008,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       dismissAgentRunCancel,
       dismissAgentRunRetry,
       exportAgentRunDiagnostics,
+      grantAgentRuntimeConsent,
       openAgentReport,
       planAgentRuntime,
       planAgentRun,
@@ -1970,6 +2020,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
       readAgentRunLog,
       readAgentRunReports,
       readAgentRuns,
+      revokeAgentRuntimeConsent,
       saveAgentRuntimePolicy,
       setAgentProjectPaused,
       startAgentRun,
@@ -1994,8 +2045,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     readSpec,
     readTask,
     readIdea,
-    recordTaskQa,
-    confirmTaskQaBatch,
+    submitWorkGroupQa,
     resumeTask,
     recordTaskRevisionRequest,
     decideSpec,

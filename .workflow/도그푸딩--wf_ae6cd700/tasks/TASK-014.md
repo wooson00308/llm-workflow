@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-014
 title: 잡 설정 쓰기를 파일 기준 병합으로 전환하고 미지정 필드를 보존
-status: completed
+status: verified
 source_spec_id: SPEC-005
 source_decision_id: DECISION-02EBD5DB
-updated_at: 2026-08-03T02:30:54.023925+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:30:54.023925+00:00, kind: completed }
+- at: 2026-08-03T02:30:54.023925+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-02EBD5DB
+work_group_revision: 1
 ---
 
 # 잡 설정 쓰기를 파일 기준 병합으로 전환하고 미지정 필드를 보존

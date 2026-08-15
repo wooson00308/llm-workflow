@@ -38,6 +38,37 @@ pub struct PolicySnapshot {
     pub compatibility: Compatibility,
     /// 런타임이 한 번만 관리하는 기기 전체 용량과 프로젝트별 사용 현황.
     pub device_capacity: DeviceCapacity,
+    /// 이 프로젝트의 실행 권한 동의 상태. 설정 저장과는 무관하다.
+    pub consent: ProjectConsent,
+}
+
+/// 실행 권한 동의 상태 하나. 화면은 이 값을 읽어 동의 화면을 열지 결정한다.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectConsent {
+    pub status: ConsentStatus,
+    pub notice_version: Option<u32>,
+    pub granted_at: Option<String>,
+    pub required_notice_version: Option<u32>,
+    /// 확인하지 못한 사유. 상태가 `unreadable`일 때만 채운다.
+    pub detail: Option<String>,
+}
+
+/// 동의 확인의 결과.
+///
+/// 확인하지 못한 것을 동의로 접지 않으려고 실패도 상태 값으로 남긴다. 런타임이 명령을 모르는 것과
+/// 그 밖의 이유로 읽지 못한 것을 가르는 것은 화면이 두 경우를 다르게 안내하기 때문이다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentStatus {
+    /// 유효한 동의가 있다.
+    Granted,
+    /// 기록이 없거나 고지 버전이 런타임이 요구하는 버전보다 낮다.
+    Required,
+    /// 이 런타임은 동의 명령을 모른다.
+    Unsupported,
+    /// 그 밖의 이유로 확인하지 못했다.
+    Unreadable,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -149,6 +180,8 @@ impl AgentRuntimeConfigService {
         let providers = agent_runtime_process::diagnose_providers(caller, project_id)
             // 진단을 읽지 못하는 것은 설정을 읽지 못한 것과 다르다. 설정은 그대로 보이고 진단만 빈다.
             .unwrap_or_default();
+        // 동의 확인도 같은 성격이다. 실패를 전체 실패로 올리지 않고 동의 값 안의 상태로 옮긴다.
+        let consent = consent_from_runtime(agent_runtime_process::read_consent(caller, project_id));
         let stored = runtime_read.configuration;
         let (mut policy, is_stored) = match stored.as_ref() {
             Some(value) => (from_runtime(value, working_directory), true),
@@ -168,7 +201,40 @@ impl AgentRuntimeConfigService {
             stored: is_stored,
             providers,
             device_capacity,
+            consent,
         })
+    }
+
+    /// 사용자가 읽은 고지 버전으로 동의를 남긴다. 갱신된 동의 값을 그대로 돌려준다.
+    pub fn grant_consent(
+        &self,
+        caller: &dyn RuntimeCaller,
+        project_id: &str,
+        notice_version: u32,
+        compatibility: Compatibility,
+    ) -> Result<ProjectConsent, ConfigFailure> {
+        // 저장과 같은 규칙이다. 호환되지 않는 런타임에는 요청 자체를 보내지 않는다.
+        if !compatibility.allows_execution() {
+            return Err(ConfigFailure::Incompatible(compatibility));
+        }
+        let answer = agent_runtime_process::grant_consent(caller, project_id, notice_version)
+            .map_err(ConfigFailure::Runtime)?;
+        Ok(consent_of(&answer))
+    }
+
+    /// 이 프로젝트의 동의를 철회한다. 이미 실행 중인 세션은 이 명령의 대상이 아니다.
+    pub fn revoke_consent(
+        &self,
+        caller: &dyn RuntimeCaller,
+        project_id: &str,
+        compatibility: Compatibility,
+    ) -> Result<ProjectConsent, ConfigFailure> {
+        if !compatibility.allows_execution() {
+            return Err(ConfigFailure::Incompatible(compatibility));
+        }
+        let answer = agent_runtime_process::revoke_consent(caller, project_id)
+            .map_err(ConfigFailure::Runtime)?;
+        Ok(consent_of(&answer))
     }
 
     /// 정책 하나를 저장한다. 검사와 revision 대조를 모두 통과할 때만 쓴다.
@@ -370,6 +436,48 @@ fn to_runtime(policy: &ProjectPolicy) -> Value {
     })
 }
 
+/// 동의 확인의 결과를 화면이 읽을 값으로 옮긴다.
+///
+/// 실패를 `granted`로 바꾸는 갈래가 여기에 없다. 확인하지 못한 것과 동의한 것을 같게 다루면 관문이
+/// 무너지므로, 확인하지 못한 경우는 사유를 실어 그대로 남긴다.
+fn consent_from_runtime(answer: Result<Value, RuntimeCallFailure>) -> ProjectConsent {
+    match answer {
+        Ok(value) => consent_of(&value),
+        // 런타임이 이 명령을 모르는 것은 읽기 실패가 아니라 그 런타임의 사실이다.
+        Err(RuntimeCallFailure::Rejected { code, .. }) if code == "unsupported_command" => {
+            unconfirmed(ConsentStatus::Unsupported, None)
+        }
+        Err(failure) => unconfirmed(ConsentStatus::Unreadable, Some(failure.message())),
+    }
+}
+
+/// 런타임이 답한 동의 객체 하나를 옮긴다. `valid`가 참일 때만 동의한 것으로 읽는다.
+fn consent_of(value: &Value) -> ProjectConsent {
+    let valid = value.get("valid").and_then(Value::as_bool).unwrap_or(false);
+    ProjectConsent {
+        status: if valid {
+            ConsentStatus::Granted
+        } else {
+            ConsentStatus::Required
+        },
+        notice_version: number_at(Some(value), "noticeVersion"),
+        granted_at: string_at(Some(value), "grantedAt"),
+        required_notice_version: number_at(Some(value), "requiredNoticeVersion"),
+        detail: None,
+    }
+}
+
+/// 동의 여부를 확인하지 못한 경우의 값. 남길 사실이 상태와 사유뿐이다.
+fn unconfirmed(status: ConsentStatus, detail: Option<String>) -> ProjectConsent {
+    ProjectConsent {
+        status,
+        notice_version: None,
+        granted_at: None,
+        required_notice_version: None,
+        detail,
+    }
+}
+
 /// 읽은 설정의 지문. 런타임 계약에 revision 필드가 없어 앱이 읽은 내용에서 만든다.
 fn revision_of(stored: Option<&Value>, device_capacity: Option<&Value>) -> String {
     let mut hasher = Sha256::new();
@@ -506,13 +614,13 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
-    use super::{AgentRuntimeConfigService, ConfigFailure};
+    use super::{AgentRuntimeConfigService, ConfigFailure, ConsentStatus};
     use crate::application::heartbeat_service::ManagedRoleJob;
     use crate::domain::agent_runtime::{
         Compatibility, PolicyRejection, DEFAULT_DEVICE_MAX_PARALLEL,
     };
     use crate::infrastructure::agent_runtime_process::tests::FakeCaller;
-    use crate::infrastructure::agent_runtime_process::Captured;
+    use crate::infrastructure::agent_runtime_process::{Captured, RuntimeCallFailure};
 
     fn envelope(data: serde_json::Value) -> Captured {
         Captured {
@@ -560,6 +668,23 @@ mod tests {
         json!({"providers": [{"provider": "claude", "status": "login_required", "version": null}]})
     }
 
+    fn consent(
+        granted: bool,
+        valid: bool,
+        notice: serde_json::Value,
+        at: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({"consent": {
+            "projectId": "p1", "granted": granted, "valid": valid,
+            "noticeVersion": notice, "grantedAt": at, "requiredNoticeVersion": 1,
+        }})
+    }
+
+    /// 유효한 동의가 있는 프로젝트의 응답. 조회마다 한 번씩 소비된다.
+    fn granted_consent() -> serde_json::Value {
+        consent(true, true, json!(1), json!("2026-08-13T15:00:00Z"))
+    }
+
     fn job(
         role: &str,
         interval: Option<&str>,
@@ -584,6 +709,7 @@ mod tests {
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
 
         let snapshot = AgentRuntimeConfigService
@@ -609,6 +735,7 @@ mod tests {
         let caller = FakeCaller::new(vec![
             Ok(envelope(json!({"configuration": null}))),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
 
         let snapshot = AgentRuntimeConfigService
@@ -638,6 +765,7 @@ mod tests {
                 }
             }))),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
 
         let snapshot = AgentRuntimeConfigService
@@ -655,6 +783,7 @@ mod tests {
         let caller = FakeCaller::new(vec![
             Ok(envelope(json!({"configuration": null}))),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
 
         let snapshot = AgentRuntimeConfigService
@@ -675,12 +804,14 @@ mod tests {
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
         let second = FakeCaller::new(vec![
             Ok(envelope(
                 json!({"configuration": configuration("p2", "/p2", 3)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
 
         let one = AgentRuntimeConfigService
@@ -704,10 +835,12 @@ mod tests {
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
             Ok(envelope(
                 json!({"configuration": configuration("p1", "/p1", 3)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
         let read = AgentRuntimeConfigService
             .read(&caller, "p1", "/p1", Compatibility::Compatible)
@@ -729,7 +862,7 @@ mod tests {
             other => panic!("stale expected, got {other:?}"),
         }
         // 조회 두 번뿐이고 쓰기 호출은 나가지 않았다.
-        assert_eq!(caller.calls.borrow().len(), 4);
+        assert_eq!(caller.calls.borrow().len(), 6);
     }
 
     #[test]
@@ -788,10 +921,12 @@ mod tests {
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
             Ok(envelope(
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
             Ok(envelope(
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
@@ -799,6 +934,7 @@ mod tests {
                 json!({"configuration": configuration("p1", "/p1", 2)}),
             )),
             Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
         ]);
         let read = AgentRuntimeConfigService
             .read(&caller, "p1", "/p1", Compatibility::Compatible)
@@ -902,6 +1038,7 @@ mod tests {
                 {"provider": "claude", "status": "executable_missing", "version": null},
                 {"provider": "codex", "status": "unsupported_version", "version": "0.1"},
             ]}))),
+            Ok(envelope(granted_consent())),
         ]);
 
         let snapshot = AgentRuntimeConfigService
@@ -915,5 +1052,182 @@ mod tests {
             .collect();
         assert_eq!(statuses, vec!["executable_missing", "unsupported_version"]);
         assert_eq!(snapshot.policy.roles["architect"].provider, "codex");
+    }
+
+    #[test]
+    fn a_valid_consent_rides_along_with_the_configuration() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
+            Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
+        ]);
+
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "p1", "/p1", Compatibility::Compatible)
+            .expect("snapshot");
+
+        assert_eq!(snapshot.consent.status, ConsentStatus::Granted);
+        assert_eq!(snapshot.consent.notice_version, Some(1));
+        assert_eq!(
+            snapshot.consent.granted_at.as_deref(),
+            Some("2026-08-13T15:00:00Z")
+        );
+        assert_eq!(snapshot.consent.required_notice_version, Some(1));
+        assert_eq!(snapshot.consent.detail, None);
+        let (arguments, request) = caller.calls.borrow()[2].clone();
+        assert_eq!(arguments, vec!["agent", "consent", "read"]);
+        assert_eq!(request.expect("request body")["projectId"], json!("p1"));
+    }
+
+    #[test]
+    fn a_project_without_a_consent_record_is_asked_for_one() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
+            Ok(envelope(diagnostics())),
+            Ok(envelope(consent(false, false, json!(null), json!(null)))),
+        ]);
+
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "p1", "/p1", Compatibility::Compatible)
+            .expect("snapshot");
+
+        assert_eq!(snapshot.consent.status, ConsentStatus::Required);
+        assert_eq!(snapshot.consent.notice_version, None);
+        assert_eq!(snapshot.consent.granted_at, None);
+        assert_eq!(snapshot.consent.required_notice_version, Some(1));
+    }
+
+    #[test]
+    fn a_runtime_that_does_not_know_the_command_leaves_the_rest_of_the_read_intact() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
+            Ok(envelope(diagnostics())),
+            Err(RuntimeCallFailure::Rejected {
+                stage: Some("request_validation".to_owned()),
+                code: "unsupported_command".to_owned(),
+                detail: "agent command is not implemented".to_owned(),
+            }),
+        ]);
+
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "p1", "/p1", Compatibility::Compatible)
+            .expect("snapshot");
+
+        assert_eq!(snapshot.consent.status, ConsentStatus::Unsupported);
+        assert_eq!(snapshot.consent.detail, None);
+        assert!(snapshot.stored);
+        assert_eq!(snapshot.providers.len(), 1);
+        assert!(snapshot.execution_allowed);
+    }
+
+    #[test]
+    fn a_consent_read_that_fails_for_another_reason_never_reads_as_granted() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(
+                json!({"configuration": configuration("p1", "/p1", 2)}),
+            )),
+            Ok(envelope(diagnostics())),
+            Err(RuntimeCallFailure::Rejected {
+                stage: Some("execution".to_owned()),
+                code: "internal_error".to_owned(),
+                detail: "동의 기록을 열지 못했습니다".to_owned(),
+            }),
+        ]);
+
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "p1", "/p1", Compatibility::Compatible)
+            .expect("snapshot");
+
+        assert_eq!(snapshot.consent.status, ConsentStatus::Unreadable);
+        assert_eq!(
+            snapshot.consent.detail.as_deref(),
+            Some("요청을 처리하지 못했습니다: 동의 기록을 열지 못했습니다")
+        );
+        assert!(snapshot.stored);
+    }
+
+    #[test]
+    fn granting_consent_sends_the_project_and_the_notice_version() {
+        let caller = FakeCaller::new(vec![Ok(envelope(granted_consent()))]);
+
+        let granted = AgentRuntimeConfigService
+            .grant_consent(&caller, "p1", 1, Compatibility::Compatible)
+            .expect("granted");
+
+        assert_eq!(granted.status, ConsentStatus::Granted);
+        assert_eq!(granted.granted_at.as_deref(), Some("2026-08-13T15:00:00Z"));
+        let (arguments, request) = caller.calls.borrow()[0].clone();
+        assert_eq!(arguments, vec!["agent", "consent", "grant"]);
+        let request = request.expect("request body");
+        assert_eq!(request["projectId"], json!("p1"));
+        assert_eq!(request["noticeVersion"], json!(1));
+    }
+
+    #[test]
+    fn revoking_consent_leaves_the_project_asking_for_consent_again() {
+        let caller = FakeCaller::new(vec![Ok(envelope(consent(
+            false,
+            false,
+            json!(null),
+            json!(null),
+        )))]);
+
+        let revoked = AgentRuntimeConfigService
+            .revoke_consent(&caller, "p1", Compatibility::Compatible)
+            .expect("revoked");
+
+        assert_eq!(revoked.status, ConsentStatus::Required);
+        let (arguments, request) = caller.calls.borrow()[0].clone();
+        assert_eq!(arguments, vec!["agent", "consent", "revoke"]);
+        let request = request.expect("request body");
+        assert_eq!(request["projectId"], json!("p1"));
+        assert!(request.get("noticeVersion").is_none());
+    }
+
+    #[test]
+    fn an_incompatible_runtime_is_never_asked_about_consent() {
+        let caller = FakeCaller::new(vec![]);
+        let incompatible = Compatibility::UnsupportedApiMajor {
+            found: 9,
+            supported: 1,
+        };
+
+        let refused_grant = AgentRuntimeConfigService
+            .grant_consent(&caller, "p1", 1, incompatible.clone())
+            .expect_err("refused");
+        let refused_revoke = AgentRuntimeConfigService
+            .revoke_consent(&caller, "p1", incompatible)
+            .expect_err("refused");
+
+        assert!(matches!(refused_grant, ConfigFailure::Incompatible(_)));
+        assert!(matches!(refused_revoke, ConfigFailure::Incompatible(_)));
+        assert!(caller.calls.borrow().is_empty());
+    }
+
+    /// 화면이 이 이름으로 읽는다. 이름이나 상태 문자열이 바뀌면 뒤따르는 동의 화면이 값을 잃는다.
+    #[test]
+    fn the_consent_value_reaches_the_screen_under_the_agreed_names() {
+        let caller = FakeCaller::new(vec![
+            Ok(envelope(json!({"configuration": null}))),
+            Ok(envelope(diagnostics())),
+            Ok(envelope(granted_consent())),
+        ]);
+        let snapshot = AgentRuntimeConfigService
+            .read(&caller, "p1", "/p1", Compatibility::Compatible)
+            .expect("snapshot");
+
+        let sent = serde_json::to_value(&snapshot).expect("직렬화");
+
+        assert_eq!(sent["consent"]["status"], json!("granted"));
+        assert_eq!(sent["consent"]["noticeVersion"], json!(1));
+        assert_eq!(sent["consent"]["grantedAt"], json!("2026-08-13T15:00:00Z"));
+        assert_eq!(sent["consent"]["requiredNoticeVersion"], json!(1));
+        assert_eq!(sent["consent"]["detail"], json!(null));
     }
 }

@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-010
 title: 연동 공통 모델과 카드 골격 도입 (하트비트 카드 동작 변화 없음)
-status: completed
+status: verified
 source_spec_id: SPEC-003
 source_decision_id: DECISION-5276FDBF
-updated_at: 2026-08-02T14:57:41Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-5276FDBF
+work_group_revision: 1
 ---
 
 # 연동 공통 모델과 카드 골격 도입 (하트비트 카드 동작 변화 없음)

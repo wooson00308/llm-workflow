@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-102
 title: 세 계약이 겹침 선언을 쓰고 지목하게 하고 rules_version을 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-032
 source_decision_id: DECISION-0D79A7F0
-depends_on: [TASK-098, TASK-101]
-updated_at: 2026-08-05T03:08:52.922872+00:00
+depends_on:
+- TASK-098
+- TASK-101
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T15:46:00Z, kind: created }
-  - { at: 2026-08-04T17:52:30Z, kind: in_progress }
-  - { at: 2026-08-04T18:00:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T03:08:52.922872+00:00, kind: completed }
+- at: 2026-08-04T15:46:00Z
+  kind: created
+- at: 2026-08-04T17:52:30Z
+  kind: in_progress
+- at: 2026-08-04T18:00:00Z
+  kind: qa_waiting
+- at: 2026-08-05T03:08:52.922872+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-0D79A7F0
+work_group_revision: 1
 ---
 
 # 세 계약이 겹침 선언을 쓰고 지목하게 하고 rules_version을 올린다

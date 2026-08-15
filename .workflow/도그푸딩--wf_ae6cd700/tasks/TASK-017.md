@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-017
 title: 화면이 읽은 뒤 바뀐 관리 블록을 확인 없이 덮어쓰지 않는다
-status: completed
+status: verified
 source_spec_id: SPEC-005
 source_decision_id: DECISION-02EBD5DB
-updated_at: 2026-08-03T02:31:02.092686+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:31:02.092686+00:00, kind: completed }
+- at: 2026-08-03T02:31:02.092686+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-02EBD5DB
+work_group_revision: 1
 ---
 
 # 화면이 읽은 뒤 바뀐 관리 블록을 확인 없이 덮어쓰지 않는다

@@ -1,38 +1,37 @@
-# 판 상태 핸드오프 (TL 스냅샷)
+# 판 상태 핸드오프
 
-> 다음 세션 팔로업용 정본. 갱신: 2026-08-12.
+> 다음 세션 팔로업용 정본. 갱신: 2026-08-14, 작업 그룹 v2와 품질 확인 적응형·균형 작업대 구현 및 실기 검수 완료.
 
-## 완료된 결과
+## 현재 상태
 
-1. 에이전트 화면을 설정 폼에서 관제 화면으로 교체했다. 자동 배정 여부, 사용자가 확인할 관문, 진행 중, 현재 자격 대기열, 최근 종료만 기본 화면에 남겼다.
-2. 자동 배정은 프로젝트별 opt-in이며 기본값은 꺼짐이다. 끄기는 새 자동 시작만 막고 직접 배정과 이미 실행 중인 세션은 유지한다.
-3. `no_target`은 정상 대기다. run/error/lease/quota/provider 호출을 만들지 않으며, 수동 지정 대상이 경합으로 사라진 경우만 실행 이력 밖 시작 실패로 답한다.
-4. 작업 대기열은 예약 목록이 아니라 전체 역할 자격 판정의 읽기 전용 결과다. 실제 실행 직전에만 다시 판정하고 lease를 잡는다. 프로젝트 간·역할 간 공정 순환은 유지하고 역할 내부 순서는 워크플로 계약을 따른다.
-5. `.workflow` 변경 watcher는 500ms debounce로 즉시 재판정하며, 실패하면 기본 5분 안전 확인으로 저하 운행한다. 앱의 2.5초 전체 프로젝트·연동 반복 조회는 제거했다.
-6. 연동 메뉴와 Dream 관리 UI/API를 제거했다. 런타임 복구와 기존 역할 잡 이전은 고급 설정으로 이동했고, 외부 Dream 파일은 수정·삭제하지 않는다.
-7. 런타임 0.9.0/API 1/schema 5를 앱에 bundle했다. launchd 서비스는 stable launcher의 `agent-dispatcher`를 실행하며 강제 재시작과 앱 종료 뒤에도 복구한다.
-8. workflow-labs 구형 역할 잡은 실기 전환으로 제거됐다. mech-arena 잡과 외부 Dream plist는 보존됐다. workflow-labs 자동 배정은 실제 DB에서 OFF다.
-9. 모델 선택은 provider 공통 메타데이터·실제 카탈로그를 사용하며, 잘못된 모델과 `limit_reached`·`no_target`을 서로 다른 사용자 안내로 표시한다. 종료된 실행의 경과는 고정 종료 시각을 사용한다.
-10. 최신 universal debug 앱은 940px 에이전트 관제 화면에 열려 있다. 고급 설정은 좁은 창에서 overlay sheet로 동작하고 기본 화면에는 원시 JSON·project/lease 식별자가 없다.
+- 작업 그룹 v2 구현은 제품 코드와 제공 관리 자산에 반영됐으며 아직 커밋하지 않았다.
+- 승인된 기획서 개정본 하나가 작업 그룹 하나를 만들고, 태스크는 `todo | in_progress | blocked | verified`인 AI 실행 단위로만 남는다.
+- 사용자 QA는 그룹의 비개발자용 시나리오만 확인하고 그룹 전체에 한 번 승인하거나 반려한다. 반려는 기존 태스크를 롤백하지 않고 아키텍트의 새 수정 태스크 분해로 이어진다.
+- v1→v2 마이그레이션은 문서·manifest·관리 규칙·역할·예약 헬퍼를 같은 잠금, 백업, 롤백 경계에서 전환한다. 기존 task QA 문서는 감사 기록으로 보존한다.
 
-## 검증 정본
+## 화면과 역할
 
-- claude-heartbeat: 330 passed, 8 skipped; 변경 범위 Ruff 통과.
-- workflow-labs 프런트: 24 files, 446 passed·42 skipped; typecheck·production build 통과.
-- workflow-labs Rust: 718 lib + 19 e2e; `cargo fmt --check`, Clippy `-D warnings` 통과.
-- macOS 실기: service PID 강제 교체 뒤 DB 소유권 일치, runningVersion 0.9.0, 앱 종료 뒤 서비스 유지.
-- bundle: 앱·heartbeat·psutil·watchdog 모두 arm64/x86_64, manifest 0.9.0/API 1/macos-universal 검증.
-- 1180px·940px 실화면: 헤더 개행·가로 스크롤 없음, 940px drawer sheet 확인.
+- 개발은 작업 그룹 보드가 기본이며 평면 태스크 보기는 보조 전환이다. 태스크 상세은 AI 자동검증과 유효한 소속 그룹만 보여준다.
+- 개발 상세의 제목 설명·상태 배지와 요약 카드 사이에는 화면 전용 10px 간격을 둔다. 그룹 레인은 제목과 ID/구성 버전을 두 줄 위계로 표시하고, 평면 보기 전환은 선택 상태가 아닌 액션 버튼으로 읽힌다.
+- 품질 확인은 `workGroups`를 직접 사용한다. 기능 설명과 항목 목록은 동시에 열리지 않고 같은 컨텍스트 슬롯을 쓰며, 임시 저장은 workflow+group+revision+scenario로 격리된다. 대기열은 앱 공통 좌측 시작선부터 워크스페이스 전체 폭을 사용하고, 검토·최종 결정은 최대 1280px 포커스 캔버스 안의 760px 주 영역과 280~320px 우측 레일을 균형 배치한다. 기본 1180px와 최소 940px 창은 한 열로 안전하게 접힌다.
+- 아키텍트 우선순위는 그룹 QA 반려→태스크 정의 수정→중단된 preparing 복구→신규 승인 분해다.
+- 개발자는 최신 승인 쌍과 active 그룹의 원천·revision이 일치하는 태스크만 실행하고 verified로 끝낸다. Rust·POSIX·PowerShell 계약은 공용 시나리오로 맞췄다.
 
-## 다음 확인
+## 검증 스냅샷
 
-1. 자동 배정은 사용자가 원할 때만 켠다. 현재 OFF이므로 유료 세션이 자동 시작되지 않는다.
-2. Linux·Windows 실제 서비스와 앱 bundle smoke, 공식 3OS release 산출물 양성 경로는 target CI 또는 해당 OS 기기에서 확인한다.
-3. `.workflow`의 기존 QA·task·report 변경은 사용자/역할 작업이므로 보호한다. 이 직접 구현과 섞어 상태를 소급 수정하지 않는다.
-4. main 병합·push·태그·릴리스는 하지 않았다. 릴리스 컷은 별도 승인과 `docs/releasing.md` 절차를 따른다.
+- 프런트: Vitest 31개 파일, 491 통과·42 건너뜀. 타입 검사와 Vite 프로덕션 빌드 통과.
+- Rust: 단위 782 통과, 런타임 E2E 20 통과. `cargo fmt --check`, `cargo check`, diff 검사 통과.
+- Tauri: debug `.app` 빌드 통과. Computer Use로 1440/1180/940px에서 QA 대기열·세션·설명/목록·최종 검토를 확인했고, 마지막 균형 보정 뒤 넓은 화면의 전체 폭 대기열과 중앙 포커스 세션을 다시 확인했다. 넓은 화면의 주 카드 고정과 우측 레일 내부 스크롤, 기본/최소 화면의 한 열·단일 워크스페이스 스크롤을 검수했다.
+- 실기 제출: GROUP-A 3/3 승인 후 완료, GROUP-I 1개 확인+1개 문제/코멘트 후 아키텍트 재분류 대기. 대기열 2→1→0과 결정 문서 1개씩, 태스크 verified 유지 확인.
 
-## 산출물
+## 보호와 남은 것
 
-- 앱: `/Users/catze/project/workflow-labs/src-tauri/target/universal-apple-darwin/debug/bundle/macos/LLM Workflow.app`
-- DMG: `/Users/catze/project/workflow-labs/src-tauri/target/universal-apple-darwin/debug/bundle/dmg/LLM Workflow_0.1.11_universal.dmg`
-- 런타임: `/Users/catze/Git/claude-heartbeat/dist/heartbeat`
+- 실제 저장소의 `.workflow`는 이번 QA 레이아웃 검수에서 수정하지 않았다. 최종 검토 화면 확인용 로컬 draft는 제출하지 않고 검수 직후 삭제해 원래 상태로 복구했다. 현재 `.workflow`의 기존 dirty/untracked 문서는 사용자·다른 세션 소유이므로 보존한다.
+- 실기 데이터는 무시되는 `src-tauri/target/codex-v2-ui-fixture`에만 남아 있다.
+- macOS에 PowerShell 실행기가 없어 PS 본문은 정적 계약과 Windows 공용 fixture까지만 검증했다. 실제 실행은 Windows CI가 필요하다.
+- 기존 Vite 500kB 초과 chunk 경고는 비차단이다. 커밋·PR·릴리스는 사용자 요청 전까지 하지 않는다.
+
+## 기존 배포 메모
+
+- 게시 버전은 앱 v0.1.16, 번들 런타임 0.9.4다. 다음 릴리스 컷은 `docs/releasing.md`의 병합 조건을 먼저 따른다.
+- cargo target 저장 공간과 런타임 버전 축적을 계속 감시한다.

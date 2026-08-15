@@ -2,17 +2,28 @@
 schema: workflow-labs/task@1
 id: TASK-140
 title: 역할 계약에 작업 문서 우선 착수와 완결 지시서, 보고서 규격 문장을 넣고 버전을 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-049
 source_decision_id: DECISION-30E36EFB
-depends_on: [TASK-139]
-scope_files: [src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/infrastructure/project_instructions.rs]
-updated_at: 2026-08-06T15:13:24.899641+00:00
+depends_on:
+- TASK-139
+scope_files:
+- src-tauri/src/infrastructure/fs_project_repository.rs
+- src-tauri/src/infrastructure/project_instructions.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T13:58:00Z, kind: created }
-  - { at: 2026-08-06T14:39:00Z, kind: in_progress }
-  - { at: 2026-08-06T14:50:00Z, kind: qa_waiting }
-  - { at: 2026-08-06T15:13:24.899641+00:00, kind: completed }
+- at: 2026-08-06T13:58:00Z
+  kind: created
+- at: 2026-08-06T14:39:00Z
+  kind: in_progress
+- at: 2026-08-06T14:50:00Z
+  kind: qa_waiting
+- at: 2026-08-06T15:13:24.899641+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-30E36EFB
+work_group_revision: 1
 ---
 
 # 역할 계약에 작업 문서 우선 착수와 완결 지시서, 보고서 규격 문장을 넣고 버전을 올린다

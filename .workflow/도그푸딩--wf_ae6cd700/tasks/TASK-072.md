@@ -2,16 +2,27 @@
 schema: workflow-labs/task@1
 id: TASK-072
 title: 하트비트 카드의 역할마다 지금 실행 액션과 확인 단계를 만든다
-status: completed
+status: verified
 source_spec_id: SPEC-020
 source_decision_id: DECISION-53577F93
-depends_on: [TASK-062, TASK-065, TASK-071]
-updated_at: 2026-08-04T11:42:43.583090+00:00
+depends_on:
+- TASK-062
+- TASK-065
+- TASK-071
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:02:00Z, kind: created }
-  - { at: 2026-08-04T09:23:30Z, kind: in_progress }
-  - { at: 2026-08-04T09:41:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:43.583090+00:00, kind: completed }
+- at: 2026-08-04T09:02:00Z
+  kind: created
+- at: 2026-08-04T09:23:30Z
+  kind: in_progress
+- at: 2026-08-04T09:41:00Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:43.583090+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-53577F93
+work_group_revision: 1
 ---
 
 # 하트비트 카드의 역할마다 지금 실행 액션과 확인 단계를 만든다

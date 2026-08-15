@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-061
 title: 설치 가이드 접힘을 기억하는 브라우저 저장소를 별도 키로 만든다
-status: completed
+status: verified
 source_spec_id: SPEC-019
 source_decision_id: DECISION-284DCE8B
-updated_at: 2026-08-04T09:46:00.654592+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:15:00Z, kind: created }
-  - { at: 2026-08-04T08:12:22Z, kind: in_progress }
-  - { at: 2026-08-04T08:15:54Z, kind: qa_waiting }
-  - { at: 2026-08-04T09:46:00.654592+00:00, kind: completed }
+- at: 2026-08-04T08:15:00Z
+  kind: created
+- at: 2026-08-04T08:12:22Z
+  kind: in_progress
+- at: 2026-08-04T08:15:54Z
+  kind: qa_waiting
+- at: 2026-08-04T09:46:00.654592+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-284DCE8B
+work_group_revision: 1
 ---
 
 # 설치 가이드 접힘을 기억하는 브라우저 저장소를 별도 키로 만든다

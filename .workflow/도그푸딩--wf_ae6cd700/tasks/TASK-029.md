@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-029
 title: 역할별 대기 물량을 조회 결과에 싣고 조건 스크립트와 같은 결론을 테스트로 고정한다
-status: completed
+status: verified
 source_spec_id: SPEC-009
 source_decision_id: DECISION-85491D81
-updated_at: 2026-08-03T12:42:55Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T00:45:00Z, kind: created }
-  - { at: 2026-08-03T05:01:26Z, kind: in_progress }
-  - { at: 2026-08-03T05:16:00Z, kind: qa_waiting }
+- at: 2026-08-03T00:45:00Z
+  kind: created
+- at: 2026-08-03T05:01:26Z
+  kind: in_progress
+- at: 2026-08-03T05:16:00Z
+  kind: qa_waiting
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-85491D81
+work_group_revision: 1
 ---
 
 # 역할별 대기 물량을 조회 결과에 싣고 조건 스크립트와 같은 결론을 테스트로 고정한다

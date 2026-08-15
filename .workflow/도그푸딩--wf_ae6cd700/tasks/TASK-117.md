@@ -2,17 +2,35 @@
 schema: workflow-labs/task@1
 id: TASK-117
 title: 설치 마법사가 실행 버튼을 갖고 버전 어긋남이 화면에 보인다
-status: completed
+status: verified
 source_spec_id: SPEC-037
 source_decision_id: DECISION-6C2F2639
-depends_on: [TASK-114, TASK-115, TASK-116]
-scope_files: [src/features/projects/components/integrations/HeartbeatCard.tsx, src/features/projects/components/integrations/IntegrationsView.test.tsx, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/application/useProjectWorkspace.test.ts, src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts, src/App.css]
-updated_at: 2026-08-05T09:08:41.739152+00:00
+depends_on:
+- TASK-114
+- TASK-115
+- TASK-116
+scope_files:
+- src/features/projects/components/integrations/HeartbeatCard.tsx
+- src/features/projects/components/integrations/IntegrationsView.test.tsx
+- src/features/projects/application/useProjectWorkspace.ts
+- src/features/projects/application/useProjectWorkspace.test.ts
+- src/features/projects/domain/types.ts
+- src/features/projects/infrastructure/tauriProjectGateway.ts
+- src/App.css
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T03:25:00Z, kind: created }
-  - { at: 2026-08-05T08:07:00Z, kind: in_progress }
-  - { at: 2026-08-05T08:33:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T09:08:41.739152+00:00, kind: completed }
+- at: 2026-08-05T03:25:00Z
+  kind: created
+- at: 2026-08-05T08:07:00Z
+  kind: in_progress
+- at: 2026-08-05T08:33:00Z
+  kind: qa_waiting
+- at: 2026-08-05T09:08:41.739152+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6C2F2639
+work_group_revision: 1
 ---
 
 # 설치 마법사가 실행 버튼을 갖고 버전 어긋남이 화면에 보인다

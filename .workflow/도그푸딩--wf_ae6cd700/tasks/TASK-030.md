@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-030
 title: 카드 골격에 본문 경고 통로를 열고 하트비트 카드가 사용량·소진·대기 경고를 보여준다
-status: completed
+status: verified
 source_spec_id: SPEC-009
 source_decision_id: DECISION-85491D81
-updated_at: 2026-08-04T09:33:58.956919+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T00:45:00Z, kind: created }
-  - { at: 2026-08-03T05:29:00Z, kind: in_progress }
-  - { at: 2026-08-03T05:41:00Z, kind: qa_waiting }
-  - { at: 2026-08-04T09:33:58.956919+00:00, kind: completed }
+- at: 2026-08-03T00:45:00Z
+  kind: created
+- at: 2026-08-03T05:29:00Z
+  kind: in_progress
+- at: 2026-08-03T05:41:00Z
+  kind: qa_waiting
+- at: 2026-08-04T09:33:58.956919+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-85491D81
+work_group_revision: 1
 ---
 
 # 카드 골격에 본문 경고 통로를 열고 하트비트 카드가 사용량·소진·대기 경고를 보여준다

@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-046
 title: 건너뜀 문구가 조건 검사 실행 실패를 배제하지 않게 하고 dream 조건의 비보증을 카드가 밝힌다
-status: completed
+status: verified
 source_spec_id: SPEC-015
 source_decision_id: DECISION-EEEEB81D
-updated_at: 2026-08-04T11:45:32.822054+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T06:50:00Z, kind: created }
-  - { at: 2026-08-03T09:28:56Z, kind: in_progress }
-  - { at: 2026-08-03T09:39:32Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:45:32.822054+00:00, kind: completed }
+- at: 2026-08-03T06:50:00Z
+  kind: created
+- at: 2026-08-03T09:28:56Z
+  kind: in_progress
+- at: 2026-08-03T09:39:32Z
+  kind: qa_waiting
+- at: 2026-08-04T11:45:32.822054+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-EEEEB81D
+work_group_revision: 1
 ---
 
 # 건너뜀 문구가 조건 검사 실행 실패를 배제하지 않게 하고 dream 조건의 비보증을 카드가 밝힌다

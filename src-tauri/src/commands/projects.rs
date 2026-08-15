@@ -8,9 +8,9 @@ use crate::application::project_service::ProjectService;
 use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, ReportDocument, SaveCustomRulesRequest,
-    SaveCustomRulesResult, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskQaBatchResult,
-    TaskQaOutcome, TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput,
-    TaskRevisionRequestResult, WorkflowReportSummary,
+    SaveCustomRulesResult, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskResumeRequest,
+    TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult, WorkGroupQaSubmission,
+    WorkGroupQaSubmissionResult, WorkflowReportSummary,
 };
 use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
 
@@ -218,34 +218,14 @@ pub fn record_spec_decision(
         .map_err(|error| error.to_string())
 }
 
+/// 작업 그룹의 사용자 시나리오 결과를 감사 결정 한 건으로 원자적으로 기록한다.
 #[tauri::command]
-pub fn record_task_qa(
+pub fn submit_work_group_qa(
     path: String,
-    workflow_directory: String,
-    file_name: String,
-    outcome: TaskQaOutcome,
-    comment: String,
-) -> Result<ProjectSummary, String> {
+    submission: WorkGroupQaSubmission,
+) -> Result<WorkGroupQaSubmissionResult, String> {
     ProjectService::default()
-        .record_task_qa(
-            Path::new(&path),
-            &workflow_directory,
-            &file_name,
-            outcome,
-            &comment,
-        )
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn confirm_task_qa_batch(
-    path: String,
-    workflow_directory: String,
-    file_names: Vec<String>,
-    comment: String,
-) -> Result<TaskQaBatchResult, String> {
-    ProjectService::default()
-        .confirm_task_qa_batch(Path::new(&path), &workflow_directory, &file_names, &comment)
+        .submit_work_group_qa(Path::new(&path), &submission)
         .map_err(|error| error.to_string())
 }
 

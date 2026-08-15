@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-088
 title: 공통 규칙에 대리 결정 요건과 재가 절차를 넣고 rules_version을 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-028
 source_decision_id: DECISION-2A9D7B31
-depends_on: [TASK-086, TASK-087]
-updated_at: 2026-08-04T11:42:28.171433+00:00
+depends_on:
+- TASK-086
+- TASK-087
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T09:27:00Z, kind: created }
-  - { at: 2026-08-04T10:20:58Z, kind: in_progress }
-  - { at: 2026-08-04T10:30:25Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:42:28.171433+00:00, kind: completed }
+- at: 2026-08-04T09:27:00Z
+  kind: created
+- at: 2026-08-04T10:20:58Z
+  kind: in_progress
+- at: 2026-08-04T10:30:25Z
+  kind: qa_waiting
+- at: 2026-08-04T11:42:28.171433+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-2A9D7B31
+work_group_revision: 1
 ---
 
 # 공통 규칙에 대리 결정 요건과 재가 절차를 넣고 rules_version을 올린다

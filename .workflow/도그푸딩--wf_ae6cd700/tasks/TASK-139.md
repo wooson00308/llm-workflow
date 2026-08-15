@@ -2,16 +2,28 @@
 schema: workflow-labs/task@1
 id: TASK-139
 title: 자격 확인 도구와 앱 판정이 대상 문서와 후보별 제외 사유를 함께 답한다
-status: completed
+status: verified
 source_spec_id: SPEC-049
 source_decision_id: DECISION-30E36EFB
-scope_files: [src-tauri/src/domain/project.rs, src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/infrastructure/heartbeat_condition.rs, src-tauri/src/infrastructure/role_eligibility.rs]
-updated_at: 2026-08-06T15:13:24.909513+00:00
+scope_files:
+- src-tauri/src/domain/project.rs
+- src-tauri/src/infrastructure/fs_project_repository.rs
+- src-tauri/src/infrastructure/heartbeat_condition.rs
+- src-tauri/src/infrastructure/role_eligibility.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T13:57:00Z, kind: created }
-  - { at: 2026-08-06T14:08:00Z, kind: in_progress }
-  - { at: 2026-08-06T14:32:00Z, kind: qa_waiting }
-  - { at: 2026-08-06T15:13:24.909513+00:00, kind: completed }
+- at: 2026-08-06T13:57:00Z
+  kind: created
+- at: 2026-08-06T14:08:00Z
+  kind: in_progress
+- at: 2026-08-06T14:32:00Z
+  kind: qa_waiting
+- at: 2026-08-06T15:13:24.909513+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-30E36EFB
+work_group_revision: 1
 ---
 
 # 자격 확인 도구와 앱 판정이 대상 문서와 후보별 제외 사유를 함께 답한다

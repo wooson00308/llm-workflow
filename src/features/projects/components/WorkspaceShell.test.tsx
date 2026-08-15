@@ -9,11 +9,16 @@ import type {
   ManagedAssetSyncResult,
   ManagedAssetsState,
   ProjectSummary,
+  WorkGroupSummary,
 } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
 import { WorkspaceShell } from "./WorkspaceShell";
+import { EXECUTION_NOTICE_FACTS } from "./agents/AgentRuntimeView";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const project: ProjectSummary = {
   rootPath: "/projects/workflow-labs",
@@ -28,8 +33,8 @@ const project: ProjectSummary = {
     name: "Feature",
     status: "active",
     createdAt: "2026-07-30T00:00:00Z",
-    counts: { ideas: 0, specs: 0, decisions: 0, tasks: 0, reports: 0 },
-    items: { ideas: [], specs: [], tasks: [] },
+    counts: { ideas: 0, specs: 0, decisions: 0, workGroups: 0, tasks: 0, reports: 0 },
+    items: { ideas: [], specs: [], workGroups: [], tasks: [] },
   }],
 };
 
@@ -53,6 +58,24 @@ const integrations: IntegrationsState = {
 const integrationActions = {
   installHeartbeatJobs: vi.fn().mockResolvedValue(true),
 };
+
+function workGroup(
+  id: string,
+  title: string,
+  displayStatus: WorkGroupSummary["displayStatus"] = "qa_ready",
+  scenarioCount = 1,
+): WorkGroupSummary {
+  return {
+    fileName: `${id}.md`, id, title, status: "active", displayStatus, revision: 1, qaMode: "user",
+    sourceSpecId: id.replace("GROUP", "SPEC"), sourceDecisionId: `DECISION-${id}`, sourceQaDecisionId: null,
+    updatedAt: "2026-08-13T09:00:00Z", description: `${title} 설명`,
+    scenarios: Array.from({ length: scenarioCount }, (_, index) => ({
+      id: `QA-${String(index + 1).padStart(2, "0")}`,
+      title: `${title} 확인 ${index + 1}`,
+      body: `${title} 화면을 확인합니다.`,
+    })),
+  };
+}
 
 const managedAssets: ManagedAssetsState = {
   syncing: false,
@@ -131,8 +154,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -148,22 +169,468 @@ describe("WorkspaceShell", () => {
     expect(screen.getByRole("heading", { name: "개발 작업" })).toBeInTheDocument();
   });
 
-  it("keeps the full completed task history in the archive", () => {
-    const completedTasks = [1, 2, 3, 4].map((day) => ({
-      fileName: `TASK-00${day}.md`,
-      id: `TASK-00${day}`,
-      title: `완료 기록 ${day}`,
-      status: "completed",
-      updatedAt: `2026-07-0${day}T00:00:00Z`,
+  it("opens the quality check workbench from the primary menu without moving the other entries", () => {
+    const qaProject: ProjectSummary = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, decisions: 1, specs: 1, workGroups: 1, tasks: 1 },
+        items: {
+          ideas: [],
+          specs: [{
+            fileName: "SPEC-A.md",
+            id: "SPEC-A",
+            title: "카드 등록 흐름",
+            status: "user_review",
+            updatedAt: "2026-08-13T08:00:00Z",
+            dueAt: null,
+            excerpt: "결제 화면의 카드 등록 단계를 줄였다.",
+          }],
+          workGroups: [workGroup("GROUP-A", "카드 등록 흐름")],
+          tasks: [{
+            fileName: "TASK-001.md",
+            id: "TASK-001",
+            title: "카드 등록 화면 정리",
+            status: "qa_waiting",
+            updatedAt: "2026-08-13T09:00:00Z",
+            dueAt: null,
+            sourceSpecId: "SPEC-A",
+            excerpt: "결제 화면에서 카드를 등록하면 목록에 바로 나타난다.",
+          }],
+        },
+      }],
+    };
+
+    render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={qaProject}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    expect(screen.getByRole("heading", { level: 1, name: "품질 확인" })).toBeInTheDocument();
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("품질 확인");
+    expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
+
+    // 개발 화면은 같은 그룹에 품질 확인 입구만 열고, 확인·도장 같은 QA 결정 조작은 두지 않는다.
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    expect(screen.getByText("카드 등록 흐름")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "품질 확인 시작 →" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /확인 완료|기록하기/ })).not.toBeInTheDocument();
+
+    // 오늘 화면의 내 선택 대기도 그대로다.
+    fireEvent.click(screen.getByRole("button", { name: "오늘" }));
+    expect(screen.getByRole("heading", { name: "내 선택 대기" })).toBeInTheDocument();
+    expect(screen.getByText("SPEC-A · 기획서 승인 필요")).toBeInTheDocument();
+  });
+
+  it("remounts the QA workbench when workflows reuse the same group id and revision", () => {
+    stubStorage();
+    const firstGroup = workGroup("GROUP-SAME", "첫 워크플로 기능");
+    const secondGroup = {
+      ...workGroup("GROUP-SAME", "둘째 워크플로 기능"),
+      scenarios: [{ id: "QA-01", title: "둘째 화면 확인", body: "둘째 워크플로 화면만 확인합니다." }],
+    };
+    const qaProject: ProjectSummary = {
+      ...project,
+      workflows: [
+        {
+          ...project.workflows[0],
+          name: "First",
+          counts: { ...project.workflows[0].counts, workGroups: 1 },
+          items: { ...project.workflows[0].items, workGroups: [firstGroup] },
+        },
+        {
+          ...project.workflows[0],
+          id: "wf_2",
+          directory: "second--wf_2",
+          name: "Second",
+          counts: { ...project.workflows[0].counts, workGroups: 1 },
+          items: { ...project.workflows[0].items, workGroups: [secondGroup] },
+        },
+      ],
+    };
+
+    render(
+      <WorkspaceShell
+        busy={false}
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        error={null}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+        project={qaProject}
+        updater={updater}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    fireEvent.click(screen.getByRole("button", { name: /첫 워크플로 기능/ }));
+    fireEvent.click(screen.getByRole("button", { name: "기대대로 동작함" }));
+    expect(screen.getByRole("button", { name: "기대대로 동작함" })).toHaveAttribute("aria-pressed", "true");
+
+    // 같은 그룹 id·revision이라도 워크플로가 다르면 임시 결정을 물려받지 않는다.
+    fireEvent.click(screen.getByRole("button", { name: /Second/ }));
+    expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /둘째 워크플로 기능/ }));
+    expect(screen.getByRole("region", { name: "확인 플로우" })).toHaveTextContent("둘째 워크플로 화면만 확인합니다.");
+    expect(screen.getByRole("button", { name: "기대대로 동작함" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("does not carry a Today QA deep link into another workflow with the same group id", () => {
+    stubStorage();
+    const firstGroup = workGroup("GROUP-SAME", "첫 워크플로 기능");
+    const secondGroup = workGroup("GROUP-SAME", "둘째 워크플로 기능");
+    const qaProject: ProjectSummary = {
+      ...project,
+      workflows: [
+        {
+          ...project.workflows[0],
+          name: "First",
+          counts: { ...project.workflows[0].counts, workGroups: 1 },
+          items: { ...project.workflows[0].items, workGroups: [firstGroup] },
+        },
+        {
+          ...project.workflows[0],
+          id: "wf_2",
+          directory: "second--wf_2",
+          name: "Second",
+          counts: { ...project.workflows[0].counts, workGroups: 1 },
+          items: { ...project.workflows[0].items, workGroups: [secondGroup] },
+        },
+      ],
+    };
+
+    shell({ project: qaProject });
+
+    fireEvent.click(screen.getByRole("button", { name: /품질 확인 시작/ }));
+    expect(screen.getByRole("heading", { level: 1, name: "첫 워크플로 기능" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Second/ }));
+    expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1, name: "둘째 워크플로 기능" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /둘째 워크플로 기능/ })).toBeInTheDocument();
+  });
+
+  it("isolates an opened and an in-flight task detail when the workflow changes", async () => {
+    const firstGroup = workGroup("GROUP-DEV-A", "첫 개발 그룹", "developing");
+    const secondGroup = workGroup("GROUP-DEV-B", "둘째 개발 그룹", "developing");
+    const firstTask = {
+      fileName: "TASK-A.md",
+      id: "TASK-A",
+      title: "첫 태스크",
+      status: "in_progress",
+      updatedAt: "2026-08-13T09:00:00Z",
+      dueAt: null,
+      excerpt: "첫 워크플로 내부 내용",
+      sourceSpecId: firstGroup.sourceSpecId,
+      sourceDecisionId: firstGroup.sourceDecisionId,
+      workGroupId: firstGroup.id,
+      workGroupRevision: firstGroup.revision,
+    };
+    const secondTask = {
+      ...firstTask,
+      fileName: "TASK-B.md",
+      id: "TASK-B",
+      title: "둘째 태스크",
+      excerpt: "둘째 워크플로 내부 내용",
+      sourceSpecId: secondGroup.sourceSpecId,
+      sourceDecisionId: secondGroup.sourceDecisionId,
+      workGroupId: secondGroup.id,
+    };
+    const developmentProject: ProjectSummary = {
+      ...project,
+      workflows: [
+        {
+          ...project.workflows[0],
+          name: "First",
+          counts: { ...project.workflows[0].counts, workGroups: 1, tasks: 1 },
+          items: { ...project.workflows[0].items, workGroups: [firstGroup], tasks: [firstTask] },
+        },
+        {
+          ...project.workflows[0],
+          id: "wf_2",
+          directory: "second--wf_2",
+          name: "Second",
+          counts: { ...project.workflows[0].counts, workGroups: 1, tasks: 1 },
+          items: { ...project.workflows[0].items, workGroups: [secondGroup], tasks: [secondTask] },
+        },
+      ],
+    };
+    let resolveDelayed!: (value: { summary: typeof firstTask; body: string }) => void;
+    const onReadTask = vi.fn()
+      .mockResolvedValueOnce({ summary: firstTask, body: "첫 태스크 원문" })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveDelayed = resolve; }));
+
+    shell({ onReadTask, project: developmentProject });
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    fireEvent.click(screen.getByRole("button", { name: /첫 태스크/ }));
+    expect(await screen.findByRole("heading", { level: 1, name: "첫 태스크" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Second/ }));
+    expect(screen.getByRole("heading", { level: 1, name: "개발 작업" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1, name: "첫 태스크" })).not.toBeInTheDocument();
+    expect(screen.getByText("둘째 개발 그룹")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /First/ }));
+    fireEvent.click(screen.getByRole("button", { name: /첫 태스크/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Second/ }));
+    resolveDelayed({ summary: firstTask, body: "늦게 도착한 첫 태스크 원문" });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 1, name: "개발 작업" })).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { level: 1, name: "첫 태스크" })).not.toBeInTheDocument();
+      expect(screen.getByText("둘째 태스크")).toBeInTheDocument();
+    });
+  });
+
+  /** 오늘 화면 검사가 함께 쓰는 목록 항목 하나. */
+  function summaryItem(
+    id: string,
+    status: string,
+    overrides: Partial<ProjectSummary["workflows"][number]["items"]["tasks"][number]> = {},
+  ) {
+    return {
+      fileName: `${id}.md`,
+      id,
+      title: `${id} 문서`,
+      status,
+      updatedAt: "2026-08-13T09:00:00Z",
       dueAt: null,
       excerpt: "",
+      ...overrides,
+    };
+  }
+
+  /**
+   * 오늘 화면을 그린다. 기획서 승인 대기 건수는 앱이 센 값이라 따로 넘긴다.
+   */
+  function renderToday(
+    specs: ProjectSummary["workflows"][number]["items"]["specs"],
+    tasks: ProjectSummary["workflows"][number]["items"]["tasks"],
+    decisions: number,
+  ) {
+    const groups = specs
+      .filter((spec) => spec.status === "approved")
+      .map((spec) => {
+        const linked = tasks.filter((task) => task.sourceSpecId === spec.id);
+        const ready = linked.length > 0 && linked.every((task) => task.status === "qa_waiting" || task.status === "completed");
+        return workGroup(
+          `GROUP-${spec.id.replace("SPEC-", "")}`,
+          spec.title,
+          ready ? "qa_ready" : "developing",
+          Math.max(1, linked.filter((task) => task.status === "qa_waiting").length),
+        );
+      });
+    const todayProject: ProjectSummary = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, decisions, specs: specs.length, workGroups: groups.length, tasks: tasks.length },
+        items: { ideas: [], specs, workGroups: groups, tasks },
+      }],
+    };
+    return render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={todayProject}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+  }
+
+  /** 기획서 승인 하나와 확인 가능한 기능 하나와 준비 중인 기능 하나가 함께 있는 워크플로. */
+  function mixedTodayItems() {
+    const specs = [
+      summaryItem("SPEC-A", "user_review", { title: "카드 등록 흐름" }),
+      summaryItem("SPEC-B", "approved", { title: "알림 재설계" }),
+      summaryItem("SPEC-C", "approved", { title: "결제 재시도" }),
+    ];
+    const tasks = [
+      summaryItem("TASK-001", "qa_waiting", { sourceSpecId: "SPEC-B" }),
+      summaryItem("TASK-002", "qa_waiting", { sourceSpecId: "SPEC-B" }),
+      summaryItem("TASK-003", "qa_waiting", { sourceSpecId: "SPEC-C" }),
+      summaryItem("TASK-004", "todo", { sourceSpecId: "SPEC-C" }),
+    ];
+    return { specs, tasks };
+  }
+
+  it("counts a spec approval and a confirmable feature together on today's screen", () => {
+    const { specs, tasks } = mixedTodayItems();
+    const { container } = renderToday(specs, tasks, 1);
+
+    const attention = container.querySelector(".attention-card") as HTMLElement;
+    // 기획서 승인 한 건과 기능 한 건. 같은 기능의 대기 작업이 둘이어도 한 건으로 센다.
+    expect(attention.querySelector(".count-badge")).toHaveTextContent("2");
+    expect(within(attention).getByText("SPEC-A · 기획서 승인 필요")).toBeInTheDocument();
+    expect(within(attention).getByText("알림 재설계")).toBeInTheDocument();
+    expect(within(attention).getByText("확인 항목 2개 · 품질 확인 필요")).toBeInTheDocument();
+    expect(within(attention).getAllByRole("button")).toHaveLength(2);
+
+    // 아직 확인할 수 없는 기능은 목록에도 건수에도 없다. 작업 식별자도 여기서 말하지 않는다.
+    expect(within(attention).queryByText("결제 재시도")).not.toBeInTheDocument();
+    expect(attention.textContent).not.toContain("TASK-001");
+  });
+
+  it("opens the workbench at the chosen feature without passing through the development screen", () => {
+    const { specs, tasks } = mixedTodayItems();
+    renderToday(specs, tasks, 1);
+
+    fireEvent.click(screen.getByRole("button", { name: /알림 재설계/ }));
+
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("품질 확인");
+    expect(screen.getByRole("heading", { level: 1, name: "알림 재설계" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "지금 확인할 기능" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "개발 작업" })).not.toBeInTheDocument();
+
+    // 주요 메뉴로 다시 들어가면 대기열에서 시작한다.
+    fireEvent.click(screen.getByRole("button", { name: "오늘" }));
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
+  });
+
+  it("says nothing is waiting only when neither kind is left", () => {
+    const specs = [summaryItem("SPEC-C", "approved", { title: "결제 재시도" })];
+    const tasks = [
+      summaryItem("TASK-003", "qa_waiting", { sourceSpecId: "SPEC-C" }),
+      summaryItem("TASK-004", "todo", { sourceSpecId: "SPEC-C" }),
+    ];
+    const { container } = renderToday(specs, tasks, 0);
+
+    const attention = container.querySelector(".attention-card") as HTMLElement;
+    expect(attention.querySelector(".count-badge")).toHaveTextContent("0");
+    expect(within(attention).getByText("기다리는 선택이 없습니다")).toBeInTheDocument();
+  });
+
+  it("hands the quality check screen a submit action that reaches the workflow directory", async () => {
+    stubStorage();
+    const onWorkGroupQaSubmit = vi.fn().mockResolvedValue({
+      summary: project,
+      decisionFileName: "GROUP-QA-A.md",
+      groupId: "GROUP-A",
+      groupRevision: 1,
+      outcome: "confirmed",
+      status: "recorded",
+    });
+    const qaProject: ProjectSummary = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, specs: 1, workGroups: 1, tasks: 1 },
+        items: {
+          ideas: [],
+          specs: [{
+            fileName: "SPEC-A.md",
+            id: "SPEC-A",
+            title: "카드 등록 흐름",
+            status: "approved",
+            updatedAt: "2026-08-13T08:00:00Z",
+            dueAt: null,
+            excerpt: "결제 화면의 카드 등록 단계를 줄였다.",
+          }],
+          workGroups: [workGroup("GROUP-A", "카드 등록 흐름")],
+          tasks: [{
+            fileName: "TASK-001.md",
+            id: "TASK-001",
+            title: "카드 등록 화면 정리",
+            status: "qa_waiting",
+            updatedAt: "2026-08-13T09:00:00Z",
+            dueAt: null,
+            sourceSpecId: "SPEC-A",
+            excerpt: "결제 화면에서 카드를 등록하면 목록에 바로 나타난다.",
+          }],
+        },
+      }],
+    };
+
+    render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={qaProject}
+        updater={updater}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
+        onWorkGroupQaSubmit={onWorkGroupQaSubmit}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    fireEvent.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
+    fireEvent.click(screen.getByRole("button", { name: "기대대로 동작함" }));
+    fireEvent.click(screen.getByRole("button", { name: "기능 승인 기록하기" }));
+
+    await waitFor(() => expect(onWorkGroupQaSubmit).toHaveBeenCalledTimes(1));
+    expect(onWorkGroupQaSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      workflowDirectory: "feature--wf_1",
+      fileName: "GROUP-A.md",
+      expectedRevision: 1,
+      entries: [{ scenarioId: "QA-01", outcome: "confirmed", comment: "" }],
     }));
+  });
+
+  it("keeps completed work groups in the archive", () => {
+    const completedGroups = [1, 2, 3, 4].map((day) => workGroup(
+      `GROUP-${day}`,
+      `완료 기록 ${day}`,
+      day === 4 ? "automatic_completed" : "completed",
+    ));
     const completedProject: ProjectSummary = {
       ...project,
       workflows: [{
         ...project.workflows[0],
-        counts: { ...project.workflows[0].counts, tasks: 4 },
-        items: { ...project.workflows[0].items, tasks: completedTasks },
+        counts: { ...project.workflows[0].counts, workGroups: 4 },
+        items: { ...project.workflows[0].items, workGroups: completedGroups },
       }],
     };
 
@@ -185,19 +652,68 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
+        onRefresh={vi.fn()}
+        onSwitchProject={vi.fn()}
+      />,
+    );
+
+    // 끝난 그룹은 개발 보드에 남지 않고, 기록 화면이 정본 목록을 갖는다.
+    fireEvent.click(screen.getByRole("button", { name: "개발" }));
+    expect(screen.queryByText("완료 기록 1")).not.toBeInTheDocument();
+    expect(screen.getByText("완료된 작업 그룹 4개는 기록 화면에 있습니다.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "기록" }));
+    expect(screen.getByText("완료 기록 1")).toBeInTheDocument();
+    expect(screen.getAllByText(/완료 기록 [1-4]/)).toHaveLength(4);
+
+    // 완료된 기능은 기록에서 한 화면으로 다시 열어 본다.
+    fireEvent.click(screen.getByRole("button", { name: /완료 기록 1/ }));
+    expect(screen.getByRole("heading", { level: 1, name: "완료 기록 1" })).toBeInTheDocument();
+    expect(screen.getByText("사용자 QA 승인")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "← 기록으로 돌아가기" }));
+    expect(screen.getAllByText(/완료 기록 [1-4]/)).toHaveLength(4);
+  });
+
+  it("jumps from the development board into the quality check for a qa-ready group", () => {
+    stubStorage();
+    const qaProject: ProjectSummary = {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, workGroups: 1 },
+        items: { ...project.workflows[0].items, workGroups: [workGroup("GROUP-A", "카드 등록 흐름")] },
+      }],
+    };
+
+    render(
+      <WorkspaceShell
+        customRules={customRules}
+        customRulesActions={customRulesActions}
+        busy={false}
+        error={null}
+        project={qaProject}
+        updater={updater}
+        integrations={integrations}
+        integrationActions={integrationActions}
+        managedAssets={managedAssets}
+        onAddIdea={vi.fn().mockResolvedValue(true)}
+        onAddWorkflow={vi.fn().mockResolvedValue(true)}
+        onDecideSpec={vi.fn().mockResolvedValue(true)}
+        onMigrate={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(null)}
+        onReadSpec={vi.fn().mockResolvedValue(null)}
+        onReadTask={vi.fn().mockResolvedValue(null)}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "개발" }));
-    expect(screen.queryByText("완료 기록 1")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "품질 확인 시작 →" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "기록" }));
-    expect(screen.getByText("완료 기록 1")).toBeInTheDocument();
-    expect(screen.getAllByText(/완료 기록 [1-4]/)).toHaveLength(4);
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("품질 확인");
+    expect(screen.getByRole("heading", { level: 1, name: "카드 등록 흐름" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "확인 플로우" })).toBeInTheDocument();
   });
 
   it("refreshes the project with visible interaction feedback", async () => {
@@ -224,8 +740,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={onRefresh}
         onSwitchProject={vi.fn()}
       />,
@@ -277,8 +791,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -314,8 +826,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -347,8 +857,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -387,8 +895,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -402,7 +908,7 @@ describe("WorkspaceShell", () => {
     expect(screen.getByRole("region", { name: "연동" }).textContent).toBe(before);
   });
 
-  it("opens the activity view from its own sidebar menu", () => {
+  it("keeps the retired activity menu out of the sidebar", () => {
     const { container } = render(
       <WorkspaceShell
         customRules={customRules}
@@ -421,18 +927,14 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "활동" }));
-
-    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "활동" })).toHaveClass("active");
-    expect(container.querySelector(".breadcrumbs")).toHaveTextContent("활동");
+    // 활동 메뉴는 에이전트 화면으로 통합되어 사라졌다.
+    expect(screen.queryByRole("button", { name: "활동" })).not.toBeInTheDocument();
+    expect(container.querySelector(".breadcrumbs")).not.toHaveTextContent("활동");
   });
 
   it("keeps the today banner out of sight while nothing is running", () => {
@@ -454,8 +956,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -466,7 +966,7 @@ describe("WorkspaceShell", () => {
 
   // R2. 배너는 요약으로 남되 막다른 길이 아니어야 하고, 대표로 지목한 워커가 전용 뷰의 첫 카드와
   // 어긋나면 사용자가 두 화면을 다른 사실로 읽는다.
-  it("leads from the today banner to the activity view it summarizes", () => {
+  it("leads from the today banner to the agents view it summarizes", () => {
     const runningProject: ProjectSummary = {
       ...project,
       activeLeases: [
@@ -507,8 +1007,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -518,9 +1016,8 @@ describe("WorkspaceShell", () => {
     expect(banner).toHaveTextContent("planner-claude");
     fireEvent.click(banner);
 
-    const activity = screen.getByRole("region", { name: "활동" });
-    expect(within(activity).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(within(activity).getAllByRole("listitem")[0]).getByText("planner-claude")).toBeInTheDocument();
+    // 배너의 목적지는 이제 에이전트 화면이다. 세부 목록은 그 화면의 앱 밖 세션 절이 맡는다.
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("에이전트");
   });
 
   it("opens a working settings view", () => {
@@ -543,8 +1040,6 @@ describe("WorkspaceShell", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={onSwitchProject}
       />,
@@ -606,8 +1101,6 @@ function shell(overrides: Partial<ComponentProps<typeof WorkspaceShell>> = {}) {
       onReadIdea={vi.fn().mockResolvedValue(null)}
       onReadSpec={vi.fn().mockResolvedValue(null)}
       onReadTask={vi.fn().mockResolvedValue(null)}
-      onTaskQa={vi.fn().mockResolvedValue(true)}
-      onTaskQaBatch={vi.fn().mockResolvedValue([])}
       onRefresh={vi.fn()}
       onSwitchProject={vi.fn()}
       {...overrides}
@@ -869,8 +1362,6 @@ describe("WorkspaceShell 관리 규칙 알림", () => {
     onReadIdea: vi.fn().mockResolvedValue(null),
     onReadSpec: vi.fn().mockResolvedValue(null),
     onReadTask: vi.fn().mockResolvedValue(null),
-    onTaskQa: vi.fn().mockResolvedValue(true),
-    onTaskQaBatch: vi.fn().mockResolvedValue([]),
     onRefresh: vi.fn(),
     onSwitchProject: vi.fn(),
   };
@@ -1070,8 +1561,6 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
     onReadIdea: vi.fn().mockResolvedValue(null),
     onReadSpec: vi.fn().mockResolvedValue(null),
     onReadTask: vi.fn().mockResolvedValue(null),
-    onTaskQa: vi.fn().mockResolvedValue(true),
-    onTaskQaBatch: vi.fn().mockResolvedValue([]),
     onRefresh: vi.fn(),
     onSwitchProject: vi.fn(),
   };
@@ -1091,14 +1580,14 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
   }
 
   function summary(count: number) {
-    return screen.getByRole("button", { name: `실행 중인 세션 ${count}개, 활동 화면 열기` });
+    return screen.getByRole("button", { name: `실행 중인 세션 ${count}개, 에이전트 화면 열기` });
   }
 
   /** 완료 조건 1. 좌측 메뉴는 화면 전환 분기 바깥에 있으므로 어느 화면을 열어도 표시가 남아야 한다. */
   it("오늘이 아닌 모든 화면에서도 좌측 메뉴에 축약 표시를 남긴다", () => {
     shell({ project: running(2) });
 
-    for (const menu of ["아이디어", "기획서", "개발", "기록", "활동", "도움말", "설정"]) {
+    for (const menu of ["아이디어", "기획서", "개발", "기록", "도움말", "설정"]) {
       fireEvent.click(screen.getByRole("button", { name: menu }));
       expect(summary(2)).toBeInTheDocument();
     }
@@ -1132,15 +1621,15 @@ describe("WorkspaceShell 활성 세션 축약 표시", () => {
     expect(card).toHaveTextContent("IDEA-001");
   });
 
-  /** 완료 조건 4, 5. 이미 활동 화면일 때 다시 눌러도 같은 값을 넣을 뿐이라 화면이 유지돼야 한다. */
-  it("축약 표시를 누르면 활동 화면으로 이동하고 다시 눌러도 그대로 머문다", () => {
+  /** 완료 조건 4, 5. 이미 에이전트 화면일 때 다시 눌러도 같은 값을 넣을 뿐이라 화면이 유지돼야 한다. */
+  it("축약 표시를 누르면 에이전트 화면으로 이동하고 다시 눌러도 그대로 머문다", () => {
     shell({ project: running(1) });
 
     fireEvent.click(summary(1));
-    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("에이전트");
 
     fireEvent.click(summary(1));
-    expect(screen.getByRole("region", { name: "활동" })).toBeInTheDocument();
+    expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("에이전트");
   });
 
   /** 완료 조건 7. 프로젝트가 바뀌면 축약 표시는 새 프로젝트의 활성 수를 따라야 한다. */
@@ -1166,31 +1655,21 @@ describe("WorkspaceShell 막힌 작업 안내", () => {
     updatedAt: "2026-08-08T01:00:00Z",
     dueAt: null,
     excerpt: "보완 작업을 기다린다.",
+    sourceSpecId: "SPEC-900",
+    sourceDecisionId: "DECISION-GROUP-900",
+    workGroupId: "GROUP-900",
+    workGroupRevision: 1,
   };
+  const blockedGroup = workGroup("GROUP-900", "막힌 작업 그룹", "blocked", 0);
   const blockedProject: ProjectSummary = {
     ...project,
     workflows: [{
       ...project.workflows[0],
-      counts: { ...project.workflows[0].counts, tasks: 1 },
-      items: { ideas: [], specs: [], tasks: [blockedTask] },
+      counts: { ...project.workflows[0].counts, workGroups: 1, tasks: 1 },
+      items: { ideas: [], specs: [], workGroups: [blockedGroup], tasks: [blockedTask] },
     }],
   };
-  const blockedBody = [
-    "# 막힌 작업",
-    "",
-    "## 결정권자 요약",
-    "",
-    "보완 작업을 기다린다.",
-    "",
-    "## 막힌 사유",
-    "",
-    "- 막힌 지점: 보완 작업의 결과를 쓸 수 없다.",
-    "- 필요한 해결: 보완 작업이 사용자 확인까지 간다.",
-    "- 재개 조건: 보완 작업의 결과를 읽을 수 있다.",
-    "- 관련 대상: 없음",
-  ].join("\n");
-
-  it("막힘 처리를 에이전트 책임으로 알리고 사용자 재개 조작을 만들지 않는다", async () => {
+  it("막힌 작업의 AI 상태와 소속 그룹만 비개발자 언어로 보여준다", async () => {
     render(
       <WorkspaceShell
         customRules={customRules}
@@ -1208,9 +1687,7 @@ describe("WorkspaceShell 막힌 작업 안내", () => {
         onMigrate={vi.fn().mockResolvedValue(true)}
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
-        onReadTask={vi.fn().mockResolvedValue({ summary: blockedTask, body: blockedBody })}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
+        onReadTask={vi.fn().mockResolvedValue({ summary: blockedTask, body: "내부 터미널 명령" })}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
       />,
@@ -1218,14 +1695,16 @@ describe("WorkspaceShell 막힌 작업 안내", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "개발" }));
     fireEvent.click(screen.getByRole("button", { name: /막힌 작업/ }));
-    await screen.findByRole("heading", { level: 2, name: "진행이 막혔습니다" });
-
-    const notice = screen.getByRole("region", { name: "에이전트 처리 안내" });
-    expect(within(notice).getByText("에이전트가 해결·재시도합니다")).toBeInTheDocument();
-    expect(within(notice).getByText(/별도로 수정을 요청할 수 있습니다/)).toBeInTheDocument();
-    expect(screen.queryByLabelText("해결 근거")).not.toBeInTheDocument();
+    const verification = await screen.findByRole("region", { name: "작업 진행 상태" });
+    expect(within(verification).getByText("AI 작업이 잠시 멈췄습니다")).toBeInTheDocument();
+    const group = screen.getByRole("region", { name: "소속 작업 그룹" });
+    expect(within(group).getByText("막힌 작업 그룹")).toBeInTheDocument();
+    expect(within(group).getByText("GROUP-900")).toBeInTheDocument();
+    expect(within(group).getByText("개발 막힘")).toBeInTheDocument();
+    expect(screen.queryByText("내부 터미널 명령")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "에이전트 처리 안내" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /개발 준비로 되돌리기|한 번 더 누르면 재개/ })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("수정이 필요한 이유")).toBeInTheDocument();
+    expect(screen.queryByLabelText("수정이 필요한 이유")).not.toBeInTheDocument();
   });
 });
 
@@ -1246,10 +1725,13 @@ describe("WorkspaceShell 에이전트 진입점", () => {
     migrationError: null,
     saving: false,
     saveError: null,
+    consentBusy: false,
+    consentError: null,
   };
 
   const agentActions = {
     refresh: vi.fn().mockResolvedValue(undefined),
+    setViewActive: vi.fn(),
     plan: vi.fn().mockResolvedValue(undefined),
     cancelPlan: vi.fn(),
     apply: vi.fn().mockResolvedValue(true),
@@ -1257,7 +1739,42 @@ describe("WorkspaceShell 에이전트 진입점", () => {
     applyMigration: vi.fn().mockResolvedValue(true),
     dismissMigration: vi.fn(),
     save: vi.fn().mockResolvedValue(true),
+    grantConsent: vi.fn().mockResolvedValue(true),
+    revokeConsent: vi.fn().mockResolvedValue(true),
   };
+
+  /**
+   * 껍데기의 알림은 자동 배정 여부와 동의 상태만 읽는다. 설정 조회 응답 전체를 흉내 낼 필요가 없어
+   * 그 두 값과 화면이 함께 읽는 최소한만 담는다.
+   */
+  function agentPolicy(automationEnabled: boolean, consentStatus: string) {
+    return {
+      policy: {
+        projectId: "prj_1",
+        workingDirectory: "/projects/workflow-labs",
+        automationEnabled,
+        projectMaxParallel: 3,
+        deviceMaxParallel: 8,
+        roles: {},
+      },
+      stored: true,
+      revision: "rev-1",
+      providers: [],
+      executionAllowed: true,
+      compatibility: { kind: "compatible" },
+      consent: {
+        status: consentStatus,
+        noticeVersion: consentStatus === "granted" ? 1 : null,
+        grantedAt: consentStatus === "granted" ? "2026-08-13T15:00:00Z" : null,
+        requiredNoticeVersion: 1,
+        detail: null,
+      },
+    };
+  }
+
+  function consentState(automationEnabled: boolean, consentStatus: string) {
+    return { ...agentState, policy: agentPolicy(automationEnabled, consentStatus) };
+  }
 
   function renderShell(extra: Record<string, unknown>) {
     return render(
@@ -1278,8 +1795,6 @@ describe("WorkspaceShell 에이전트 진입점", () => {
         onReadIdea={vi.fn().mockResolvedValue(null)}
         onReadSpec={vi.fn().mockResolvedValue(null)}
         onReadTask={vi.fn().mockResolvedValue(null)}
-        onTaskQa={vi.fn().mockResolvedValue(true)}
-        onTaskQaBatch={vi.fn().mockResolvedValue([])}
         onRefresh={vi.fn()}
         onSwitchProject={vi.fn()}
         {...extra}
@@ -1304,5 +1819,59 @@ describe("WorkspaceShell 에이전트 진입점", () => {
     renderShell({});
 
     expect(screen.queryByRole("button", { name: "에이전트" })).not.toBeInTheDocument();
+  });
+
+  /*
+   * 완료 조건 13, 14. 자동 배정을 이미 켜 둔 사용자는 에이전트 화면을 열 이유가 없으므로 첫 화면에서
+   * 동의 요구를 만나야 한다. 그 자리는 동의만 남기고 정책은 저장하지 않는다.
+   */
+  describe("첫 화면의 실행 권한 동의 알림", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it("자동 배정이 켜지고 동의가 필요하면 메뉴를 누르지 않아도 첫 화면에서 동의를 받는다", async () => {
+      renderShell({ agentRuntime: consentState(true, "required"), agentRuntimeActions: agentActions });
+
+      expect(screen.getByText("실행 권한 동의 필요")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "고지 읽고 동의" }));
+
+      // 고지 다섯 문장이 모두 있고, 확인 항목은 미리 선택돼 있지 않다.
+      for (const fact of EXECUTION_NOTICE_FACTS) {
+        expect(screen.getByText(fact)).toBeInTheDocument();
+      }
+      const agreement = screen.getByRole("checkbox", { name: "위 내용을 읽고 실행 권한에 동의합니다" });
+      expect(agreement).not.toBeChecked();
+
+      fireEvent.click(agreement);
+      fireEvent.click(screen.getByRole("button", { name: "동의하고 계속" }));
+
+      await waitFor(() => expect(agentActions.grantConsent).toHaveBeenCalledWith(1));
+      // 이 자리는 동의만 남긴다. 자동 배정은 이미 켜져 있으므로 저장할 것이 없다.
+      expect(agentActions.save).not.toHaveBeenCalled();
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "실행 권한 동의" })).not.toBeInTheDocument());
+    });
+
+    it("자동 배정이 꺼져 있으면 알리지 않는다", () => {
+      renderShell({ agentRuntime: consentState(false, "required"), agentRuntimeActions: agentActions });
+
+      expect(screen.queryByText("실행 권한 동의 필요")).not.toBeInTheDocument();
+    });
+
+    it("이미 동의한 프로젝트에서는 알리지 않는다", () => {
+      renderShell({ agentRuntime: consentState(true, "granted"), agentRuntimeActions: agentActions });
+
+      expect(screen.queryByText("실행 권한 동의 필요")).not.toBeInTheDocument();
+    });
+
+    // 에이전트 화면이 같은 안내를 이미 담고 있어 두 번 보일 이유가 없다.
+    it("에이전트 화면을 보고 있는 동안에는 그 화면의 안내만 남는다", () => {
+      renderShell({ agentRuntime: consentState(true, "required"), agentRuntimeActions: agentActions });
+
+      fireEvent.click(screen.getByRole("button", { name: "에이전트" }));
+
+      expect(screen.getAllByText("실행 권한 동의 필요")).toHaveLength(1);
+    });
   });
 });

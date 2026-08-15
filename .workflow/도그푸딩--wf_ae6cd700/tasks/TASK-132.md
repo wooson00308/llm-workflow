@@ -2,25 +2,53 @@
 schema: workflow-labs/task@1
 id: TASK-132
 title: 모든 관리 자산을 검사한 뒤 한 번의 명령으로 동기화한다
-status: completed
+status: verified
 source_spec_id: SPEC-047
 source_decision_id: DECISION-6650F2D7
-scope_files: [src-tauri/src/infrastructure/project_instructions.rs, src-tauri/src/infrastructure/claim_helper.rs, src-tauri/src/infrastructure/managed_script.rs, src-tauri/src/infrastructure/managed_project_assets.rs, src-tauri/src/infrastructure/project_write_lock.rs, src-tauri/src/infrastructure/mod.rs, src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/application/project_service.rs, src-tauri/src/domain/project.rs, src-tauri/src/commands/projects.rs, src-tauri/src/lib.rs]
-updated_at: 2026-08-06T12:01:22.603218+00:00
+scope_files:
+- src-tauri/src/infrastructure/project_instructions.rs
+- src-tauri/src/infrastructure/claim_helper.rs
+- src-tauri/src/infrastructure/managed_script.rs
+- src-tauri/src/infrastructure/managed_project_assets.rs
+- src-tauri/src/infrastructure/project_write_lock.rs
+- src-tauri/src/infrastructure/mod.rs
+- src-tauri/src/infrastructure/fs_project_repository.rs
+- src-tauri/src/application/project_service.rs
+- src-tauri/src/domain/project.rs
+- src-tauri/src/commands/projects.rs
+- src-tauri/src/lib.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T09:51:14Z, kind: created }
-  - { at: 2026-08-06T10:00:56Z, kind: in_progress }
-  - { at: 2026-08-06T10:17:17Z, kind: qa_waiting }
-  - { at: 2026-08-06T10:57:52.530338+00:00, kind: revision_requested }
-  - { at: 2026-08-06T10:58:42Z, kind: in_progress }
-  - { at: 2026-08-06T11:05:32Z, kind: qa_waiting }
-  - { at: 2026-08-06T11:21:12.688995+00:00, kind: revision_requested }
-  - { at: 2026-08-06T11:22:00Z, kind: in_progress }
-  - { at: 2026-08-06T11:34:55Z, kind: qa_waiting }
-  - { at: 2026-08-06T11:50:35.619457+00:00, kind: revision_requested }
-  - { at: 2026-08-06T11:52:50Z, kind: in_progress }
-  - { at: 2026-08-06T11:58:09Z, kind: qa_waiting }
-  - { at: 2026-08-06T12:01:22.603218+00:00, kind: completed }
+- at: 2026-08-06T09:51:14Z
+  kind: created
+- at: 2026-08-06T10:00:56Z
+  kind: in_progress
+- at: 2026-08-06T10:17:17Z
+  kind: qa_waiting
+- at: 2026-08-06T10:57:52.530338+00:00
+  kind: revision_requested
+- at: 2026-08-06T10:58:42Z
+  kind: in_progress
+- at: 2026-08-06T11:05:32Z
+  kind: qa_waiting
+- at: 2026-08-06T11:21:12.688995+00:00
+  kind: revision_requested
+- at: 2026-08-06T11:22:00Z
+  kind: in_progress
+- at: 2026-08-06T11:34:55Z
+  kind: qa_waiting
+- at: 2026-08-06T11:50:35.619457+00:00
+  kind: revision_requested
+- at: 2026-08-06T11:52:50Z
+  kind: in_progress
+- at: 2026-08-06T11:58:09Z
+  kind: qa_waiting
+- at: 2026-08-06T12:01:22.603218+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-6650F2D7
+work_group_revision: 1
 ---
 
 # 모든 관리 자산을 검사한 뒤 한 번의 명령으로 동기화한다

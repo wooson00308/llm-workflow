@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-074
 title: 개발 보드 카드가 컬럼 경계를 넘지 않게 하고 선언을 회귀 검사로 고정한다
-status: completed
+status: verified
 source_spec_id: SPEC-021
 source_decision_id: DECISION-C9B1C1D5
-updated_at: 2026-08-04T11:43:23.174513+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:50:00Z, kind: created }
-  - { at: 2026-08-04T08:54:22Z, kind: in_progress }
-  - { at: 2026-08-04T09:02:19Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:23.174513+00:00, kind: completed }
+- at: 2026-08-04T08:50:00Z
+  kind: created
+- at: 2026-08-04T08:54:22Z
+  kind: in_progress
+- at: 2026-08-04T09:02:19Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:23.174513+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-C9B1C1D5
+work_group_revision: 1
 ---
 
 # 개발 보드 카드가 컬럼 경계를 넘지 않게 하고 선언을 회귀 검사로 고정한다

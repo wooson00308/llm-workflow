@@ -2,17 +2,36 @@
 schema: workflow-labs/task@1
 id: TASK-135
 title: 사용자 정의 규칙 파일과 적용 규칙 미리보기를 백엔드에 추가한다
-status: completed
+status: verified
 source_spec_id: SPEC-048
 source_decision_id: DECISION-D0174726
-depends_on: [TASK-132]
-scope_files: [src-tauri/Cargo.lock, src-tauri/Cargo.toml, src-tauri/src/application/project_service.rs, src-tauri/src/commands/projects.rs, src-tauri/src/domain/project.rs, src-tauri/src/infrastructure/custom_rules.rs, src-tauri/src/infrastructure/fs_project_repository.rs, src-tauri/src/infrastructure/mod.rs, src-tauri/src/infrastructure/project_instructions.rs, src-tauri/src/lib.rs]
-updated_at: 2026-08-06T13:36:41.222600+00:00
+depends_on:
+- TASK-132
+scope_files:
+- src-tauri/Cargo.lock
+- src-tauri/Cargo.toml
+- src-tauri/src/application/project_service.rs
+- src-tauri/src/commands/projects.rs
+- src-tauri/src/domain/project.rs
+- src-tauri/src/infrastructure/custom_rules.rs
+- src-tauri/src/infrastructure/fs_project_repository.rs
+- src-tauri/src/infrastructure/mod.rs
+- src-tauri/src/infrastructure/project_instructions.rs
+- src-tauri/src/lib.rs
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-06T10:03:06Z, kind: created }
-  - { at: 2026-08-06T12:09:18Z, kind: in_progress }
-  - { at: 2026-08-06T12:28:10Z, kind: qa_waiting }
-  - { at: 2026-08-06T13:36:41.222600+00:00, kind: completed }
+- at: 2026-08-06T10:03:06Z
+  kind: created
+- at: 2026-08-06T12:09:18Z
+  kind: in_progress
+- at: 2026-08-06T12:28:10Z
+  kind: qa_waiting
+- at: 2026-08-06T13:36:41.222600+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-D0174726
+work_group_revision: 1
 ---
 
 # 사용자 정의 규칙 파일과 적용 규칙 미리보기를 백엔드에 추가한다

@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-019
 title: 연동을 사이드바 독립 메뉴와 전용 뷰로 옮기고 설정에서 제거
-status: completed
+status: verified
 source_spec_id: SPEC-006
 source_decision_id: DECISION-E8A3CB27
-updated_at: 2026-08-03T02:31:08.875265+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:31:08.875265+00:00, kind: completed }
+- at: 2026-08-03T02:31:08.875265+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-E8A3CB27
+work_group_revision: 1
 ---
 
 # 연동을 사이드바 독립 메뉴와 전용 뷰로 옮기고 설정에서 제거

@@ -239,20 +239,32 @@ mod tests {
         install_condition_script(&control).expect("install condition script");
         let workflow = control.join("wf-demo");
         fs::create_dir_all(workflow.join("tasks")).expect("tasks root");
+        fs::create_dir_all(workflow.join("groups")).expect("groups root");
         fs::create_dir_all(workflow.join("decisions")).expect("decisions root");
 
         fs::write(
+            workflow.join("groups/GROUP-DEFAULT.md"),
+            "---\nschema: workflow-labs/work-group@1\nid: GROUP-DEFAULT\nstatus: active\nrevision: 1\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\n---\n",
+        )
+        .expect("active work group");
+        fs::write(
+            workflow.join("decisions/DECISION-DEFAULT.md"),
+            "---\nschema: workflow-labs/decision@1\nid: DECISION-DEFAULT\nspec_id: SPEC-DEFAULT\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n",
+        )
+        .expect("source approval");
+
+        fs::write(
             workflow.join("tasks/TASK-001.md"),
-            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: todo\n---\n",
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: todo\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\n---\n",
         )
         .expect("todo task");
         assert_eq!(run_recorded_condition(root.path(), "developer"), 0);
 
         fs::write(
             workflow.join("tasks/TASK-001.md"),
-            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: qa_waiting\n---\n",
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: verified\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\n---\n",
         )
-        .expect("claimed task");
+        .expect("verified task");
         assert_eq!(run_recorded_condition(root.path(), "developer"), 1);
     }
 

@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-011
 title: dream 연동 카드 추가와 정제 상태 읽기 전용 표시
-status: completed
+status: verified
 source_spec_id: SPEC-003
 source_decision_id: DECISION-5276FDBF
-updated_at: 2026-08-02T14:57:41Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-5276FDBF
+work_group_revision: 1
 ---
 
 # dream 연동 카드 추가와 정제 상태 읽기 전용 표시

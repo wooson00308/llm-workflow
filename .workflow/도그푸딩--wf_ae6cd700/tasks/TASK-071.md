@@ -2,15 +2,23 @@
 schema: workflow-labs/task@1
 id: TASK-071
 title: 잡 실행 계약과 진행·실패 상태를 워크스페이스 훅에 만든다
-status: completed
+status: verified
 source_spec_id: SPEC-020
 source_decision_id: DECISION-53577F93
-updated_at: 2026-08-04T11:43:21.540468+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:52:00Z, kind: created }
-  - { at: 2026-08-04T08:54:30Z, kind: in_progress }
-  - { at: 2026-08-04T09:07:25Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:21.540468+00:00, kind: completed }
+- at: 2026-08-04T08:52:00Z
+  kind: created
+- at: 2026-08-04T08:54:30Z
+  kind: in_progress
+- at: 2026-08-04T09:07:25Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:21.540468+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-53577F93
+work_group_revision: 1
 ---
 
 # 잡 실행 계약과 진행·실패 상태를 워크스페이스 훅에 만든다

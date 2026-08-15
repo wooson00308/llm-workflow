@@ -2,17 +2,37 @@
 schema: workflow-labs/task@1
 id: TASK-124
 title: 연동 카드에서 데몬을 끄고 켠다
-status: completed
+status: verified
 source_spec_id: SPEC-036
 source_decision_id: DECISION-3D9A30F2
-depends_on: [TASK-117, TASK-123]
-scope_files: [src/features/projects/components/integrations/HeartbeatCard.tsx, src/features/projects/components/integrations/IntegrationsView.tsx, src/features/projects/components/integrations/IntegrationsView.test.tsx, src/features/projects/components/WorkspaceShell.tsx, src/features/projects/components/WorkspaceShell.test.tsx, src/features/projects/application/useProjectWorkspace.ts, src/features/projects/application/useProjectWorkspace.test.ts, src/features/projects/domain/types.ts, src/features/projects/infrastructure/tauriProjectGateway.ts, src/App.css]
-updated_at: 2026-08-05T16:44:14.769940+00:00
+depends_on:
+- TASK-117
+- TASK-123
+scope_files:
+- src/features/projects/components/integrations/HeartbeatCard.tsx
+- src/features/projects/components/integrations/IntegrationsView.tsx
+- src/features/projects/components/integrations/IntegrationsView.test.tsx
+- src/features/projects/components/WorkspaceShell.tsx
+- src/features/projects/components/WorkspaceShell.test.tsx
+- src/features/projects/application/useProjectWorkspace.ts
+- src/features/projects/application/useProjectWorkspace.test.ts
+- src/features/projects/domain/types.ts
+- src/features/projects/infrastructure/tauriProjectGateway.ts
+- src/App.css
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T07:22:00Z, kind: created }
-  - { at: 2026-08-05T15:58:00Z, kind: in_progress }
-  - { at: 2026-08-05T16:22:00Z, kind: qa_waiting }
-  - { at: 2026-08-05T16:44:14.769940+00:00, kind: completed }
+- at: 2026-08-05T07:22:00Z
+  kind: created
+- at: 2026-08-05T15:58:00Z
+  kind: in_progress
+- at: 2026-08-05T16:22:00Z
+  kind: qa_waiting
+- at: 2026-08-05T16:44:14.769940+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-3D9A30F2
+work_group_revision: 1
 ---
 
 # 연동 카드에서 데몬을 끄고 켠다

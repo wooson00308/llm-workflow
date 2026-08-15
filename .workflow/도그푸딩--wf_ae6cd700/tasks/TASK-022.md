@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-022
 title: 개발 작업 전이 이력 계약을 정의하고 규칙 자산에 반영한다
-status: completed
+status: verified
 source_spec_id: SPEC-007
 source_decision_id: DECISION-AA40AF4B
-updated_at: 2026-08-03T02:31:04.232982+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:31:04.232982+00:00, kind: completed }
+- at: 2026-08-03T02:31:04.232982+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-AA40AF4B
+work_group_revision: 1
 ---
 
 # 개발 작업 전이 이력 계약을 정의하고 규칙 자산에 반영한다

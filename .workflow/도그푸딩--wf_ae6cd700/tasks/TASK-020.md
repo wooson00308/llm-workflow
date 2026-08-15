@@ -2,12 +2,17 @@
 schema: workflow-labs/task@1
 id: TASK-020
 title: 연동 카드에 접기·펼치기 토글과 접힘 요약을 더한다
-status: completed
+status: verified
 source_spec_id: SPEC-006
 source_decision_id: DECISION-E8A3CB27
-updated_at: 2026-08-03T02:31:11.179691+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T02:31:11.179691+00:00, kind: completed }
+- at: 2026-08-03T02:31:11.179691+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-E8A3CB27
+work_group_revision: 1
 ---
 
 # 연동 카드에 접기·펼치기 토글과 접힘 요약을 더한다

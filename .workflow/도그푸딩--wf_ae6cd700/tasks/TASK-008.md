@@ -2,10 +2,15 @@
 schema: workflow-labs/task@1
 id: TASK-008
 title: 관리 블록 엔진을 잡 종류에 독립적으로 만들고 dream 잡 정의 추가
-status: completed
+status: verified
 source_spec_id: SPEC-003
 source_decision_id: DECISION-5276FDBF
-updated_at: 2026-08-02T14:57:41Z
+updated_at: 2026-08-14T09:08:07.880257+00:00
+history:
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-5276FDBF
+work_group_revision: 1
 ---
 
 # 관리 블록 엔진을 잡 종류에 독립적으로 만들고 dream 잡 정의 추가

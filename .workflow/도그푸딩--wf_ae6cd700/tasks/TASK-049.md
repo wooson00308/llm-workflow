@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-049
 title: 하트비트 카드의 설치 안내를 단계별 마법사로 바꾼다
-status: completed
+status: verified
 source_spec_id: SPEC-016
 source_decision_id: DECISION-4F1083FF
-depends_on: [TASK-048]
-updated_at: 2026-08-04T11:43:29.354881+00:00
+depends_on:
+- TASK-048
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T07:45:00Z, kind: created }
-  - { at: 2026-08-03T12:35:16Z, kind: in_progress }
-  - { at: 2026-08-03T12:45:07Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:29.354881+00:00, kind: completed }
+- at: 2026-08-03T07:45:00Z
+  kind: created
+- at: 2026-08-03T12:35:16Z
+  kind: in_progress
+- at: 2026-08-03T12:45:07Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:29.354881+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-4F1083FF
+work_group_revision: 1
 ---
 
 # 하트비트 카드의 설치 안내를 단계별 마법사로 바꾼다

@@ -2,17 +2,29 @@
 schema: workflow-labs/task@1
 id: TASK-111
 title: 계약이 인수를 말하게 하고 규칙 자산 버전을 올린다
-status: completed
+status: verified
 source_spec_id: SPEC-035
 source_decision_id: DECISION-D6C694F2
-depends_on: [TASK-102, TASK-110]
-scope_files: [src-tauri/src/infrastructure/project_instructions.rs, docs/file-contract.md]
-updated_at: 2026-08-05T06:13:57.754180+00:00
+depends_on:
+- TASK-102
+- TASK-110
+scope_files:
+- src-tauri/src/infrastructure/project_instructions.rs
+- docs/file-contract.md
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-05T01:55:00Z, kind: created }
-  - { at: 2026-08-05T04:52:12Z, kind: in_progress }
-  - { at: 2026-08-05T05:04:36Z, kind: qa_waiting }
-  - { at: 2026-08-05T06:13:57.754180+00:00, kind: completed }
+- at: 2026-08-05T01:55:00Z
+  kind: created
+- at: 2026-08-05T04:52:12Z
+  kind: in_progress
+- at: 2026-08-05T05:04:36Z
+  kind: qa_waiting
+- at: 2026-08-05T06:13:57.754180+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-D6C694F2
+work_group_revision: 1
 ---
 
 # 계약이 인수를 말하게 하고 규칙 자산 버전을 올린다

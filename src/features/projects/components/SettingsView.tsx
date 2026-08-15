@@ -58,6 +58,7 @@ const assetStatusLabels: Record<ManagedAssetStatus, string> = {
 const triggerLabels: Record<ManagedAssetSyncTrigger, string> = {
   project_open: "프로젝트 열기",
   manual_refresh: "수동 새로 고침",
+  migration: "스키마 전환",
 };
 
 export function SettingsView({
@@ -78,50 +79,71 @@ export function SettingsView({
         </div>
       </div>
 
-      <div className="settings-grid">
-        <section className="settings-card update-settings-card">
-          <header>
-            <span><Icon name="refresh" /></span>
-            <div><strong>앱 업데이트</strong><small>서명된 최신 버전을 확인하고 설치합니다.</small></div>
-          </header>
-          <UpdateControl updater={updater} />
-        </section>
-
-        <section className="settings-card">
-          <header>
-            <span><Icon name="folder" /></span>
-            <div><strong>현재 프로젝트</strong><small>앱이 읽고 있는 로컬 작업 공간입니다.</small></div>
-          </header>
-          <dl className="settings-details">
-            <div><dt>이름</dt><dd>{project.name}</dd></div>
-            <div><dt>위치</dt><dd title={project.rootPath}>{project.rootPath}</dd></div>
-            <div><dt>워크플로우</dt><dd>{project.workflows.length}개</dd></div>
-            <div><dt>문서 호환성</dt><dd><span className={`compatibility-status status-${project.compatibility}`}>{compatibilityLabels[project.compatibility]}</span></dd></div>
-          </dl>
-          <button className="secondary-button settings-switch-button" onClick={onSwitchProject} type="button">다른 프로젝트 열기</button>
-        </section>
-
-        <section className="settings-card">
-          <header>
-            <span><Icon name="workflow" /></span>
-            <div><strong>파일 감시</strong><small>외부 LLM과 앱의 변경 사항을 자동으로 동기화합니다.</small></div>
-          </header>
-          <div className="settings-state-row">
-            <span className="settings-state-dot" />
-            <span><strong>자동 새로고침 사용 중</strong><small>2.5초 간격으로 Markdown 변경을 확인합니다.</small></span>
+      <div className="settings-sections">
+        <section className="settings-section">
+          <div className="settings-section-rail">
+            <h2>앱</h2>
+            <p>설치 버전과 업데이트를 관리합니다.</p>
           </div>
-          <div className="settings-state-row muted">
-            <Icon name="archive" />
-            <span><strong>{project.activeLeases.length}개의 활성 작업 lease</strong><small>활성 lease가 있으면 문서 마이그레이션을 보호합니다.</small></span>
+          <div className="settings-section-body">
+            <section className="settings-card update-settings-card">
+              <header>
+                <div><strong>앱 업데이트</strong><small>서명된 최신 버전을 확인하고 설치합니다.</small></div>
+                <UpdateControl updater={updater} />
+              </header>
+            </section>
           </div>
         </section>
 
-        <ManagedRulesCard compatibility={project.compatibility} managedAssets={managedAssets} />
-        <CustomRulesCard
-          actions={customRulesActions}
-          activeLeaseCount={project.activeLeases.length}
-          state={customRules}
-        />
+        <section className="settings-section">
+          <div className="settings-section-rail">
+            <h2>프로젝트</h2>
+            <p>연결된 작업 공간과 문서 동기화 상태입니다.</p>
+          </div>
+          <div className="settings-section-body">
+            <section className="settings-card">
+              <header>
+                <div><strong>현재 프로젝트</strong><small>앱이 읽고 있는 로컬 작업 공간입니다.</small></div>
+                <button className="secondary-button settings-switch-button" onClick={onSwitchProject} type="button">다른 프로젝트 열기</button>
+              </header>
+              <dl className="settings-details">
+                <div><dt>이름</dt><dd>{project.name}</dd></div>
+                <div><dt>위치</dt><dd title={project.rootPath}>{project.rootPath}</dd></div>
+                <div><dt>워크플로우</dt><dd>{project.workflows.length}개</dd></div>
+                <div><dt>문서 호환성</dt><dd><span className={`compatibility-status status-${project.compatibility}`}>{compatibilityLabels[project.compatibility]}</span></dd></div>
+              </dl>
+            </section>
+
+            <section className="settings-card">
+              <header>
+                <div><strong>파일 감시</strong><small>외부 LLM과 앱의 변경 사항을 자동으로 동기화합니다.</small></div>
+              </header>
+              <div className="settings-state-row">
+                <span className="settings-state-dot" />
+                <span><strong>자동 새로고침 사용 중</strong><small>2.5초 간격으로 Markdown 변경을 확인합니다.</small></span>
+              </div>
+              <div className="settings-state-row muted">
+                <Icon name="archive" />
+                <span><strong>{project.activeLeases.length}개의 활성 작업 lease</strong><small>활성 lease가 있으면 문서 마이그레이션을 보호합니다.</small></span>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-rail">
+            <h2>에이전트 규칙</h2>
+            <p>앱이 설치하는 공통 규칙과 이 프로젝트만의 규칙입니다.</p>
+          </div>
+          <div className="settings-section-body">
+            <ManagedRulesCard compatibility={project.compatibility} managedAssets={managedAssets} />
+            <CustomRulesCard
+              actions={customRulesActions}
+              activeLeaseCount={project.activeLeases.length}
+              state={customRules}
+            />
+          </div>
+        </section>
       </div>
     </section>
   );
@@ -138,7 +160,6 @@ function ManagedRulesCard({
   return (
     <section aria-label="관리 규칙" className="settings-card managed-rules-card">
       <header>
-        <span><Icon name="stamp" /></span>
         <div><strong>관리 규칙</strong><small>앱이 설치하는 공통 규칙과 역할 계약의 상태입니다.</small></div>
       </header>
 
@@ -197,18 +218,24 @@ function ManagedRulesCard({
       )}
 
       {result && (
-        <ul className="managed-rules-assets">
-          {result.assets.map((asset) => (
-            <li key={asset.id}>
-              <div>
-                <strong>{asset.label}</strong>
-                <span className={`managed-asset-status status-${asset.status}`}>{assetStatusLabels[asset.status]}</span>
-              </div>
-              <span className="managed-asset-versions">{versionLine(asset)}</span>
-              {asset.reason && <small>{asset.reason}</small>}
-            </li>
-          ))}
-        </ul>
+        <details
+          className="settings-subdisclosure"
+          open={result.status === "conflict" || result.status === "retry_required" || undefined}
+        >
+          <summary>자산별 설치 상태<span>{result.assets.length}</span></summary>
+          <ul className="managed-rules-assets">
+            {result.assets.map((asset) => (
+              <li key={asset.id}>
+                <div>
+                  <strong>{asset.label}</strong>
+                  <span className={`managed-asset-status status-${asset.status}`}>{assetStatusLabels[asset.status]}</span>
+                </div>
+                <span className="managed-asset-versions">{versionLine(asset)}</span>
+                {asset.reason && <small>{asset.reason}</small>}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
 
       {result && (result.rollbackFailures.length > 0 || result.rollbackRecoveries.length > 0) && (

@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-025
 title: 날짜를 선택해 그날 이벤트를 보고 빈 상태를 구분해 알린다
-status: completed
+status: verified
 source_spec_id: SPEC-007
 source_decision_id: DECISION-AA40AF4B
-updated_at: 2026-08-03T02:31:51.532346+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T01:22:00Z, kind: in_progress }
-  - { at: 2026-08-03T01:33:00Z, kind: qa_waiting }
-  - { at: 2026-08-03T02:31:51.532346+00:00, kind: completed }
+- at: 2026-08-03T01:22:00Z
+  kind: in_progress
+- at: 2026-08-03T01:33:00Z
+  kind: qa_waiting
+- at: 2026-08-03T02:31:51.532346+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-AA40AF4B
+work_group_revision: 1
 ---
 
 # 날짜를 선택해 그날 이벤트를 보고 빈 상태를 구분해 알린다

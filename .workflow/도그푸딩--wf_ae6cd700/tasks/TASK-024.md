@@ -2,14 +2,21 @@
 schema: workflow-labs/task@1
 id: TASK-024
 title: 캘린더를 전이 사실 타임라인으로 바꾸고 하루 칸을 집계로 표시한다
-status: completed
+status: verified
 source_spec_id: SPEC-007
 source_decision_id: DECISION-AA40AF4B
-updated_at: 2026-08-03T02:31:18.459682+00:00
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T00:53:00Z, kind: in_progress }
-  - { at: 2026-08-03T01:07:00Z, kind: qa_waiting }
-  - { at: 2026-08-03T02:31:18.459682+00:00, kind: completed }
+- at: 2026-08-03T00:53:00Z
+  kind: in_progress
+- at: 2026-08-03T01:07:00Z
+  kind: qa_waiting
+- at: 2026-08-03T02:31:18.459682+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-AA40AF4B
+work_group_revision: 1
 ---
 
 # 캘린더를 전이 사실 타임라인으로 바꾸고 하루 칸을 집계로 표시한다

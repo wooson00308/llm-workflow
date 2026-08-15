@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-106
 title: 판정 비용의 회귀를 자동 검사가 잡게 한다
-status: completed
+status: verified
 source_spec_id: SPEC-033
 source_decision_id: DECISION-8D3F0D0F
-depends_on: [TASK-104]
-updated_at: 2026-08-05T06:13:41.574680+00:00
+depends_on:
+- TASK-104
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T16:30:00Z, kind: created }
-  - { at: 2026-08-05T03:50:00Z, kind: in_progress }
-  - { at: 2026-08-05T04:19:30Z, kind: qa_waiting }
-  - { at: 2026-08-05T06:13:41.574680+00:00, kind: completed }
+- at: 2026-08-04T16:30:00Z
+  kind: created
+- at: 2026-08-05T03:50:00Z
+  kind: in_progress
+- at: 2026-08-05T04:19:30Z
+  kind: qa_waiting
+- at: 2026-08-05T06:13:41.574680+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-8D3F0D0F
+work_group_revision: 1
 ---
 
 # 판정 비용의 회귀를 자동 검사가 잡게 한다

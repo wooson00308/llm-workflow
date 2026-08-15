@@ -2,16 +2,26 @@
 schema: workflow-labs/task@1
 id: TASK-065
 title: 저장 확인 화면 세 문장이 다른 프로젝트의 잡 보장을 밝힌다
-status: completed
+status: verified
 source_spec_id: SPEC-022
 source_decision_id: DECISION-7A3E5B90
-depends_on: [TASK-064, TASK-062]
-updated_at: 2026-08-04T11:43:14.920003+00:00
+depends_on:
+- TASK-064
+- TASK-062
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-04T08:37:00Z, kind: created }
-  - { at: 2026-08-04T09:12:39Z, kind: in_progress }
-  - { at: 2026-08-04T09:18:39Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:43:14.920003+00:00, kind: completed }
+- at: 2026-08-04T08:37:00Z
+  kind: created
+- at: 2026-08-04T09:12:39Z
+  kind: in_progress
+- at: 2026-08-04T09:18:39Z
+  kind: qa_waiting
+- at: 2026-08-04T11:43:14.920003+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-7A3E5B90
+work_group_revision: 1
 ---
 
 # 저장 확인 화면 세 문장이 다른 프로젝트의 잡 보장을 밝힌다

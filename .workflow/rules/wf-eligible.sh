@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 18
+# condition_script_version: 20
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -413,10 +413,12 @@ scan_decisions() { # $1=워크플로우 경로 $2=찾는 outcome 값 $3=1이면 
   ' "$@"
 }
 
-# 작업 정의 수정 요청을 "생성 시각<TAB>요청 id<TAB>작업 id"로 낸다. 스키마와
-# created_by가 앱이 쓴 기록임을 확정하고, 판정할 수 없는 문서는 그 파일만 건너뛴다.
-scan_task_revision_requests() { # $1=워크플로우 경로
-  scan_dir="$1"decisions
+# 작업 그룹 하나를 "id<TAB>status<TAB>revision<TAB>source decision<TAB>source spec<TAB>
+# source QA decision"으로 낸다. 선택 필드를 마지막에 두는 것은 POSIX read가 인접한 공백 IFS
+# 구분자를 접기 때문이다. 아키텍트 분기는 중단된 preparing 그룹과 승인 분해 여부를 함께 판단하고,
+# 개발자 분기는 task 원천과 그룹 원천이 같은지 확인한다.
+scan_work_groups() { # $1=워크플로우 경로
+  scan_dir="$1"groups
   set --
   for f in "$scan_dir"/*.md; do
     [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
@@ -424,32 +426,195 @@ scan_task_revision_requests() { # $1=워크플로우 경로
   [ "$#" -eq 0 ] && return 0
   awk '
     function emit() {
-      if (schema && by == "user" && id != "" && task != "" && at != "") {
-        print at "\t" id "\t" task
+      if (schema && id != "" && status != "" && revision ~ /^[0-9]+$/ &&
+          (revision + 0) <= 4294967295 && source != "" && source_spec != "") {
+        print id "\t" status "\t" sprintf("%.0f", revision + 0) "\t" source "\t" \
+          source_spec "\t" source_qa
       }
     }
     FILENAME != prev {
       emit()
       prev = FILENAME
-      id = ""; task = ""; by = ""; at = ""; schema = 0
-      got_id = 0; got_task = 0; got_by = 0; got_at = 0
+      id = ""; status = ""; revision = ""; source = ""; source_qa = ""; source_spec = ""
+      schema = 0
+      got_id = 0; got_status = 0; got_revision = 0; got_source = 0; got_source_qa = 0
+      got_source_spec = 0
     }
     {
       if (!got_id && index($0, "id:") == 1) {
         got_id = 1; id = substr($0, 4); sub(/^ */, "", id)
       }
-      if (!got_task && index($0, "task_id:") == 1) {
-        got_task = 1; task = substr($0, 9); sub(/^ */, "", task)
+      if (!got_status && index($0, "status:") == 1) {
+        got_status = 1; status = substr($0, 8); sub(/^ */, "", status)
       }
-      if (!got_by && index($0, "created_by:") == 1) {
-        got_by = 1; by = substr($0, 12); sub(/^ */, "", by)
+      if (!got_revision && index($0, "revision:") == 1) {
+        got_revision = 1; revision = substr($0, 10); sub(/^ */, "", revision)
       }
-      if (!got_at && index($0, "created_at:") == 1) {
-        got_at = 1; at = substr($0, 12); sub(/^ */, "", at)
+      if (!got_source && index($0, "source_decision_id:") == 1) {
+        got_source = 1; source = substr($0, 20); sub(/^ */, "", source)
       }
-      if (index($0, "schema: workflow-labs/task-revision-request@1") == 1) schema = 1
+      if (!got_source_qa && index($0, "source_qa_decision_id:") == 1) {
+        got_source_qa = 1; source_qa = substr($0, 23); sub(/^ */, "", source_qa)
+      }
+      if (!got_source_spec && index($0, "source_spec_id:") == 1) {
+        got_source_spec = 1; source_spec = substr($0, 16); sub(/^ */, "", source_spec)
+      }
+      if (index($0, "schema: workflow-labs/work-group@1") == 1) schema = 1
     }
     END { emit() }
+  ' "$@"
+}
+
+# 아키텍트가 보는 결정 디렉터리를 한 번만 훑는다. 출력 태그는 그룹 QA 반려(G), 과거 task 정의
+# 수정(T), 새 승인(A)이다. 세 후보군은 아래 역할 분기에서 계약 우선순위대로 따로 소비한다.
+# 그룹 revision별 최신 app-owned QA 결정과 기획서별 최신 결정도 이 한 훑기 안에서 고른다.
+scan_architect_decisions() { # $1=워크플로우 경로
+  scan_dir="$1"decisions
+  set --
+  for f in "$scan_dir"/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  [ "$#" -eq 0 ] && return 0
+  LC_ALL=C awk '
+    function leap(y) { return (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0)) }
+    function month_days(y, m) {
+      if (m == 2) return leap(y) ? 29 : 28
+      return (m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31
+    }
+    function leaps_before(y) {
+      if (y <= 0) return 0
+      return int((y - 1) / 4) - int((y - 1) / 100) + int((y - 1) / 400) + 1
+    }
+    # Chrono DateTime::parse_from_rfc3339와 같은 ASCII RFC3339 형태를 읽고, 비교할 UTC 초와
+    # nanosecond를 전역 rfc_sec/rfc_nano에 둔다. 날짜 변환을 awk 산술로 끝내 macOS/BSD date와
+    # GNU date의 서로 다른 옵션에 기대지 않는다.
+    function rfc3339(s,   y, mo, d, h, mi, se, p, c, start, frac, zone, sign, oh, om,
+                           offset, days, m, nanos) {
+      if (length(s) < 20) return 0
+      if (substr(s, 5, 1) != "-" || substr(s, 8, 1) != "-" ||
+          substr(s, 14, 1) != ":" || substr(s, 17, 1) != ":") return 0
+      c = substr(s, 11, 1)
+      if (c != "T" && c != "t" && c != " ") return 0
+      if (substr(s, 1, 4) !~ /^[0-9][0-9][0-9][0-9]$/ ||
+          substr(s, 6, 2) !~ /^[0-9][0-9]$/ || substr(s, 9, 2) !~ /^[0-9][0-9]$/ ||
+          substr(s, 12, 2) !~ /^[0-9][0-9]$/ || substr(s, 15, 2) !~ /^[0-9][0-9]$/ ||
+          substr(s, 18, 2) !~ /^[0-9][0-9]$/) return 0
+      y = substr(s, 1, 4) + 0; mo = substr(s, 6, 2) + 0; d = substr(s, 9, 2) + 0
+      h = substr(s, 12, 2) + 0; mi = substr(s, 15, 2) + 0; se = substr(s, 18, 2) + 0
+      if (mo < 1 || mo > 12 || d < 1 || d > month_days(y, mo) || h > 23 || mi > 59 ||
+          se > 60) return 0
+      p = 20; frac = ""
+      if (substr(s, p, 1) == ".") {
+        p++; start = p
+        while (p <= length(s) && substr(s, p, 1) ~ /^[0-9]$/) p++
+        if (p == start) return 0
+        frac = substr(s, start, p - start)
+      }
+      zone = substr(s, p)
+      if (zone == "Z" || zone == "z") {
+        offset = 0
+      } else {
+        if (length(zone) != 6 || substr(zone, 4, 1) != ":") return 0
+        sign = substr(zone, 1, 1)
+        if (sign != "+" && sign != "-") return 0
+        if (substr(zone, 2, 2) !~ /^[0-9][0-9]$/ ||
+            substr(zone, 5, 2) !~ /^[0-9][0-9]$/) return 0
+        oh = substr(zone, 2, 2) + 0; om = substr(zone, 5, 2) + 0
+        if (oh > 23 || om > 59) return 0
+        offset = oh * 3600 + om * 60
+        if (sign == "-") offset = -offset
+      }
+      days = y * 365 + leaps_before(y)
+      for (m = 1; m < mo; m++) days += month_days(y, m)
+      days += d - 1
+      nanos = 0
+      if (frac != "") nanos = substr(frac "000000000", 1, 9) + 0
+      if (se == 60) { se = 59; nanos += 1000000000 }
+      rfc_sec = days * 86400 + h * 3600 + mi * 60 + se - offset
+      rfc_nano = nanos
+      return 1
+    }
+    FILENAME != prev {
+      prev = FILENAME
+      n = n + 1
+      id[n] = ""; spec[n] = ""; task[n] = ""; group[n] = ""; revision[n] = ""
+      outcome[n] = ""; by[n] = ""; at[n] = ""; request[n] = ""
+      file[n] = FILENAME; sub(/^.*\//, "", file[n])
+      decision_schema[n] = 0; task_schema[n] = 0; group_schema[n] = 0; approved[n] = 0
+      got_id[n] = 0; got_spec[n] = 0; got_task[n] = 0; got_group[n] = 0
+      got_revision[n] = 0; got_outcome[n] = 0; got_by[n] = 0; got_at[n] = 0
+      got_request[n] = 0
+    }
+    {
+      if (!got_id[n] && index($0, "id:") == 1) {
+        got_id[n] = 1; id[n] = substr($0, 4); sub(/^ */, "", id[n])
+      }
+      if (!got_spec[n] && index($0, "spec_id:") == 1) {
+        got_spec[n] = 1; spec[n] = substr($0, 9); sub(/^ */, "", spec[n])
+      }
+      if (!got_task[n] && index($0, "task_id:") == 1) {
+        got_task[n] = 1; task[n] = substr($0, 9); sub(/^ */, "", task[n])
+      }
+      if (!got_group[n] && index($0, "group_id:") == 1) {
+        got_group[n] = 1; group[n] = substr($0, 10); sub(/^ */, "", group[n])
+      }
+      if (!got_revision[n] && index($0, "group_revision:") == 1) {
+        got_revision[n] = 1; revision[n] = substr($0, 16); sub(/^ */, "", revision[n])
+      }
+      if (!got_outcome[n] && index($0, "outcome:") == 1) {
+        got_outcome[n] = 1; outcome[n] = substr($0, 9); sub(/^ */, "", outcome[n])
+      }
+      if (!got_by[n] && index($0, "created_by:") == 1) {
+        got_by[n] = 1; by[n] = substr($0, 12); sub(/^ */, "", by[n])
+      }
+      if (!got_at[n] && index($0, "created_at:") == 1) {
+        got_at[n] = 1; at[n] = substr($0, 12); sub(/^ */, "", at[n])
+      }
+      if (!got_request[n] && index($0, "request_id:") == 1) {
+        got_request[n] = 1; request[n] = substr($0, 12); sub(/^ */, "", request[n])
+      }
+      if (index($0, "schema: workflow-labs/decision@1") == 1) decision_schema[n] = 1
+      if (index($0, "schema: workflow-labs/task-revision-request@1") == 1) task_schema[n] = 1
+      if (index($0, "schema: workflow-labs/group-qa-decision@1") == 1) group_schema[n] = 1
+      if (index($0, "outcome: approved") == 1) approved[n] = 1
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        if (decision_schema[i] && by[i] == "user") {
+          s = spec[i]
+          if (!(s in latest_spec) || (at[i] "") > (latest_spec[s] "")) latest_spec[s] = at[i]
+        }
+        if (!group_schema[i] || by[i] != "user" || id[i] == "" || group[i] == "" ||
+            revision[i] !~ /^[0-9]+$/ || (revision[i] + 0) > 4294967295 || request[i] == "" ||
+            !rfc3339(at[i])) continue
+        if (outcome[i] != "confirmed" && outcome[i] != "revision_requested") continue
+        instant_sec[i] = rfc_sec; instant_nano[i] = rfc_nano
+        normalized_revision[i] = sprintf("%.0f", revision[i] + 0)
+        key = group[i] SUBSEP normalized_revision[i]
+        if (!(key in selected_group) || instant_sec[i] > latest_group_sec[key] ||
+            (instant_sec[i] == latest_group_sec[key] && instant_nano[i] > latest_group_nano[key]) ||
+            (instant_sec[i] == latest_group_sec[key] && instant_nano[i] == latest_group_nano[key] &&
+             file[i] > file[selected_group[key]])) {
+          latest_group_sec[key] = instant_sec[i]
+          latest_group_nano[key] = instant_nano[i]
+          selected_group[key] = i
+        }
+      }
+      for (i = 1; i <= n; i++) {
+        key = group[i] SUBSEP normalized_revision[i]
+        if (selected_group[key] == i && outcome[i] == "revision_requested") {
+          print "G\t" at[i] "\t" id[i] "\t" group[i] "\t" normalized_revision[i]
+        }
+        if (task_schema[i] && by[i] == "user" && id[i] != "" && task[i] != "" && at[i] != "") {
+          print "T\t" at[i] "\t" id[i] "\t" task[i]
+        }
+        if (approved[i] && by[i] == "user" && id[i] != "") {
+          s = spec[i]
+          if ((s in latest_spec) && (latest_spec[s] "") > (at[i] "")) continue
+          print "A\t" id[i] "\t" spec[i]
+        }
+      }
+    }
   ' "$@"
 }
 
@@ -490,11 +655,13 @@ lease_active() { # $1=대상 id
 # 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
 # 네 자리는 차례로
 #   후보 여부  — ^status: (todo|in_progress)가 있거나, definition_error가 아닌 blocked인가
-#   충족 여부  — ^status: qa_waiting 또는 ^status: completed가 파일 아무 줄에나 있는가
+#   충족 여부  — ^status: verified가 파일 아무 줄에나 있는가
 #   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
 #   겹침 줄 수 — 0·1·2
-# 다. 뒤따르는 줄은 있다고 적힌 것만 온다: 후보이면 첫 id 줄의 값, 선행 줄 수가 1이면 그 값,
-# 겹침 줄 수가 1이면 그 값이다. 값은 모두 한 줄에서 읽은 것이라 개행을 담을 수 없으므로 한 줄에 담긴다.
+# 다. 뒤따르는 줄은 있다고 적힌 것만 온다: 후보이면 첫 id·work_group_id·work_group_revision·
+# source_decision_id·source_spec_id 값, 선행 줄 수가 1이면 그 값, 겹침 줄 수가 1이면 그 값이다.
+# 네 metadata 값은 `0`(없음) 또는 `1`+값으로 실어 POSIX read가 빈 tab 필드를 접어도 자리가 바뀌지
+# 않게 한다. 값은 모두 한 줄에서 읽은 것이라 개행을 담을 수 없으므로 한 줄에 담긴다.
 #
 # 두 가지 id 읽기가 여기 함께 있다. 후보의 id는 첫 id 줄 하나이고(sed ... | head -1), 선행 이름
 # 해석은 파일 아무 줄이나 보며 값이 정확히 같은 것을 찾는다(grep -ls "^id: *<id>$" | head -1).
@@ -513,13 +680,15 @@ scan_tasks() { # $1=워크플로우 경로
       sub(/[[:space:]]*$/, "", s)
       return s
     }
+    function token(s) { return s == "" ? "0" : "1" s }
     function emit(  i, line, cand) {
       if (!started) return
       cand = ordinary || (blocked && !definition_error)
       line = "M" cand sat depn scopen " "
       for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
       print line
-      if (cand) print first_id
+      if (cand) print first_id "\t" token(work_group) "\t" token(work_group_revision) \
+        "\t" token(source_decision) "\t" token(source_spec)
       if (depn == 1) print dep_value
       if (scopen == 1) print scope_value
     }
@@ -530,7 +699,10 @@ scan_tasks() { # $1=워크플로우 경로
       files = files + 1
       ordinary = 0; blocked = 0; definition_error = 0
       sat = 0; depn = 0; scopen = 0
-      got_id = 0; first_id = ""; dep_value = ""; scope_value = ""; n_ids = 0
+      got_id = 0; first_id = ""; work_group = ""; work_group_revision = ""
+      source_decision = ""; source_spec = ""; got_work_group = 0; got_work_group_revision = 0
+      got_source_decision = 0; got_source_spec = 0
+      dep_value = ""; scope_value = ""; n_ids = 0
     }
     {
       if (index($0, "id:") == 1) {
@@ -546,7 +718,26 @@ scan_tasks() { # $1=워크플로우 경로
       if ($0 ~ /^status: (todo|in_progress)/) ordinary = 1
       if ($0 ~ /^status: blocked/) blocked = 1
       if ($0 ~ /^blocked_kind: definition_error/) definition_error = 1
-      if ($0 ~ /^status: qa_waiting/ || $0 ~ /^status: completed/) sat = 1
+      if ($0 ~ /^status: verified/) sat = 1
+      if (!got_work_group && index($0, "work_group_id:") == 1) {
+        got_work_group = 1; work_group = substr($0, length("work_group_id:") + 1)
+        sub(/^ */, "", work_group)
+      }
+      if (!got_work_group_revision && index($0, "work_group_revision:") == 1) {
+        got_work_group_revision = 1
+        work_group_revision = substr($0, length("work_group_revision:") + 1)
+        sub(/^ */, "", work_group_revision)
+      }
+      if (!got_source_decision && index($0, "source_decision_id:") == 1) {
+        got_source_decision = 1
+        source_decision = substr($0, length("source_decision_id:") + 1)
+        sub(/^ */, "", source_decision)
+      }
+      if (!got_source_spec && index($0, "source_spec_id:") == 1) {
+        got_source_spec = 1
+        source_spec = substr($0, length("source_spec_id:") + 1)
+        sub(/^ */, "", source_spec)
+      }
       if (index($0, "depends_on:") == 1) {
         if (depn == 0) { depn = 1; dep_value = trim(substr($0, 12)) } else depn = 2
       }
@@ -598,18 +789,62 @@ REVISIONS
   done
   ;;
 architect)
-  # 작업 정의 수정 요청은 워크플로우 경계를 넘어 모두 먼저 모으고 생성 시각으로 정렬한다.
-  # 승인 분해 후보는 처리할 수 있는 요청이 없을 때만 아래 두 번째 훑기에서 본다.
+  # 그룹 표는 QA 반려 처리 여부, 중단된 preparing 복구, 승인 분해 여부가 함께 쓴다.
+  architect_group_rows=""
+  group_revision_rows=""
   revision_rows=""
+  approval_rows=""
   for wf in .workflow/*/; do
-    rows=$(scan_task_revision_requests "$wf")
-    while IFS='	' read -r created rid tid; do
-      [ -n "$created" ] && [ -n "$rid" ] && [ -n "$tid" ] || continue
-      revision_rows="$revision_rows$created	$rid	$tid	$wf$nl"
-    done <<REVISION_ROWS
-$rows
-REVISION_ROWS
+    groups=$(scan_work_groups "$wf")
+    while IFS='	' read -r gid status revision source source_spec source_qa; do
+      [ -n "$gid" ] && [ -n "$status" ] && [ -n "$revision" ] && [ -n "$source" ] || continue
+      architect_group_rows="$architect_group_rows$wf	$gid	$status	$revision	$source	$source_spec	$source_qa$nl"
+    done <<GROUP_ROWS
+$groups
+GROUP_ROWS
+    decision_rows=$(scan_architect_decisions "$wf")
+    while IFS='	' read -r kind first second third fourth; do
+      case "$kind" in
+        G)
+          [ -n "$first" ] && [ -n "$second" ] && [ -n "$third" ] && [ -n "$fourth" ] || continue
+          group_revision_rows="$group_revision_rows$first	$second	$wf	$third	$fourth$nl"
+          ;;
+        T)
+          [ -n "$first" ] && [ -n "$second" ] && [ -n "$third" ] || continue
+          revision_rows="$revision_rows$first	$second	$third	$wf$nl"
+          ;;
+        A)
+          [ -n "$first" ] || continue
+          approval_rows="$approval_rows$wf	$first	$second$nl"
+          ;;
+      esac
+    done <<ARCHITECT_DECISION_ROWS
+$decision_rows
+ARCHITECT_DECISION_ROWS
   done
+
+  # 사용자 승인 단위인 그룹 QA 반려가 내부 작업 정의 수정보다 먼저다. 현재 revision과 일치하고
+  # 현재 revision의 최신 반려 결정만 후보가 된다. source_qa_decision_id는 이전 revision 반려의
+  # 계보이고, 같은 revision에 잘못 남은 값이 현재 반려를 숨기지는 않는다.
+  ordered_group_revision_rows=$(printf '%s' "$group_revision_rows" | LC_ALL=C sort)
+  while IFS='	' read -r created rid wf gid revision; do
+    [ -n "$created" ] && [ -n "$rid" ] && [ -n "$gid" ] && [ -n "$revision" ] && [ -n "$wf" ] || continue
+    group_found=0
+    while IFS='	' read -r gwf current_gid status current_revision source source_spec source_qa; do
+      [ "$gwf" = "$wf" ] && [ "$current_gid" = "$gid" ] && [ "$current_revision" = "$revision" ] || continue
+      group_found=1
+      break
+    done <<ARCHITECT_GROUP_ROWS
+$architect_group_rows
+ARCHITECT_GROUP_ROWS
+    [ "$group_found" -eq 1 ] || continue
+    if lease_blocks "$rid" || lease_blocks "$gid"; then note_candidate leased "$rid"; continue; fi
+    note_target "$rid" group_qa_revision
+  done <<ORDERED_GROUP_REVISION_ROWS
+$ordered_group_revision_rows
+ORDERED_GROUP_REVISION_ROWS
+
+  # 작업 정의 수정 요청은 워크플로우 경계를 넘어 모으고 생성 시각으로 정렬한다.
   ordered_revision_rows=$(printf '%s' "$revision_rows" | LC_ALL=C sort)
   revision_task_ids="$nl"
   while IFS='	' read -r created rid tid wf; do
@@ -628,23 +863,18 @@ REVISION_ROWS
   done <<ORDERED_REVISION_ROWS
 $ordered_revision_rows
 ORDERED_REVISION_ROWS
-  # 이전 앱이 남긴 사용자 수정 요청은 먼저 처리한다. 그런 요청이 없으면 task 문서가 이미 기록한
-  # definition_error를 사용자 조작 없이 바로 아키텍트 작업으로 연다. 이 훑기는 승인 분해 판정이
-  # 필요로 하는 source_decision_id 줄도 함께 모아 아래 두 판단이 tasks/를 한 번만 읽게 한다.
-  architect_task_refs=""
+  # 이전 앱이 남긴 사용자 수정 요청 다음에는 task 문서가 이미 기록한 definition_error를 사용자
+  # 조작 없이 바로 아키텍트 작업으로 연다.
   direct_rows=""
   for wf in .workflow/*/; do
     task_scan=$(scan_refs "${wf}tasks" "source_decision_id:")
-    task_refs=""
     while IFS= read -r task_row; do
       case "$task_row" in
         "__WF_DIRECT__	"*) direct_rows="$direct_rows$wf	${task_row#*	}$nl" ;;
-        *) task_refs="$task_refs$task_row$nl" ;;
       esac
     done <<TASK_SCAN
 $task_scan
 TASK_SCAN
-    architect_task_refs="$architect_task_refs${nl}W$wf$nl$task_refs${nl}E$wf$nl"
   done
   while IFS='	' read -r wf tid; do
     [ -n "$wf" ] && [ -n "$tid" ] || continue
@@ -654,31 +884,68 @@ TASK_SCAN
   done <<DIRECT_ROWS
 $direct_rows
 DIRECT_ROWS
-  for wf in .workflow/*/; do
-    [ -d "${wf}decisions" ] || continue
-    # 아키텍트 후보는 스키마 줄도 spec_id도 요구하지 않는다. strict가 0인 것이 그 차이다.
-    # created_by 필터와 최신 검사는 기획자 분기와 같은 훑기가 한다.
-    task_ref_section=${architect_task_refs#*"$nl"W$wf"$nl"}
-    task_refs=${task_ref_section%%"$nl"E$wf"$nl"*}
-    approvals=$(scan_decisions "$wf" approved 0)
-    while IFS= read -r did; do
-      IFS= read -r spec || spec=""
-      [ -n "$did" ] || continue
-      case "$task_refs" in *"source_decision_id:$did"*) note_candidate decomposed "$did"; continue ;; esac
+
+  # 그룹 작성 중 lease가 끊긴 경우 새 승인을 열기 전에 기존 문서를 이어 쓴다. 최초 분해 세션은
+  # 승인 결정 id, 재작업 세션은 QA 결정 id로 선점할 수 있으므로 세 id를 모두 활성 여부로 본다.
+  while IFS='	' read -r wf gid status revision source source_spec source_qa; do
+    [ "$status" = preparing ] || continue
+    if lease_blocks "$gid" || lease_blocks "$source" || { [ -n "$source_qa" ] && lease_blocks "$source_qa"; };
+    then
+      note_candidate leased "$gid"
+      continue
+    fi
+    note_target "$gid" work_group
+  done <<PREPARING_GROUP_ROWS
+$architect_group_rows
+PREPARING_GROUP_ROWS
+
+  # 아키텍트 후보는 스키마 줄도 spec_id도 요구하지 않는다. created_by 필터와 최신 검사는 위의
+  # 결정 단일 훑기에서 끝났다.
+  while IFS='	' read -r wf did spec; do
+      [ -n "$wf" ] && [ -n "$did" ] || continue
+      decomposed=0
+      while IFS='	' read -r gwf gid status revision source source_spec source_qa; do
+        [ "$gwf" = "$wf" ] && [ "$source" = "$did" ] || continue
+        decomposed=1
+        break
+      done <<ARCHITECT_GROUP_ROWS
+$architect_group_rows
+ARCHITECT_GROUP_ROWS
+      [ "$decomposed" -eq 0 ] || { note_candidate decomposed "$did"; continue; }
       # 분해 중인 세션의 lease는 결정 id로 잡힌다. 이 검사가 없으면 세션이 도는 동안에도 같은
       # 결정이 대상으로 계속 나가, 화면이 중복 배정처럼 보이고 자동 배정이 헛 시도를 만든다.
       if lease_blocks "$did"; then note_candidate leased "$did"; continue; fi
       if [ -n "$spec" ] && lease_blocks "$spec"; then note_candidate spec-leased "$did"; continue; fi
       note_target "$did" spec_approval
-    done <<APPROVALS
-$approvals
-APPROVALS
-  done
+  done <<APPROVAL_ROWS
+$approval_rows
+APPROVAL_ROWS
   ;;
 developer)
   scan_leases
   for wf in .workflow/*/; do
     [ -d "${wf}tasks" ] || continue
+    active_group_rows="$nl"
+    groups=$(scan_work_groups "$wf")
+    while IFS='	' read -r gid status revision source source_spec source_qa; do
+      [ "$status" = active ] || continue
+      case "$revision" in ''|*[!0-9]*) continue ;; esac
+      [ "$revision" -gt 0 ] || continue
+      active_group_rows="$active_group_rows$gid	$revision	$source	$source_spec$nl"
+    done <<DEVELOPER_GROUP_ROWS
+$groups
+DEVELOPER_GROUP_ROWS
+    # Each row is the latest approved decision id and its specification. An id alone is not enough:
+    # a task cannot relabel approval A as belonging to a different specification.
+    approved_task_sources="$nl"
+    decision_rows=$(scan_architect_decisions "$wf")
+    while IFS='	' read -r kind first second third fourth; do
+      [ "$kind" = A ] || continue
+      [ -n "$first" ] || continue
+      approved_task_sources="$approved_task_sources$first	$second$nl"
+    done <<DEVELOPER_DECISION_ROWS
+$decision_rows
+DEVELOPER_DECISION_ROWS
     scanned=$(scan_tasks "$wf")
     known_ids=" "
     sat_ids=" "
@@ -701,13 +968,23 @@ developer)
       depn=${depn%?}
       scopen=${flags#???}
       tid=""
+      task_group=""
+      task_group_revision=""
+      task_source_decision=""
+      task_source_spec=""
       dep_value=""
       scope_value=""
       # 후보는 todo, in_progress, 그리고 definition_error가 아닌 blocked다. 죽은 세션이 남긴
       # in_progress 작업은 그 작업을 덮는 미만료 lease가 없으므로 아래 lease_active가 통과시키고,
       # 살아 있는 세션의 작업은 그 lease가 막는다(SPEC-035 R1). blocked 복구에도 lease·선행·겹침
       # 조건은 완전히 같다. definition_error는 위 아키텍트 분기의 대상이라 후보로 내지 않는다.
-      [ "$cand" = 1 ] && IFS= read -r tid
+      if [ "$cand" = 1 ]; then
+        IFS='	' read -r tid task_group_token task_group_revision_token task_source_decision_token task_source_spec_token
+        case "$task_group_token" in 1*) task_group=${task_group_token#1} ;; esac
+        case "$task_group_revision_token" in 1*) task_group_revision=${task_group_revision_token#1} ;; esac
+        case "$task_source_decision_token" in 1*) task_source_decision=${task_source_decision_token#1} ;; esac
+        case "$task_source_spec_token" in 1*) task_source_spec=${task_source_spec_token#1} ;; esac
+      fi
       [ "$depn" = 1 ] && IFS= read -r dep_value
       [ "$scopen" = 1 ] && IFS= read -r scope_value
       if deps_of "$depn" "$dep_value"; then deps=$parsed; deps_ok=1; else deps=""; deps_ok=0; fi
@@ -735,7 +1012,7 @@ developer)
       done
       [ "$cand" = 1 ] || continue
       [ -n "$tid" ] || continue
-      rows="$rows$deps_ok$scope_ok|$deps|$scope|$tid$nl"
+      rows="$rows$deps_ok$scope_ok|$deps|$scope|$tid|$task_group|$task_group_revision|$task_source_decision|$task_source_spec$nl"
     done <<SCAN
 $scanned
 SCAN
@@ -746,9 +1023,59 @@ SCAN
       deps=${rest%%"|"*}
       rest=${rest#*"|"}
       scope=${rest%%"|"*}
-      tid=${rest#*"|"}
+      rest=${rest#*"|"}
+      tid=${rest%%"|"*}
+      rest=${rest#*"|"}
+      task_group=${rest%%"|"*}
+      task_group_revision=${rest#*"|"}
+      task_source_decision=${task_group_revision#*"|"}
+      task_group_revision=${task_group_revision%%"|"*}
+      task_source_spec=${task_source_decision#*"|"}
+      task_source_decision=${task_source_decision%%"|"*}
       deps_ok=${flags%?}
       scope_ok=${flags#?}
+      group_available=0
+      group_source_decision=""
+      group_source_spec=""
+      case "$task_group_revision" in ''|*[!0-9]*) ;; *)
+        if [ "$task_group_revision" -gt 0 ]; then
+          while IFS='	' read -r gid group_revision group_source group_spec; do
+            [ "$gid" = "$task_group" ] || continue
+            if [ "$task_group_revision" -le "$group_revision" ]; then
+              origin_available=0
+              if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ] && \
+                 [ "$task_source_decision" = "$group_source" ] && \
+                 [ "$task_source_spec" = "$group_spec" ]; then
+                origin_available=1
+              else
+                legacy_decision_ok=0
+                legacy_spec_ok=0
+                if [ -z "$task_source_decision" ]; then
+                  case "$group_source" in LEGACY-*) legacy_decision_ok=1 ;; esac
+                else
+                  case "$task_source_decision:$group_source" in
+                    LEGACY-*:"$task_source_decision") legacy_decision_ok=1 ;;
+                  esac
+                fi
+                if [ -z "$task_source_spec" ] || [ "$task_source_spec" = "$group_spec" ]; then
+                  legacy_spec_ok=1
+                fi
+                case "$task_group:$group_source" in GROUP-*-LEGACY:LEGACY-*) ;; *) legacy_decision_ok=0 ;; esac
+                [ "$legacy_decision_ok" -eq 1 ] && [ "$legacy_spec_ok" -eq 1 ] && origin_available=1
+              fi
+              if [ "$origin_available" -eq 1 ]; then
+                group_available=1
+                group_source_decision=$group_source
+                group_source_spec=$group_spec
+              fi
+            fi
+            break
+          done <<ACTIVE_GROUP_ROWS
+$active_group_rows
+ACTIVE_GROUP_ROWS
+        fi
+        ;;
+      esac
       lease_active "$tid" && { note_candidate leased "$tid"; continue; }
       # 선행 관련 제외는 사유가 하나다. 선언을 읽지 못한 것과 선행이 아직 끝나지 않은 것과 고리가
       # 있는 것은 세션이 할 일이 같다 — 그 선언을 보고 앞의 작업을 먼저 끝내는 것이다.
@@ -766,6 +1093,19 @@ SCAN
       done
       [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
+      source_approved=0
+      if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ]; then
+        case "$approved_task_sources" in
+          *"$nl$task_source_decision	$task_source_spec$nl"*) source_approved=1 ;;
+        esac
+      fi
+      if [ "$source_approved" -eq 0 ] && [ "$group_available" -eq 1 ]; then
+        case "$task_group:$group_source_decision" in
+          GROUP-*-LEGACY:LEGACY-*) source_approved=1 ;;
+        esac
+      fi
+      [ "$source_approved" -eq 1 ] || { note_candidate source-decision-not-approved "$tid"; continue; }
+      [ "$group_available" -eq 1 ] || { note_candidate work-group-unavailable "$tid"; continue; }
       note_target "$tid"
     done <<ROWS
 $rows

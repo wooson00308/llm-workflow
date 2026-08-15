@@ -2,16 +2,25 @@
 schema: workflow-labs/task@1
 id: TASK-038
 title: 작업 상세가 선행 작업과 충족 여부를 보여주고 영원히 열리지 않는 선언을 구분한다
-status: completed
+status: verified
 source_spec_id: SPEC-013
 source_decision_id: DECISION-73D4BC1B
-depends_on: [TASK-037]
-updated_at: 2026-08-04T11:45:34.169873+00:00
+depends_on:
+- TASK-037
+updated_at: 2026-08-14T09:08:07.880257+00:00
 history:
-  - { at: 2026-08-03T05:05:00Z, kind: created }
-  - { at: 2026-08-03T09:21:03Z, kind: in_progress }
-  - { at: 2026-08-03T09:32:10Z, kind: qa_waiting }
-  - { at: 2026-08-04T11:45:34.169873+00:00, kind: completed }
+- at: 2026-08-03T05:05:00Z
+  kind: created
+- at: 2026-08-03T09:21:03Z
+  kind: in_progress
+- at: 2026-08-03T09:32:10Z
+  kind: qa_waiting
+- at: 2026-08-04T11:45:34.169873+00:00
+  kind: completed
+- at: 2026-08-14T09:08:07.880257+00:00
+  kind: migrated_verified
+work_group_id: GROUP-DECISION-73D4BC1B
+work_group_revision: 1
 ---
 
 # 작업 상세가 선행 작업과 충족 여부를 보여주고 영원히 열리지 않는 선언을 구분한다

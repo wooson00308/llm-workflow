@@ -33,6 +33,10 @@ const MIGRATE_SERVICE: [&str; 2] = ["migrate-service", "--confirmed"];
 const CONFIG_READ: [&str; 3] = ["agent", "config", "read"];
 const CONFIG_WRITE: [&str; 3] = ["agent", "config", "write"];
 const PROVIDER_DIAGNOSE: [&str; 3] = ["agent", "provider", "diagnose"];
+/// 실행 권한 동의 계약의 고정 인자.
+const CONSENT_READ: [&str; 3] = ["agent", "consent", "read"];
+const CONSENT_GRANT: [&str; 3] = ["agent", "consent", "grant"];
+const CONSENT_REVOKE: [&str; 3] = ["agent", "consent", "revoke"];
 /// 실행 계획·시작·상태·제어의 고정 인자. `once` 같은 데몬 밖 실행 경로는 이 목록에 없다.
 const PLAN_READ: [&str; 2] = ["agent", "plan"];
 const RUN_START: [&str; 3] = ["agent", "run", "start"];
@@ -365,6 +369,46 @@ pub fn diagnose_providers(
         Some(Value::Array(values)) => Ok(values.clone()),
         _ => Err(off_contract(&captured)),
     }
+}
+
+/// 프로젝트 하나의 실행 권한 동의 기록을 읽는다. 아무것도 쓰지 않는다.
+pub fn read_consent(
+    caller: &dyn RuntimeCaller,
+    project_id: &str,
+) -> Result<Value, RuntimeCallFailure> {
+    consent_call(caller, &CONSENT_READ, project_envelope(project_id))
+}
+
+/// 사용자가 읽은 고지 버전으로 동의를 남긴다. 동의 시각은 런타임이 스스로 읽으므로 보내지 않는다.
+pub fn grant_consent(
+    caller: &dyn RuntimeCaller,
+    project_id: &str,
+    notice_version: u32,
+) -> Result<Value, RuntimeCallFailure> {
+    let mut request = project_envelope(project_id);
+    request["noticeVersion"] = json!(notice_version);
+    consent_call(caller, &CONSENT_GRANT, request)
+}
+
+/// 프로젝트 하나의 동의 기록을 지운다. 다른 프로젝트의 기록은 그대로 남는다.
+pub fn revoke_consent(
+    caller: &dyn RuntimeCaller,
+    project_id: &str,
+) -> Result<Value, RuntimeCallFailure> {
+    consent_call(caller, &CONSENT_REVOKE, project_envelope(project_id))
+}
+
+/// 세 동의 명령은 모두 같은 모양의 동의 객체 하나로 답한다. 그 객체가 없으면 계약 밖이다.
+fn consent_call(
+    caller: &dyn RuntimeCaller,
+    arguments: &[&str],
+    request: Value,
+) -> Result<Value, RuntimeCallFailure> {
+    let captured = caller.call(arguments, Some(&request))?;
+    let data: Value = decode_envelope(&captured)?;
+    data.get("consent")
+        .cloned()
+        .ok_or_else(|| off_contract(&captured))
 }
 
 /// 프로젝트 하나의 실행 계획을 읽는다. provider 프로세스를 만들지 않는다.

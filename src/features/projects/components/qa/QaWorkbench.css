@@ -1,0 +1,79 @@
+/* 품질 확인 작업대.
+   구조: 대기열(한 열) → 통합 QA 플로우 한 페이지 + 결정 하나(GitHub 리뷰식).
+   항목별 확인 화면은 없다. 아키텍트가 그룹 생성 시점에 적은 플로우를 그대로 읽고 도장 하나를 찍는다.
+   본문은 읽기 폭에서 멈추고 왼쪽 정렬로 서며, 결정 패널은 넓은 화면에서 오른쪽에 고정된다. */
+
+/* ── 대기열 ─────────────────────────────────────────────── */
+.qa-workbench { width: 100%; max-width: none; margin: 0; container-name: qa-canvas; container-type: inline-size; }
+.qa-queue-layout { display: grid; gap: 36px; max-width: 760px; margin-top: 28px; }
+.qa-queue-section > header h2 { margin: 0; font-size: 15px; }
+.qa-queue-section > header p { margin: 4px 0 0; color: #92968d; font-size: 11px; }
+.qa-queue-list { list-style: none; display: grid; gap: 10px; margin: 14px 0 0; padding: 0; }
+.qa-queue-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; padding: 15px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); color: inherit; text-align: left; cursor: pointer; }
+.qa-queue-row:hover { border-color: #b9cabd; }
+.qa-queue-main { min-width: 0; }
+.qa-queue-title { display: block; font-size: 14px; font-weight: 650; }
+.qa-queue-goal { display: block; margin-top: 3px; color: #777a70; font-size: 12px; line-height: 1.55; word-break: keep-all; }
+.qa-queue-counts { display: block; color: #92968d; font-size: 11px; }
+.qa-queue-state { flex: 0 0 auto; padding: 7px 14px; border: 1px solid #b9cabd; border-radius: 999px; color: var(--green); font-size: 12px; font-weight: 700; }
+.qa-queue-section-upcoming .qa-queue-list { gap: 0; }
+.qa-queue-row-upcoming { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 2px; border: 0; border-bottom: 1px solid #ebe9e1; border-radius: 0; background: transparent; cursor: default; }
+.qa-queue-row-upcoming .qa-queue-title { font-size: 12px; font-weight: 600; color: #555a52; }
+.qa-queue-empty { margin: 14px 0 0; color: #92968d; font-size: 12px; }
+
+/* ── 열린 기능의 공통 틀 ────────────────────────────────── */
+.qa-feature-scope { max-width: 760px; }
+.qa-feature-scope-session { max-width: none; container-name: qa-canvas; container-type: inline-size; }
+.qa-feature-session-head { display: grid; gap: 4px; margin-bottom: 22px; }
+.qa-scope-back { justify-self: start; font-size: 12px; }
+.qa-feature-kicker { margin: 10px 0 0; color: #8a8d83; font-size: 11px; font-weight: 650; }
+.qa-feature-session-head h1 { margin: 4px 0 0; font-size: 26px; font-weight: 480; letter-spacing: -.03em; }
+.qa-feature-goal { margin: 7px 0 0; max-width: 62ch; color: #777a70; font-size: 13px; line-height: 1.6; word-break: keep-all; }
+
+/* ── 통합 QA 플로우 + 결정 ──────────────────────────────── */
+.qa-flow-layout { display: grid; gap: 20px; align-items: start; }
+.qa-flow { display: grid; gap: 12px; min-width: 0; }
+.qa-flow-section { padding: 20px 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); }
+.qa-flow-section h2 { margin: 0 0 12px; font-size: 16px; letter-spacing: -.015em; word-break: keep-all; }
+.qa-flow-section .markdown-body { max-width: 640px; margin: 0; font-size: 13px; line-height: 1.75; }
+
+/* 확인 플로우 작성 규격의 전용 렌더링.
+   순서 목록 한 항목 = 확인 단계 하나(번호 구슬 카드), 그 안의 인용문 = 눈으로 볼 기대 결과.
+   아키텍트 규칙이 이 형태로 쓰게 되어 있어, 규격대로만 쓰면 그대로 예쁘게 나온다. */
+.qa-flow-section .markdown-body ol { list-style: none; counter-reset: qa-step; display: grid; gap: 10px; margin: 0; padding: 0; }
+.qa-flow-section .markdown-body ol > li { counter-increment: qa-step; position: relative; padding: 13px 16px 13px 48px; border: 1px solid #ebe9e1; border-radius: 12px; background: #fdfcf9; }
+.qa-flow-section .markdown-body ol > li::before { content: counter(qa-step); position: absolute; top: 13px; left: 14px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--green); color: #fff; font-size: 11px; font-weight: 700; }
+.qa-flow-section .markdown-body li > p { margin: 0; }
+.qa-flow-section .markdown-body blockquote { margin: 9px 0 0; padding: 8px 12px; border: 0; border-radius: 8px; background: var(--green-soft); color: #3f5a45; }
+.qa-flow-section .markdown-body blockquote p { margin: 0; font-size: 12px; line-height: 1.6; }
+.qa-flow-section .markdown-body blockquote p:first-child::before { content: "기대 결과 · "; font-weight: 750; }
+.qa-flow-empty { margin: 0; color: #92968d; font-size: 12px; }
+.qa-flow > .confirm-warning { margin: 0; }
+
+.qa-review-decision { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+.qa-decision-question { margin: 0; font-size: 13px; font-weight: 650; }
+.qa-decision-choices { display: grid; gap: 8px; }
+.qa-decision-choices .secondary-button { width: 100%; padding: 10px 14px; font-size: 12px; cursor: pointer; }
+.qa-decision-confirm[aria-pressed="true"] { border-color: #76917d; color: var(--green); background: var(--green-soft); }
+.qa-decision-revision { color: #8d4b3c; }
+.qa-decision-revision[aria-pressed="true"] { border-color: #d9a08c; background: #f8e7e0; }
+.qa-decision-note { display: grid; gap: 6px; }
+.qa-decision-note label { color: #5e645c; font-size: 11px; font-weight: 700; }
+.qa-decision-note textarea { width: 100%; min-height: 110px; padding: 11px; resize: vertical; border: 1px solid #d9d8cf; border-radius: 10px; color: #333831; background: #fff; font-family: inherit; font-size: 12px; line-height: 1.7; }
+.qa-decision-note textarea:focus { border-color: #76917d; box-shadow: 0 0 0 3px rgba(49, 91, 68, .08); }
+.qa-review-decision .confirm-warning { margin: 0; }
+.qa-review-outcome { margin: 0; color: #555a52; font-size: 12px; line-height: 1.6; word-break: keep-all; }
+.qa-review-footer { display: grid; gap: 8px; }
+.qa-review-footer .stamp-button { width: 100%; justify-content: center; }
+.qa-review-note { margin: 0; color: #92968d; font-size: 10px; text-align: center; word-break: keep-all; }
+
+/* ── 준비 중 화면 ───────────────────────────────────────── */
+.qa-scope-block { margin-top: 20px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+.qa-scope-block h2 { margin: 0 0 8px; font-size: 14px; }
+.qa-scope-block p { margin: 0; color: #777a70; font-size: 12px; line-height: 1.65; word-break: keep-all; }
+
+/* ── 넓은 화면: 플로우 본문 옆에 결정 패널 고정 ─────────── */
+@container qa-canvas (min-width: 1000px) {
+  .qa-flow-layout { grid-template-columns: minmax(0, 820px) 290px; }
+  .qa-review-decision { position: sticky; top: 10px; }
+}
