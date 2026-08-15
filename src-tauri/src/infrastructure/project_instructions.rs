@@ -18,10 +18,10 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 26;
-pub(crate) const PLANNER_RULES_VERSION: u32 = 11;
-pub(crate) const ARCHITECT_RULES_VERSION: u32 = 18;
-pub(crate) const DEVELOPER_RULES_VERSION: u32 = 18;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 28;
+pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
+pub(crate) const ARCHITECT_RULES_VERSION: u32 = 19;
+pub(crate) const DEVELOPER_RULES_VERSION: u32 = 19;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 ## LLM Workflow
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 26
+rules_version: 28
 ---
 
 # LLM Workflow agent protocol
@@ -100,6 +100,15 @@ That leaves a document sitting in `decisions/` that the app does not see. Every 
 - The architect eligibility judgement ignores it. It is not architect work, and it cannot displace another decision from being the latest one.
 
 Decisions written before this rule carry `created_by: user` even where an agent wrote them. They are not valid delegated decisions, but the app cannot tell them from its own stamps and still reads them as user decisions, which also means the ratification above does not reach them. Do not rewrite them: `created_by` is the app's field. Report the gap instead.
+
+### Control documents and the code working copy
+
+Two locations take part in one development session, and they are not interchangeable. The registered shared project holds the control documents: leases, the migration lock, task status, work groups, decisions, and role reports are canonical there and are written nowhere else. The task-dedicated isolated copy is where code is worked on.
+
+- A development session edits product code, builds, and runs its automated checks only in the isolated copy prepared for that task.
+- A commit on the isolated branch carries product changes alone. Task status transitions, leases, and role reports are never mixed into it; they are written in the shared project where they are canonical.
+- A session receives both locations explicitly and never guesses which one holds the canonical control documents.
+- Isolation widens no write permission. What this section marks as app-owned stays app-owned inside the isolated copy, and a file that may not be written in the shared project may not be written there either.
 
 ## 3. Keep one role per session
 
@@ -190,12 +199,21 @@ prompt to send unchanged to the provider. It is a lease handoff, not a second cl
   It verifies that it owns the reservation and never calls `acquire` for the same target.
 - A session without a reservation follows the ordinary `acquire` procedure above. A missing or
   failed handoff never authorizes a direct lease-file write.
-- `resultPrefix` is unique to the reserved lease. Planners use it when creating SPEC identifiers;
-  architects use it for new GROUP and TASK identifiers when decomposing an approval. Group QA rework preserves the GROUP identifier and uses the prefix only for new TASK identifiers. A task correction creates no new identifier. Before writing, stop
-  if the resulting document path already exists. Developers preserve it in their report when it
-  explains a runtime handoff but do not invent a new result identifier.
+- Document identifiers follow lineage, never the reservation. A planner takes the lowest unused
+  three-digit number for a new specification (`SPEC-057`); if that path exists when writing begins,
+  another session got there first — take the next unused number. An architect names the group after
+  the specification it implements (`GROUP-057`; a second group from the same specification appends
+  an ordinal, `GROUP-057-2`) and numbers derived tasks in that lineage with two-digit ordinals
+  (`TASK-S057-01`). The decomposition happens under one lease, so parallel sessions never share a
+  number source. Group QA rework preserves the GROUP identifier and appends corrective tasks at the
+  next unused ordinals of the same lineage; before writing a GROUP or TASK document, stop if its
+  path already exists. A task correction creates no new identifier. `resultPrefix` still names the
+  reservation — sessions may cite it in reports but never put it into a document identifier.
 - The role prompt may name only this role, target, lease, result prefix, and the managed rules it
   must read. Runtime and provider adapters do not add provider-specific role instructions.
+- The reservation result also names where the code working copy has been prepared and where the
+  control documents stay canonical. Both locations ride in that one result, and §2 states which
+  writes belong to each.
 
 ## 5. Follow the document state machine
 
@@ -331,6 +349,9 @@ history:
 - A work group uses `schema: workflow-labs/work-group@1`, `status: preparing | active`, and `qa_mode: user | automatic`. Only the architect role changes it.
 - The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
 - An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
+- The declaration guards more than simultaneous editing. It is also what keeps two tasks from being integrated into conflicting states of one file, and what keeps them from changing the same behaviour in incompatible ways. `depends_on` limits implementation order and integration order alike: while a declared predecessor is not `verified`, the task that named it is not started from a base that predates that predecessor's work.
+- A user working directly in the repository declares nothing. This field is a contract between automated sessions and places no obligation on a person editing their own workspace.
+- A missing or wrong declaration gives a developer no authority to widen it. That case goes through the task-definition error recovery §5 already defines, and `.workflow/rules/roles/developer.md` states it as the one path.
 - What kind of block a task is under lives in the optional `blocked_kind` field, and the task-definition revision request a task has already answered lives in the optional `revision_request_id` field. §5 defines both, and a task that has neither fact leaves both keys out.
 - Do not combine user decisions with an agent-authored specification, work group, or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
@@ -446,7 +467,7 @@ const PLANNER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: planner
 managed_by: workflow-labs
-rules_version: 11
+rules_version: 12
 ---
 
 # Planner role
@@ -456,8 +477,10 @@ Turn one unprocessed idea or one app-recorded `revision_requested` decision into
 ## Runtime reservation handoff
 
 When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that lease before reading
-or writing the target. Do not acquire it again. Create a new SPEC identifier from the supplied prefix
-only after confirming that its document path is absent; otherwise stop and report the collision.
+or writing the target. Do not acquire it again. Name a new specification by the lineage rule in
+`workflow.md` §Runtime reservation handoff: the lowest unused three-digit number (`SPEC-057`),
+moving to the next unused number if that path already exists. The prefix never becomes part of a
+document identifier.
 
 ## Eligibility
 
@@ -534,7 +557,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 18
+rules_version: 19
 ---
 
 # Project architect role
@@ -544,9 +567,11 @@ Handle one architect target: create or recover a work group, reclassify a group 
 ## Runtime reservation handoff
 
 When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that exact lease before
-reading or changing the target. Do not acquire it again. Use the prefix only when the target is an
-approval being decomposed into a new group and tasks, or when group QA rework needs new corrective
-tasks. A group recovery and a task correction preserve their identifiers.
+reading or changing the target. Do not acquire it again. Name a new group and its tasks by the
+lineage rule in `workflow.md` §Runtime reservation handoff — `GROUP-<spec number>` and
+`TASK-S<spec number>-<ordinal>` — never from the prefix. Corrective tasks from group QA rework
+continue the same lineage at the next unused ordinals.
+A group recovery and a task correction preserve their identifiers.
 
 ## Eligibility
 
@@ -668,7 +693,7 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 18
+rules_version: 19
 ---
 
 # Developer role
@@ -755,6 +780,31 @@ If you opened the specification or the decision, write in the report which part 
 
 Before you change the first product file, read the task's `## 범위 사전 검사` section against the repository as it is now. This is a short cross-read, not a second decomposition: open what the section names and see whether those files still carry the behaviour the completion conditions ask for. The architect wrote that section from the same repository, and this reading is what catches the gap between then and now.
 
+## Implement in isolation, then integrate
+
+Product code is written in the task's isolated copy, and the shared workspace receives it at integration. `.workflow/rules/workflow.md` §2 draws that boundary; this section is the order the work follows.
+
+1. Run the checks the completion conditions name inside the isolated copy.
+2. When they pass, record the integration candidate: the change commit, the base it started from, the check commands and their results, and the list of changed files.
+3. Integrate the change into the shared workspace.
+4. Run the task's required checks and the checks its change affects again from the shared base.
+5. Complete the report, and only then move the task to `verified`.
+
+Passing the isolated checks is not by itself ground for moving the task to `verified`. A change shown to hold only in its own copy has not been shown to hold in the base every later session starts from.
+
+Integration is the work of the developer role that holds the task. It creates no new role and no new user approval gate. The session that first implements the task may carry it through integration, or a later developer session on the same task reads the recorded integration candidate and continues from it.
+
+Immediately before integrating, compare the shared base against the base the candidate recorded. If they differ, bring the change onto the current commit and run the isolated checks again before continuing.
+
+## Leave the user's own work alone
+
+The shared workspace is where the user works too, and what they have not finished is not this session's to move.
+
+- Do not begin an automatic integration while the shared workspace holds uncommitted changes to tracked files, staged changes, or a base change in progress. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
+- Do not stash, commit, reset, check out, or delete those changes, and do not guess whose they are. A workspace you did not find clean is a reason to wait, not something to clear.
+- When a conflict can be resolved inside the task's approved scope and its `scope_files`, resolve it and run the isolated checks again.
+- When resolving it would mean changing something outside that scope, or choosing what the user intended, take neither side. Record the specific conflict and the condition for resuming in the four labels `.workflow/rules/workflow.md` §5 defines.
+
 ## Keep user QA at the group boundary
 
 - Do not add `## 확인 동선`, terminal instructions, or a user confirmation request to a task. The architect-owned work group is the only source of user QA scenarios.
@@ -796,6 +846,11 @@ The report body is at most 80 lines. Count it the way `.workflow/rules/workflow.
 Detail that does not fit goes where it already has a place. The reasoning behind one edit belongs in a code comment beside that edit, and the record of what a change contains belongs in the commit message. Do not create a new document kind or schema to hold what the limit pushed out.
 
 User QA scenarios are not one of these report sections. They remain in the architect-owned work group.
+
+### Isolated results and integrated results are separate facts
+
+- A check that passed in the isolated copy and failed after integration is two results, and the report carries both. Neither is hidden behind the other.
+- When integration and the status transitions only partly succeeded, do not mark the whole as successful. Write which step the work reached and which step it did not.
 
 ## Allowed
 
@@ -1410,7 +1465,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1432,7 +1487,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1454,11 +1509,11 @@ mod tests {
             "Do not write `qa_waiting`, `completed`, `revision_requested`, `resumed`, or `migrated_verified` entries."
         ));
         assert!(rules.contains("`resumed` never stands in for `in_progress`"));
-        assert!(architect.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
         assert!(architect.contains("`history`"));
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer.contains("`history`"));
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         assert!(!planner.contains("`history`"));
     }
 
@@ -1477,13 +1532,13 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 18"));
-        assert!(developer.contains("rules_version: 18"));
-        assert!(planner.contains("rules_version: 11"));
+        assert!(architect.contains("rules_version: 19"));
+        assert!(developer.contains("rules_version: 19"));
+        assert!(planner.contains("rules_version: 12"));
     }
 
     #[test]
@@ -1501,7 +1556,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1509,15 +1564,15 @@ mod tests {
         assert!(rules.contains(
             "Runtime and provider adapters do not add provider-specific role instructions"
         ));
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains("Runtime reservation handoff"));
-        assert!(planner.contains("supplied prefix"));
-        assert!(architect.contains("rules_version: 18"));
-        assert!(architect.contains("approval being decomposed into a new group and tasks"));
+        assert!(planner.contains("lowest unused three-digit number"));
+        assert!(architect.contains("rules_version: 19"));
+        assert!(architect.contains("TASK-S<spec number>-<ordinal>"));
         assert!(
             architect.contains("A group recovery and a task correction preserve their identifiers")
         );
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer.contains("do not call `acquire` again"));
     }
 
@@ -1536,7 +1591,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1558,13 +1613,13 @@ mod tests {
             assert!(contract.contains("`.workflow/rules/workflow.md` §4"));
             assert!(!contract.contains("wf-claim.sh"));
         }
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("status is `verified`"));
-        assert!(architect.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
     }
 
     #[test]
@@ -1578,13 +1633,13 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
         assert!(rules.contains("`YYYY-MM-DDTHH:MM:SSZ`"));
 
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         // 판정 키는 여전히 결정 id다. R2가 그 참조를 세는 조건만 "모두 `draft`"로 넓혔다.
         assert!(planner.contains(
             "every specification that carries that decision's id in `source_decision_id` is still `draft`"
@@ -1612,21 +1667,21 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
         assert!(architect.contains("the judgement follows `scope_files`"));
 
         // 개발자 계약의 겹침 조항이 선언을 근거로 지목한다.
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer
             .contains("No unexpired lease may cover work that overlaps the task's `scope_files`"));
         assert!(developer.contains("## Overlapping work"));
@@ -1639,14 +1694,14 @@ mod tests {
         assert!(developer.contains("Do not move them to `blocked` either"));
 
         // 이 기획서에 기획자 계약의 변경분이 없다.
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 26);
-        assert_eq!(PLANNER_RULES_VERSION, 11);
-        assert_eq!(ARCHITECT_RULES_VERSION, 18);
-        assert_eq!(DEVELOPER_RULES_VERSION, 18);
+        assert_eq!(WORKFLOW_RULES_VERSION, 28);
+        assert_eq!(PLANNER_RULES_VERSION, 12);
+        assert_eq!(ARCHITECT_RULES_VERSION, 19);
+        assert_eq!(DEVELOPER_RULES_VERSION, 19);
     }
 
     #[test]
@@ -1665,7 +1720,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1694,7 +1749,7 @@ mod tests {
         }
 
         // 개발자 계약: R1의 자격 조건, definition_error 역할 경계, R6의 순서.
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer.contains("The task must be `todo`, `in_progress`, or `blocked`"));
         assert!(developer
             .contains("An `in_progress` task qualifies only while no unexpired lease covers it"));
@@ -1709,7 +1764,7 @@ mod tests {
         assert!(developer.contains("Do not move them to `blocked` either"));
 
         // 기획자 계약: R2의 자격 조건, R5의 이어쓰기, R6의 순서.
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains(
             "every specification that references it in `source_idea_id` is still `draft`"
         ));
@@ -1727,7 +1782,7 @@ mod tests {
         assert!(planner.contains("Never delete the document and never merge it"));
 
         // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
-        assert!(architect.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
         assert!(!architect.contains("Taking over"));
     }
 
@@ -1746,7 +1801,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1818,14 +1873,14 @@ mod tests {
             assert!(!contract.contains("결정권자 요약"));
             assert!(!contract.contains("blank lines excluded"));
         }
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains("what the user decides in this document"));
         assert!(planner.contains("what stays exactly as it is if it is not"));
-        assert!(architect.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 자동검증 보고와 그룹 경계 유지.
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer.contains("which work-group result this evidence supports"));
         assert!(developer.contains("## Keep user QA at the group boundary"));
         assert!(developer.contains("`## 확인 동선`"));
@@ -1850,10 +1905,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 26"));
-        assert!(architect.contains("rules_version: 18"));
-        assert!(developer.contains("rules_version: 18"));
-        assert!(planner.contains("rules_version: 11"));
+        assert!(rules.contains("rules_version: 28"));
+        assert!(architect.contains("rules_version: 19"));
+        assert!(developer.contains("rules_version: 19"));
+        assert!(planner.contains("rules_version: 12"));
 
         // 차단 분류 네 값과 그 뜻이 한 번씩 정의된다.
         assert!(rules.contains("### Naming what kind of block it is"));
@@ -1983,10 +2038,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 26"));
-        assert!(developer.contains("rules_version: 18"));
-        assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 18"));
+        assert!(rules.contains("rules_version: 28"));
+        assert!(developer.contains("rules_version: 19"));
+        assert!(planner.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 19"));
 
         // 전이와 같은 편집에서 남기는 고정 절.
         assert!(rules.contains("### Recording why a task is blocked"));
@@ -2073,7 +2128,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("### The structured summary"));
 
         // 네 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·전후·위험으로 끝난다.
@@ -2147,17 +2202,17 @@ mod tests {
             assert!(!contract.contains("### 제안"));
             assert!(!contract.contains("### 결정 요청"));
         }
-        assert!(planner.contains("rules_version: 11"));
+        assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains(
             "Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request"
         ));
         assert!(planner.contains("what stays exactly as it is while this document is not approved"));
-        assert!(architect.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
         assert!(architect.contains("Write that summary in the structured form §8 defines"));
         assert!(architect
             .contains("the closing heading names the automated result this task contributes to"));
         assert!(architect.contains("User QA steps belong to the group, never the individual task"));
-        assert!(developer.contains("rules_version: 18"));
+        assert!(developer.contains("rules_version: 19"));
         assert!(developer.contains(
             "bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them"
         ));
@@ -2181,7 +2236,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2222,9 +2277,9 @@ mod tests {
         assert!(
             developer.contains("changes, automated verification, risks, and architect handoffs")
         );
-        assert!(planner.contains("rules_version: 11"));
-        assert!(architect.contains("rules_version: 18"));
-        assert!(developer.contains("rules_version: 18"));
+        assert!(planner.contains("rules_version: 12"));
+        assert!(architect.contains("rules_version: 19"));
+        assert!(developer.contains("rules_version: 19"));
     }
 
     #[test]
@@ -2283,7 +2338,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2314,10 +2369,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 26"));
+        assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 18"));
-        assert!(developer.contains("rules_version: 18"));
+        assert!(architect.contains("rules_version: 19"));
+        assert!(developer.contains("rules_version: 19"));
     }
 
     #[test]

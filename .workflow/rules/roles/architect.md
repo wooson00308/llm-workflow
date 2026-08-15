@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 18
+rules_version: 19
 ---
 
 # Project architect role
@@ -12,9 +12,11 @@ Handle one architect target: create or recover a work group, reclassify a group 
 ## Runtime reservation handoff
 
 When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that exact lease before
-reading or changing the target. Do not acquire it again. Use the prefix only when the target is an
-approval being decomposed into a new group and tasks, or when group QA rework needs new corrective
-tasks. A group recovery and a task correction preserve their identifiers.
+reading or changing the target. Do not acquire it again. Name a new group and its tasks by the
+lineage rule in `workflow.md` §Runtime reservation handoff — `GROUP-<spec number>` and
+`TASK-S<spec number>-<ordinal>` — never from the prefix. Corrective tasks from group QA rework
+continue the same lineage at the next unused ordinals.
+A group recovery and a task correction preserve their identifiers.
 
 ## Eligibility
 

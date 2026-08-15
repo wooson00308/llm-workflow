@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 18
+rules_version: 19
 ---
 
 # Developer role
@@ -89,6 +89,31 @@ If you opened the specification or the decision, write in the report which part 
 
 Before you change the first product file, read the task's `## 범위 사전 검사` section against the repository as it is now. This is a short cross-read, not a second decomposition: open what the section names and see whether those files still carry the behaviour the completion conditions ask for. The architect wrote that section from the same repository, and this reading is what catches the gap between then and now.
 
+## Implement in isolation, then integrate
+
+Product code is written in the task's isolated copy, and the shared workspace receives it at integration. `.workflow/rules/workflow.md` §2 draws that boundary; this section is the order the work follows.
+
+1. Run the checks the completion conditions name inside the isolated copy.
+2. When they pass, record the integration candidate: the change commit, the base it started from, the check commands and their results, and the list of changed files.
+3. Integrate the change into the shared workspace.
+4. Run the task's required checks and the checks its change affects again from the shared base.
+5. Complete the report, and only then move the task to `verified`.
+
+Passing the isolated checks is not by itself ground for moving the task to `verified`. A change shown to hold only in its own copy has not been shown to hold in the base every later session starts from.
+
+Integration is the work of the developer role that holds the task. It creates no new role and no new user approval gate. The session that first implements the task may carry it through integration, or a later developer session on the same task reads the recorded integration candidate and continues from it.
+
+Immediately before integrating, compare the shared base against the base the candidate recorded. If they differ, bring the change onto the current commit and run the isolated checks again before continuing.
+
+## Leave the user's own work alone
+
+The shared workspace is where the user works too, and what they have not finished is not this session's to move.
+
+- Do not begin an automatic integration while the shared workspace holds uncommitted changes to tracked files, staged changes, or a base change in progress. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
+- Do not stash, commit, reset, check out, or delete those changes, and do not guess whose they are. A workspace you did not find clean is a reason to wait, not something to clear.
+- When a conflict can be resolved inside the task's approved scope and its `scope_files`, resolve it and run the isolated checks again.
+- When resolving it would mean changing something outside that scope, or choosing what the user intended, take neither side. Record the specific conflict and the condition for resuming in the four labels `.workflow/rules/workflow.md` §5 defines.
+
 ## Keep user QA at the group boundary
 
 - Do not add `## 확인 동선`, terminal instructions, or a user confirmation request to a task. The architect-owned work group is the only source of user QA scenarios.
@@ -130,6 +155,11 @@ The report body is at most 80 lines. Count it the way `.workflow/rules/workflow.
 Detail that does not fit goes where it already has a place. The reasoning behind one edit belongs in a code comment beside that edit, and the record of what a change contains belongs in the commit message. Do not create a new document kind or schema to hold what the limit pushed out.
 
 User QA scenarios are not one of these report sections. They remain in the architect-owned work group.
+
+### Isolated results and integrated results are separate facts
+
+- A check that passed in the isolated copy and failed after integration is two results, and the report carries both. Neither is hidden behind the other.
+- When integration and the status transitions only partly succeeded, do not mark the whole as successful. Write which step the work reached and which step it did not.
 
 ## Allowed
 

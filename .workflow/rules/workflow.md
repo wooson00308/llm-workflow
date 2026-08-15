@@ -1,7 +1,7 @@
 ---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 26
+rules_version: 28
 ---
 
 # LLM Workflow agent protocol
@@ -55,6 +55,15 @@ That leaves a document sitting in `decisions/` that the app does not see. Every 
 - The architect eligibility judgement ignores it. It is not architect work, and it cannot displace another decision from being the latest one.
 
 Decisions written before this rule carry `created_by: user` even where an agent wrote them. They are not valid delegated decisions, but the app cannot tell them from its own stamps and still reads them as user decisions, which also means the ratification above does not reach them. Do not rewrite them: `created_by` is the app's field. Report the gap instead.
+
+### Control documents and the code working copy
+
+Two locations take part in one development session, and they are not interchangeable. The registered shared project holds the control documents: leases, the migration lock, task status, work groups, decisions, and role reports are canonical there and are written nowhere else. The task-dedicated isolated copy is where code is worked on.
+
+- A development session edits product code, builds, and runs its automated checks only in the isolated copy prepared for that task.
+- A commit on the isolated branch carries product changes alone. Task status transitions, leases, and role reports are never mixed into it; they are written in the shared project where they are canonical.
+- A session receives both locations explicitly and never guesses which one holds the canonical control documents.
+- Isolation widens no write permission. What this section marks as app-owned stays app-owned inside the isolated copy, and a file that may not be written in the shared project may not be written there either.
 
 ## 3. Keep one role per session
 
@@ -145,12 +154,21 @@ prompt to send unchanged to the provider. It is a lease handoff, not a second cl
   It verifies that it owns the reservation and never calls `acquire` for the same target.
 - A session without a reservation follows the ordinary `acquire` procedure above. A missing or
   failed handoff never authorizes a direct lease-file write.
-- `resultPrefix` is unique to the reserved lease. Planners use it when creating SPEC identifiers;
-  architects use it for new GROUP and TASK identifiers when decomposing an approval. Group QA rework preserves the GROUP identifier and uses the prefix only for new TASK identifiers. A task correction creates no new identifier. Before writing, stop
-  if the resulting document path already exists. Developers preserve it in their report when it
-  explains a runtime handoff but do not invent a new result identifier.
+- Document identifiers follow lineage, never the reservation. A planner takes the lowest unused
+  three-digit number for a new specification (`SPEC-057`); if that path exists when writing begins,
+  another session got there first — take the next unused number. An architect names the group after
+  the specification it implements (`GROUP-057`; a second group from the same specification appends
+  an ordinal, `GROUP-057-2`) and numbers derived tasks in that lineage with two-digit ordinals
+  (`TASK-S057-01`). The decomposition happens under one lease, so parallel sessions never share a
+  number source. Group QA rework preserves the GROUP identifier and appends corrective tasks at the
+  next unused ordinals of the same lineage; before writing a GROUP or TASK document, stop if its
+  path already exists. A task correction creates no new identifier. `resultPrefix` still names the
+  reservation — sessions may cite it in reports but never put it into a document identifier.
 - The role prompt may name only this role, target, lease, result prefix, and the managed rules it
   must read. Runtime and provider adapters do not add provider-specific role instructions.
+- The reservation result also names where the code working copy has been prepared and where the
+  control documents stay canonical. Both locations ride in that one result, and §2 states which
+  writes belong to each.
 
 ## 5. Follow the document state machine
 
@@ -286,6 +304,9 @@ history:
 - A work group uses `schema: workflow-labs/work-group@1`, `status: preparing | active`, and `qa_mode: user | automatic`. Only the architect role changes it.
 - The files a task touches live in the optional `scope_files` field: one flow sequence on a single line starting at column 0, written at most once, holding paths relative to the project root — `scope_files: [src/a.rs, src/b.ts]`. A path may hold only `A-Za-z0-9`, `_`, `-`, `.`, and `/`, and paths are compared exactly as written, with no normalization, globbing, directory prefix matching, or case folding. `depends_on` decides which task comes first; `scope_files` decides which tasks must not be started at the same time.
 - An empty `scope_files` list means the task touches no files and overlaps with nothing. A missing key is not an empty list, and a value in any other shape cannot be judged. Both lean to the safe side, and `.workflow/rules/roles/developer.md` states what that costs.
+- The declaration guards more than simultaneous editing. It is also what keeps two tasks from being integrated into conflicting states of one file, and what keeps them from changing the same behaviour in incompatible ways. `depends_on` limits implementation order and integration order alike: while a declared predecessor is not `verified`, the task that named it is not started from a base that predates that predecessor's work.
+- A user working directly in the repository declares nothing. This field is a contract between automated sessions and places no obligation on a person editing their own workspace.
+- A missing or wrong declaration gives a developer no authority to widen it. That case goes through the task-definition error recovery §5 already defines, and `.workflow/rules/roles/developer.md` states it as the one path.
 - What kind of block a task is under lives in the optional `blocked_kind` field, and the task-definition revision request a task has already answered lives in the optional `revision_request_id` field. §5 defines both, and a task that has neither fact leaves both keys out.
 - Do not combine user decisions with an agent-authored specification, work group, or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.

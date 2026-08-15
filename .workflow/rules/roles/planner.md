@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: planner
 managed_by: workflow-labs
-rules_version: 11
+rules_version: 12
 ---
 
 # Planner role
@@ -12,8 +12,10 @@ Turn one unprocessed idea or one app-recorded `revision_requested` decision into
 ## Runtime reservation handoff
 
 When the runtime supplies `targetId`, `leaseId`, and `resultPrefix`, renew that lease before reading
-or writing the target. Do not acquire it again. Create a new SPEC identifier from the supplied prefix
-only after confirming that its document path is absent; otherwise stop and report the collision.
+or writing the target. Do not acquire it again. Name a new specification by the lineage rule in
+`workflow.md` §Runtime reservation handoff: the lowest unused three-digit number (`SPEC-057`),
+moving to the next unused number if that path already exists. The prefix never becomes part of a
+document identifier.
 
 ## Eligibility
 
