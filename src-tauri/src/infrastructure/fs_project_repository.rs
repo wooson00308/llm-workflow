@@ -50,6 +50,11 @@ const RUNTIME_DIRECTORY: &str = ".runtime";
 /// 그룹 품질 확인이 고정한 기준 커밋을 두는 실행 상태 디렉터리. 한 파일이 그룹 하나의 한 구성
 /// 버전을 담으므로, 새 구성 버전은 이전 버전의 고정 값을 지우지 않고 옆에 새 파일을 만든다.
 const QA_BASE_DIRECTORY: &str = "qa-base";
+/// 격리 준비 기록을 두는 실행 상태 디렉터리. 대상 하나가 파일 하나이고 파일 이름이 곧 대상 id다.
+const ISOLATION_DIRECTORY: &str = "isolation";
+/// 격리 검사를 마치고 공유 작업 공간 반영을 기다리는 상태를 가리키는 준비 기록의 단계 값. 값을
+/// 읽는 쪽이 이 모듈이고, 기록에 실제로 적는 주체는 별도로 배포되는 실행 환경이다.
+const INTEGRATION_WAITING_STEP: &str = "integration_waiting";
 const MIGRATION_LOCK_FILE: &str = "migration.lock";
 const WORKFLOW_DIRECTORIES: [&str; 7] = [
     "ideas",
@@ -1827,6 +1832,10 @@ fn summary_from_manifest(
     // 한 요약 안의 모든 워크플로우가 같은 공유 기준을 본다. 기준 커밋은 프로젝트 하나의 값이므로
     // 워크플로우마다 다시 읽지 않는다.
     let qa_base = QaBasePin::new(root, &control_root);
+    // 통합 대기 제외 대상도 프로젝트 하나의 값이다. 준비 기록은 컨트롤 루트 하나 아래에 대상 id로
+    // 모이고 공유 기준도 프로젝트에 하나뿐이므로, lease 집합과 같은 자리에서 한 번 만들어 모든
+    // 워크플로우가 같은 집합을 본다.
+    let integration_waiting = integration_waiting_tasks(&control_root, &qa_base);
     let prepared: Vec<PreparedWorkflow> = manifest
         .workflows
         .iter()
@@ -1861,7 +1870,12 @@ fn summary_from_manifest(
             .join(RUNTIME_DIRECTORY)
             .join(MIGRATION_LOCK_FILE)
             .exists();
-        pending_role_work(migration_locked, &lease_target_ids, &inputs)
+        pending_role_work(
+            migration_locked,
+            &lease_target_ids,
+            &integration_waiting,
+            &inputs,
+        )
     };
 
     ProjectSummary {
@@ -2910,6 +2924,85 @@ fn read_qa_base_pin(path: &Path) -> Option<String> {
     let contents = fs::read_to_string(path).ok()?;
     let document = serde_yaml::from_str::<serde_yaml::Value>(&contents).ok()?;
     yaml_text(Some(&document), "base_commit")
+}
+
+/// 통합을 기다리느라 개발자 후보에서 빠지는 작업 id(SPEC-RES-20260815T030040Z R6).
+///
+/// `step`이 통합 대기인 준비 기록만 본다. 그런 기록이 하나도 없으면 Git을 부르지 않고 빈 집합으로
+/// 끝난다. 판정은 프로젝트를 읽을 때마다 도는 경로이므로 조회 비용을 이 조건 뒤에 두고, 그래야 Git
+/// 작업 트리가 아닌 프로젝트의 판정도 이 조건이 없던 때와 완전히 같은 경로로 끝난다.
+///
+/// 기다리는 이유가 그대로인지는 둘을 함께 보아 판정한다. 공유 작업 공간에 추적 파일의 미커밋 변경
+/// 또는 stage된 변경이 남아 있고, 기록의 기준 커밋이 지금 공유 기준과 같으면 그대로다. 둘 중 하나라도
+/// 달라지면, 즉 작업 공간이 깨끗해졌거나 기준이 전진했으면 그 작업은 다시 후보가 된다.
+///
+/// Git 조회가 실패하면 기록이 있는 작업을 제외한 채로 둔다. 기다림이 끝났다는 근거를 얻지 못한
+/// 상태이고, 근거 없이 후보로 되돌리면 이 판정이 막으려던 반복 기동이 그대로 남는다.
+fn integration_waiting_tasks(control_root: &Path, qa_base: &QaBasePin<'_>) -> HashSet<String> {
+    // 파일 이름이 대상 id다. `target_id` 필드가 아니라 이름을 키로 쓰는 것은 스크립트 본문이 작업
+    // id로 기록 파일을 직접 조회하기 때문이다 — 두 값이 어긋난 기록에서도 세 구현이 같게 판정한다.
+    let waiting: Vec<(String, String)> = fs::read_dir(
+        control_root
+            .join(RUNTIME_DIRECTORY)
+            .join(ISOLATION_DIRECTORY),
+    )
+    .into_iter()
+    .flatten()
+    .filter_map(Result::ok)
+    .filter_map(|entry| {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("yml") {
+            return None;
+        }
+        let target = path.file_stem()?.to_str()?.to_owned();
+        Some((target, read_integration_waiting_base(&path)?))
+    })
+    .collect();
+    if waiting.is_empty() {
+        return HashSet::new();
+    }
+    let all_waiting = || waiting.iter().map(|(target, _)| target.clone()).collect();
+    let Some(current) = qa_base.current() else {
+        return all_waiting();
+    };
+    let Some(dirty) = shared_workspace_is_dirty(qa_base.project_root) else {
+        return all_waiting();
+    };
+    if !dirty {
+        return HashSet::new();
+    }
+    waiting
+        .iter()
+        .filter(|(_, base_commit)| base_commit == current)
+        .map(|(target, _)| target.clone())
+        .collect()
+}
+
+/// 통합 대기 기록이 담은 기준 커밋. 단계가 통합 대기가 아니거나, 파일을 읽지 못하거나, 기준 커밋이
+/// 없으면 `None`이다. 그 셋은 모두 이 판정의 재료가 되지 못하므로 기록이 없는 것과 같게 다룬다.
+fn read_integration_waiting_base(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let document = serde_yaml::from_str::<serde_yaml::Value>(&contents).ok()?;
+    (yaml_text(Some(&document), "step")? == INTEGRATION_WAITING_STEP)
+        .then(|| yaml_text(Some(&document), "base_commit"))
+        .flatten()
+}
+
+/// 공유 작업 공간에 추적 파일의 미커밋 변경이나 stage된 변경이 남아 있는가. 미추적 파일은 세지
+/// 않는다 — 사용자가 새로 만들어 둔 파일은 통합이 건드릴 대상이 아니기 때문이다.
+///
+/// 조회에 실패하면 `None`이다. 더러운지 깨끗한지 모르는 것과 깨끗한 것은 다른 사실이므로 합치지
+/// 않는다.
+fn shared_workspace_is_dirty(project_root: &Path) -> Option<bool> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 /// 공유 기준의 현재 커밋. 예약 헬퍼가 사본을 만들 때 쓰는 기준과 같은 값을 같은 방법으로 읽는다.

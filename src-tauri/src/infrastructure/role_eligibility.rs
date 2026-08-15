@@ -26,8 +26,8 @@ use std::collections::HashSet;
 
 use crate::domain::project::{
     PendingRoleWorkDetail, RoleWorkVerdict, WorkGroupStatus, WorkflowItemSummary, WorkflowItems,
-    DECOMPOSED, DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, LEASED, OVERLAP, SPEC_EXISTS,
-    SPEC_LEASED,
+    DECOMPOSED, DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, INTEGRATION_WAITING, LEASED, OVERLAP,
+    SPEC_EXISTS, SPEC_LEASED,
 };
 
 /// 워크플로우 하나의 판정 재료. 스크립트가 워크플로우 하나 안에서 아이디어↔기획서, 결정↔작업을
@@ -100,9 +100,14 @@ const WORK_GROUP_UNAVAILABLE: &str = "work-group-unavailable";
 ///
 /// 답은 역할마다 대상 하나와 판정한 후보 목록이다(SPEC-049 R1). 대상 유무는 이 작업 전의 불리언
 /// 그대로이고 넓어진 것은 답의 내용이다 — 화면 payload는 [`PendingRoleWorkDetail::flags`]가 낸다.
+/// `integration_waiting`은 격리 검사를 마치고도 공유 작업 공간에 반영하지 못해 기다리는 작업의
+/// id다. 준비 기록과 Git 상태를 함께 보아야 만들 수 있는 값이라 이 모듈은 만들지 않고 받는다 —
+/// lease 집합과 같은 이유이고, 같은 이유로 워크플로우가 아니라 프로젝트 하나의 값이다. 기록 파일은
+/// 컨트롤 루트 하나 아래에 대상 id로 저장되고 Git 기준도 프로젝트에 하나뿐이다.
 pub fn pending_role_work(
     migration_locked: bool,
     lease_ids: &HashSet<String>,
+    integration_waiting: &HashSet<String>,
     workflows: &[WorkflowInput<'_>],
 ) -> PendingRoleWorkDetail {
     // 스크립트 첫 줄: `[ -f ".workflow/.runtime/migration.lock" ] && exit 1`.
@@ -115,7 +120,9 @@ pub fn pending_role_work(
     PendingRoleWorkDetail {
         planner: judge_workflows(workflows, |workflow| planner_verdict(workflow, lease_ids)),
         architect: architect_workflows_verdict(workflows, lease_ids),
-        developer: judge_workflows(workflows, |workflow| developer_verdict(workflow, lease_ids)),
+        developer: judge_workflows(workflows, |workflow| {
+            developer_verdict(workflow, lease_ids, integration_waiting)
+        }),
     }
 }
 
@@ -375,7 +382,15 @@ fn architect_workflows_verdict(
 ///
 /// 마지막 조건은 잡힌 lease가 있을 때만 개입한다. 활성 lease가 하나도 없으면 `overlap_blocked`가
 /// 비어 있어 판정이 이 조건이 없던 때와 같다(SPEC-032 R9).
-fn developer_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
+///
+/// 통합 대기 제외는 lease·선행·겹침 뒤, 원천 결정과 그룹 판정 앞에 둔다. 앞의 셋은 통합 대기와
+/// 무관하게 성립하는 조건이고, 통합을 기다리는 작업은 이미 승인된 원천에서 나와 착수까지 간
+/// 작업이라 뒤의 두 판정까지 갈 이유가 없다. 스크립트 본문도 같은 차례를 쓴다.
+fn developer_verdict(
+    workflow: &WorkflowInput<'_>,
+    lease_ids: &HashSet<String>,
+    integration_waiting: &HashSet<String>,
+) -> RoleWorkVerdict {
     let mut verdict = RoleWorkVerdict::default();
     for task in by_file_name(&workflow.items.tasks) {
         if task.status != "todo" && task.status != "in_progress" && task.status != "blocked" {
@@ -394,6 +409,10 @@ fn developer_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
         }
         if workflow.overlap_blocked.contains(&task.id) {
             verdict.exclude(&task.id, OVERLAP);
+            continue;
+        }
+        if integration_waiting.contains(&task.id) {
+            verdict.exclude(&task.id, INTEGRATION_WAITING);
             continue;
         }
         let referenced_group = task.work_group_id.as_deref().and_then(|group_id| {
@@ -659,6 +678,163 @@ mod tests {
             format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
         )
         .expect("write task");
+    }
+
+    fn run_git(project_root: &Path, arguments: &[&str]) -> i32 {
+        std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(project_root)
+            .output()
+            .expect("run git")
+            .status
+            .code()
+            .expect("git exit code")
+    }
+
+    /// 통합 대기 판정만 Git 상태를 함께 보므로, 그 시나리오는 저장소를 갖춘 프로젝트를 쓴다.
+    /// 만드는 방식은 `reservation_helper.rs` 시험의 `git_project`와 같다. 워크플로우 문서는
+    /// 커밋하지 않아 미추적으로 남고, 판정이 미추적을 세지 않으므로 첫 커밋 직후의 작업 공간은
+    /// 깨끗하다.
+    fn git_project() -> (TempDir, PathBuf, String) {
+        let (root, workflow_root) = project();
+        fs::write(root.path().join(".gitignore"), ".workflow/.runtime/\n").expect("gitignore");
+        fs::write(root.path().join("README.md"), "base\n").expect("tracked file");
+        assert_eq!(run_git(root.path(), &["init", "-b", "main"]), 0);
+        assert_eq!(
+            run_git(root.path(), &["config", "core.autocrlf", "false"]),
+            0
+        );
+        assert_eq!(run_git(root.path(), &["add", ".gitignore", "README.md"]), 0);
+        assert_eq!(
+            run_git(
+                root.path(),
+                &[
+                    "-c",
+                    "user.email=agent@workflow-labs.test",
+                    "-c",
+                    "user.name=workflow-labs",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            ),
+            0
+        );
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "픽스처 저장소의 현재 커밋을 읽지 못했다"
+        );
+        let head = String::from_utf8(output.stdout)
+            .expect("git stdout is utf-8")
+            .trim()
+            .to_owned();
+        (root, workflow_root, head)
+    }
+
+    /// 추적 파일 하나를 미커밋 상태로 만든다. 사용자가 자기 변경을 아직 정리하지 않은 상태다.
+    fn dirty_the_shared_workspace(project_root: &Path) {
+        fs::write(project_root.join("README.md"), "base\n사용자 편집\n").expect("dirty file");
+    }
+
+    /// 격리 준비 기록 하나. 예약 헬퍼가 쓰는 것과 같은 키를 담는다.
+    fn write_isolation_record(project_root: &Path, target_id: &str, step: &str, base_commit: &str) {
+        let isolation = project_root.join(".workflow/.runtime/isolation");
+        fs::create_dir_all(&isolation).expect("isolation root");
+        fs::write(
+            isolation.join(format!("{target_id}.yml")),
+            format!("# managed_by: workflow-labs\nschema_version: 1\ntarget_id: {target_id}\nlease_id: lease-{target_id}\nbase_commit: {base_commit}\nbranch: wf-iso/{target_id}\nworkspace_path: /tmp/{target_id}\ncontrol_root: /tmp/control\nprepared_at: 2026-08-15T00:00:00Z\nstep: {step}\n"),
+        )
+        .expect("write isolation record");
+    }
+
+    /// 통합 대기 제외를 앱 판정과 스크립트 본문이 같은 후보 목록과 같은 사유로 낸다. 대조는
+    /// 완료 조건 1~5·7의 상황을 모두 지난다.
+    #[test]
+    fn a_task_waiting_for_integration_is_excluded_in_both_implementations() {
+        let (root, workflow_root, head) = git_project();
+        write_task(&workflow_root, "TASK-001", "in_progress", None);
+        write_isolation_record(root.path(), "TASK-001", "integration_waiting", &head);
+        dirty_the_shared_workspace(root.path());
+
+        let pending = assert_matches_condition_script(root.path());
+
+        assert!(
+            !pending.developer,
+            "통합을 기다리는 작업은 대기 물량이 아니다"
+        );
+        let detail = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect project")
+            .pending_detail;
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec!["integration-waiting TASK-001"],
+            "제외 사유가 기존 세 사유와 구분되는 값으로 나간다"
+        );
+    }
+
+    /// 기다리는 이유가 사라지거나 기록이 통합 대기가 아니면 두 판정 모두 후보로 되돌린다.
+    #[test]
+    fn both_implementations_return_the_task_when_the_wait_is_over() {
+        for (step, dirty, base_is_head) in [
+            ("integration_waiting", false, true),
+            ("integration_waiting", true, false),
+            ("ready", true, true),
+        ] {
+            let (root, workflow_root, head) = git_project();
+            write_task(&workflow_root, "TASK-001", "in_progress", None);
+            let base = if base_is_head { head } else { "0".repeat(40) };
+            write_isolation_record(root.path(), "TASK-001", step, &base);
+            if dirty {
+                dirty_the_shared_workspace(root.path());
+            }
+
+            let pending = assert_matches_condition_script(root.path());
+
+            assert!(pending.developer, "{step} 기록에서 후보가 남아야 한다");
+        }
+    }
+
+    /// 통합 대기 작업이 있어도 겹치지 않는 다른 작업은 두 판정 모두에서 후보로 남는다.
+    #[test]
+    fn another_task_stays_a_candidate_in_both_implementations() {
+        let (root, workflow_root, head) = git_project();
+        write_task_with_scope(&workflow_root, "TASK-001", "in_progress", "[src/a.rs]");
+        write_task_with_scope(&workflow_root, "TASK-002", "todo", "[src/b.rs]");
+        write_isolation_record(root.path(), "TASK-001", "integration_waiting", &head);
+        dirty_the_shared_workspace(root.path());
+
+        let pending = assert_matches_condition_script(root.path());
+
+        assert!(pending.developer);
+    }
+
+    /// 기준을 읽을 수 없는 프로젝트에서도 두 판정이 같게 제외를 유지한다. 픽스처가 Git 저장소가
+    /// 아니므로 조회 자체가 실패하는 경우다.
+    #[test]
+    fn both_implementations_keep_the_wait_when_the_shared_base_cannot_be_read() {
+        let (root, workflow_root) = project();
+        write_task(&workflow_root, "TASK-001", "in_progress", None);
+        write_isolation_record(
+            root.path(),
+            "TASK-001",
+            "integration_waiting",
+            &"0".repeat(40),
+        );
+
+        let pending = assert_matches_condition_script(root.path());
+
+        assert!(
+            !pending.developer,
+            "기준을 읽지 못하면 통합 대기를 유지한다"
+        );
     }
 
     fn write_task_for_work_group(
@@ -3007,7 +3183,8 @@ mod tests {
         let mut leases = HashSet::new();
         leases.insert("SPEC-001".to_owned());
 
-        let blocked = super::pending_role_work(false, &leases, &workflows).architect;
+        let blocked =
+            super::pending_role_work(false, &leases, &HashSet::new(), &workflows).architect;
         assert_eq!(blocked.target, None);
         assert_eq!(
             blocked.candidates,
@@ -3017,7 +3194,8 @@ mod tests {
             }]
         );
 
-        let open = super::pending_role_work(false, &HashSet::new(), &workflows).architect;
+        let open =
+            super::pending_role_work(false, &HashSet::new(), &HashSet::new(), &workflows).architect;
         assert_eq!(open.target.as_deref(), Some("DECISION-001"));
     }
 }

@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 20;
+const CONDITION_SCRIPT_VERSION: u32 = 21;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 20;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 20
+# condition_script_version: 21
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -39,6 +39,13 @@ machine_target=""
 machine_target_kind=""
 machine_candidates=""
 leases=".workflow/.runtime/leases"
+isolation=".workflow/.runtime/isolation"
+# 공유 기준 조회는 통합 대기 기록을 가진 후보를 처음 만났을 때 한 번만 돈다. 그때까지 이 넷은
+# "아직 조회하지 않았다"를 뜻한다.
+shared_scanned=0
+shared_ok=0
+shared_dirty=0
+shared_head=""
 # 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
 # 개행이 목록의 경계가 된다.
 nl='
@@ -229,6 +236,41 @@ overlap_blocks() { # $1=자기 선언의 유효 여부 $2=자기 선언의 경�
     case "$lease_paths" in *" $a "*) return 0 ;; esac
   done
   return 1
+}
+
+# 공유 기준의 현재 커밋과 작업 공간 상태를 한 번만 조회해 담는다. 통합 대기 기록을 가진 후보를
+# 처음 만났을 때만 불리므로, 그런 기록이 없는 프로젝트에서는 git이 한 번도 실행되지 않는다.
+# 조회에 실패하면 shared_ok가 0으로 남는다. 더러운지 깨끗한지 모르는 것과 깨끗한 것은 다른
+# 사실이므로 합치지 않는다.
+scan_shared_base() {
+  [ "$shared_scanned" -eq 0 ] || return 0
+  shared_scanned=1
+  shared_head=$(git rev-parse HEAD 2>/dev/null) || return 0
+  [ -n "$shared_head" ] || return 0
+  shared_status=$(git status --porcelain --untracked-files=no 2>/dev/null) || return 0
+  shared_ok=1
+  [ -n "$shared_status" ] && shared_dirty=1
+  return 0
+}
+
+# 격리 검사를 마치고도 공유 작업 공간에 반영하지 못해 통합을 기다리는 작업인가. 기다리는 이유가
+# 그대로인 동안만 막는다 — 추적 파일의 미커밋 변경이나 stage된 변경이 남아 있고, 기록의 기준
+# 커밋이 지금 공유 기준과 같을 때다. 작업 공간이 깨끗해졌거나 기준이 전진했으면 다시 후보다.
+# 미추적 파일은 보지 않는다. 사용자가 새로 만들어 둔 파일은 통합이 건드릴 대상이 아니다.
+# 기록이 없거나, 읽지 못하거나, 단계가 통합 대기가 아니거나, 기준 커밋이 없으면 막지 않는다.
+# 반대로 git 조회가 실패하면 막은 채로 둔다. 기다림이 끝났다는 근거를 얻지 못한 상태이고, 근거 없이
+# 후보로 되돌리면 이 판정이 막으려던 반복 기동이 그대로 남는다.
+integration_waiting_blocks() { # $1=대상 id
+  record="$isolation/$1.yml"
+  [ -f "$record" ] || return 1
+  step=$(sed -n 's/^step: *//p' "$record" | head -1 | tr -d '"'\''')
+  [ "$step" = integration_waiting ] || return 1
+  base=$(sed -n 's/^base_commit: *//p' "$record" | head -1 | tr -d '"'\''')
+  [ -n "$base" ] || return 1
+  scan_shared_base
+  [ "$shared_ok" -eq 1 ] || return 0
+  [ "$shared_dirty" -eq 1 ] || return 1
+  [ "$base" = "$shared_head" ]
 }
 
 # $1에서 선언을 따라가 $2에 닿는가. 방문 집합이 종료를 보장한다.
@@ -1119,6 +1161,10 @@ ACTIVE_GROUP_ROWS
       done
       [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
+      # 통합 대기는 lease·선행·겹침 뒤, 원천 결정과 그룹 판정 앞에서 본다. 앞의 셋은 통합 대기와
+      # 무관하게 성립하는 조건이고, 통합을 기다리는 작업은 이미 승인된 원천에서 나와 착수까지 간
+      # 작업이라 뒤의 두 판정까지 갈 이유가 없다.
+      integration_waiting_blocks "$tid" && { note_candidate integration-waiting "$tid"; continue; }
       source_approved=0
       if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ]; then
         case "$approved_task_sources" in
@@ -1164,7 +1210,7 @@ const CONDITION_SCRIPT_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 20
+# condition_script_version: 21
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1175,7 +1221,14 @@ param([string]$Role = '', [string]$Output = '')
 $ErrorActionPreference = 'Stop'
 
 $leases = '.workflow/.runtime/leases'
+$isolation = '.workflow/.runtime/isolation'
 $lineCache = @{}
+# The shared base is read once, and only after a candidate turns out to carry an integration
+# waiting record. Until then these four mean "not looked at yet".
+$script:sharedScanned = $false
+$script:sharedOk = $false
+$script:sharedDirty = $false
+$script:sharedHead = ''
 # Windows PowerShell treats a token beginning with `--` as an unbound named
 # argument instead of the second positional string on some runner versions.
 # Keep the shared CLI spelling and accept it from either binding path.
@@ -1322,6 +1375,61 @@ function Test-Overlapped([string]$Root, [string]$Id, [string[]]$Lines) {
     }
   }
   return $false
+}
+
+# Runs one git command and returns its stdout, or $null when it could not be run or exited
+# non-zero. An empty string means the command succeeded and printed nothing, which is a different
+# fact from a failed lookup, so the two never collapse into one value. The preference is lowered
+# for the call because a native command writing to stderr must not become a terminating error.
+function Invoke-GitRead([string[]]$Arguments) {
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $output = & git @Arguments 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return [string]::Join("`n", @($output))
+  } catch {
+    return $null
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+}
+
+# Reads the shared base commit and working tree state once. Called only after a candidate turns
+# out to carry an integration waiting record, so a project without one never invokes git.
+function Update-SharedBase() {
+  if ($script:sharedScanned) { return }
+  $script:sharedScanned = $true
+  $head = Invoke-GitRead @('rev-parse', 'HEAD')
+  if ($null -eq $head) { return }
+  $head = $head.Trim()
+  if ($head.Length -eq 0) { return }
+  # Untracked files are not counted. A file the user newly created is not what integration touches.
+  $status = Invoke-GitRead @('status', '--porcelain', '--untracked-files=no')
+  if ($null -eq $status) { return }
+  $script:sharedHead = $head
+  $script:sharedDirty = ($status.Trim().Length -gt 0)
+  $script:sharedOk = $true
+}
+
+# Is this task waiting for integration after its isolated checks passed? It blocks only while the
+# reason to wait still holds: tracked uncommitted or staged changes remain and the record's base
+# commit is still the shared base. A cleaned workspace or an advanced base makes it a candidate
+# again. A missing, unreadable, differently staged, or base-less record does not block. A failed
+# git lookup keeps it blocked, because nothing proved the wait is over, and reopening it without
+# that proof leaves exactly the repeated startup this verdict exists to stop.
+function Test-IntegrationWaiting([string]$Id) {
+  $path = Join-Path $isolation ($Id + '.yml')
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+  $lines = Get-Lines $path
+  $step = (Get-Value $lines 'step').Replace([string][char]34, '').Replace([string][char]39, '')
+  if ($step -cne 'integration_waiting') { return $false }
+  $base = (Get-Value $lines 'base_commit').Replace([string][char]34, '').Replace([string][char]39, '')
+  if ($base.Length -eq 0) { return $false }
+  Update-SharedBase
+  if (-not $script:sharedOk) { return $true }
+  if (-not $script:sharedDirty) { return $false }
+  return ($base -ceq $script:sharedHead)
 }
 
 # Mirrors "grep -ls '^id: *<id>$' <workflow>/tasks/*.md | head -1".
@@ -1921,6 +2029,10 @@ switch -CaseSensitive ($Role) {
         }
         if (-not $ok) { Write-Candidate 'dependencies-unsatisfied' $tid; continue }
         if (Test-Overlapped $root $tid $lines) { Write-Candidate 'overlap' $tid; continue }
+        # Integration waiting is read after lease, dependency, and overlap and before the source
+        # decision and work group. The first three hold independently of it, and a task waiting to
+        # be integrated already came from an approved source, so the last two add nothing.
+        if (Test-IntegrationWaiting $tid) { Write-Candidate 'integration-waiting' $tid; continue }
         if (-not $sourceApproved) {
           Write-Candidate 'source-decision-not-approved' $tid
           continue
@@ -2082,7 +2194,7 @@ mod tests {
 
     use tempfile::{tempdir, TempDir};
 
-    use super::test_support::{run_condition, run_machine_condition};
+    use super::test_support::{run_condition, run_machine_condition, ConditionRun};
 
     #[test]
     fn the_powershell_body_carries_a_byte_order_mark_and_the_shell_body_does_not() {
@@ -2112,7 +2224,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 20"));
+        assert!(script.contains("# condition_script_version: 21"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -2126,8 +2238,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 21",
             "# condition_script_version: 20",
-            "# condition_script_version: 19",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -2392,7 +2504,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 20보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 21보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -2562,6 +2674,208 @@ mod tests {
             write_lease(&control, target);
         }
         run_condition(root.path(), "developer").code
+    }
+
+    fn run_git(project_root: &Path, arguments: &[&str]) -> i32 {
+        std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(project_root)
+            .output()
+            .expect("run git")
+            .status
+            .code()
+            .expect("git exit code")
+    }
+
+    /// 픽스처 저장소의 현재 커밋.
+    fn head_commit(project_root: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(project_root)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "픽스처 저장소의 현재 커밋을 읽지 못했다"
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout is utf-8")
+            .trim()
+            .to_owned()
+    }
+
+    /// 격리 준비 기록 하나. 예약 헬퍼가 쓰는 것과 같은 키를 담는다.
+    fn write_isolation_record(control_root: &Path, target_id: &str, step: &str, base_commit: &str) {
+        let isolation = control_root.join(".runtime/isolation");
+        fs::create_dir_all(&isolation).expect("isolation root");
+        fs::write(
+            isolation.join(format!("{target_id}.yml")),
+            format!("# managed_by: workflow-labs\nschema_version: 1\ntarget_id: {target_id}\nlease_id: lease-{target_id}\nbase_commit: {base_commit}\nbranch: wf-iso/{target_id}\nworkspace_path: /tmp/{target_id}\ncontrol_root: /tmp/control\nprepared_at: 2026-08-15T00:00:00Z\nstep: {step}\n"),
+        )
+        .expect("write isolation record");
+    }
+
+    /// 준비 기록에 적을 기준 커밋.
+    enum RecordBase {
+        /// 지금 공유 기준과 같은 값. 준비한 뒤로 기준이 그대로인 상태다.
+        Current,
+        /// 공유 기준과 다른 값. 준비한 뒤로 기준이 전진한 상태다.
+        Other,
+    }
+
+    /// 통합 대기 판정을 보는 픽스처. 작업에 더해 격리 준비 기록과 Git 상태까지 갖춘다. 저장소는
+    /// `reservation_helper.rs` 시험의 `git_project`와 같은 방식으로 만든다 — `.workflow/.runtime/`를
+    /// 무시하는 `.gitignore`와 추적 파일 하나를 두고 첫 커밋까지 만든다.
+    ///
+    /// 워크플로우 문서는 커밋하지 않으므로 미추적으로 남는다. 판정이 미추적 파일을 세지 않으므로
+    /// `dirty`가 거짓인 픽스처의 작업 공간은 깨끗하고, 참이면 추적 파일 하나가 미커밋으로 바뀐다.
+    fn developer_run_with_isolation(
+        tasks: &[(&str, &str, Option<&str>)],
+        records: &[(&str, &str, RecordBase)],
+        dirty: bool,
+    ) -> ConditionRun {
+        let (root, control) = project();
+        install_condition_script(&control).expect("install condition script");
+        let tasks_root = control.join("wf-demo/tasks");
+        fs::create_dir_all(&tasks_root).expect("tasks root");
+        for (id, status, declaration) in tasks {
+            write_task(&tasks_root, id, status, *declaration);
+        }
+        fs::write(root.path().join(".gitignore"), ".workflow/.runtime/\n").expect("gitignore");
+        fs::write(root.path().join("README.md"), "base\n").expect("tracked file");
+        assert_eq!(run_git(root.path(), &["init", "-b", "main"]), 0);
+        assert_eq!(
+            run_git(root.path(), &["config", "core.autocrlf", "false"]),
+            0
+        );
+        assert_eq!(run_git(root.path(), &["add", ".gitignore", "README.md"]), 0);
+        assert_eq!(
+            run_git(
+                root.path(),
+                &[
+                    "-c",
+                    "user.email=agent@workflow-labs.test",
+                    "-c",
+                    "user.name=workflow-labs",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            ),
+            0
+        );
+        let head = head_commit(root.path());
+        for (target_id, step, base) in records {
+            let base_commit = match base {
+                RecordBase::Current => head.clone(),
+                RecordBase::Other => "0".repeat(40),
+            };
+            write_isolation_record(&control, target_id, step, &base_commit);
+        }
+        if dirty {
+            fs::write(root.path().join("README.md"), "base\n사용자 편집\n")
+                .expect("dirty tracked file");
+        }
+        run_condition(root.path(), "developer")
+    }
+
+    /// 격리 검사를 마치고도 사용자의 미커밋 변경 때문에 반영하지 못한 작업은, 그 상황이 그대로인
+    /// 동안 후보에서 빠진다. 이것이 없으면 같은 작업이 같은 이유로 되풀이해 시작된다.
+    #[test]
+    fn a_task_waiting_for_integration_is_not_a_developer_candidate() {
+        let run = developer_run_with_isolation(
+            &[("TASK-001", "in_progress", None)],
+            &[("TASK-001", "integration_waiting", RecordBase::Current)],
+            true,
+        );
+
+        assert_eq!(run.code, 1, "통합을 기다리는 작업만 있으면 대상이 없다");
+        assert_eq!(run.candidates(), vec!["integration-waiting TASK-001"]);
+    }
+
+    /// 기다리는 이유가 사라지면 그대로 다시 후보다. 사용자가 자기 변경을 정리한 경우와 공유 기준이
+    /// 전진한 경우 둘 다이며, 뒤엣것은 작업 공간이 여전히 더러워도 성립한다.
+    #[test]
+    fn a_waiting_task_returns_to_the_candidates_when_the_reason_to_wait_is_gone() {
+        assert_eq!(
+            developer_run_with_isolation(
+                &[("TASK-001", "in_progress", None)],
+                &[("TASK-001", "integration_waiting", RecordBase::Current)],
+                false,
+            )
+            .code,
+            0,
+            "작업 공간이 깨끗해지면 다시 후보다"
+        );
+        assert_eq!(
+            developer_run_with_isolation(
+                &[("TASK-001", "in_progress", None)],
+                &[("TASK-001", "integration_waiting", RecordBase::Other)],
+                true,
+            )
+            .code,
+            0,
+            "기준 커밋이 전진하면 작업 공간이 더러워도 다시 후보다"
+        );
+    }
+
+    /// 통합 대기가 아닌 기록과 기록이 없는 작업은 이 판정이 없던 때와 같게 판정한다.
+    #[test]
+    fn a_record_that_is_not_integration_waiting_changes_no_verdict() {
+        assert_eq!(
+            developer_run_with_isolation(
+                &[("TASK-001", "in_progress", None)],
+                &[("TASK-001", "ready", RecordBase::Current)],
+                true,
+            )
+            .code,
+            0,
+            "준비 완료 기록은 후보에서 빼지 않는다"
+        );
+        assert_eq!(
+            developer_run_with_isolation(&[("TASK-001", "in_progress", None)], &[], true).code,
+            0,
+            "기록이 없는 작업은 후보에서 빼지 않는다"
+        );
+    }
+
+    /// 통합 대기 제외는 그 작업 하나에만 미친다. 겹치지 않는 다른 작업은 그동안 정상적으로 진행된다.
+    #[test]
+    fn another_task_stays_a_candidate_while_one_waits_for_integration() {
+        let run = developer_run_with_isolation(
+            &[
+                ("TASK-001", "in_progress", Some("scope_files: [src/a.rs]")),
+                ("TASK-002", "todo", Some("scope_files: [src/b.rs]")),
+            ],
+            &[("TASK-001", "integration_waiting", RecordBase::Current)],
+            true,
+        );
+
+        assert_eq!(run.code, 0);
+        assert_eq!(run.target().as_deref(), Some("TASK-002"));
+        assert_eq!(
+            run.candidates(),
+            vec!["integration-waiting TASK-001", "eligible TASK-002"]
+        );
+    }
+
+    /// 기록은 통합 대기인데 기준을 읽을 수 없으면 제외한 채로 둔다. 기다림이 끝났다는 근거를 얻지
+    /// 못한 상태이고, 근거 없이 후보로 되돌리면 막으려던 반복 기동이 그대로 남는다.
+    #[test]
+    fn a_waiting_task_stays_excluded_when_the_shared_base_cannot_be_read() {
+        let (root, control) = project();
+        install_condition_script(&control).expect("install condition script");
+        let tasks_root = control.join("wf-demo/tasks");
+        fs::create_dir_all(&tasks_root).expect("tasks root");
+        write_task(&tasks_root, "TASK-001", "in_progress", None);
+        write_isolation_record(&control, "TASK-001", "integration_waiting", &"0".repeat(40));
+
+        let run = run_condition(root.path(), "developer");
+
+        assert_eq!(run.code, 1, "Git 작업 트리가 아니면 통합 대기를 유지한다");
+        assert_eq!(run.candidates(), vec!["integration-waiting TASK-001"]);
     }
 
     #[test]

@@ -171,6 +171,10 @@ pub const DEPENDENCIES_UNSATISFIED: &str = "dependencies-unsatisfied";
 /// 겹침 선언이 다른 문서를 잡은 미만료 lease와 충돌한다.
 pub const OVERLAP: &str = "overlap";
 
+/// 격리 사본의 검사는 끝났으나 공유 작업 공간에 반영하지 못해 통합을 기다리는 중이다. 기다리는
+/// 이유가 그대로인 동안 같은 세션을 다시 시작하지 않으려고 후보에서 뺀다.
+pub const INTEGRATION_WAITING: &str = "integration-waiting";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowSummary {
