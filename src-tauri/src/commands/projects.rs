@@ -41,7 +41,20 @@ pub fn watch_project(
     let event_watch_id = watch_id.clone();
     let event_path = path.clone();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if result.is_ok() {
+        // 격리 작업 사본은 저장소 전체의 사본이라, 개발 세션이 일하는 동안 그 안의 파일 이벤트가
+        // 초 단위로 이어진다. 사본 안만 바뀐 이벤트는 워크플로 상태 변화가 아니므로 조회를 깨우지
+        // 않는다. 경로가 없는 이벤트는 무엇이 변했는지 모르므로 그대로 알린다.
+        let relevant = match &result {
+            Ok(event) => {
+                event.paths.is_empty()
+                    || event
+                        .paths
+                        .iter()
+                        .any(|path| !inside_isolated_worktree(path))
+            }
+            Err(_) => false,
+        };
+        if relevant {
             let _ = app.emit(
                 "workflow-project-changed",
                 ProjectChanged {
@@ -253,4 +266,49 @@ pub fn migrate_project(path: String) -> Result<ProjectSummary, String> {
     ProjectService::default()
         .migrate(Path::new(&path))
         .map_err(|error| error.to_string())
+}
+
+/// 경로가 격리 작업 사본(`…/.runtime/worktrees/…`) 안인지. 구분자 문자열 비교 대신 경로 성분으로
+/// 판정해 운영체제 구분자 차이에 걸리지 않는다.
+fn inside_isolated_worktree(path: &Path) -> bool {
+    let mut previous_was_runtime = false;
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            if previous_was_runtime && name == "worktrees" {
+                return true;
+            }
+            previous_was_runtime = name == ".runtime";
+        } else {
+            previous_was_runtime = false;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inside_isolated_worktree;
+    use std::path::Path;
+
+    #[test]
+    fn only_paths_under_the_isolated_worktrees_are_ignored() {
+        assert!(inside_isolated_worktree(Path::new(
+            "/p/.workflow/.runtime/worktrees/TASK-1/lease-1/src/App.tsx"
+        )));
+        // 사본 디렉터리 자신도 사본 안의 일이다 — 생성·삭제 이벤트가 조회를 깨우지 않는다.
+        assert!(inside_isolated_worktree(Path::new(
+            "/p/.workflow/.runtime/worktrees"
+        )));
+        // lease와 격리 기록은 워크플로 상태이므로 계속 알린다.
+        assert!(!inside_isolated_worktree(Path::new(
+            "/p/.workflow/.runtime/leases/TASK-1.yml"
+        )));
+        assert!(!inside_isolated_worktree(Path::new(
+            "/p/.workflow/.runtime/isolation/TASK-1.yml"
+        )));
+        // `.runtime` 밖의 `worktrees`라는 이름만으로는 사본이 아니다.
+        assert!(!inside_isolated_worktree(Path::new(
+            "/p/.workflow/wf-1/tasks/worktrees.md"
+        )));
+    }
 }

@@ -86,18 +86,21 @@ export function AgentRunDashboard({
   const [selectedQueue, setSelectedQueue] = useState<QueueItem | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const itemMap = useMemo(() => workflowItems(project), [project]);
-  const queueItems = useMemo(() => eligibleQueue(project, itemMap), [itemMap, project]);
   const runs = state.queue?.runs ?? [];
   const active = runs.filter((run) => activeStates.has(run.state)).sort(activeOrder);
   const recent = runs.filter((run) => !activeStates.has(run.state)).slice(0, 3);
+  const claimedByRuns = runClaimedTargets(state);
+  // 실행 목록이 잡은 대상은 배정 대기가 아니다. 스냅샷의 선점 제외는 파일 갱신을 기다리므로,
+  // 진행 중을 그리는 것과 같은 실행 데이터에서 바로 뺀다 — 두 목록이 시차로 어긋나지 않는다.
+  const queueItems = useMemo(() => eligibleQueue(project, itemMap), [itemMap, project])
+    .filter((item) => !claimedByRuns.has(item.id));
   const attention = attentionItems(project, state);
   const waitingForUser = userDecisions(project);
   // 문서 선점은 파일이 진실이다. 앱이 돌리지 않은 세션(터미널에서 직접 연 것)도 문서를 선점하면
   // 여기서 보인다. 앱이 돌린 실행이 잡은 대상은 진행 중 목록이 이미 말하므로 겹치지 않게 뺀다.
-  const externalLeases = useMemo(() => {
-    const claimed = new Set(active.map((run) => run.targetId).filter(Boolean));
-    return project.activeLeases.filter((lease) => !lease.taskId || !claimed.has(lease.taskId));
-  }, [active, project.activeLeases]);
+  const externalLeases = project.activeLeases.filter(
+    (lease) => !lease.taskId || !claimedByRuns.has(lease.taskId),
+  );
   // 신호 나이와 만료 잔여는 시간이 흐르면 저절로 낡는 값이라 30초마다 다시 계산한다.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -285,7 +288,10 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
   const [role, setRole] = useState<(typeof ROLE_ORDER)[number]>("developer");
   const [target, setTarget] = useState("");
   const [agreed, setAgreed] = useState(false);
-  const candidates = eligibleQueue(project, itemMap).filter((item) => item.role === role);
+  const claimedByRuns = runClaimedTargets(state);
+  const candidates = eligibleQueue(project, itemMap).filter(
+    (item) => item.role === role && !claimedByRuns.has(item.id),
+  );
   const selected = target || candidates[0]?.id || "";
   const plannedRole = state.runPlan?.roles.find((item) => item.role === role);
   const consent = state.policy?.consent ?? null;
@@ -557,6 +563,16 @@ function workflowDirectoryOf(project: ProjectSummary, targetId: string | null) {
         || group.sourceQaDecisionId === targetId),
   );
   return owner?.directory ?? null;
+}
+
+/** 실행 목록이 잡은 대상 집합. 배정 대기·직접 배정·앱 밖 세션이 같은 기준으로 겹침을 뺀다. */
+function runClaimedTargets(state: AgentRuntimeState): Set<string> {
+  return new Set(
+    (state.queue?.runs ?? [])
+      .filter((run) => activeStates.has(run.state))
+      .map((run) => run.targetId)
+      .filter((id): id is string => Boolean(id)),
+  );
 }
 
 function eligibleQueue(project: ProjectSummary, items: Map<string, NamedWorkflowItem>): QueueItem[] {

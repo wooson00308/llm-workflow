@@ -144,6 +144,14 @@ export function WorkspaceShell({
     groupId: string;
   } | null>(null);
 
+  const activeRuns = (agentRuntime?.queue?.runs ?? []).filter((run) =>
+    ["reserved", "queued", "running", "paused"].includes(run.state),
+  );
+  const runTargets = new Set(activeRuns.map((run) => run.targetId));
+  const activeSessionCount =
+    activeRuns.length +
+    project.activeLeases.filter((lease) => !lease.taskId || !runTargets.has(lease.taskId)).length;
+
   useEffect(() => {
     if (!project.workflows.some((item) => item.directory === selectedDirectory)) {
       setSelectedDirectory(project.workflows[0]?.directory ?? "");
@@ -335,17 +343,19 @@ export function WorkspaceShell({
 
         <div className="sidebar-footer">
           {/* 좌측 메뉴는 화면 전환 분기 바깥이라 이 자리에 두면 어떤 화면에서도 보인다. 세션이 도는지와
-              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 에이전트 화면이 맡는다. */}
-          {project.activeLeases.length > 0 && (
+              활성 수만 알리고, 담당자와 대상 문서는 오늘 화면 카드와 에이전트 화면이 맡는다.
+              수는 실행 목록(빠른 갱신)과 문서 선점(파일)의 합집합이다 — 실행이 잡은 대상의 선점은
+              같은 세션이므로 겹쳐 세지 않고, 선점 전의 실행도 앱 밖 세션도 빠지지 않는다. */}
+          {activeSessionCount > 0 && (
             <button
-              aria-label={`실행 중인 세션 ${project.activeLeases.length}개, 에이전트 화면 열기`}
+              aria-label={`실행 중인 세션 ${activeSessionCount}개, 에이전트 화면 열기`}
               className="sidebar-activity"
               onClick={() => setView("agents")}
               type="button"
             >
               <span className="sidebar-activity-dot" />
               <span>세션 실행 중</span>
-              <small>{project.activeLeases.length}</small>
+              <small>{activeSessionCount}</small>
             </button>
           )}
           <UpdateControl updater={updater} />

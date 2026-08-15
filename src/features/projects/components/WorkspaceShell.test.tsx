@@ -1802,6 +1802,28 @@ describe("WorkspaceShell 에이전트 진입점", () => {
     );
   }
 
+  it("문서 선점이 아직 없어도 실행이 시작되면 세션 실행 중이 뜬다", () => {
+    // 선점 파일은 실행보다 늦게 갱신될 수 있다. 실행 목록이 아는 세션은 그 순간부터 세어야
+    // 사용자가 "배정됐다는데 세션이 없다"를 보지 않는다.
+    renderShell({
+      agentRuntime: {
+        ...agentState,
+        queue: {
+          projectId: "prj_1", paused: false, errors: [], providers: [], unavailable: null,
+          runs: [{
+            runId: "run-1", projectId: "prj_1", role: "developer", provider: "codex",
+            state: "running", targetId: "TASK-001", startedAt: "2026-08-13T09:00:00Z",
+            finishedAt: null, failureStage: null, reason: null, remaining: [],
+            previousRunId: null, resultPrefix: "RES-run-1",
+          }],
+        },
+      },
+      agentRuntimeActions: agentActions,
+    });
+
+    expect(screen.getByRole("button", { name: "실행 중인 세션 1개, 에이전트 화면 열기" })).toBeInTheDocument();
+  });
+
   it("작업 공간이 통로를 넘기면 메뉴에서 에이전트 화면을 연다", () => {
     renderShell({ agentRuntime: agentState, agentRuntimeActions: agentActions });
 

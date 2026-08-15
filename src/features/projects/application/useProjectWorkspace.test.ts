@@ -1491,6 +1491,43 @@ describe("useProjectWorkspace 에이전트 실행", () => {
     unmount();
   });
 
+  it("실행 집합이 변하면 프로젝트 스냅샷을 조용히 다시 읽는다", async () => {
+    // 파일 감시가 신호를 놓쳐도 배정 대기·세션 표시가 실행 목록과 어긋난 채 남지 않기 위한
+    // 보험이다. 같은 실행 집합이 반복 조회되는 동안에는 다시 읽지 않는다.
+    const queueOf = (runs: unknown[]) => ({
+      projectId: project.projectId, paused: false, runs, errors: [], providers: [], unavailable: null,
+    });
+    const runRow = {
+      runId: "run-1", projectId: project.projectId, role: "developer", provider: "codex",
+      state: "running", targetId: "TASK-1", startedAt: "2026-08-08T09:00:00Z", finishedAt: null,
+      failureStage: null, reason: null, remaining: [], previousRunId: null, resultPrefix: "RES-1",
+    };
+    const inspectAgentRuns = vi.fn()
+      .mockResolvedValueOnce(queueOf([]))
+      .mockResolvedValue(queueOf([runRow]));
+    const gateway = gatewayFor({ inspectAgentRuns });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+    const baseline = (gateway.inspect as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // 빈 집합 → 실행 하나: 스냅샷을 다시 읽는다.
+    await act(() => result.current.agentRuntimeActions.refreshRuns());
+    await waitFor(() =>
+      expect((gateway.inspect as ReturnType<typeof vi.fn>).mock.calls.length).toBe(baseline + 1),
+    );
+
+    // 같은 집합이 이어지는 동안에는 다시 읽지 않는다.
+    await act(() => result.current.agentRuntimeActions.refreshRuns());
+    await act(() => result.current.agentRuntimeActions.refreshRuns());
+    expect((gateway.inspect as ReturnType<typeof vi.fn>).mock.calls.length).toBe(baseline + 1);
+    unmount();
+  });
+
   it("게시된 런타임 조회 실패는 사유를 남기고 이전 조회 결과를 지운다", async () => {
     const gateway = gatewayFor({
       checkAgentRuntimeRelease: vi.fn().mockRejectedValue(new Error("rate limited")),

@@ -1974,6 +1974,27 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     ["reserved", "queued", "running", "paused"].includes(run.state)
   ) ?? false;
 
+  // 실행 시작·종료는 문서 상태와 선점을 곧 바꾼다. 파일 감시가 신호를 놓쳐도 배정 대기와 세션
+  // 표시가 어긋난 채 남지 않도록, 실행 집합이 변하면 프로젝트 스냅샷을 조용히 다시 읽는다.
+  const activeRunSignature = useMemo(
+    () =>
+      (agentRuntime.queue?.runs ?? [])
+        .filter((run) => ["reserved", "queued", "running", "paused"].includes(run.state))
+        .map((run) => run.runId)
+        .sort()
+        .join("|"),
+    [agentRuntime.queue],
+  );
+  const seenRunSignature = useRef<string | null>(null);
+  useEffect(() => {
+    if (!project?.initialized) return;
+    if (seenRunSignature.current === activeRunSignature) return;
+    const first = seenRunSignature.current === null;
+    seenRunSignature.current = activeRunSignature;
+    if (first) return;
+    void inspect(project.rootPath, true);
+  }, [activeRunSignature, inspect, project?.initialized, project?.rootPath]);
+
   useEffect(() => {
     if (!project?.initialized || !project.projectId || (!agentViewActive && !hasActiveAgentRun)) return;
     const path = project.rootPath;

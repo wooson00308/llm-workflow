@@ -202,6 +202,24 @@ describe("AgentRuntimeView cockpit", () => {
     expect(within(dialog).getByPlaceholderText("TASK-…")).toBeInTheDocument();
   });
 
+  it("removes a target from waiting and direct assign the moment a run claims it", () => {
+    // 배정 대기와 진행 중이 같은 실행 데이터를 봐야 한다. 파일 스냅샷의 선점 제외를 기다리면
+    // 실행이 잡은 작업이 대기 목록에 그대로 남는 시차가 생긴다(2026-08-15 실측).
+    renderView(state({
+      queue: {
+        projectId: "prj_1", paused: false, errors: [], providers: [], unavailable: null,
+        runs: [run("run-1", "running", "TASK-1", "2026-08-11T00:00:00Z", null)],
+      },
+    }));
+
+    // 유일한 배정 가능 후보(TASK-1)가 실행에 잡혔으므로 배정 대기 절 자체가 사라진다.
+    expect(screen.queryByRole("heading", { name: "배정 대기" })).not.toBeInTheDocument();
+    // 직접 배정도 실행 중인 대상을 후보로 내놓지 않는다.
+    fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+    const dialog = screen.getByRole("dialog", { name: "직접 배정" });
+    expect(within(dialog).getByText("현재 이 역할에 안전하게 배정할 작업이 없습니다.")).toBeInTheDocument();
+  });
+
   it("keeps user approval and group QA gates separate from automatic assignment", () => {
     renderView();
     const section = screen.getByRole("heading", { name: "내 선택 대기" }).closest("section")!;
