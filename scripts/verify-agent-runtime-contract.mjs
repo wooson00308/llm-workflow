@@ -9,6 +9,9 @@ import { spawnSync } from "node:child_process";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED_COMMANDS = [
+  "consent.grant",
+  "consent.read",
+  "consent.revoke",
   "logs.read",
   "plan.read",
   "project.pause",
