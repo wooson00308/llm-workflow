@@ -406,7 +406,11 @@ function Write-IsolationRecord([string]$Target, [string]$LeaseId, [string]$Step)
     # 회수를 수행했거나 저장 공간 때문에 대기했다면 그 결과를 같은 기록에 남긴다. 실패한 회수 단계도
     # 여기에 남으므로, 준비가 이어졌다는 사실이 회수 실패를 덮지 않는다.
     if ($reclaimNote.Length -gt 0) { $lines += "reclaim: $reclaimNote" }
-    Set-Content -LiteralPath (Join-Path $isolationRoot ($Target + '.yml')) -Value $lines -Encoding UTF8 -ErrorAction Stop
+    # 기록은 도구가 파싱하는 데이터라 BOM 없이 LF로 쓴다. Windows PowerShell 5.1의 UTF8 인코딩은
+    # BOM을 붙이고 기본 줄바꿈은 CRLF이므로, .NET으로 sh 구현과 바이트 단위로 같은 모양을 만든다.
+    $recordPath = Join-Path (Get-Location).Path (Join-Path $isolationRoot ($Target + '.yml'))
+    $recordBody = ($lines -join "`n") + "`n"
+    [System.IO.File]::WriteAllText($recordPath, $recordBody, (New-Object System.Text.UTF8Encoding($false)))
     return $true
   } catch {
     return $false
