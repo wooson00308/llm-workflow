@@ -3,12 +3,13 @@ schema: workflow-labs/work-group@1
 id: GROUP-059
 title: 끝난 작업 그룹을 개발 작업 화면 전체에서 감춘다
 status: active
-revision: 1
+revision: 2
 qa_mode: user
 source_spec_id: SPEC-059
 source_decision_id: DECISION-D01A8B62
+source_qa_decision_id: GROUP-QA-AF94544D
 created_at: 2026-08-17T14:19:30Z
-updated_at: 2026-08-17T14:24:50Z
+updated_at: 2026-08-17T15:23:32Z
 ---
 
 # 끝난 작업 그룹을 개발 작업 화면 전체에서 감춘다
