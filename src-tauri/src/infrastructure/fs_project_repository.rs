@@ -2890,6 +2890,23 @@ impl<'a> QaBasePin<'a> {
         if let Some(pinned) = read_qa_base_pin(&path) {
             return Some(pinned);
         }
+        self.write_pin(&path, group_id, revision)
+    }
+
+    /// 판정 시점의 기준 커밋을 이 그룹과 구성 버전의 값으로 기록하고 그 값을 돌려준다. 저장된 값이
+    /// 지금 기준과 다르면 지금 값으로 다시 적는다. 자동 확인 그룹은 사용자가 나중에 확인할 자리가
+    /// 없어 처음 값을 붙들 이유가 없고, 완료를 판정한 코드 상태를 남기는 쪽이 기록의 뜻과 맞는다.
+    fn pin_to_current(&self, group_id: &str, revision: u32) -> Option<String> {
+        let path = qa_base_pin_path(self.control_root, group_id, revision)?;
+        let current = self.current()?;
+        if read_qa_base_pin(&path).as_deref() == Some(current) {
+            return Some(current.to_owned());
+        }
+        self.write_pin(&path, group_id, revision)
+    }
+
+    /// 지금 기준 커밋을 기록 파일에 적고 그 값을 돌려준다.
+    fn write_pin(&self, path: &Path, group_id: &str, revision: u32) -> Option<String> {
         let current = self.current()?.to_owned();
         let document = format!(
             "schema_version: 1\ngroup_id: {}\ngroup_revision: {revision}\nbase_commit: {}\npinned_at: {}\n",
@@ -2897,11 +2914,11 @@ impl<'a> QaBasePin<'a> {
             yaml_scalar(&current),
             yaml_scalar(&Utc::now().to_rfc3339()),
         );
-        // 고정에 실패하면 고정 값이 없는 것으로 둔다. 저장되지 않은 값을 기준으로 제출을 거절하면
+        // 기록에 실패하면 고정 값이 없는 것으로 둔다. 저장되지 않은 값을 기준으로 제출을 거절하면
         // 다음 읽기가 다른 값을 만들어 판정이 흔들린다.
         path.parent()
             .is_some_and(|parent| fs::create_dir_all(parent).is_ok())
-            .then(|| write_text_atomically(&path, &document).ok())
+            .then(|| write_text_atomically(path, &document).ok())
             .flatten()
             .map(|()| current)
     }
@@ -3124,8 +3141,7 @@ fn parse_work_group(
         .filter(|decision| decision.outcome == "revision_requested")
         .map(|decision| decision.id.clone())
         .or(declared_source_qa_decision_id);
-    let mut display_status = if latest_decision
-        .is_some_and(|decision| decision.outcome == "confirmed")
+    let display_status = if latest_decision.is_some_and(|decision| decision.outcome == "confirmed")
         || (task_revisions_valid
             && assigned_tasks
                 .iter()
@@ -3171,23 +3187,15 @@ fn parse_work_group(
         WorkGroupDisplayStatus::AutomaticCompleted
     };
 
-    // 품질 확인을 열 수 있는 상태가 되는 바로 이 시점이 확인 대상을 고정하는 자리다. 사용자 모드와
-    // 자동 모드가 같은 고정 값을 쓰고, 제출 판정도 여기서 실린 값을 그대로 본다.
-    let qa_base_commit = matches!(
-        display_status,
-        WorkGroupDisplayStatus::QaReady | WorkGroupDisplayStatus::AutomaticCompleted
-    )
-    .then(|| qa_base.pin(&id, revision))
-    .flatten();
-    // 자동 모드에는 사용자가 다시 확인할 자리가 없으므로, 기준이 어긋난 채로 완료로 넘기지 않고
-    // 개발 단계에 남긴다. 사용자 모드는 확인 화면을 계속 열어 두고 제출 시점에 판정한다.
-    if display_status == WorkGroupDisplayStatus::AutomaticCompleted
-        && qa_base_commit
-            .as_deref()
-            .is_some_and(|pinned| qa_base.current() != Some(pinned))
-    {
-        display_status = WorkGroupDisplayStatus::Developing;
-    }
+    // 확인 대상 코드 상태를 기록하는 자리다. 두 모드가 이 값을 다르게 다룬다. 사용자 모드는 확인
+    // 화면을 열어 둔 채 제출 시점에 판정하므로, 사용자가 확인을 시작한 코드 상태를 한 번만 고정한다.
+    // 자동 모드는 사용자가 확인할 자리 없이 판정과 동시에 완료되므로, 완료를 판정한 이 시점의 코드
+    // 상태를 기록한다.
+    let qa_base_commit = match display_status {
+        WorkGroupDisplayStatus::QaReady => qa_base.pin(&id, revision),
+        WorkGroupDisplayStatus::AutomaticCompleted => qa_base.pin_to_current(&id, revision),
+        _ => None,
+    };
 
     Some(WorkGroupSummary {
         file_name: path.file_name()?.to_str()?.to_owned(),
@@ -11224,7 +11232,7 @@ mod report_surface_tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        contains_internal_qa_instruction, read_qa_base_pin, run_reports,
+        contains_internal_qa_instruction, current_base_commit, read_qa_base_pin, run_reports,
         scenario_describes_user_observable_flow, scenario_is_user_safe, workflow_reports,
         FileSystemProjectRepository, ProjectError, CONTROL_DIRECTORY, GROUP_QA_DECISION_SCHEMA,
         QA_BASE_DIRECTORY, RUNTIME_DIRECTORY,
@@ -11849,10 +11857,10 @@ mod report_surface_tests {
         );
     }
 
-    /// 완료 조건 7. 자동 모드 그룹은 사용자가 다시 확인할 자리가 없으므로, 기준 커밋이 어긋나면
-    /// 자동 완료로 넘어가지 않는다.
+    /// 완료 조건 7. 자동 모드 그룹은 판정하는 시점의 코드 상태에서 완료를 정한다. 기준 커밋이
+    /// 전진한 뒤 다시 읽어도 완료로 남고, 그룹 요약과 기록 파일의 기준 커밋이 함께 갱신된다.
     #[test]
-    fn automatic_work_group_does_not_complete_when_the_base_commit_moves() {
+    fn automatic_work_group_stays_completed_and_records_the_base_commit_of_each_reading() {
         let (root, _) = git_work_group_fixture("verified", "automatic");
         let completed = FileSystemProjectRepository
             .inspect(root.path())
@@ -11867,20 +11875,55 @@ mod report_surface_tests {
             .expect("pinned base commit");
 
         advance_base(root.path(), "after-complete");
+        let moved = current_base_commit(root.path()).expect("moved base commit");
+        assert_ne!(moved, pinned);
 
         let held = FileSystemProjectRepository
             .inspect(root.path())
             .expect("inspect after base moved");
         assert_eq!(
             held.workflows[0].items.work_groups[0].display_status,
-            WorkGroupDisplayStatus::Developing
+            WorkGroupDisplayStatus::AutomaticCompleted
         );
         assert_eq!(
             held.workflows[0].items.work_groups[0]
                 .qa_base_commit
                 .as_deref(),
-            Some(pinned.as_str())
+            Some(moved.as_str())
         );
+        assert_eq!(
+            qa_base_pin(root.path(), "GROUP-DECISION-1", 1).as_deref(),
+            Some(moved.as_str())
+        );
+    }
+
+    /// 수용 기준 4. 검증 완료가 아닌 작업이 남은 자동 모드 그룹은 기준 커밋이 전진해도 완료로
+    /// 넘어가지 않는다. 완료 판정 조건 자체는 이 변경으로 달라지지 않는다.
+    #[test]
+    fn automatic_work_group_with_an_unverified_task_never_completes_on_a_moved_base_commit() {
+        let (root, _) = git_work_group_fixture("in_progress", "automatic");
+        let developing = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect automatic in progress");
+        assert_eq!(
+            developing.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::Developing
+        );
+
+        advance_base(root.path(), "while-developing");
+
+        let reread = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("inspect after base moved");
+        assert_eq!(
+            reread.workflows[0].items.work_groups[0].display_status,
+            WorkGroupDisplayStatus::Developing
+        );
+        assert_eq!(
+            reread.workflows[0].items.work_groups[0].qa_base_commit,
+            None
+        );
+        assert_eq!(qa_base_pin(root.path(), "GROUP-DECISION-1", 1), None);
     }
 
     /// 완료 조건 8. Git 작업 트리가 아닌 프로젝트는 고정 값을 만들지 않고, 그룹 상태 계산과 제출
