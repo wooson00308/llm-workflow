@@ -21,7 +21,7 @@ const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 pub(crate) const WORKFLOW_RULES_VERSION: u32 = 28;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
 pub(crate) const ARCHITECT_RULES_VERSION: u32 = 19;
-pub(crate) const DEVELOPER_RULES_VERSION: u32 = 20;
+pub(crate) const DEVELOPER_RULES_VERSION: u32 = 21;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 ## LLM Workflow
@@ -693,7 +693,7 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 20
+rules_version: 21
 ---
 
 # Developer role
@@ -800,9 +800,11 @@ Immediately before integrating, compare the shared base against the base the can
 
 The shared workspace is where the user works too, and what they have not finished is not this session's to move.
 
-- Do not begin an automatic integration while the shared workspace holds uncommitted changes to tracked files outside `.workflow/`, staged changes, or a base change in progress. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
-- Control documents under `.workflow/` are the pipeline's own writing — task status, reports, and role records that sessions produce as they work. Before judging cleanliness, land those changes in a documents-only commit of their own. They are not the user's unfinished work, and they must never hold integration hostage to the pipeline's paperwork (2026-08-15: a candidate that had passed every check waited behind the very reports that recorded it).
-- Do not stash, commit, reset, check out, or delete changes outside `.workflow/`, and do not guess whose they are. A workspace you did not find clean is a reason to wait, not something to clear.
+- Before integrating, read two sets of paths: the files the recorded integration candidate changes, and the tracked files outside `.workflow/` that hold uncommitted or staged changes in the shared workspace. When the two sets share no path, integrate. Landing the change touches none of the user's files, and their unfinished work stays in the working tree exactly as they left it. The user is never required to commit, stash, or otherwise clear their own changes to let the pipeline proceed (2026-08-18: a consuming project held a fully verified candidate behind thirteen unrelated uncommitted files, and five developer sessions in a row could only re-verify and wait).
+- Integration waits only for an actual collision: the user's uncommitted changes touch a file the candidate changes, a base change is in progress in the shared workspace, or one of the two sets cannot be read — not knowing what would collide is not the same as knowing nothing would. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
+- Control documents under `.workflow/` are the pipeline's own writing — task status, reports, and role records that sessions produce as they work. Before judging collision, land those changes in a documents-only commit of their own. They are not the user's unfinished work, and they must never hold integration hostage to the pipeline's paperwork (2026-08-15: a candidate that had passed every check waited behind the very reports that recorded it).
+- Do not stash, commit, reset, check out, or delete changes outside `.workflow/`, and do not guess whose they are. A collision you found is a reason to wait, not something to clear.
+- After integrating beside unrelated uncommitted changes, run the post-integration checks against the integrated commit in a clean copy — the isolated copy moved onto that commit suffices. The user's half-finished work is not part of what was integrated, and a check that reads it can fail work that is sound or pass work that is not.
 - When a conflict can be resolved inside the task's approved scope and its `scope_files`, resolve it and run the isolated checks again.
 - When resolving it would mean changing something outside that scope, or choosing what the user intended, take neither side. Record the specific conflict and the condition for resuming in the four labels `.workflow/rules/workflow.md` §5 defines.
 
@@ -1512,7 +1514,7 @@ mod tests {
         assert!(rules.contains("`resumed` never stands in for `in_progress`"));
         assert!(architect.contains("rules_version: 19"));
         assert!(architect.contains("`history`"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer.contains("`history`"));
         assert!(planner.contains("rules_version: 12"));
         assert!(!planner.contains("`history`"));
@@ -1538,7 +1540,7 @@ mod tests {
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
         assert!(architect.contains("rules_version: 19"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(planner.contains("rules_version: 12"));
     }
 
@@ -1573,7 +1575,7 @@ mod tests {
         assert!(
             architect.contains("A group recovery and a task correction preserve their identifiers")
         );
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer.contains("do not call `acquire` again"));
     }
 
@@ -1614,7 +1616,7 @@ mod tests {
             assert!(contract.contains("`.workflow/rules/workflow.md` §4"));
             assert!(!contract.contains("wf-claim.sh"));
         }
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("status is `verified`"));
         assert!(architect.contains("rules_version: 19"));
@@ -1682,7 +1684,7 @@ mod tests {
         assert!(architect.contains("the judgement follows `scope_files`"));
 
         // 개발자 계약의 겹침 조항이 선언을 근거로 지목한다.
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer
             .contains("No unexpired lease may cover work that overlaps the task's `scope_files`"));
         assert!(developer.contains("## Overlapping work"));
@@ -1702,7 +1704,41 @@ mod tests {
         assert_eq!(WORKFLOW_RULES_VERSION, 28);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 19);
-        assert_eq!(DEVELOPER_RULES_VERSION, 20);
+        assert_eq!(DEVELOPER_RULES_VERSION, 21);
+    }
+
+    #[test]
+    fn records_the_collision_based_integration_contract_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        // 통합은 충돌 기준으로만 기다린다. 무관한 미커밋 변경은 통합을 막지 않고,
+        // 사용자에게 버전 관리 조작을 요구하는 해제 조건은 없다.
+        assert!(developer.contains("rules_version: 21"));
+        assert!(developer.contains("When the two sets share no path, integrate"));
+        assert!(developer.contains(
+            "The user is never required to commit, stash, or otherwise clear their own changes"
+        ));
+        assert!(developer.contains("Integration waits only for an actual collision"));
+        assert!(developer
+            .contains("not knowing what would collide is not the same as knowing nothing would"));
+
+        // 보호 의도는 그대로다: 세션이 사용자의 변경을 치우는 것은 여전히 금지된다.
+        assert!(developer.contains(
+            "Do not stash, commit, reset, check out, or delete changes outside `.workflow/`"
+        ));
+        assert!(developer.contains("A collision you found is a reason to wait"));
+
+        // 통합 뒤 검사는 사용자의 미완성 변경이 섞이지 않는 깨끗한 사본에서 판정한다.
+        assert!(developer.contains(
+            "run the post-integration checks against the integrated commit in a clean copy"
+        ));
     }
 
     #[test]
@@ -1750,7 +1786,7 @@ mod tests {
         }
 
         // 개발자 계약: R1의 자격 조건, definition_error 역할 경계, R6의 순서.
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer.contains("The task must be `todo`, `in_progress`, or `blocked`"));
         assert!(developer
             .contains("An `in_progress` task qualifies only while no unexpired lease covers it"));
@@ -1881,7 +1917,7 @@ mod tests {
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 자동검증 보고와 그룹 경계 유지.
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer.contains("which work-group result this evidence supports"));
         assert!(developer.contains("## Keep user QA at the group boundary"));
         assert!(developer.contains("`## 확인 동선`"));
@@ -1908,7 +1944,7 @@ mod tests {
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
         assert!(rules.contains("rules_version: 28"));
         assert!(architect.contains("rules_version: 19"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(planner.contains("rules_version: 12"));
 
         // 차단 분류 네 값과 그 뜻이 한 번씩 정의된다.
@@ -2040,7 +2076,7 @@ mod tests {
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
         assert!(rules.contains("rules_version: 28"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 19"));
 
@@ -2213,7 +2249,7 @@ mod tests {
         assert!(architect
             .contains("the closing heading names the automated result this task contributes to"));
         assert!(architect.contains("User QA steps belong to the group, never the individual task"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
         assert!(developer.contains(
             "bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them"
         ));
@@ -2280,7 +2316,7 @@ mod tests {
         );
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 19"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
     }
 
     #[test]
@@ -2373,7 +2409,7 @@ mod tests {
         assert!(rules.contains("rules_version: 28"));
         assert!(rules.contains("`history`"));
         assert!(architect.contains("rules_version: 19"));
-        assert!(developer.contains("rules_version: 20"));
+        assert!(developer.contains("rules_version: 21"));
     }
 
     #[test]
