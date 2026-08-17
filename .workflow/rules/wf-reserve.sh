@@ -18,6 +18,16 @@ workspace_path=""
 control_root=""
 base_commit=""
 branch=""
+project_root=""
+# 기기 상한 20 GiB와 볼륨 여유 하한 10 GiB. 셸 산술 폭이 좁은 환경에서도 안전하도록 KiB로 센다.
+storage_limit_kib=$((20 * 1024 * 1024))
+storage_min_free_kib=$((10 * 1024 * 1024))
+# 검사는 상한을 낮춰 잡아 회수 순서를 재현한다. 값을 주지 않으면 위의 기본값을 그대로 쓴다.
+case "${WF_ISOLATION_LIMIT_KIB:-}" in ''|*[!0-9]*) ;; *) storage_limit_kib="$WF_ISOLATION_LIMIT_KIB" ;; esac
+case "${WF_ISOLATION_MIN_FREE_KIB:-}" in ''|*[!0-9]*) ;; *) storage_min_free_kib="$WF_ISOLATION_MIN_FREE_KIB" ;; esac
+reclaimed_kib=0
+reclaim_failed=""
+reclaim_note=""
 
 usage() {
   echo "usage: wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>" >&2
@@ -60,7 +70,133 @@ write_isolation_record() { # $1=준비 단계 이름
   printf '%s\nschema_version: 1\ntarget_id: %s\nlease_id: %s\nbase_commit: %s\nbranch: %s\nworkspace_path: %s\ncontrol_root: %s\nprepared_at: %s\nstep: %s\n' \
     '# managed_by: workflow-labs. 앱이 소유하는 상태이므로 에이전트 세션이 직접 고치지 않는다.' \
     "$target" "$lease_id" "$base_commit" "$branch" "$workspace_path" "$control_root" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >"$isolation_root/$target.yml" 2>/dev/null
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >"$isolation_root/$target.yml" 2>/dev/null || return 1
+  # 회수를 수행했거나 저장 공간 때문에 대기했다면 그 결과를 같은 기록에 남긴다. 실패한 회수 단계도
+  # 여기에 남으므로, 준비가 이어졌다는 사실이 회수 실패를 덮지 않는다.
+  if [ -n "$reclaim_note" ]; then
+    printf 'reclaim: %s\n' "$reclaim_note" >>"$isolation_root/$target.yml" 2>/dev/null || return 1
+  fi
+}
+
+record_field() { # $1=준비 기록 경로 $2=키
+  sed -n "s/^$2: *//p" "$1" 2>/dev/null | head -1
+}
+
+dir_kib() {
+  [ -d "$1" ] || { printf '0'; return 0; }
+  size=$(du -sk "$1" 2>/dev/null | awk 'NR==1 {print $1}')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  printf '%s' "$size"
+}
+
+free_kib() {
+  # 여유를 읽지 못하면 0으로 본다. 남은 용량을 모르는 채 사본을 늘리는 쪽보다 기다리는 쪽이 안전하다.
+  size=$(df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  printf '%s' "$size"
+}
+
+managed_copy_count() {
+  count=0
+  for target_dir in "$worktree_root"/*; do
+    [ -d "$target_dir" ] || continue
+    for copy_dir in "$target_dir"/*; do
+      [ -d "$copy_dir" ] && count=$((count + 1))
+    done
+  done
+  printf '%s' "$count"
+}
+
+storage_within_limits() {
+  managed_kib=$(dir_kib "$worktree_root")
+  copies=$(managed_copy_count)
+  # 새 사본이 얼마를 쓸지는 만들어 보기 전에는 알 수 없다. 관리 중인 사본의 평균 크기를 그 몫으로
+  # 잡고, 사본이 하나도 없으면 회수할 것도 없으므로 0으로 둔다.
+  if [ "$copies" -gt 0 ]; then
+    expected_kib=$((managed_kib / copies))
+  else
+    expected_kib=0
+  fi
+  [ $((managed_kib + expected_kib)) -le "$storage_limit_kib" ] &&
+    [ "$(free_kib "$project_root")" -ge "$storage_min_free_kib" ]
+}
+
+# 재생성 가능한 산출물만 걷어낸다. 사본 안에서 Git이 무시하는 경로인지 직접 확인하므로 추적 중인
+# 파일과 사용자가 직접 만든 파일은 대상이 되지 않는다.
+reclaim_artifacts() { # $1=사본 경로
+  for candidate in src-tauri/target target node_modules dist coverage; do
+    artifact="$1/$candidate"
+    [ -d "$artifact" ] || continue
+    git -C "$1" check-ignore -q "$candidate" 2>/dev/null || continue
+    artifact_kib=$(dir_kib "$artifact")
+    rm -rf "$artifact" >/dev/null 2>&1 || :
+    if [ -d "$artifact" ]; then
+      reclaim_failed="artifacts"
+    else
+      reclaimed_kib=$((reclaimed_kib + artifact_kib))
+    fi
+  done
+}
+
+# 삭제는 관리 대상 사본 하나만 다룬다. 경로를 기록 본문에서 받지 않고 대상과 lease 이름으로 직접
+# 조립하므로 관리 경로 밖으로 나갈 수 없고, 상위 디렉터리는 대상이 되지 않는다.
+reclaim_copy() { # $1=대상 $2=lease
+  case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  case "$2" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  copy="$worktree_root/$1/$2"
+  [ -d "$copy" ] || return 0
+  [ -f "$isolation_root/$1.yml" ] || return 1
+  [ "$(record_field "$isolation_root/$1.yml" lease_id)" = "$2" ] || return 1
+  copy_kib=$(dir_kib "$copy")
+  # 변경 커밋을 담은 전용 브랜치와 준비 기록은 남긴다. 사본만 걷어내면 같은 기준에서 다시 만들 수 있다.
+  git worktree remove --force "$copy" >/dev/null 2>&1 || :
+  [ -d "$copy" ] && { rm -rf "$copy" >/dev/null 2>&1 || :; }
+  git worktree prune >/dev/null 2>&1 || :
+  [ -d "$copy" ] && return 1
+  reclaimed_kib=$((reclaimed_kib + copy_kib))
+  return 0
+}
+
+failed_copies_oldest_first() {
+  for record in "$isolation_root"/*.yml; do
+    [ -f "$record" ] || continue
+    case "$(record_field "$record" step)" in failed*) ;; *) continue ;; esac
+    printf '%s|%s|%s\n' "$(record_field "$record" prepared_at)" \
+      "$(record_field "$record" target_id)" "$(record_field "$record" lease_id)"
+  done | sort
+}
+
+# 회수는 정해진 순서로만 한다. 한 대상을 정리할 때마다 조건을 다시 보고, 만족하는 순간 멈춘다.
+reclaim_storage() {
+  for target_dir in "$worktree_root"/*; do
+    [ -d "$target_dir" ] || continue
+    for copy_dir in "$target_dir"/*; do
+      [ -d "$copy_dir" ] || continue
+      storage_within_limits && return 0
+      reclaim_artifacts "$copy_dir"
+    done
+  done
+  for record in "$isolation_root"/*.yml; do
+    [ -f "$record" ] || continue
+    case "$(record_field "$record" step)" in integrated|cancelled) ;; *) continue ;; esac
+    storage_within_limits && return 0
+    reclaim_copy "$(record_field "$record" target_id)" "$(record_field "$record" lease_id)" ||
+      reclaim_failed="finished"
+  done
+  for entry in $(failed_copies_oldest_first); do
+    storage_within_limits && return 0
+    stale_target=${entry#*|}
+    stale_lease=${stale_target#*|}
+    reclaim_copy "${stale_target%%|*}" "$stale_lease" || reclaim_failed="stale"
+  done
+}
+
+# 요약에는 사본 경로, 사용자 파일 이름, prompt 원문, 인증 값을 넣지 않는다. 숫자와 단계 이름뿐이다.
+storage_summary() { # $1=결과
+  reclaim_note="result=$1 freed=${reclaimed_kib}K remaining=$(dir_kib "$worktree_root")K limit=${storage_limit_kib}K"
+  [ -n "$reclaim_failed" ] && reclaim_note="$reclaim_note failed_step=$reclaim_failed"
+  [ "$1" = waiting ] && reclaim_note="$reclaim_note action=free-disk-space"
+  echo "wf-reserve storage: $reclaim_note" >&2
 }
 
 discard_isolation() {
@@ -82,6 +218,17 @@ prepare_isolation() {
   branch="wf-iso/$target/$lease_id"
   workspace_path="$project_root/$worktree_root/$target/$lease_id"
   write_isolation_record preparing || return 1
+  # 사본을 늘리기 전에 관리 중인 사본이 차지한 용량과 볼륨 여유를 본다. 상한에 걸리면 회수를 먼저
+  # 하고, 회수해도 조건을 못 채우면 사본을 만들지 않는다. 디스크가 조용히 차는 것보다 대기가 낫다.
+  if ! storage_within_limits; then
+    reclaim_storage
+    if ! storage_within_limits; then
+      storage_summary waiting
+      write_isolation_record waiting:storage || :
+      return 1
+    fi
+    storage_summary reclaimed
+  fi
   # 기준 커밋에서 만들므로 공유 작업 공간의 미커밋 변경은 사본으로 넘어가지 않는다.
   mkdir -p "$worktree_root/$target" 2>/dev/null &&
     git worktree add -b "$branch" "$workspace_path" "$base_commit" >/dev/null 2>&1 || {

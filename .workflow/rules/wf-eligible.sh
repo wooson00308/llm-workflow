@@ -1,6 +1,6 @@
 #!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 20
+# condition_script_version: 21
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -13,6 +13,13 @@ machine_target=""
 machine_target_kind=""
 machine_candidates=""
 leases=".workflow/.runtime/leases"
+isolation=".workflow/.runtime/isolation"
+# 공유 기준 조회는 통합 대기 기록을 가진 후보를 처음 만났을 때 한 번만 돈다. 그때까지 이 넷은
+# "아직 조회하지 않았다"를 뜻한다.
+shared_scanned=0
+shared_ok=0
+shared_dirty=0
+shared_head=""
 # 훑기가 모은 목록을 담을 때 쓰는 구분자. 값은 전부 한 줄에서 읽어 온 것이라 개행을 담을 수 없으므로
 # 개행이 목록의 경계가 된다.
 nl='
@@ -203,6 +210,41 @@ overlap_blocks() { # $1=자기 선언의 유효 여부 $2=자기 선언의 경�
     case "$lease_paths" in *" $a "*) return 0 ;; esac
   done
   return 1
+}
+
+# 공유 기준의 현재 커밋과 작업 공간 상태를 한 번만 조회해 담는다. 통합 대기 기록을 가진 후보를
+# 처음 만났을 때만 불리므로, 그런 기록이 없는 프로젝트에서는 git이 한 번도 실행되지 않는다.
+# 조회에 실패하면 shared_ok가 0으로 남는다. 더러운지 깨끗한지 모르는 것과 깨끗한 것은 다른
+# 사실이므로 합치지 않는다.
+scan_shared_base() {
+  [ "$shared_scanned" -eq 0 ] || return 0
+  shared_scanned=1
+  shared_head=$(git rev-parse HEAD 2>/dev/null) || return 0
+  [ -n "$shared_head" ] || return 0
+  shared_status=$(git status --porcelain --untracked-files=no 2>/dev/null) || return 0
+  shared_ok=1
+  [ -n "$shared_status" ] && shared_dirty=1
+  return 0
+}
+
+# 격리 검사를 마치고도 공유 작업 공간에 반영하지 못해 통합을 기다리는 작업인가. 기다리는 이유가
+# 그대로인 동안만 막는다 — 추적 파일의 미커밋 변경이나 stage된 변경이 남아 있고, 기록의 기준
+# 커밋이 지금 공유 기준과 같을 때다. 작업 공간이 깨끗해졌거나 기준이 전진했으면 다시 후보다.
+# 미추적 파일은 보지 않는다. 사용자가 새로 만들어 둔 파일은 통합이 건드릴 대상이 아니다.
+# 기록이 없거나, 읽지 못하거나, 단계가 통합 대기가 아니거나, 기준 커밋이 없으면 막지 않는다.
+# 반대로 git 조회가 실패하면 막은 채로 둔다. 기다림이 끝났다는 근거를 얻지 못한 상태이고, 근거 없이
+# 후보로 되돌리면 이 판정이 막으려던 반복 기동이 그대로 남는다.
+integration_waiting_blocks() { # $1=대상 id
+  record="$isolation/$1.yml"
+  [ -f "$record" ] || return 1
+  step=$(sed -n 's/^step: *//p' "$record" | head -1 | tr -d '"'\''')
+  [ "$step" = integration_waiting ] || return 1
+  base=$(sed -n 's/^base_commit: *//p' "$record" | head -1 | tr -d '"'\''')
+  [ -n "$base" ] || return 1
+  scan_shared_base
+  [ "$shared_ok" -eq 1 ] || return 0
+  [ "$shared_dirty" -eq 1 ] || return 1
+  [ "$base" = "$shared_head" ]
 }
 
 # $1에서 선언을 따라가 $2에 닿는가. 방문 집합이 종료를 보장한다.
@@ -1093,6 +1135,10 @@ ACTIVE_GROUP_ROWS
       done
       [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
       overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
+      # 통합 대기는 lease·선행·겹침 뒤, 원천 결정과 그룹 판정 앞에서 본다. 앞의 셋은 통합 대기와
+      # 무관하게 성립하는 조건이고, 통합을 기다리는 작업은 이미 승인된 원천에서 나와 착수까지 간
+      # 작업이라 뒤의 두 판정까지 갈 이유가 없다.
+      integration_waiting_blocks "$tid" && { note_candidate integration-waiting "$tid"; continue; }
       source_approved=0
       if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ]; then
         case "$approved_task_sources" in

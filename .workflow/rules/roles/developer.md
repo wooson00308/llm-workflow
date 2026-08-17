@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 19
+rules_version: 20
 ---
 
 # Developer role
@@ -109,8 +109,9 @@ Immediately before integrating, compare the shared base against the base the can
 
 The shared workspace is where the user works too, and what they have not finished is not this session's to move.
 
-- Do not begin an automatic integration while the shared workspace holds uncommitted changes to tracked files, staged changes, or a base change in progress. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
-- Do not stash, commit, reset, check out, or delete those changes, and do not guess whose they are. A workspace you did not find clean is a reason to wait, not something to clear.
+- Do not begin an automatic integration while the shared workspace holds uncommitted changes to tracked files outside `.workflow/`, staged changes, or a base change in progress. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
+- Control documents under `.workflow/` are the pipeline's own writing — task status, reports, and role records that sessions produce as they work. Before judging cleanliness, land those changes in a documents-only commit of their own. They are not the user's unfinished work, and they must never hold integration hostage to the pipeline's paperwork (2026-08-15: a candidate that had passed every check waited behind the very reports that recorded it).
+- Do not stash, commit, reset, check out, or delete changes outside `.workflow/`, and do not guess whose they are. A workspace you did not find clean is a reason to wait, not something to clear.
 - When a conflict can be resolved inside the task's approved scope and its `scope_files`, resolve it and run the isolated checks again.
 - When resolving it would mean changing something outside that scope, or choosing what the user intended, take neither side. Record the specific conflict and the condition for resuming in the four labels `.workflow/rules/workflow.md` §5 defines.
 
