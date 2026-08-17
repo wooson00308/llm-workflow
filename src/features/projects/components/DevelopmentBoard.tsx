@@ -89,9 +89,15 @@ export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
     setLaneCollapsed(browserSpecLaneCollapseStore.load(workflow.directory));
   }
 
+  // 끝난 그룹은 개발 화면의 관심사가 아니다. 기록 화면이 완료 그룹의 정본 목록을 갖는다.
+  const activeGroups = useMemo(
+    () => workflow.items.workGroups.filter((group) => !isFinishedWorkGroup(group)),
+    [workflow.items.workGroups],
+  );
+  const completedGroupCount = workflow.items.workGroups.length - activeGroups.length;
   const scopedTasks = useMemo(
-    () => tasksForDevelopment(workflow.items.tasks),
-    [workflow.items.tasks],
+    () => tasksForDevelopment(workflow.items.tasks, workflow.items.workGroups),
+    [workflow.items.tasks, workflow.items.workGroups],
   );
   const filteredTasks = useMemo(
     () => scopedTasks.filter((item) => matchesFilters(item, query, statusFilter)),
@@ -138,7 +144,7 @@ export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
     <section className="development-view">
       <div className="view-heading development-heading">
         <div><p className="eyebrow">DEVELOPMENT</p><h1>개발 작업</h1><p>작업 흐름을 보드·리스트·타임라인으로 바꿔 보세요.</p></div>
-        <span><strong>{count(workflow.items.tasks, "in_progress")}</strong><small>진행 중</small></span>
+        <span><strong>{count(scopedTasks, "in_progress")}</strong><small>진행 중</small></span>
       </div>
 
       <div className="development-toolbar">
@@ -181,9 +187,9 @@ export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
       </div>
 
       <div className="development-summary">
-        <span><i className="summary-dot active" />진행 중 {count(workflow.items.tasks, "in_progress")}</span>
-        <span><i className="summary-dot danger" />막힘 {count(workflow.items.tasks, "blocked")}</span>
-        <span><i className="summary-dot review" />완료 {count(workflow.items.tasks, "verified")}</span>
+        <span><i className="summary-dot active" />진행 중 {count(scopedTasks, "in_progress")}</span>
+        <span><i className="summary-dot danger" />막힘 {count(scopedTasks, "blocked")}</span>
+        <span><i className="summary-dot review" />완료 {count(scopedTasks, "verified")}</span>
         <span className="result-count">
           {viewMode === "calendar"
             ? `${timelineTasks.length}개 표시 · 전체 이력 표시`
@@ -202,9 +208,9 @@ export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
           </div>
           {laneGrouping ? (
             <WorkGroupLaneBoard
-              allTasks={workflow.items.tasks}
+              allTasks={scopedTasks}
               collapsed={laneCollapsed}
-              groups={workflow.items.workGroups}
+              groups={activeGroups}
               hasFilters={hasFilters}
               onOpen={(item) => void openTask(item.fileName)}
               onOpenQa={onOpenQa}
@@ -230,6 +236,10 @@ export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
           onCursorChange={setCalendarCursor}
           onOpen={(item) => void openTask(item.fileName)}
         />
+      )}
+      {/* 감춘 그룹을 어느 보기에서 왔든 같은 문장으로 알린다. 타임라인은 전체 이력을 그대로 보여주므로 뺀다. */}
+      {viewMode !== "calendar" && completedGroupCount > 0 && (
+        <p className="task-lane-note task-lane-completed-note">완료된 작업 그룹 {completedGroupCount}개는 기록 화면에 있습니다.</p>
       )}
     </section>
   );
@@ -400,13 +410,8 @@ function WorkGroupLaneBoard({
   statusFilter: string;
   visibleTasks: WorkflowItemSummary[];
 }) {
-  // 끝난 그룹은 개발 화면의 관심사가 아니다. 기록 화면이 완료 그룹의 정본 목록을 갖는다.
-  const activeGroups = useMemo(
-    () => groups.filter((group) => group.displayStatus !== "completed" && group.displayStatus !== "automatic_completed"),
-    [groups],
-  );
-  const completedCount = groups.length - activeGroups.length;
-  const lanes = useMemo(() => buildWorkGroupLanes(activeGroups, allTasks, visibleTasks, hasFilters), [activeGroups, allTasks, hasFilters, visibleTasks]);
+  // `groups`는 이미 끝난 그룹을 뺀 목록이다. 감춘 그룹 수와 안내는 화면 본체가 세 보기에 공통으로 붙인다.
+  const lanes = useMemo(() => buildWorkGroupLanes(groups, allTasks, visibleTasks, hasFilters), [allTasks, groups, hasFilters, visibleTasks]);
 
   return (
     <>
@@ -460,9 +465,6 @@ function WorkGroupLaneBoard({
         );
       })}
       {lanes.length === 0 && <EmptyTasks />}
-      {completedCount > 0 && (
-        <p className="task-lane-note task-lane-completed-note">완료된 작업 그룹 {completedCount}개는 기록 화면에 있습니다.</p>
-      )}
     </>
   );
 }
@@ -691,8 +693,21 @@ function EmptyTasks() {
   return <div className="task-list-empty"><strong>조건에 맞는 작업이 없습니다.</strong><small>검색어나 상태 필터를 바꿔 보세요.</small></div>;
 }
 
-function tasksForDevelopment(items: WorkflowItemSummary[]) {
-  return items;
+/** 사용자 품질 확인을 통과했거나 자동 확인으로 닫힌 그룹. 두 상태 모두 사용자가 더 할 일이 없다. */
+function isFinishedWorkGroup(group: WorkGroupSummary) {
+  return group.displayStatus === "completed" || group.displayStatus === "automatic_completed";
+}
+
+/**
+ * 개발 작업 화면이 다루는 작업만 남긴다. 끝난 작업 그룹에 속한 작업은 기록 화면이 정본을 가지므로
+ * 목록과 수치에서 함께 뺀다. 소속 그룹을 확정할 수 없는 작업은 끝났다고 판단할 근거가 없어 남긴다.
+ * 감추면 사용자가 확인해야 할 구성 오류가 화면에서 사라지기 때문이다.
+ */
+function tasksForDevelopment(items: WorkflowItemSummary[], groups: WorkGroupSummary[]) {
+  return items.filter((item) => {
+    const group = matchingWorkGroup(item, groups);
+    return !group || !isFinishedWorkGroup(group);
+  });
 }
 
 function matchesFilters(item: WorkflowItemSummary, query: string, statusFilter: string) {

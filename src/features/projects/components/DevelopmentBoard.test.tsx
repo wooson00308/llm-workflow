@@ -590,6 +590,137 @@ describe("DevelopmentBoard", () => {
     expect(screen.getByText("완료된 작업 그룹 2개는 기록 화면에 있습니다.")).toBeInTheDocument();
   });
 
+  /**
+   * 감춤 판정을 확인하는 검사들이 함께 쓰는 화면. 진행 중 그룹 하나, 끝난 그룹 두 개, 소속을
+   * 확정할 수 없는 작업 세 종류를 한 화면에 놓아 어느 보기에서든 같은 집합이 나오는지 본다.
+   */
+  function hidingWorkflow() {
+    const items = [
+      laneTask("TASK-601", "in_progress", "SPEC-A", { title: "남는 작업", workGroupId: "GROUP-A", workGroupRevision: 1 }),
+      laneTask("TASK-602", "verified", "SPEC-B", { title: "끝난 QA 작업", workGroupId: "GROUP-B", workGroupRevision: 1 }),
+      laneTask("TASK-603", "blocked", "SPEC-C", { title: "끝난 자동 작업", workGroupId: "GROUP-C", workGroupRevision: 1 }),
+      laneTask("TASK-604", "verified", "SPEC-D", { title: "QA 대기 작업", workGroupId: "GROUP-D", workGroupRevision: 1 }),
+    ];
+    return workflowWith(items, [], [
+      testGroup({ id: "GROUP-A", title: "진행 중 기능", displayStatus: "developing", sourceSpecId: "SPEC-A", sourceDecisionId: "DECISION-A" }),
+      testGroup({ id: "GROUP-B", title: "QA 끝난 기능", displayStatus: "completed", sourceSpecId: "SPEC-B", sourceDecisionId: "DECISION-B" }),
+      testGroup({ id: "GROUP-C", title: "자동 검증 기능", displayStatus: "automatic_completed", sourceSpecId: "SPEC-C", sourceDecisionId: "DECISION-C" }),
+      testGroup({ id: "GROUP-D", title: "QA 대기 기능", displayStatus: "qa_ready", sourceSpecId: "SPEC-D", sourceDecisionId: "DECISION-D" }),
+    ]);
+  }
+
+  function openFlatBoard() {
+    fireEvent.click(screen.getByRole("button", { name: "평면 태스크 보기" }));
+    return screen.getByRole("region", { name: "개발 작업 칸반 보드" });
+  }
+
+  function openList() {
+    fireEvent.click(screen.getByRole("button", { name: "리스트" }));
+    return screen.getByRole("region", { name: "개발 작업 리스트" });
+  }
+
+  it("keeps finished group tasks out of the flat board and the list", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={hidingWorkflow()} />);
+
+    const board = openFlatBoard();
+    expect(within(board).getByText("남는 작업")).toBeInTheDocument();
+    expect(within(board).queryByText("끝난 QA 작업")).not.toBeInTheDocument();
+    expect(within(board).queryByText("끝난 자동 작업")).not.toBeInTheDocument();
+
+    const list = openList();
+    expect(within(list).getByText("남는 작업")).toBeInTheDocument();
+    expect(within(list).queryByText("끝난 QA 작업")).not.toBeInTheDocument();
+    expect(within(list).queryByText("끝난 자동 작업")).not.toBeInTheDocument();
+  });
+
+  it("counts the header, summary band and result count without finished group tasks", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={hidingWorkflow()} />);
+
+    // 남는 작업은 진행 중 1건과 QA 대기 그룹의 완료 1건뿐이다. 막힘 1건은 끝난 그룹에 속해 빠진다.
+    expect(screen.getByText("진행 중 1")).toBeInTheDocument();
+    expect(screen.getByText("막힘 0")).toBeInTheDocument();
+    expect(screen.getByText("완료 1")).toBeInTheDocument();
+    expect(screen.getByText("2개 표시")).toBeInTheDocument();
+
+    openFlatBoard();
+    expect(screen.getByText("2개 표시")).toBeInTheDocument();
+    openList();
+    expect(screen.getByText("2개 표시")).toBeInTheDocument();
+  });
+
+  it("keeps a qa-ready group's tasks in every view", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={hidingWorkflow()} />);
+
+    expect(within(screen.getByRole("region", { name: "GROUP-D 칸반 보드" })).getByText("QA 대기 작업")).toBeInTheDocument();
+    expect(within(openFlatBoard()).getByText("QA 대기 작업")).toBeInTheDocument();
+    expect(within(openList()).getByText("QA 대기 작업")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["missing group", { workGroupId: "GROUP-404" }],
+    ["future group revision", { workGroupRevision: 2 }],
+    ["different source decision", { sourceDecisionId: "DECISION-OTHER" }],
+  ])("keeps a task with a %s visible even when its group id is finished", (_case, overrides) => {
+    const item = laneTask("TASK-701", "verified", "SPEC-B", {
+      title: "소속 미확정 작업",
+      workGroupId: "GROUP-B",
+      workGroupRevision: 1,
+      ...overrides,
+    });
+    const workflow = workflowWith([item], [], [
+      testGroup({ id: "GROUP-B", title: "QA 끝난 기능", displayStatus: "completed", sourceSpecId: "SPEC-B", sourceDecisionId: "DECISION-B" }),
+    ]);
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflow} />);
+
+    expect(within(openFlatBoard()).getByText("소속 미확정 작업")).toBeInTheDocument();
+    expect(within(openList()).getByText("소속 미확정 작업")).toBeInTheDocument();
+  });
+
+  it("does not surface a finished group task through the search box", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={hidingWorkflow()} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "작업 검색" }), { target: { value: "끝난" } });
+    expect(within(openFlatBoard()).queryByText("끝난 QA 작업")).not.toBeInTheDocument();
+    expect(within(openList()).queryByText("끝난 QA 작업")).not.toBeInTheDocument();
+  });
+
+  it("shows the archive note once in each list view and never without a hidden group", () => {
+    const view = render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={hidingWorkflow()} />);
+    const note = "완료된 작업 그룹 2개는 기록 화면에 있습니다.";
+
+    expect(screen.getAllByText(note)).toHaveLength(1);
+    openFlatBoard();
+    expect(screen.getAllByText(note)).toHaveLength(1);
+    openList();
+    expect(screen.getAllByText(note)).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+
+    const items = [laneTask("TASK-801", "in_progress", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1 })];
+    view.rerender(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [
+      testGroup({ id: "GROUP-A", displayStatus: "developing" }),
+    ])} />);
+    fireEvent.click(screen.getByRole("button", { name: "보드" }));
+    expect(screen.queryByText(/완료된 작업 그룹/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the timeline counting the events of finished group tasks", () => {
+    const items = [
+      laneTask("TASK-901", "in_progress", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1, events: [{ kind: "in_progress", at: `${todayKey}T01:00:00Z` }] }),
+      laneTask("TASK-902", "verified", "SPEC-B", { workGroupId: "GROUP-B", workGroupRevision: 1, events: [{ kind: "verified", at: `${todayKey}T02:00:00Z` }] }),
+    ];
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [
+      testGroup({ id: "GROUP-A", displayStatus: "developing", sourceSpecId: "SPEC-A", sourceDecisionId: "DECISION-A" }),
+      testGroup({ id: "GROUP-B", displayStatus: "completed", sourceSpecId: "SPEC-B", sourceDecisionId: "DECISION-B" }),
+    ])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "타임라인" }));
+    const cell = dayCell(screen.getByRole("region", { name: "개발 작업 타임라인" }), todayKey);
+    expect(within(cell).getByText("완료")).toBeInTheDocument();
+    expect(screen.getByText("2개 표시 · 전체 이력 표시")).toBeInTheDocument();
+  });
+
   it("switches to the flat task board only as a secondary view", () => {
     const items = [laneTask("TASK-301", "todo", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 1 })];
     render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [testGroup()])} />);
