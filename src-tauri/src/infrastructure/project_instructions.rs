@@ -18,10 +18,10 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 30;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 31;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
 pub(crate) const ARCHITECT_RULES_VERSION: u32 = 20;
-pub(crate) const DEVELOPER_RULES_VERSION: u32 = 22;
+pub(crate) const DEVELOPER_RULES_VERSION: u32 = 23;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 ## LLM Workflow
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 30
+rules_version: 31
 ---
 
 # LLM Workflow agent protocol
@@ -226,6 +226,12 @@ prompt to send unchanged to the provider. It is a lease handoff, not a second cl
 - The reservation result also names where the code working copy has been prepared and where the
   control documents stay canonical. Both locations ride in that one result, and §2 states which
   writes belong to each.
+- The reservation record the helper keeps under `.workflow/.runtime/isolation/` is app-owned exactly
+  as a lease file is, and a session never creates, edits, or deletes one. Its `step` value changes
+  through a single path: `sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>`,
+  which `.workflow/rules/roles/developer.md` says when to call. When the installed helper carries no
+  such command, or the call fails for any other reason, write that fact into the session report and
+  finish there. Never work around a failed helper call by writing the record file yourself.
 
 ## 5. Follow the document state machine
 
@@ -710,7 +716,7 @@ const DEVELOPER_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 22
+rules_version: 23
 ---
 
 # Developer role
@@ -819,6 +825,9 @@ The shared workspace is where the user works too, and what they have not finishe
 
 - Before integrating, read two sets of paths: the files the recorded integration candidate changes, and the tracked files outside `.workflow/` that hold uncommitted or staged changes in the shared workspace. When the two sets share no path, integrate. Landing the change touches none of the user's files, and their unfinished work stays in the working tree exactly as they left it. The user is never required to commit, stash, or otherwise clear their own changes to let the pipeline proceed (2026-08-18: a consuming project held a fully verified candidate behind thirteen unrelated uncommitted files, and five developer sessions in a row could only re-verify and wait).
 - Integration waits only for an actual collision: the user's uncommitted changes touch a file the candidate changes, a base change is in progress in the shared workspace, or one of the two sets cannot be read — not knowing what would collide is not the same as knowing nothing would. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
+- A session that ends in that waiting state records the fact where the assignment judgement reads it. After the last commit it leaves in the shared workspace, and immediately before releasing its lease, it calls `sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>` once. The record stores the shared HEAD read at the moment of the call, so any commit the session makes afterwards moves the base forward and clears the mark on its own. That is why the call comes after every document commit and never before one.
+- Only a session that actually waits calls it. A session that integrated its change does not, and neither does a session that stopped for any other reason, so a task that has been integrated carries no waiting mark.
+- The call is not a condition for finishing. Whether it succeeded or failed, write the report and release the lease exactly as `## Completion` describes. A project whose installed helper has no such command fails the call, and the session writes that failure into its report so the next session can read why the same task was assigned again.
 - Control documents under `.workflow/` are the pipeline's own writing — task status, reports, and role records that sessions produce as they work. Before judging collision, land those changes in a documents-only commit of their own. They are not the user's unfinished work, and they must never hold integration hostage to the pipeline's paperwork (2026-08-15: a candidate that had passed every check waited behind the very reports that recorded it).
 - Do not stash, commit, reset, check out, or delete changes outside `.workflow/`, and do not guess whose they are. A collision you found is a reason to wait, not something to clear.
 - After integrating beside unrelated uncommitted changes, run the post-integration checks against the integrated commit in a clean copy — the isolated copy moved onto that commit suffices. The user's half-finished work is not part of what was integrated, and a check that reads it can fail work that is sound or pass work that is not.
@@ -906,6 +915,7 @@ User QA scenarios are not one of these report sections. They remain in the archi
 - Record changes, checks, risks, and handoff notes in `reports/`.
 - Open the report with the summary section `.workflow/rules/workflow.md` §8 defines. It says what was done, what was verified, and which work-group result this evidence supports.
 - Before marking the task verified, check that the report's Korean follows `.workflow/rules/workflow.md` §9. Keep the report focused on changes, automated verification, risks, and architect handoffs. This self-review does not affect eligibility.
+- A session ending while it waits for integration calls `sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>` once, after its last commit in the shared workspace and before releasing the lease, exactly as `## Leave the user's own work alone` describes. A session that integrated its change, and a session stopped for another reason, do not call it, and a failed call holds up neither the report nor the release.
 - Move the task to `verified`, release the lease, and stop. Do not ask the user to run a terminal command or stamp the individual task.
 "#;
 
@@ -1491,7 +1501,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1513,7 +1523,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1537,7 +1547,7 @@ mod tests {
         assert!(rules.contains("`resumed` never stands in for `in_progress`"));
         assert!(architect.contains("rules_version: 20"));
         assert!(architect.contains("`history`"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("`history`"));
         assert!(planner.contains("rules_version: 12"));
         assert!(!planner.contains("`history`"));
@@ -1558,12 +1568,12 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
         assert!(architect.contains("rules_version: 20"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
     }
 
@@ -1582,7 +1592,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1598,8 +1608,41 @@ mod tests {
         assert!(
             architect.contains("A group recovery and a task correction preserve their identifiers")
         );
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("do not call `acquire` again"));
+    }
+
+    #[test]
+    fn records_the_integration_waiting_mark_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        assert!(rules.contains("rules_version: 31"));
+        assert!(developer.contains("rules_version: 23"));
+
+        // 표시를 남기는 경로가 헬퍼 호출 하나뿐임을 공통 규칙이 정한다.
+        assert!(rules.contains(
+            "`sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>`"
+        ));
+        assert!(rules.contains("a session never creates, edits, or deletes one"));
+        assert!(rules.contains(
+            "Never work around a failed helper call by writing the record file yourself"
+        ));
+
+        // 개발자 계약은 호출 시점과 성공 경로 제외를 함께 담는다.
+        assert!(developer.contains(
+            "`sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>`"
+        ));
+        assert!(developer.contains("immediately before releasing its lease"));
+        assert!(developer.contains("Only a session that actually waits calls it."));
+        assert!(developer.contains("The call is not a condition for finishing."));
     }
 
     #[test]
@@ -1617,7 +1660,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1639,7 +1682,7 @@ mod tests {
             assert!(contract.contains("`.workflow/rules/workflow.md` §4"));
             assert!(!contract.contains("wf-claim.sh"));
         }
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("status is `verified`"));
         assert!(architect.contains("rules_version: 20"));
@@ -1659,7 +1702,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1693,7 +1736,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
@@ -1707,7 +1750,7 @@ mod tests {
         assert!(architect.contains("the judgement follows `scope_files`"));
 
         // 개발자 계약의 겹침 조항이 선언을 근거로 지목한다.
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer
             .contains("No unexpired lease may cover work that overlaps the task's `scope_files`"));
         assert!(developer.contains("## Overlapping work"));
@@ -1724,10 +1767,10 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 30);
+        assert_eq!(WORKFLOW_RULES_VERSION, 31);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 20);
-        assert_eq!(DEVELOPER_RULES_VERSION, 22);
+        assert_eq!(DEVELOPER_RULES_VERSION, 23);
     }
 
     #[test]
@@ -1743,7 +1786,7 @@ mod tests {
 
         // 통합은 충돌 기준으로만 기다린다. 무관한 미커밋 변경은 통합을 막지 않고,
         // 사용자에게 버전 관리 조작을 요구하는 해제 조건은 없다.
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("When the two sets share no path, integrate"));
         assert!(developer.contains(
             "The user is never required to commit, stash, or otherwise clear their own changes"
@@ -1780,7 +1823,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1828,7 +1871,7 @@ mod tests {
         }
 
         // 개발자 계약: R1의 자격 조건, definition_error 역할 경계, R6의 순서.
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("The task must be `todo`, `in_progress`, or `blocked`"));
         assert!(developer
             .contains("An `in_progress` task qualifies only while no unexpired lease covers it"));
@@ -1880,7 +1923,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1959,7 +2002,7 @@ mod tests {
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 자동검증 보고와 그룹 경계 유지.
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("which work-group result this evidence supports"));
         assert!(developer.contains("## Keep user QA at the group boundary"));
         assert!(developer.contains("`## 확인 동선`"));
@@ -1984,9 +2027,9 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(architect.contains("rules_version: 20"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
 
         // 차단 분류 네 값과 그 뜻이 한 번씩 정의된다.
@@ -2117,8 +2160,8 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 30"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(rules.contains("rules_version: 31"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 20"));
 
@@ -2207,7 +2250,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("### The structured summary"));
 
         // 네 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·전후·위험으로 끝난다.
@@ -2291,7 +2334,7 @@ mod tests {
         assert!(architect
             .contains("the closing heading names the automated result this task contributes to"));
         assert!(architect.contains("User QA steps belong to the group, never the individual task"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains(
             "bring its values up to the current facts and leave the headings, their order, and the two impact markers exactly as the architect wrote them"
         ));
@@ -2315,7 +2358,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2358,7 +2401,7 @@ mod tests {
         );
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 20"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
     }
 
     #[test]
@@ -2417,7 +2460,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2448,10 +2491,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 30"));
+        assert!(rules.contains("rules_version: 31"));
         assert!(rules.contains("`history`"));
         assert!(architect.contains("rules_version: 20"));
-        assert!(developer.contains("rules_version: 22"));
+        assert!(developer.contains("rules_version: 23"));
     }
 
     #[test]
