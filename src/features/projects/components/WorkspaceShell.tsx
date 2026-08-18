@@ -19,6 +19,12 @@ import type {
   WorkflowSummary,
 } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
+import {
+  DEVELOPMENT_MENU_KEY,
+  IDEAS_MENU_KEY,
+  MENU_KEYS,
+  browserMenuLastSeenStore,
+} from "../infrastructure/browserMenuLastSeenStore";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
 import { AgentRuntimeView, ExecutionConsentDialog } from "./agents/AgentRuntimeView";
@@ -111,6 +117,25 @@ function pendingDecisions(workflow: WorkflowSummary | undefined) {
 }
 
 /**
+ * 마지막으로 확인한 뒤에 바뀐 문서가 있는지 본다.
+ *
+ * 확인 기록이 없으면 비교할 기준이 없으므로 켜지 않는다. 마지막 변경 시각이 없거나 시각으로 읽을 수
+ * 없는 문서도 판정에서 뺀다. 언제 바뀌었는지 모르는 문서가 점을 켜는 근거가 되면, 그 문서가 남아
+ * 있는 동안 점이 꺼지지 않는다.
+ */
+function hasChangedSince(
+  items: { updatedAt: string | null }[],
+  seenAt: string | undefined,
+): boolean {
+  const seen = seenAt ? Date.parse(seenAt) : Number.NaN;
+  if (!Number.isFinite(seen)) return false;
+  return items.some((item) => {
+    const changed = item.updatedAt ? Date.parse(item.updatedAt) : Number.NaN;
+    return Number.isFinite(changed) && changed > seen;
+  });
+}
+
+/**
  * 메뉴 이름 옆의 대기 건수. 셀 것이 없으면 요소 자체를 그리지 않아 그 메뉴는 변경 전과 같은 모양,
  * 같은 접근 이름으로 남는다. 숫자는 눈으로만 읽는 표시라 가리고, 무엇이 몇 건인지는 화면 읽기
  * 도구가 버튼 이름으로 함께 듣도록 따로 적는다.
@@ -122,6 +147,21 @@ function NavBadge({ count, label }: { count: number; label: string }) {
       <span aria-hidden="true" className="nav-badge">{count}</span>
       {/* 접근 이름은 형제 노드를 구분자 없이 잇는다. 쉼표를 앞에 두지 않으면 "기획서승인 대기"로 들린다. */}
       <span className="visually-hidden">, {label} {count}건</span>
+    </>
+  );
+}
+
+/**
+ * 메뉴 이름 옆의 변경 점. 켤 조건이 아니면 요소 자체를 그리지 않아 그 메뉴는 변경 전과 같은 모양,
+ * 같은 접근 이름으로 남는다. 점은 눈으로만 읽는 표시라 가리고, 무엇이 달라졌는지는 화면 읽기 도구가
+ * 버튼 이름으로 함께 듣도록 따로 적는다. 순서는 NavBadge와 같아 메뉴 이름이 앞에 온다.
+ */
+function NavChangeDot({ changed }: { changed: boolean }) {
+  if (!changed) return null;
+  return (
+    <>
+      <span aria-hidden="true" className="nav-change-dot" />
+      <span className="visually-hidden">, 새로운 변경 있음</span>
     </>
   );
 }
@@ -174,6 +214,9 @@ export function WorkspaceShell({
     workflowDirectory: string;
     groupId: string;
   } | null>(null);
+  // 지금 고른 워크플로우의 메뉴별 마지막 확인 시각. 저장소가 정본이고 이 상태는 화면을 다시 그리기
+  // 위한 사본이다. 기록이 없는 메뉴는 키 자체가 없다.
+  const [menuLastSeen, setMenuLastSeen] = useState<Record<string, string>>({});
 
   const activeRuns = (agentRuntime?.queue?.runs ?? []).filter((run) =>
     ["reserved", "queued", "running", "paused"].includes(run.state),
@@ -192,6 +235,40 @@ export function WorkspaceShell({
   useEffect(() => {
     setSpecDocument(null);
   }, [selectedDirectory]);
+
+  /*
+   * 고른 워크플로우의 확인 시각을 읽고, 기록이 없는 메뉴는 지금을 첫 기준으로 남긴다. 그 메뉴를 열지
+   * 않아도 남겨야, 프로젝트를 처음 여는 사용자가 그동안 쌓인 문서를 한꺼번에 변경으로 만나지 않는다.
+   * 저장은 고른 워크플로우의 없는 기록에만 하므로 다른 워크플로우의 기록은 전환만으로 달라지지 않고,
+   * 되돌아오면 그때 저장된 기록을 그대로 다시 읽는다.
+   */
+  useEffect(() => {
+    if (!selectedDirectory) return;
+    const stored = browserMenuLastSeenStore.load(selectedDirectory);
+    const seeded = { ...stored };
+    const now = new Date().toISOString();
+    for (const menuKey of MENU_KEYS) {
+      if (seeded[menuKey]) continue;
+      browserMenuLastSeenStore.save(selectedDirectory, menuKey, now);
+      seeded[menuKey] = now;
+    }
+    setMenuLastSeen(seeded);
+  }, [selectedDirectory]);
+
+  /*
+   * 아이디어 화면과 개발 화면에 들어간 사실을 그 메뉴의 확인 시각으로 남긴다. 메뉴 버튼도 검색 결과도
+   * 결국 view를 지나가므로, 버튼 처리가 아니라 이 자리에 두어야 어느 경로로 들어와도 걸린다. 들어간
+   * 메뉴 하나만 저장하므로 다른 메뉴의 기록은 함께 갱신되지 않는다.
+   */
+  useEffect(() => {
+    if (!selectedDirectory) return;
+    const menuKey =
+      view === "ideas" ? IDEAS_MENU_KEY : view === "tasks" ? DEVELOPMENT_MENU_KEY : null;
+    if (!menuKey) return;
+    const now = new Date().toISOString();
+    browserMenuLastSeenStore.save(selectedDirectory, menuKey, now);
+    setMenuLastSeen((current) => ({ ...current, [menuKey]: now }));
+  }, [selectedDirectory, view]);
 
   useEffect(() => {
     function handleSearchShortcut(event: KeyboardEvent) {
@@ -219,6 +296,23 @@ export function WorkspaceShell({
   const pendingSpecs = decisions.specs;
   // 기획서 승인과 그룹 QA만 사용자 판단이다. 태스크 상태는 이 수치에 들어가지 않는다.
   const decisionCount = decisions.total;
+
+  /*
+   * 아이디어 메뉴와 개발 메뉴의 변경 점. 아이디어 메뉴는 아이디어 문서를, 개발 메뉴는 작업 문서와
+   * 작업 그룹을 함께 본다. 개수는 붙이지 않으므로 하나라도 바뀌었는지만 판단한다.
+   */
+  const ideasChanged = useMemo(
+    () => hasChangedSince(workflow?.items.ideas ?? [], menuLastSeen[IDEAS_MENU_KEY]),
+    [workflow, menuLastSeen],
+  );
+  const developmentChanged = useMemo(
+    () =>
+      hasChangedSince(
+        [...(workflow?.items.tasks ?? []), ...(workflow?.items.workGroups ?? [])],
+        menuLastSeen[DEVELOPMENT_MENU_KEY],
+      ),
+    [workflow, menuLastSeen],
+  );
 
   /** 기능 하나를 지정해 품질 확인 작업대를 연다. 중간 화면을 거치지 않는다. */
   function openQaFeature(featureKey: string) {
@@ -336,9 +430,9 @@ export function WorkspaceShell({
             <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Icon name="spark" />오늘</button>
           </div>
           <div className="primary-nav-group">
-            <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
+            <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어<NavChangeDot changed={ideasChanged} /></button>
             <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서<NavBadge count={pendingSpecs.length} label="승인 대기" /></button>
-            <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
+            <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발<NavChangeDot changed={developmentChanged} /></button>
             <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인<NavBadge count={readyQaFeatures.length} label="확인 가능" /></button>
           </div>
           <div className="primary-nav-group">

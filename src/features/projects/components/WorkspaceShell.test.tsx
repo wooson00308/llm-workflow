@@ -2002,3 +2002,150 @@ describe("WorkspaceShell 사이드 메뉴 대기 표시", () => {
     expect(within(primaryNav()).getByRole("button", { name: /^기획서/ })).toHaveAccessibleName("기획서");
   });
 });
+
+describe("WorkspaceShell 사이드 메뉴 변경 점", () => {
+  const LAST_SEEN_KEY = "workflow-labs.menu-last-seen.v1";
+  const IDEAS_MENU_KEY = "ideas";
+  const DEVELOPMENT_MENU_KEY = "tasks";
+
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    storage = stubStorage();
+  });
+
+  function item(id: string, title: string, updatedAt: string | null): WorkflowItemSummary {
+    return { fileName: `${id}.md`, id, title, status: "inbox", updatedAt, dueAt: null, excerpt: `${title} 요약` };
+  }
+
+  /** 23~37행 리터럴을 펼쳐 워크플로우 하나에 아이디어·작업·작업 그룹을 채운 사본. */
+  function changed(directory = "feature--wf_1", name = "Feature") {
+    return {
+      ...project.workflows[0],
+      id: directory,
+      directory,
+      name,
+      counts: { ...project.workflows[0].counts, ideas: 1, tasks: 1, workGroups: 1 },
+      items: {
+        ideas: [item("IDEA-001", "결제 화면 정리", "2026-08-13T09:00:00Z")],
+        specs: [],
+        workGroups: [workGroup("GROUP-A", "카드 등록 흐름")],
+        tasks: [item("TASK-001", "카드 등록 화면 정리", "2026-08-13T09:00:00Z")],
+      },
+    };
+  }
+
+  function seen(records: Record<string, Record<string, string>>) {
+    storage.set(LAST_SEEN_KEY, JSON.stringify(records));
+  }
+
+  function primaryNav() {
+    return screen.getByRole("navigation", { name: "주요 메뉴" });
+  }
+
+  function menuButton(namePrefix: RegExp) {
+    return within(primaryNav()).getByRole("button", { name: namePrefix });
+  }
+
+  it("확인 시각 뒤에 바뀐 아이디어가 있으면 아이디어 메뉴에만 점이 붙는다", () => {
+    // 아이디어는 확인 시각보다 나중에, 개발 쪽 문서는 확인 시각보다 먼저 바뀐 자료.
+    seen({
+      "feature--wf_1": {
+        [IDEAS_MENU_KEY]: "2026-08-01T00:00:00Z",
+        [DEVELOPMENT_MENU_KEY]: "2026-08-14T00:00:00Z",
+      },
+    });
+    shell({ project: { ...project, workflows: [changed()] } });
+
+    expect(menuButton(/^아이디어/).querySelector(".nav-change-dot")).not.toBeNull();
+    expect(menuButton(/^개발/).querySelector(".nav-change-dot")).toBeNull();
+  });
+
+  it("아이디어 메뉴를 다시 열면 그 점만 꺼지고 개발 메뉴의 점은 남는다", () => {
+    seen({
+      "feature--wf_1": {
+        [IDEAS_MENU_KEY]: "2026-08-01T00:00:00Z",
+        [DEVELOPMENT_MENU_KEY]: "2026-08-01T00:00:00Z",
+      },
+    });
+    shell({ project: { ...project, workflows: [changed()] } });
+
+    expect(menuButton(/^아이디어/).querySelector(".nav-change-dot")).not.toBeNull();
+    expect(menuButton(/^개발/).querySelector(".nav-change-dot")).not.toBeNull();
+
+    fireEvent.click(menuButton(/^아이디어/));
+
+    expect(menuButton(/^아이디어/).querySelector(".nav-change-dot")).toBeNull();
+    expect(menuButton(/^개발/).querySelector(".nav-change-dot")).not.toBeNull();
+  });
+
+  it("기록이 없으면 점을 켜지 않고 두 메뉴의 기록을 첫 기준으로 남긴다", () => {
+    shell({ project: { ...project, workflows: [changed()] } });
+
+    expect(primaryNav().querySelector(".nav-change-dot")).toBeNull();
+
+    const stored = JSON.parse(storage.get(LAST_SEEN_KEY) ?? "{}");
+    expect(Object.keys(stored["feature--wf_1"] ?? {}).sort()).toEqual([
+      DEVELOPMENT_MENU_KEY,
+      IDEAS_MENU_KEY,
+    ].sort());
+  });
+
+  it("워크플로우를 바꾸면 그 워크플로우의 기록으로 판단하고 되돌아오면 그대로다", () => {
+    // 첫 워크플로우는 확인 시각이 문서보다 이르고, 두 번째는 문서보다 늦다.
+    seen({
+      "feature--wf_1": {
+        [IDEAS_MENU_KEY]: "2026-08-01T00:00:00Z",
+        [DEVELOPMENT_MENU_KEY]: "2026-08-14T00:00:00Z",
+      },
+      "other--wf_2": {
+        [IDEAS_MENU_KEY]: "2026-08-14T00:00:00Z",
+        [DEVELOPMENT_MENU_KEY]: "2026-08-14T00:00:00Z",
+      },
+    });
+    shell({
+      project: { ...project, workflows: [changed(), changed("other--wf_2", "Other")] },
+    });
+
+    expect(menuButton(/^아이디어/).querySelector(".nav-change-dot")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Other/ }));
+    expect(menuButton(/^아이디어/).querySelector(".nav-change-dot")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Feature/ }));
+    expect(menuButton(/^아이디어/).querySelector(".nav-change-dot")).not.toBeNull();
+  });
+
+  it("저장소 접근이 실패해도 사이드 메뉴는 그려지고 점은 켜지지 않는다", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("접근 거부");
+      },
+      setItem: () => {
+        throw new Error("접근 거부");
+      },
+    });
+
+    expect(() => shell({ project: { ...project, workflows: [changed()] } })).not.toThrow();
+
+    expect(primaryNav()).toBeInTheDocument();
+    expect(primaryNav().querySelector(".nav-change-dot")).toBeNull();
+  });
+
+  it("점이 붙은 메뉴 버튼은 달라진 것이 있다는 사실을 접근 이름으로 함께 알린다", () => {
+    seen({
+      "feature--wf_1": {
+        [IDEAS_MENU_KEY]: "2026-08-01T00:00:00Z",
+        [DEVELOPMENT_MENU_KEY]: "2026-08-14T00:00:00Z",
+      },
+    });
+    shell({ project: { ...project, workflows: [changed()] } });
+
+    const ideas = within(primaryNav()).getByRole("button", { name: /새로운 변경 있음/ });
+    expect(ideas).toHaveAccessibleName("아이디어, 새로운 변경 있음");
+    // 이름이 메뉴 이름으로 시작해야 메뉴 이름 앞부분만으로 이 버튼을 고르는 조회가 성립한다.
+    expect(menuButton(/^아이디어/)).toBe(ideas);
+    // 점이 없는 개발 메뉴의 접근 이름은 메뉴 이름 그대로다.
+    expect(menuButton(/^개발/)).toHaveAccessibleName("개발");
+  });
+});
