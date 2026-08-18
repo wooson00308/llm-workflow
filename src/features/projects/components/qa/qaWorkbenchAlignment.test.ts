@@ -37,4 +37,16 @@ describe("품질 확인 작업대 레이아웃", () => {
     expect(markdown.get("max-width")).toBe("640px");
     expect(markdown.get("margin")).toBe("0");
   });
+
+  it("기능 소개는 대기열 카드에서 세 줄로 끊기고 열린 화면에서는 문단째로 보인다", () => {
+    // 카드 높이를 기능마다 같게 만드는 것이 목적이라, 대기열 쪽만 줄 수를 막는다 (SPEC-066)
+    const queueGoal = declarationsFrom(baseCss, ".qa-queue-goal", "QaWorkbench.css base rules");
+    expect(queueGoal.get("display")).toBe("-webkit-box");
+    expect(queueGoal.get("-webkit-line-clamp")).toBe("3");
+    expect(queueGoal.get("overflow")).toBe("hidden");
+
+    const featureGoal = declarationsFrom(baseCss, ".qa-feature-goal", "QaWorkbench.css base rules");
+    expect(featureGoal.get("white-space")).toBe("pre-line");
+    expect(featureGoal.get("-webkit-line-clamp")).toBeUndefined();
+  });
 });

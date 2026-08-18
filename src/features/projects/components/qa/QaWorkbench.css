@@ -13,7 +13,7 @@
 .qa-queue-row:hover { border-color: #b9cabd; }
 .qa-queue-main { min-width: 0; }
 .qa-queue-title { display: block; font-size: 14px; font-weight: 650; }
-.qa-queue-goal { display: block; margin-top: 3px; color: #777a70; font-size: 12px; line-height: 1.55; word-break: keep-all; }
+.qa-queue-goal { display: -webkit-box; margin-top: 3px; overflow: hidden; color: #777a70; font-size: 12px; line-height: 1.55; word-break: keep-all; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .qa-queue-counts { display: block; color: #92968d; font-size: 11px; }
 .qa-queue-state { flex: 0 0 auto; padding: 7px 14px; border: 1px solid #b9cabd; border-radius: 999px; color: var(--green); font-size: 12px; font-weight: 700; }
 .qa-queue-section-upcoming .qa-queue-list { gap: 0; }
@@ -28,7 +28,7 @@
 .qa-scope-back { justify-self: start; font-size: 12px; }
 .qa-feature-kicker { margin: 10px 0 0; color: #8a8d83; font-size: 11px; font-weight: 650; }
 .qa-feature-session-head h1 { margin: 4px 0 0; font-size: 26px; font-weight: 480; letter-spacing: -.03em; }
-.qa-feature-goal { margin: 7px 0 0; max-width: 62ch; color: #777a70; font-size: 13px; line-height: 1.6; word-break: keep-all; }
+.qa-feature-goal { margin: 7px 0 0; max-width: 62ch; color: #777a70; font-size: 13px; line-height: 1.6; white-space: pre-line; word-break: keep-all; }
 
 /* ── 통합 QA 플로우 + 결정 ──────────────────────────────── */
 .qa-flow-layout { display: grid; gap: 20px; align-items: start; }
