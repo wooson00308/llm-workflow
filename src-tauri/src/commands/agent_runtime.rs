@@ -37,6 +37,9 @@ use crate::infrastructure::agent_runtime_release::{
 /// 번들 안에서 런타임 자산이 놓이는 디렉터리 이름.
 const RESOURCE_DIRECTORY: &str = "runtime";
 
+/// 사용자 홈 아래에서 기기 단위 기록이 놓이는 디렉터리 이름.
+const DEVICE_DIRECTORY: &str = ".workflow-labs";
+
 /// 번들·디스크·실행 중 버전과 서비스 상태를 한 번에 읽는다. 아무것도 쓰지 않는다.
 #[tauri::command]
 pub async fn inspect_agent_runtime(app: tauri::AppHandle) -> Result<RuntimeInspection, String> {
@@ -427,10 +430,16 @@ pub async fn inspect_agent_runs(
     project_id: String,
 ) -> Result<QueueSnapshot, String> {
     let (resource, install_root) = locations(&app)?;
+    let hold_root = provider_hold_root(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let caller = LauncherCaller::new(launcher_path(&install_root));
         let compatibility = compatibility_of(&resource, &install_root, &caller);
-        AgentRuntimeStatusService.inspect(&caller, &project_id, &compatibility)
+        AgentRuntimeStatusService.inspect(
+            &caller,
+            &project_id,
+            &compatibility,
+            hold_root.as_deref(),
+        )
     })
     .await
     .map_err(|error| format!("상태 조회를 시작하지 못했습니다: {error}"))
@@ -514,10 +523,17 @@ async fn set_paused(
     paused: bool,
 ) -> Result<QueueSnapshot, String> {
     let (resource, install_root) = locations(&app)?;
+    let hold_root = provider_hold_root(&app);
     status_blocking(move || {
         let caller = LauncherCaller::new(launcher_path(&install_root));
         let compatibility = compatibility_of(&resource, &install_root, &caller);
-        AgentRuntimeStatusService.set_paused(&caller, &project_id, paused, &compatibility)
+        AgentRuntimeStatusService.set_paused(
+            &caller,
+            &project_id,
+            paused,
+            &compatibility,
+            hold_root.as_deref(),
+        )
     })
     .await
 }
@@ -579,6 +595,16 @@ where
         .await
         .map_err(|error| format!("설정 작업을 시작하지 못했습니다: {error}"))?
         .map_err(|failure| failure.message())
+}
+
+/// 사용 한도 보류 기록의 루트. 홈을 얻지 못하면 보류 기록 없이 지금과 같이 조회한다.
+///
+/// 홈 해석은 이 계층에서만 한다. 서비스와 인프라 모듈은 환경 변수로 홈을 찾지 않는다.
+fn provider_hold_root(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .home_dir()
+        .ok()
+        .map(|home| home.join(DEVICE_DIRECTORY))
 }
 
 /// 하트비트 홈과 사용자 홈. 기존 잡을 읽는 자리에서만 쓴다.

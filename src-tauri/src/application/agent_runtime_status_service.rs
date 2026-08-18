@@ -6,6 +6,10 @@
 //! **로그는 cursor만 주고받는다.** 화면이 파일 경로를 보내지도 받지도 않으며, 런타임이 이미 민감정보를
 //! 제거한 이벤트만 온다. 앱은 그 이벤트를 다시 해석하지 않고 그대로 전달한다.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -15,6 +19,7 @@ use crate::domain::agent_runtime::{
     WatcherState,
 };
 use crate::infrastructure::agent_runtime_process::{self, RuntimeCallFailure, RuntimeCaller};
+use crate::infrastructure::provider_hold;
 
 /// 상태 명령이 실패하는 방식.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,11 +124,14 @@ impl AgentRuntimeStatusService {
     ///
     /// 실행 목록은 런타임이 영속 기록에서 복원한 값이다. 앱이 자기 메모리에 큐를 들고 있지 않으므로
     /// 앱을 다시 열어도 첫 조회가 같은 값을 낸다.
+    /// `hold_root`는 사용 한도 보류 기록의 루트다. 커맨드 계층이 해석해 주며, 홈을 얻지 못했으면
+    /// 없이 온다. 없으면 보류를 읽지도 남기지도 않고 나머지는 그대로 답한다.
     pub fn inspect(
         &self,
         caller: &dyn RuntimeCaller,
         project_id: &str,
         compatibility: &Compatibility,
+        hold_root: Option<&Path>,
     ) -> QueueSnapshot {
         if !compatibility.allows_execution() {
             return unavailable(project_id, "호환되지 않는 런타임입니다");
@@ -152,6 +160,16 @@ impl AgentRuntimeStatusService {
         let providers =
             agent_runtime_process::diagnose_providers(caller, project_id).unwrap_or_default();
         let automation = automation_from_state(&state);
+        let provider_holds = match hold_root {
+            Some(root) => {
+                let now = Utc::now();
+                for run in usage_limit_ends(&runs) {
+                    provider_hold::record(root, run, now);
+                }
+                provider_hold::active_holds(root, now)
+            }
+            None => Vec::new(),
+        };
         QueueSnapshot {
             project_id: project_id.to_owned(),
             paused: state
@@ -166,6 +184,7 @@ impl AgentRuntimeStatusService {
                 _ => Vec::new(),
             },
             providers,
+            provider_holds,
             unavailable: None,
         }
     }
@@ -177,6 +196,7 @@ impl AgentRuntimeStatusService {
         project_id: &str,
         paused: bool,
         compatibility: &Compatibility,
+        hold_root: Option<&Path>,
     ) -> Result<QueueSnapshot, StatusFailure> {
         if !compatibility.allows_execution() {
             return Err(StatusFailure::Incompatible(compatibility.clone()));
@@ -194,7 +214,7 @@ impl AgentRuntimeStatusService {
                 answered: answered.to_owned(),
             });
         }
-        Ok(self.inspect(caller, project_id, compatibility))
+        Ok(self.inspect(caller, project_id, compatibility, hold_root))
     }
 
     /// 실행 하나의 이벤트를 cursor부터 읽는다.
@@ -240,7 +260,9 @@ impl AgentRuntimeStatusService {
 
         // 실행 메타정보와 최근 오류는 같은 큐 상태에서 온다. 큐 상태 조회는 실패를 사유로 답하므로
         // 여기서도 실패가 조립을 멈추지 않는다.
-        let snapshot = self.inspect(caller, project_id, compatibility);
+        // 번들은 실행 행과 최근 오류만 가져간다. 보류 기록은 진단 자료의 항목이 아니므로 루트를
+        // 넘기지 않는다.
+        let snapshot = self.inspect(caller, project_id, compatibility, None);
         let (run, recent_errors) = match &snapshot.unavailable {
             Some(reason) => {
                 gaps.push(gap("run", reason));
@@ -372,6 +394,33 @@ fn bundle_event(value: &Value) -> BundleEvent {
     }
 }
 
+/// 실행 도구마다 사용 한도로 끝난 가장 늦은 실행 행 하나.
+///
+/// 고르는 조건은 셋을 모두 만족하는 행이다. 종료 사유가 한도 도달 구분값이고, 상태가 끝난 상태이며,
+/// 종료 시각이 있다. 종료 시각을 읽지 못하는 행은 재개 시각을 정할 수 없으므로 고르지 않는다.
+fn usage_limit_ends(runs: &[RunSummary]) -> Vec<&RunSummary> {
+    let mut latest: BTreeMap<&str, (DateTime<Utc>, &RunSummary)> = BTreeMap::new();
+    for run in runs {
+        if !run.reached_usage_limit() || !run.state.is_finished() {
+            continue;
+        }
+        let Some(finished_at) = run
+            .finished_at
+            .as_deref()
+            .and_then(provider_hold::runtime_time)
+        else {
+            continue;
+        };
+        match latest.get(run.provider.as_str()) {
+            Some((chosen, _)) if *chosen >= finished_at => {}
+            _ => {
+                latest.insert(run.provider.as_str(), (finished_at, run));
+            }
+        }
+    }
+    latest.into_values().map(|(_, run)| run).collect()
+}
+
 /// 읽지 못한 상태. 실행 목록을 비우고 사유를 싣는다.
 fn unavailable(project_id: &str, reason: &str) -> QueueSnapshot {
     QueueSnapshot {
@@ -386,6 +435,7 @@ fn unavailable(project_id: &str, reason: &str) -> QueueSnapshot {
         runs: Vec::new(),
         errors: Vec::new(),
         providers: Vec::new(),
+        provider_holds: Vec::new(),
         unavailable: Some(reason.to_owned()),
     }
 }
@@ -423,11 +473,15 @@ fn automation_from_state(state: &Value) -> AutomationSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use chrono::{DateTime, Duration, Utc};
     use pretty_assertions::assert_eq;
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use tempfile::tempdir;
 
     use super::{AgentRuntimeStatusService, StatusFailure};
-    use crate::domain::agent_runtime::{Compatibility, RunState};
+    use crate::domain::agent_runtime::{Compatibility, RunState, USAGE_LIMIT_REACHED};
     use crate::infrastructure::agent_runtime_process::tests::FakeCaller;
     use crate::infrastructure::agent_runtime_process::{Captured, RuntimeCallFailure};
 
@@ -480,7 +534,8 @@ mod tests {
             Ok(envelope(json!({"providers": []}))),
         ]);
 
-        let snapshot = AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible);
+        let snapshot =
+            AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible, None);
 
         assert_eq!(snapshot.runs.len(), 8);
         assert_eq!(snapshot.runs[0].state, RunState::Reserved);
@@ -499,7 +554,8 @@ mod tests {
             looked: std::path::PathBuf::from("/opt/runtime/bin/heartbeat"),
         })]);
 
-        let snapshot = AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible);
+        let snapshot =
+            AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible, None);
 
         assert!(snapshot.unavailable.is_some());
         assert!(snapshot.runs.is_empty());
@@ -516,6 +572,7 @@ mod tests {
                 found: 9,
                 supported: 1,
             },
+            None,
         );
 
         assert!(snapshot.unavailable.is_some());
@@ -533,7 +590,8 @@ mod tests {
             ],
         )))]);
 
-        let snapshot = AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible);
+        let snapshot =
+            AgentRuntimeStatusService.inspect(&caller, "p1", &Compatibility::Compatible, None);
 
         assert!(snapshot.unavailable.is_some());
         assert!(snapshot.runs.is_empty());
@@ -554,7 +612,7 @@ mod tests {
         ]);
 
         let snapshot = AgentRuntimeStatusService
-            .set_paused(&caller, "p1", true, &Compatibility::Compatible)
+            .set_paused(&caller, "p1", true, &Compatibility::Compatible, None)
             .expect("paused");
 
         assert!(snapshot.paused);
@@ -574,7 +632,7 @@ mod tests {
         ))]);
 
         let failure = AgentRuntimeStatusService
-            .set_paused(&caller, "p1", true, &Compatibility::Compatible)
+            .set_paused(&caller, "p1", true, &Compatibility::Compatible, None)
             .expect_err("refused");
 
         assert!(matches!(failure, StatusFailure::ProjectMismatch { .. }));
@@ -612,6 +670,211 @@ mod tests {
             .expect_err("refused");
 
         assert!(matches!(failure, StatusFailure::OffContract { .. }));
+    }
+
+    fn stamp(at: DateTime<Utc>) -> String {
+        at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    }
+
+    /// 끝난 실행 행 하나. 싣지 않는 값은 `Value::Null`로 준다.
+    fn ended(
+        run: &str,
+        provider: &str,
+        state: &str,
+        reason: Value,
+        finished_at: Value,
+        resets_at: Value,
+    ) -> Value {
+        let mut value = row(run, "p1", state);
+        let object = value.as_object_mut().expect("row");
+        object.insert("provider".to_owned(), json!(provider));
+        object.insert("reason".to_owned(), reason);
+        object.insert("finishedAt".to_owned(), finished_at);
+        object.insert("usageLimitResetsAt".to_owned(), resets_at);
+        value
+    }
+
+    fn queue(rows: Vec<Value>) -> FakeCaller {
+        FakeCaller::new(vec![
+            Ok(envelope(state("p1", false, rows))),
+            Ok(envelope(json!({"providers": []}))),
+        ])
+    }
+
+    #[test]
+    fn provider_holds_reach_the_queue_snapshot_and_stay_empty_without_one() {
+        let root = tempdir().expect("root");
+        let at = Utc::now();
+        let resets_at = stamp(at + Duration::hours(2));
+        let held = queue(vec![ended(
+            "run-1",
+            "claude",
+            "failed",
+            json!(USAGE_LIMIT_REACHED),
+            json!(stamp(at)),
+            json!(resets_at.clone()),
+        )]);
+
+        let snapshot = AgentRuntimeStatusService.inspect(
+            &held,
+            "p1",
+            &Compatibility::Compatible,
+            Some(root.path()),
+        );
+
+        assert_eq!(snapshot.provider_holds.len(), 1);
+        assert_eq!(snapshot.provider_holds[0].provider, "claude");
+        assert_eq!(snapshot.provider_holds[0].resume_at, resets_at);
+        assert!(snapshot.provider_holds[0].resume_at_known);
+
+        let quiet = tempdir().expect("quiet root");
+        let running = queue(vec![row("run-2", "p1", "running")]);
+
+        let snapshot = AgentRuntimeStatusService.inspect(
+            &running,
+            "p1",
+            &Compatibility::Compatible,
+            Some(quiet.path()),
+        );
+
+        assert!(snapshot.provider_holds.is_empty());
+    }
+
+    #[test]
+    fn provider_hold_records_nothing_for_rows_that_did_not_end_on_the_usage_limit() {
+        let root = tempdir().expect("root");
+        let finished_at = json!(stamp(Utc::now()));
+        let caller = queue(vec![
+            ended(
+                "run-1",
+                "claude",
+                "failed",
+                json!("provider_failed"),
+                finished_at.clone(),
+                Value::Null,
+            ),
+            ended(
+                "run-2",
+                "claude",
+                "cancelled",
+                Value::Null,
+                finished_at.clone(),
+                Value::Null,
+            ),
+            ended(
+                "run-3",
+                "claude",
+                "failed",
+                json!(USAGE_LIMIT_REACHED),
+                Value::Null,
+                Value::Null,
+            ),
+            // 사유 문구에 구분값이 섞여 있을 뿐 값이 같지는 않은 행이다.
+            ended(
+                "run-4",
+                "claude",
+                "failed",
+                json!("provider said usage_limit_reached"),
+                finished_at.clone(),
+                Value::Null,
+            ),
+            ended(
+                "run-5",
+                "claude",
+                "running",
+                json!(USAGE_LIMIT_REACHED),
+                finished_at,
+                Value::Null,
+            ),
+        ]);
+
+        let snapshot = AgentRuntimeStatusService.inspect(
+            &caller,
+            "p1",
+            &Compatibility::Compatible,
+            Some(root.path()),
+        );
+
+        assert!(snapshot.provider_holds.is_empty());
+        assert!(!root.path().join("provider-holds").exists());
+    }
+
+    #[test]
+    fn the_latest_usage_limit_row_of_each_provider_is_the_provider_hold_basis() {
+        let root = tempdir().expect("root");
+        let at = Utc::now();
+        let caller = queue(vec![
+            ended(
+                "run-1",
+                "claude",
+                "failed",
+                json!(USAGE_LIMIT_REACHED),
+                json!(stamp(at - Duration::minutes(10))),
+                json!(stamp(at + Duration::hours(1))),
+            ),
+            ended(
+                "run-2",
+                "claude",
+                "failed",
+                json!(USAGE_LIMIT_REACHED),
+                json!(stamp(at)),
+                json!(stamp(at + Duration::hours(4))),
+            ),
+            ended(
+                "run-3",
+                "codex",
+                "failed",
+                json!(USAGE_LIMIT_REACHED),
+                json!(stamp(at - Duration::minutes(5))),
+                json!(stamp(at + Duration::hours(2))),
+            ),
+        ]);
+
+        let snapshot = AgentRuntimeStatusService.inspect(
+            &caller,
+            "p1",
+            &Compatibility::Compatible,
+            Some(root.path()),
+        );
+
+        assert_eq!(
+            snapshot
+                .provider_holds
+                .iter()
+                .map(|hold| (hold.provider.as_str(), hold.resume_at.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("claude", stamp(at + Duration::hours(4)).as_str()),
+                ("codex", stamp(at + Duration::hours(2)).as_str()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unwritable_provider_hold_root_still_answers_the_run_list() {
+        let root = tempdir().expect("root");
+        // 루트 자리가 파일이면 기록 디렉터리를 만들 수 없다. 그래도 조회는 지금과 같이 성공한다.
+        let blocked = root.path().join("hold-root");
+        fs::write(&blocked, "not a directory").expect("파일");
+        let caller = queue(vec![ended(
+            "run-1",
+            "claude",
+            "failed",
+            json!(USAGE_LIMIT_REACHED),
+            json!(stamp(Utc::now())),
+            Value::Null,
+        )]);
+
+        let snapshot = AgentRuntimeStatusService.inspect(
+            &caller,
+            "p1",
+            &Compatibility::Compatible,
+            Some(&blocked),
+        );
+
+        assert!(snapshot.unavailable.is_none());
+        assert_eq!(snapshot.runs.len(), 1);
+        assert!(snapshot.provider_holds.is_empty());
     }
 }
 

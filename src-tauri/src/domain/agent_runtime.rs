@@ -671,6 +671,24 @@ pub enum RunState {
     Unrecognized,
 }
 
+impl RunState {
+    /// 더 진행하지 않는 상태인지. 계약이 정한 여덟 개 가운데 네 개가 끝난 상태다.
+    pub fn is_finished(self) -> bool {
+        matches!(
+            self,
+            RunState::Succeeded
+                | RunState::Failed
+                | RunState::Cancelled
+                | RunState::RecoveryRequired
+        )
+    }
+}
+
+/// 실행 환경이 계정 사용 한도 도달을 알리는 종료 사유 값.
+///
+/// 대조는 전체 일치이고 대소문자를 구분한다. 화면과 조건 검사 스크립트가 뒤이어 같은 이름을 쓴다.
+pub const USAGE_LIMIT_REACHED: &str = "usage_limit_reached";
+
 /// 실행 행 하나. 화면이 목록으로 보여 줄 값만 담는다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -696,13 +714,27 @@ pub struct RunSummary {
     /// 앱은 비어 있는 것을 다른 값으로 메우지 않는다.
     #[serde(default)]
     pub result_prefix: Option<String>,
+    /// 실행 환경이 알려 온 사용 한도 해제 예정 시각. 이 값을 싣지 않는 실행 행에서는 비어 있고,
+    /// 앱은 비어 있는 것을 다른 값으로 메우지 않는다.
+    #[serde(default)]
+    pub usage_limit_resets_at: Option<String>,
+}
+
+impl RunSummary {
+    /// 이 실행이 계정 사용 한도 도달로 끝났는지.
+    ///
+    /// 판정의 근거는 종료 사유 값 하나다. 실패 메시지 원문을 정규식이나 부분 문자열로 훑지 않는다.
+    /// 문구는 실행 환경이 언제든 바꿀 수 있고, 그때마다 판정이 흔들리면 배정이 엉뚱하게 멈춘다.
+    pub fn reached_usage_limit(&self) -> bool {
+        self.reason.as_deref() == Some(USAGE_LIMIT_REACHED)
+    }
 }
 
 #[cfg(test)]
 mod run_summary_tests {
     use serde_json::json;
 
-    use super::RunSummary;
+    use super::{RunState, RunSummary};
 
     fn run(finished_at: serde_json::Value) -> serde_json::Value {
         json!({
@@ -755,6 +787,58 @@ mod run_summary_tests {
             "RES-20260812T130244Z-394-20260812130244"
         );
         assert_eq!(legacy.result_prefix, None);
+    }
+
+    #[test]
+    fn the_usage_limit_reset_time_round_trips_and_stays_empty_for_rows_without_it() {
+        let mut carried = run(json!("2026-08-10T10:00:09Z"));
+        carried.as_object_mut().expect("row").insert(
+            "usageLimitResetsAt".to_owned(),
+            json!("2026-08-10T13:00:00Z"),
+        );
+        let carried: RunSummary = serde_json::from_value(carried).expect("row with reset time");
+        let silent: RunSummary =
+            serde_json::from_value(run(json!("2026-08-10T10:00:09Z"))).expect("row without it");
+
+        assert_eq!(
+            carried.usage_limit_resets_at.as_deref(),
+            Some("2026-08-10T13:00:00Z")
+        );
+        assert_eq!(
+            serde_json::to_value(carried).expect("serialize")["usageLimitResetsAt"],
+            "2026-08-10T13:00:00Z"
+        );
+        assert_eq!(silent.usage_limit_resets_at, None);
+    }
+
+    #[test]
+    fn only_the_exact_reason_value_counts_as_a_usage_limit_end() {
+        let judge = |reason: serde_json::Value| {
+            let mut row = run(json!("2026-08-10T10:00:09Z"));
+            row.as_object_mut().expect("row")["reason"] = reason;
+            serde_json::from_value::<RunSummary>(row)
+                .expect("row")
+                .reached_usage_limit()
+        };
+
+        assert!(judge(json!("usage_limit_reached")));
+        // 문구를 훑어 판정하지 않는다는 사실은 이 세 줄이 지킨다.
+        assert!(!judge(json!("Usage_Limit_Reached")));
+        assert!(!judge(json!("provider usage_limit_reached at 10:00")));
+        assert!(!judge(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn only_the_four_contract_states_are_finished_states() {
+        assert!(RunState::Succeeded.is_finished());
+        assert!(RunState::Failed.is_finished());
+        assert!(RunState::Cancelled.is_finished());
+        assert!(RunState::RecoveryRequired.is_finished());
+        assert!(!RunState::Reserved.is_finished());
+        assert!(!RunState::Queued.is_finished());
+        assert!(!RunState::Running.is_finished());
+        assert!(!RunState::Paused.is_finished());
+        assert!(!RunState::Unrecognized.is_finished());
     }
 }
 
@@ -869,6 +953,22 @@ pub struct QueueSnapshot {
     pub runs: Vec<RunSummary>,
     pub errors: Vec<serde_json::Value>,
     pub providers: Vec<serde_json::Value>,
+    /// 지금 사용 한도로 보류 중인 실행 도구들. 보류가 없으면 빈 목록이다.
+    pub provider_holds: Vec<ProviderHold>,
     /// 조회하지 못한 값이 있으면 그 사유. 있으면 화면은 상태를 모름으로 다룬다.
     pub unavailable: Option<String>,
+}
+
+/// 사용 한도로 지금 보류 중인 실행 도구 하나.
+///
+/// 보류의 단위는 실행 도구다. 한도는 계정과 실행 도구에 걸리므로 역할 이름이나 프로젝트 식별자로
+/// 갈리지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHold {
+    pub provider: String,
+    /// 다시 시작할 시각. `YYYY-MM-DDTHH:MM:SSZ` 표기의 UTC다.
+    pub resume_at: String,
+    /// 그 시각을 실행 환경에서 받았는지. 거짓이면 앱이 정한 대기 시간으로 계산한 값이다.
+    pub resume_at_known: bool,
 }
