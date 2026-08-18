@@ -5006,6 +5006,7 @@ work_group_id: GROUP-DECISION-001
 work_group_revision: 1
 updated_at: RFC3339
 due_at: YYYY-MM-DD # 선택
+solo_run: true # 선택
 ```
 
 동시에 수정하면 충돌할 수 있는 작업은 병렬로 진행하지 않습니다.
