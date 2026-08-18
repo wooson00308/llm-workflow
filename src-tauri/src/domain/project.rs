@@ -175,6 +175,13 @@ pub const OVERLAP: &str = "overlap";
 /// 이유가 그대로인 동안 같은 세션을 다시 시작하지 않으려고 후보에서 뺀다.
 pub const INTEGRATION_WAITING: &str = "integration-waiting";
 
+/// 단독 수행을 선언한 대표 작업 자신이 차례를 기다린다. 프로젝트에 다른 미만료 lease가 남아 있어
+/// 아직 조용한 기기가 아니다(SPEC-065 R2).
+pub const SOLO_RUN_WAIT: &str = "solo-run-wait";
+
+/// 단독 수행을 선언한 작업이 차례를 기다리는 동안이라 이 후보는 시작하지 않는다(SPEC-065 R3).
+pub const SOLO_RUN_ACTIVE: &str = "solo-run-active";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowSummary {

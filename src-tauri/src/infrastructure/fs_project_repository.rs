@@ -1866,6 +1866,7 @@ fn summary_from_manifest(
                 revision_requested_decisions: &workflow.revision_requested_decisions,
                 unsatisfied_dependencies: &workflow.unsatisfied_dependencies,
                 overlap_blocked: &workflow.overlap_blocked,
+                solo_run_tasks: &workflow.solo_run_tasks,
                 nondraft_spec_sources: &workflow.nondraft_spec_sources,
             })
             .collect();
@@ -1924,6 +1925,9 @@ struct PreparedWorkflow {
     unsatisfied_dependencies: HashSet<String>,
     /// 겹침 선언이 활성 lease와 충돌해 착수가 막힌 작업의 id(SPEC-032 R2).
     overlap_blocked: HashSet<String>,
+    /// 단독 수행 선언으로 읽히는 작업의 id(SPEC-065 R1). 선언 원문은 목록 payload에 실리지 않으므로
+    /// 선행·겹침과 같은 이유로 여기서 함께 낸다.
+    solo_run_tasks: HashSet<String>,
     /// `draft`가 아닌 기획서가 원천으로 참조하는 id(SPEC-035 R2). 기획서 훑기가 함께 낸다.
     nondraft_spec_sources: HashSet<String>,
 }
@@ -1958,6 +1962,11 @@ impl PreparedWorkflow {
             .collect();
         let unsatisfied_dependencies = unsatisfied_dependency_task_ids(&graph);
         let overlap_blocked = overlap_blocked_task_ids(&graph, lease_target_ids);
+        let solo_run_tasks = graph
+            .iter()
+            .filter(|(_, node)| node.solo_run.reads_as_solo())
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
         Self {
             root,
             items,
@@ -1968,6 +1977,7 @@ impl PreparedWorkflow {
             revision_requested_decisions,
             unsatisfied_dependencies,
             overlap_blocked,
+            solo_run_tasks,
             nondraft_spec_sources,
         }
     }
@@ -4078,6 +4088,49 @@ fn parse_scope_declaration(frontmatter: &str) -> ScopeDeclaration {
     ScopeDeclaration::Declared(tokens.into_iter().map(str::to_owned).collect())
 }
 
+/// 프론트매터의 단독 수행 선언 한 줄을 읽은 결과(SPEC-065 R1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SoloRunDeclaration {
+    /// 키가 없다. 선언하지 않은 것이다. 기존 작업 문서 전부가 여기 해당한다.
+    Absent,
+    /// 계약 형식의 참·거짓을 읽었다.
+    Declared(bool),
+    /// 키는 있는데 계약 형식이 아니다.
+    Malformed,
+}
+
+impl SoloRunDeclaration {
+    /// 단독 수행 선언으로 읽히는가. 읽을 수 없는 값은 단독으로 다룬다 — 판정 불가를 안전한 쪽으로
+    /// 기울이는 것은 [`parse_scope_declaration`]이 이미 쓰는 원칙과 같다.
+    fn reads_as_solo(&self) -> bool {
+        matches!(self, Self::Declared(true) | Self::Malformed)
+    }
+}
+
+/// `scope_files`와 같은 어법으로 `solo_run` 한 줄을 읽는다. 값이 목록이 아니라 참·거짓 하나라는
+/// 것만 다르다.
+///
+/// `true`가 선언이고, `false`와 키 부재가 선언하지 않은 것이다. 그 밖의 값은 모두 읽을 수 없는
+/// 선언이며 단독으로 다룬다 — 선언 줄이 둘 이상인 것, 값이 비어 있는 것, 따옴표로 감싼 것, 여러
+/// 줄로 펼친 것이 여기 들어간다. 조건 스크립트 두 본문이 같은 결론을 낸다.
+fn parse_solo_run_declaration(frontmatter: &str) -> SoloRunDeclaration {
+    let mut declarations = frontmatter
+        .lines()
+        .filter_map(|line| line.strip_prefix("solo_run:"));
+    let Some(value) = declarations.next() else {
+        return SoloRunDeclaration::Absent;
+    };
+    // 같은 키가 두 줄이면 YAML 중복 키이기도 하다.
+    if declarations.next().is_some() {
+        return SoloRunDeclaration::Malformed;
+    }
+    match value.trim() {
+        "true" => SoloRunDeclaration::Declared(true),
+        "false" => SoloRunDeclaration::Declared(false),
+        _ => SoloRunDeclaration::Malformed,
+    }
+}
+
 /// 판정에 필요한 값만 담은 작업 문서 하나. 한 번의 읽기에서 셋이 함께 나온다.
 struct TaskNode {
     status: String,
@@ -4085,6 +4138,7 @@ struct TaskNode {
     blocked_kind: Option<String>,
     dependencies: DependencyDeclaration,
     scope: ScopeDeclaration,
+    solo_run: SoloRunDeclaration,
 }
 
 /// 판정에 필요한 값만 담은 워크플로우의 작업 목록. 문서 id로 찾고 값은 상태와 두 선언이다.
@@ -4133,6 +4187,7 @@ fn read_task_documents(tasks_root: &Path) -> (Vec<WorkflowItemSummary>, HashMap<
             blocked_kind: yaml_text(metadata.as_ref(), "blocked_kind"),
             dependencies: parse_dependency_declaration(frontmatter),
             scope: parse_scope_declaration(frontmatter),
+            solo_run: parse_solo_run_declaration(frontmatter),
         });
         summaries.push(summary);
     }
@@ -4972,10 +5027,11 @@ mod tests {
     use super::{
         apply_latest_decision, latest_spec_decisions, lease_ids, markdown_excerpt,
         normalize_spec_status, overlap_blocked_task_ids, parse_scope_declaration,
-        read_all_revision_request_records, read_markdown_document, read_spec_decisions, slugify,
-        task_dependency_graph, task_revision_request_candidates, update_task_frontmatter,
-        validate_decision, validate_task_qa, walkthrough_preview, FileSystemProjectRepository,
-        ProjectError, ProjectSummary, ScopeDeclaration,
+        parse_solo_run_declaration, read_all_revision_request_records, read_markdown_document,
+        read_spec_decisions, slugify, task_dependency_graph, task_revision_request_candidates,
+        update_task_frontmatter, validate_decision, validate_task_qa, walkthrough_preview,
+        FileSystemProjectRepository, ProjectError, ProjectSummary, ScopeDeclaration,
+        SoloRunDeclaration,
     };
     use crate::domain::project::{
         CustomRuleRole, CustomRulesDraft, CustomRulesFileStatus, ManagedAssetStatus,
@@ -9224,6 +9280,56 @@ mod tests {
                 parse_scope_declaration(frontmatter),
                 expected,
                 "{frontmatter:?}의 판정이 다르다"
+            );
+        }
+    }
+
+    /// SPEC-065 완료 조건 1. 참과 거짓만 계약 형식이고, 그 밖의 값은 모두 읽을 수 없는 선언이라
+    /// 단독으로 다룬다. 부재와 형식 오류는 자격 판정에서 갈리지만 파서는 셋을 구분한다.
+    #[test]
+    fn reads_the_solo_run_declaration_by_the_contract_form() {
+        let cases = [
+            ("solo_run: true", SoloRunDeclaration::Declared(true)),
+            ("solo_run: false", SoloRunDeclaration::Declared(false)),
+            ("title: 선언 없음", SoloRunDeclaration::Absent),
+            (
+                "solo_run: true\nsolo_run: false",
+                SoloRunDeclaration::Malformed,
+            ),
+            ("solo_run:", SoloRunDeclaration::Malformed),
+            ("solo_run: ", SoloRunDeclaration::Malformed),
+            ("solo_run:\n  true", SoloRunDeclaration::Malformed),
+            ("solo_run: \"true\"", SoloRunDeclaration::Malformed),
+            ("solo_run: 'true'", SoloRunDeclaration::Malformed),
+            ("solo_run: True", SoloRunDeclaration::Malformed),
+            ("solo_run: yes", SoloRunDeclaration::Malformed),
+            ("solo_run: 1", SoloRunDeclaration::Malformed),
+        ];
+
+        for (frontmatter, expected) in cases {
+            assert_eq!(
+                parse_solo_run_declaration(frontmatter),
+                expected,
+                "{frontmatter:?}의 판정이 다르다"
+            );
+        }
+    }
+
+    /// 읽을 수 없는 선언은 단독으로, `false`와 부재는 선언하지 않은 것으로 읽힌다. 자격 판정이
+    /// 보는 것은 이 한 값이므로 파서의 세 상태가 여기서 둘로 접히는 자리를 고정한다.
+    #[test]
+    fn only_a_true_or_unreadable_declaration_reads_as_solo() {
+        for (frontmatter, solo) in [
+            ("solo_run: true", true),
+            ("solo_run: yes", true),
+            ("solo_run: true\nsolo_run: true", true),
+            ("solo_run: false", false),
+            ("title: 선언 없음", false),
+        ] {
+            assert_eq!(
+                parse_solo_run_declaration(frontmatter).reads_as_solo(),
+                solo,
+                "{frontmatter:?}의 판독이 다르다"
             );
         }
     }

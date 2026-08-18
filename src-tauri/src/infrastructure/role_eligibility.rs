@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use crate::domain::project::{
     PendingRoleWorkDetail, RoleWorkVerdict, WorkGroupStatus, WorkflowItemSummary, WorkflowItems,
     DECOMPOSED, DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, INTEGRATION_WAITING, LEASED, OVERLAP,
-    SPEC_EXISTS, SPEC_LEASED,
+    SOLO_RUN_ACTIVE, SOLO_RUN_WAIT, SPEC_EXISTS, SPEC_LEASED,
 };
 
 /// 워크플로우 하나의 판정 재료. 스크립트가 워크플로우 하나 안에서 아이디어↔기획서, 결정↔작업을
@@ -62,6 +62,11 @@ pub struct WorkflowInput<'a> {
     /// 겹침 선언이 활성 lease와 충돌해 착수가 막힌 작업의 id(SPEC-032 R2). 선행 선언과 같은
     /// 이유로 여기서 다시 판정하지 않는다 — lease 파일도 작업 문서도 이 모듈은 읽지 않는다.
     pub overlap_blocked: &'a HashSet<String>,
+    /// 단독 수행 선언으로 읽히는 작업의 id(SPEC-065 R1). 선언 원문이 아니라 판독 결과가 오는 것은
+    /// 선행·겹침과 같은 이유다 — 문서를 읽는 것은 `fs_project_repository`이고 판독 규칙도 거기
+    /// 한 벌이다. 이 집합의 원소가 곧 단독 후보인 것은 아니다. 단독 후보는 여기에 아래
+    /// [`solo_representative`]가 선점과 무관한 제외 조건을 곱해 정한다.
+    pub solo_run_tasks: &'a HashSet<String>,
     /// `draft`가 아닌 기획서가 원천으로 참조하는 id의 집합(SPEC-035 R2). 아이디어 id와 결정 id가
     /// 한 집합에 들어온다 — 두 판정이 각각 자기 id로만 조회하므로 섞이지 않는다.
     ///
@@ -117,13 +122,106 @@ pub fn pending_role_work(
         return PendingRoleWorkDetail::default();
     }
 
+    // 단독 점유는 워크플로우 하나가 아니라 프로젝트 하나의 상태다(SPEC-065 R3). 세 역할이 같은
+    // 상태를 보아야 하므로 역할 판정에 들어가기 전에 한 번만 정한다.
+    let solo = SoloGate::new(workflows, lease_ids, integration_waiting);
+
     PendingRoleWorkDetail {
-        planner: judge_workflows(workflows, |workflow| planner_verdict(workflow, lease_ids)),
-        architect: architect_workflows_verdict(workflows, lease_ids),
+        planner: judge_workflows(workflows, |workflow| {
+            planner_verdict(workflow, lease_ids, &solo)
+        }),
+        architect: architect_workflows_verdict(workflows, lease_ids, &solo),
         developer: judge_workflows(workflows, |workflow| {
-            developer_verdict(workflow, lease_ids, integration_waiting)
+            developer_verdict(workflow, lease_ids, integration_waiting, &solo)
         }),
     }
+}
+
+/// 단독 점유 상태에서 후보가 대상이 되기 직전 **마지막 자리**에 서는 검사(SPEC-065 R2·R3).
+///
+/// 지금 있는 제외 사유들보다 뒤에 있으므로, 이 검사가 없을 때 어떤 사유가 붙던 후보의 사유도
+/// 바뀌지 않는다. 단독 선언이 하나도 없는 프로젝트에서는 [`representative`](Self::representative)가
+/// `None`이라 검사 자체가 성립하지 않고, 판정 결과가 이 절이 생기기 전과 한 글자도 다르지 않다.
+struct SoloGate {
+    /// 단독 후보 집합의 대표 작업. 집합이 비어 있으면 `None`이고, 그때 이 게이트는 아무것도 하지
+    /// 않는다.
+    representative: Option<String>,
+    /// 대표 작업 자신을 뺀 미만료 lease가 프로젝트에 하나라도 있는가. 대표가 마지막 자리에
+    /// 도달했다면 자기를 잡은 lease는 이미 앞의 검사가 걸렀으므로, 이 값이 곧 "기기가 아직 조용하지
+    /// 않다"이다.
+    other_leases: bool,
+}
+
+impl SoloGate {
+    fn new(
+        workflows: &[WorkflowInput<'_>],
+        lease_ids: &HashSet<String>,
+        integration_waiting: &HashSet<String>,
+    ) -> Self {
+        let representative = solo_representative(workflows, integration_waiting);
+        let other_leases = representative
+            .as_deref()
+            .is_some_and(|representative| lease_ids.iter().any(|id| id != representative));
+        Self {
+            representative,
+            other_leases,
+        }
+    }
+
+    /// 대상으로 뽑으려는 후보를 통과시키거나 단독 사유로 제외한다. 단독 점유 상태에서 대상이 될 수
+    /// 있는 문서는 대표 작업 하나뿐이므로, 단독 작업이 여럿 대기해도 한 번에 하나만 시작한다.
+    fn select(&self, verdict: &mut RoleWorkVerdict, id: &str, kind: Option<&str>) {
+        match self.representative.as_deref() {
+            Some(representative) if representative != id => {
+                verdict.exclude(id, SOLO_RUN_ACTIVE);
+                return;
+            }
+            Some(_) if self.other_leases => {
+                verdict.exclude(id, SOLO_RUN_WAIT);
+                return;
+            }
+            _ => {}
+        }
+        match kind {
+            Some(kind) => verdict.select_kind(id, kind),
+            None => verdict.select(id),
+        }
+    }
+}
+
+/// 단독 후보 집합의 대표 작업(SPEC-065 R3). 판정 차례가 가장 앞선 원소이고, 차례는 판정이 이미
+/// 쓰는 것과 같다 — 워크플로우 디렉터리 이름 오름차순이고 그 안에서는 파일 이름 오름차순이다.
+///
+/// 집합의 조건은 선점과 무관한 개발자 제외 조건 **전부**다. 자기를 잡은 lease와 파일 겹침은 조건이
+/// 아니다. 임의의 선택이 아니라 교착을 막기 위한 것이다: 선행이 미충족인 단독 작업이나 아직
+/// `preparing`인 그룹에 속한 단독 작업이 집합에 들면, 그 작업은 시작할 수 없는데 게이트가 그
+/// 선행 작업과 아키텍트까지 막아 선행이 영원히 끝나지 않는다. 반대로 겹침과 자기 lease는 시간이
+/// 지나면 반드시 풀리므로 뺄 필요가 없다.
+///
+/// 조건을 [`developer_verdict`]와 같은 함수로 판정하는 것은 그 "전부"가 두 벌이 되지 않게 하기
+/// 위해서다.
+fn solo_representative(
+    workflows: &[WorkflowInput<'_>],
+    integration_waiting: &HashSet<String>,
+) -> Option<String> {
+    let mut ordered: Vec<&WorkflowInput<'_>> = workflows.iter().collect();
+    ordered.sort_by(|left, right| left.directory.cmp(right.directory));
+    for workflow in ordered {
+        for task in by_file_name(&workflow.items.tasks) {
+            if !workflow.solo_run_tasks.contains(&task.id)
+                || !is_developer_candidate(task, workflow)
+                || workflow.unsatisfied_dependencies.contains(&task.id)
+                || integration_waiting.contains(&task.id)
+            {
+                continue;
+            }
+            let (source_approved, group_available) = source_and_group(task, workflow);
+            if source_approved && group_available {
+                return Some(task.id.clone());
+            }
+        }
+    }
+    None
 }
 
 /// 워크플로우를 디렉터리 이름 순으로 모두 판정한다. 첫 대상은 역할 계약 순서대로 보존하고,
@@ -171,7 +269,11 @@ fn by_file_name(items: &[WorkflowItemSummary]) -> Vec<&WorkflowItemSummary> {
 ///
 /// 제외 사유를 보는 차례는 스크립트의 두 검사 차례 그대로다 — 참조 여부를 먼저 보고 선점을 나중에
 /// 본다. 두 조건이 함께 성립하는 후보에서 어느 사유가 남는지가 그 차례로 갈린다.
-fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
+fn planner_verdict(
+    workflow: &WorkflowInput<'_>,
+    lease_ids: &HashSet<String>,
+    solo: &SoloGate,
+) -> RoleWorkVerdict {
     let mut verdict = RoleWorkVerdict::default();
     for idea in by_file_name(&workflow.items.ideas) {
         if workflow.nondraft_spec_sources.contains(&idea.id) {
@@ -182,7 +284,7 @@ fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) ->
             verdict.exclude(&idea.id, LEASED);
             continue;
         }
-        verdict.select(&idea.id);
+        solo.select(&mut verdict, &idea.id, None);
     }
     for decision_id in workflow.revision_requested_decisions {
         if workflow.nondraft_spec_sources.contains(decision_id) {
@@ -193,7 +295,7 @@ fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) ->
             verdict.exclude(decision_id, LEASED);
             continue;
         }
-        verdict.select(decision_id);
+        solo.select(&mut verdict, decision_id, None);
     }
     verdict
 }
@@ -208,7 +310,11 @@ fn planner_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) ->
 /// must be `approved`"가 그것을 요구한다.
 ///
 /// 분해 여부를 먼저 보고 기획서 선점을 나중에 보는 것이 스크립트의 차례다.
-fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) -> RoleWorkVerdict {
+fn architect_verdict(
+    workflow: &WorkflowInput<'_>,
+    lease_ids: &HashSet<String>,
+    solo: &SoloGate,
+) -> RoleWorkVerdict {
     let mut verdict = RoleWorkVerdict::default();
     for (decision_id, spec_id) in workflow.approved_decisions {
         let decomposed = workflow
@@ -231,7 +337,7 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
             verdict.exclude(decision_id, SPEC_LEASED);
             continue;
         }
-        verdict.select_kind(decision_id, SPEC_APPROVAL_KIND);
+        solo.select(&mut verdict, decision_id, Some(SPEC_APPROVAL_KIND));
     }
     verdict
 }
@@ -242,6 +348,7 @@ fn architect_verdict(workflow: &WorkflowInput<'_>, lease_ids: &HashSet<String>) 
 fn architect_workflows_verdict(
     workflows: &[WorkflowInput<'_>],
     lease_ids: &HashSet<String>,
+    solo: &SoloGate,
 ) -> RoleWorkVerdict {
     let mut group_revisions: Vec<(&str, &GroupQaRevisionCandidate)> = workflows
         .iter()
@@ -265,7 +372,7 @@ fn architect_workflows_verdict(
             verdict.exclude(&request.id, LEASED);
             continue;
         }
-        verdict.select_kind(&request.id, GROUP_QA_REVISION_KIND);
+        solo.select(&mut verdict, &request.id, Some(GROUP_QA_REVISION_KIND));
     }
 
     let mut requests: Vec<(&str, &TaskRevisionRequestCandidate)> = workflows
@@ -296,7 +403,7 @@ fn architect_workflows_verdict(
             verdict.exclude(&request.id, LEASED);
             continue;
         }
-        verdict.select_kind(&request.id, TASK_REVISION_REQUEST_KIND);
+        solo.select(&mut verdict, &request.id, Some(TASK_REVISION_REQUEST_KIND));
     }
 
     let direct_corrections = judge_workflows(workflows, |workflow| {
@@ -312,7 +419,7 @@ fn architect_workflows_verdict(
                 direct.exclude(&task.id, LEASED);
                 continue;
             }
-            direct.select_kind(&task.id, BLOCKED_TASK_KIND);
+            solo.select(&mut direct, &task.id, Some(BLOCKED_TASK_KIND));
         }
         direct
     });
@@ -341,7 +448,7 @@ fn architect_workflows_verdict(
                 preparing.exclude(&group.id, LEASED);
                 continue;
             }
-            preparing.select_kind(&group.id, WORK_GROUP_KIND);
+            solo.select(&mut preparing, &group.id, Some(WORK_GROUP_KIND));
         }
         preparing
     });
@@ -351,7 +458,9 @@ fn architect_workflows_verdict(
         verdict.target_kind = preparing_groups.target_kind;
     }
 
-    let approvals = judge_workflows(workflows, |workflow| architect_verdict(workflow, lease_ids));
+    let approvals = judge_workflows(workflows, |workflow| {
+        architect_verdict(workflow, lease_ids, solo)
+    });
     verdict.candidates.extend(approvals.candidates);
     if verdict.target.is_none() {
         verdict.target = approvals.target;
@@ -390,13 +499,11 @@ fn developer_verdict(
     workflow: &WorkflowInput<'_>,
     lease_ids: &HashSet<String>,
     integration_waiting: &HashSet<String>,
+    solo: &SoloGate,
 ) -> RoleWorkVerdict {
     let mut verdict = RoleWorkVerdict::default();
     for task in by_file_name(&workflow.items.tasks) {
-        if task.status != "todo" && task.status != "in_progress" && task.status != "blocked" {
-            continue;
-        }
-        if task.status == "blocked" && workflow.definition_error_tasks.contains(&task.id) {
+        if !is_developer_candidate(task, workflow) {
             continue;
         }
         if lease_ids.contains(&task.id) {
@@ -415,70 +522,89 @@ fn developer_verdict(
             verdict.exclude(&task.id, INTEGRATION_WAITING);
             continue;
         }
-        let referenced_group = task.work_group_id.as_deref().and_then(|group_id| {
-            workflow
-                .items
-                .work_groups
-                .iter()
-                .find(|group| group.id == group_id)
-        });
-        let migrated_legacy_source = referenced_group.is_some_and(|group| {
-            let task_decision_matches = task.source_decision_id.as_deref().is_none_or(|source| {
-                source.starts_with("LEGACY-") && source == group.source_decision_id
-            });
-            let task_spec_matches = task
-                .source_spec_id
-                .as_deref()
-                .is_none_or(|source| source == group.source_spec_id);
-            let task_revision_available = task
-                .work_group_revision
-                .is_some_and(|revision| revision > 0 && revision <= group.revision);
-            group.status == WorkGroupStatus::Active
-                && group.id.starts_with("GROUP-")
-                && group.id.ends_with("-LEGACY")
-                && group.source_decision_id.starts_with("LEGACY-")
-                && !group.source_spec_id.is_empty()
-                && task_decision_matches
-                && task_spec_matches
-                && task_revision_available
-        });
-        let source_approved = task.source_decision_id.as_deref().is_some_and(|source| {
-            workflow
-                .approved_decisions
-                .iter()
-                .any(|(decision_id, spec_id)| {
-                    decision_id == source
-                        && task.source_spec_id.as_deref() == Some(spec_id.as_str())
-                })
-        }) || migrated_legacy_source;
+        let (source_approved, group_available) = source_and_group(task, workflow);
         if !source_approved {
             verdict.exclude(&task.id, SOURCE_DECISION_NOT_APPROVED);
             continue;
         }
-        let group_available = task
-            .work_group_id
-            .as_deref()
-            .zip(task.work_group_revision)
-            .is_some_and(|(group_id, task_revision)| {
-                task_revision > 0
-                    && referenced_group.is_some_and(|group| {
-                        let native_origin_matches = task.source_spec_id.as_deref()
-                            == Some(group.source_spec_id.as_str())
-                            && task.source_decision_id.as_deref()
-                                == Some(group.source_decision_id.as_str());
-                        group.id == group_id
-                            && group.status == WorkGroupStatus::Active
-                            && group.revision >= task_revision
-                            && (native_origin_matches || migrated_legacy_source)
-                    })
-            });
         if !group_available {
             verdict.exclude(&task.id, WORK_GROUP_UNAVAILABLE);
             continue;
         }
-        verdict.select(&task.id);
+        solo.select(&mut verdict, &task.id, None);
     }
     verdict
+}
+
+/// 개발자 후보 상태인가. `todo`, `in_progress`, 그리고 `definition_error`가 아닌 `blocked`다.
+/// 후보가 아닌 작업은 목록에도 오르지 않으므로 이 판정에는 낼 제외 사유가 없다.
+fn is_developer_candidate(task: &WorkflowItemSummary, workflow: &WorkflowInput<'_>) -> bool {
+    match task.status.as_str() {
+        "todo" | "in_progress" => true,
+        "blocked" => !workflow.definition_error_tasks.contains(&task.id),
+        _ => false,
+    }
+}
+
+/// 후보 작업 하나의 원천 결정과 작업 그룹 판정을 함께 낸다 — `(원천이 승인된 최신 결정인가, 소속
+/// 그룹이 쓸 수 있는가)`다. 마이그레이션 예외가 두 판정에 함께 걸리므로 한 자리에서 낸다.
+///
+/// [`developer_verdict`]와 [`solo_representative`]가 같은 함수를 부른다. 단독 후보 집합의 조건이
+/// "선점과 무관한 제외 조건 전부"라서, 본문이 갈라지면 그 전부가 두 벌이 되기 때문이다.
+fn source_and_group(task: &WorkflowItemSummary, workflow: &WorkflowInput<'_>) -> (bool, bool) {
+    let referenced_group = task.work_group_id.as_deref().and_then(|group_id| {
+        workflow
+            .items
+            .work_groups
+            .iter()
+            .find(|group| group.id == group_id)
+    });
+    let migrated_legacy_source = referenced_group.is_some_and(|group| {
+        let task_decision_matches = task.source_decision_id.as_deref().is_none_or(|source| {
+            source.starts_with("LEGACY-") && source == group.source_decision_id
+        });
+        let task_spec_matches = task
+            .source_spec_id
+            .as_deref()
+            .is_none_or(|source| source == group.source_spec_id);
+        let task_revision_available = task
+            .work_group_revision
+            .is_some_and(|revision| revision > 0 && revision <= group.revision);
+        group.status == WorkGroupStatus::Active
+            && group.id.starts_with("GROUP-")
+            && group.id.ends_with("-LEGACY")
+            && group.source_decision_id.starts_with("LEGACY-")
+            && !group.source_spec_id.is_empty()
+            && task_decision_matches
+            && task_spec_matches
+            && task_revision_available
+    });
+    let source_approved = task.source_decision_id.as_deref().is_some_and(|source| {
+        workflow
+            .approved_decisions
+            .iter()
+            .any(|(decision_id, spec_id)| {
+                decision_id == source && task.source_spec_id.as_deref() == Some(spec_id.as_str())
+            })
+    }) || migrated_legacy_source;
+    let group_available = task
+        .work_group_id
+        .as_deref()
+        .zip(task.work_group_revision)
+        .is_some_and(|(group_id, task_revision)| {
+            task_revision > 0
+                && referenced_group.is_some_and(|group| {
+                    let native_origin_matches = task.source_spec_id.as_deref()
+                        == Some(group.source_spec_id.as_str())
+                        && task.source_decision_id.as_deref()
+                            == Some(group.source_decision_id.as_str());
+                    group.id == group_id
+                        && group.status == WorkGroupStatus::Active
+                        && group.revision >= task_revision
+                        && (native_origin_matches || migrated_legacy_source)
+                })
+        });
+    (source_approved, group_available)
 }
 
 #[cfg(test)]
@@ -3168,6 +3294,7 @@ mod tests {
         let overlapped = HashSet::new();
         let nondraft_sources = HashSet::new();
         let definition_errors = HashSet::new();
+        let solo_run_tasks = HashSet::new();
         let workflows = [super::WorkflowInput {
             directory: "wf-demo",
             items: &items,
@@ -3178,6 +3305,7 @@ mod tests {
             revision_requested_decisions: &[],
             unsatisfied_dependencies: &unsatisfied,
             overlap_blocked: &overlapped,
+            solo_run_tasks: &solo_run_tasks,
             nondraft_spec_sources: &nondraft_sources,
         }];
         let mut leases = HashSet::new();
@@ -3197,5 +3325,205 @@ mod tests {
         let open =
             super::pending_role_work(false, &HashSet::new(), &HashSet::new(), &workflows).architect;
         assert_eq!(open.target.as_deref(), Some("DECISION-001"));
+    }
+
+    /// 단독 수행 선언을 가진 작업. `scope`와 `solo`는 각각 `scope_files:`와 `solo_run:` 뒤에 그대로
+    /// 놓이는 원문이라 값의 모양을 바꾸는 시나리오도 같은 헬퍼가 쓴다.
+    ///
+    /// 겹침 선언을 함께 적는 것은 단독 검사가 후보의 **마지막 자리**에 있기 때문이다. 선언이 없는
+    /// 작업은 활성 lease가 하나만 있어도 겹침으로 먼저 빠져 단독 사유까지 오지 못한다.
+    fn write_task_with_solo_run(
+        workflow_root: &Path,
+        id: &str,
+        status: &str,
+        scope: &str,
+        solo: &str,
+    ) {
+        ensure_default_work_group(workflow_root);
+        ensure_default_approval(workflow_root);
+        fs::write(
+            workflow_root.join(format!("tasks/{id}.md")),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: {status}\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-DEFAULT\nwork_group_id: GROUP-DEFAULT\nwork_group_revision: 1\nscope_files: {scope}\nsolo_run: {solo}\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+        )
+        .expect("write task with solo run");
+    }
+
+    /// SPEC-065 수용 기준 1. 단독 작업은 다른 대상을 잡은 lease가 살아 있는 동안 기다리고, 그 lease가
+    /// 만료되면 그대로 대상이 된다. 기다림의 사유는 겹침이나 선점이 아니라 `solo-run-wait`다.
+    #[test]
+    fn a_solo_task_waits_for_the_last_lease_and_then_becomes_the_target() {
+        let (root, workflow_root) = project();
+        write_task_with_solo_run(&workflow_root, "TASK-001", "todo", "[src/a.rs]", "true");
+        write_lease(root.path(), "DECISION-OTHER", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec!["solo-run-wait TASK-001"]
+        );
+
+        write_lease(root.path(), "DECISION-OTHER", &past());
+
+        let reopened = detail_matching_condition_script(root.path());
+
+        assert_eq!(reopened.developer.target.as_deref(), Some("TASK-001"));
+    }
+
+    /// SPEC-065 수용 기준 2. 단독 작업이 도는 동안에는 이 프로젝트에서 어떤 역할도 새 세션을 시작하지
+    /// 않는다. 아이디어와 승인된 결정과 다른 작업이 모두 같은 사유로 제외된다.
+    #[test]
+    fn nothing_else_starts_while_the_solo_task_holds_its_lease() {
+        let (root, workflow_root) = project();
+        write_task_with_solo_run(&workflow_root, "TASK-001", "todo", "[src/a.rs]", "true");
+        write_task_with_scope(&workflow_root, "TASK-002", "todo", "[src/b.rs]");
+        write_idea(&workflow_root, "IDEA-001");
+        write_decision(
+            &workflow_root,
+            "DECISION-002",
+            "SPEC-002",
+            "approved",
+            "2026-08-02T00:00:00Z",
+        );
+        write_lease(root.path(), "TASK-001", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.planner.target, None);
+        assert_eq!(
+            candidate_lines(&detail.planner),
+            vec!["solo-run-active IDEA-001"]
+        );
+        assert_eq!(detail.architect.target, None);
+        assert_eq!(
+            candidate_lines(&detail.architect),
+            vec![
+                "solo-run-active DECISION-002",
+                "decomposed DECISION-DEFAULT"
+            ]
+        );
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec!["leased TASK-001", "solo-run-active TASK-002"]
+        );
+    }
+
+    /// SPEC-065 수용 기준 4. 참도 거짓도 아닌 값은 읽을 수 없는 선언이라 단독으로 다룬다. 같은
+    /// 픽스처에서 `false`를 쓴 작업과 키가 없는 작업의 판정은 한 글자도 달라지지 않는다.
+    #[test]
+    fn an_unreadable_solo_value_is_treated_as_solo_and_the_others_are_untouched() {
+        let (root, workflow_root) = project();
+        write_task_with_solo_run(&workflow_root, "TASK-001", "todo", "[src/a.rs]", "yes");
+        write_task_with_solo_run(&workflow_root, "TASK-002", "todo", "[src/b.rs]", "false");
+        write_task_with_scope(&workflow_root, "TASK-003", "todo", "[src/c.rs]");
+        write_lease(root.path(), "DECISION-OTHER", &future());
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec![
+                "solo-run-wait TASK-001",
+                "solo-run-active TASK-002",
+                "solo-run-active TASK-003",
+            ]
+        );
+    }
+
+    /// 단독 작업이 여럿 기다려도 한 번에 하나만 시작한다. 대표는 판정 차례가 앞선 쪽이다.
+    #[test]
+    fn only_one_solo_task_starts_when_two_are_waiting() {
+        let (root, workflow_root) = project();
+        write_task_with_solo_run(&workflow_root, "TASK-001", "todo", "[src/a.rs]", "true");
+        write_task_with_solo_run(&workflow_root, "TASK-002", "todo", "[src/b.rs]", "true");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target.as_deref(), Some("TASK-001"));
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec!["eligible TASK-001", "solo-run-active TASK-002"]
+        );
+    }
+
+    /// 시작할 수 없는 단독 작업은 단독 점유를 만들지 않는다. 만들면 그 작업이 기다리는 선행과 그룹
+    /// 준비까지 함께 막혀 교착이 된다 — 그래서 선점과 무관한 제외 조건은 후보 집합의 조건이다.
+    #[test]
+    fn a_solo_task_that_cannot_start_locks_nothing() {
+        let (root, workflow_root) = project();
+        write_task_with_solo_run(&workflow_root, "TASK-001", "todo", "[src/a.rs]", "true");
+        let blocked = workflow_root.join("tasks/TASK-001.md");
+        let contents = fs::read_to_string(&blocked).expect("solo task");
+        fs::write(
+            &blocked,
+            contents.replace(
+                "scope_files:",
+                "depends_on: [TASK-MISSING]
+scope_files:",
+            ),
+        )
+        .expect("unsatisfied predecessor");
+        write_task_with_scope(&workflow_root, "TASK-002", "todo", "[src/b.rs]");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.developer.target.as_deref(), Some("TASK-002"));
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec!["dependencies-unsatisfied TASK-001", "eligible TASK-002"]
+        );
+    }
+
+    /// 소속 그룹이 아직 `preparing`인 단독 작업도 마찬가지다. 여기서 점유가 성립하면 그룹을 활성으로
+    /// 옮길 아키텍트까지 막혀 그 그룹이 영원히 `active`가 되지 못한다.
+    #[test]
+    fn a_solo_task_in_a_preparing_group_locks_nothing() {
+        let (root, workflow_root) = project();
+        write_work_group(
+            &workflow_root,
+            "GROUP-002",
+            "preparing",
+            1,
+            "DECISION-002",
+            None,
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-002",
+            "SPEC-001",
+            "approved",
+            "2026-08-02T00:00:00Z",
+        );
+        write_task_with_group_source(
+            &workflow_root,
+            "TASK-001",
+            "todo",
+            "GROUP-002",
+            1,
+            Some("DECISION-002"),
+        );
+        let solo = workflow_root.join("tasks/TASK-001.md");
+        let contents = fs::read_to_string(&solo).expect("solo task");
+        fs::write(
+            &solo,
+            contents.replace(
+                "updated_at:",
+                "solo_run: true
+updated_at:",
+            ),
+        )
+        .expect("solo declaration");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-002"));
+        assert_eq!(detail.developer.target, None);
+        assert_eq!(
+            candidate_lines(&detail.developer),
+            vec!["work-group-unavailable TASK-001"]
+        );
     }
 }

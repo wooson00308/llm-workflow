@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 21;
+const CONDITION_SCRIPT_VERSION: u32 = 22;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 21;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 21
+# condition_script_version: 22
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -40,6 +40,18 @@ machine_target_kind=""
 machine_candidates=""
 leases=".workflow/.runtime/leases"
 isolation=".workflow/.runtime/isolation"
+# lease 훑기는 한 번의 판정에서 한 번만 돈다. 단독 점유 훑기와 개발자 분기가 모두 부르는데, 두 번
+# 돌면 판정 순간이 둘로 갈려 같은 실행 안에서 만료 판정이 어긋난다.
+leases_scanned=0
+active_leases=""
+active_count=0
+# 단독 점유 상태(SPEC-065 R2·R3). 대표 작업이 비어 있으면 판정은 이 절이 생기기 전과 완전히 같다.
+solo_representative=""
+solo_other_leases=0
+solo_candidates=""
+# 개발자 후보 훑기의 모드. verdict는 개발자 분기의 판정이고, solo는 선점과 무관한 조건만 보아
+# 단독 후보를 모으는 훑기다.
+pass_mode=verdict
 # 공유 기준 조회는 통합 대기 기록을 가진 후보를 처음 만났을 때 한 번만 돈다. 그때까지 이 넷은
 # "아직 조회하지 않았다"를 뜻한다.
 shared_scanned=0
@@ -119,6 +131,19 @@ note_candidate() { # $1=제외 사유 코드 $2=후보 id
 
 # 대상으로 고른 후보. 후보 줄과 대상 줄을 함께 내어, 목록만 읽어도 대상이 어디서 나왔는지 보인다.
 note_target() { # $1=대상 id $2=대상 종류(없으면 빈 값)
+  # 단독 점유 상태의 마지막 검사(SPEC-065 R2·R3). 세 역할의 후보가 모두 이 함수를 지나므로 검사가
+  # 여기 한 자리에 있고, 지금 있는 제외 사유들보다 **뒤**에 있으므로 이 절이 없을 때 사유가 붙던
+  # 후보는 그 사유를 그대로 받는다. 대표 작업이 비어 있으면 아무 일도 하지 않는다.
+  if [ -n "$solo_representative" ]; then
+    if [ "$1" != "$solo_representative" ]; then
+      note_candidate solo-run-active "$1"
+      return 0
+    fi
+    if [ "$solo_other_leases" -gt 0 ]; then
+      note_candidate solo-run-wait "$1"
+      return 0
+    fi
+  fi
   if [ "$machine_output" -eq 1 ]; then
     note_candidate eligible "$1"
     [ -n "$machine_target" ] || machine_target=$1
@@ -216,6 +241,20 @@ scope_of() { # $1=선언 줄 수 $2=첫 선언 줄의 값
     out="$out $trimmed"
   done
   parsed=${out# }
+}
+
+# 프론트매터의 단독 수행 선언 한 줄을 읽는다. 0이면 단독 선언으로 읽히는 것이고 1이면 선언하지
+# 않은 것이다. `true`가 선언이고 키가 없는 것과 `false`가 선언하지 않은 것이며, 그 밖의 값은 모두
+# 읽을 수 없는 선언이라 단독으로 다룬다 — 선언 줄이 둘 이상인 것, 빈 값, 따옴표로 감싼 것, 여러
+# 줄로 펼친 것이 여기 들어간다. 판정 불가를 안전한 쪽으로 기울이는 것은 scope_of와 같은 원칙이다.
+solo_run_of() { # $1=선언 줄 수 $2=첫 선언 줄의 값
+  [ "$1" -eq 0 ] && return 1
+  [ "$1" -eq 1 ] || return 0
+  case "$2" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # 다른 문서를 잡은 미만료 lease가 이 작업의 착수를 막는가. 원래 본문은 후보마다 lease 디렉터리를
@@ -693,6 +732,8 @@ scan_architect_decisions() { # $1=워크플로우 경로
 # 읽는 규칙과 만료 판정은 lease_blocks와 같은 것을 쓴다. 읽지 못한 파일은 표기를 얻지 못해
 # 미만료로 세어지지 않는다.
 scan_leases() {
+  [ "$leases_scanned" -eq 0 ] || return 0
+  leases_scanned=1
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   active_leases="$nl"
   active_count=0
@@ -720,14 +761,16 @@ lease_active() { # $1=대상 id
 # 프로세스였고, 문서가 늘수록 데몬의 한도에 닿았다(SPEC-041). 읽는 규칙은 원래 본문의 grep·sed
 # 그대로이므로 판정은 바뀌지 않는다.
 #
-# 레코드의 첫 줄은 M과 네 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는 것들이다.
-# 네 자리는 차례로
+# 레코드의 첫 줄은 M과 다섯 자리, 공백, 그리고 이 문서가 담은 id 값 중 선행 이름이 될 수 있는
+# 것들이다. 다섯 자리는 차례로
 #   후보 여부  — ^status: (todo|in_progress)가 있거나, definition_error가 아닌 blocked인가
 #   충족 여부  — ^status: verified가 파일 아무 줄에나 있는가
 #   선행 줄 수 — 0·1·2 (2는 두 줄 이상)
 #   겹침 줄 수 — 0·1·2
+#   단독 줄 수 — 0·1·2
 # 다. 뒤따르는 줄은 있다고 적힌 것만 온다: 후보이면 첫 id·work_group_id·work_group_revision·
-# source_decision_id·source_spec_id 값, 선행 줄 수가 1이면 그 값, 겹침 줄 수가 1이면 그 값이다.
+# source_decision_id·source_spec_id 값, 선행 줄 수가 1이면 그 값, 겹침 줄 수가 1이면 그 값,
+# 단독 줄 수가 1이면 그 값이다.
 # 네 metadata 값은 `0`(없음) 또는 `1`+값으로 실어 POSIX read가 빈 tab 필드를 접어도 자리가 바뀌지
 # 않게 한다. 값은 모두 한 줄에서 읽은 것이라 개행을 담을 수 없으므로 한 줄에 담긴다.
 #
@@ -752,13 +795,14 @@ scan_tasks() { # $1=워크플로우 경로
     function emit(  i, line, cand) {
       if (!started) return
       cand = ordinary || (blocked && !definition_error)
-      line = "M" cand sat depn scopen " "
+      line = "M" cand sat depn scopen solon " "
       for (i = 1; i <= n_ids; i++) line = line id_list[i] " "
       print line
       if (cand) print first_id "\t" token(work_group) "\t" token(work_group_revision) \
         "\t" token(source_decision) "\t" token(source_spec)
       if (depn == 1) print dep_value
       if (scopen == 1) print scope_value
+      if (solon == 1) print solo_value
     }
     FILENAME != prev {
       emit()
@@ -766,11 +810,11 @@ scan_tasks() { # $1=워크플로우 경로
       started = 1
       files = files + 1
       ordinary = 0; blocked = 0; definition_error = 0
-      sat = 0; depn = 0; scopen = 0
+      sat = 0; depn = 0; scopen = 0; solon = 0
       got_id = 0; first_id = ""; work_group = ""; work_group_revision = ""
       source_decision = ""; source_spec = ""; got_work_group = 0; got_work_group_revision = 0
       got_source_decision = 0; got_source_spec = 0
-      dep_value = ""; scope_value = ""; n_ids = 0
+      dep_value = ""; scope_value = ""; solo_value = ""; n_ids = 0
     }
     {
       if (index($0, "id:") == 1) {
@@ -812,10 +856,269 @@ scan_tasks() { # $1=워크플로우 경로
       if (index($0, "scope_files:") == 1) {
         if (scopen == 0) { scopen = 1; scope_value = trim(substr($0, 13)) } else scopen = 2
       }
+      if (index($0, "solo_run:") == 1) {
+        if (solon == 0) { solon = 1; solo_value = trim(substr($0, 10)) } else solon = 2
+      }
     }
     END { emit() }
   ' "$@"
 }
+
+# 워크플로우 하나의 개발자 후보를 훑는다. $pass_mode가 verdict이면 개발자 분기의 판정을 그대로
+# 내고, solo이면 선점과 무관한 제외 조건만 보아 단독 후보를 $solo_candidates에 모은다.
+#
+# 두 모드가 한 본문을 쓰는 것은 SPEC-065 C2가 단독 후보의 조건을 "지금 개발자 판정이 보는 제외
+# 조건 중 선점과 무관한 것 **전부**"로 정하기 때문이다. 본문이 갈라지면 그 "전부"가 두 벌이 되고,
+# 두 벌은 반드시 어긋난다. 모드가 가르는 것은 셋뿐이다 — solo는 자기 lease와 파일 겹침을 보지
+# 않고(그 둘은 lease에 딸린 사실이라 시간이 지나면 반드시 풀린다), 단독 선언이 있는 작업만 보며,
+# 제외 사유를 내지 않는다(그 훑기는 어느 역할의 답도 아니다).
+developer_pass() { # $1=워크플로우 경로
+  wf=$1
+    active_group_rows="$nl"
+    groups=$(scan_work_groups "$wf")
+    while IFS='	' read -r gid status revision source source_spec source_qa; do
+      [ "$status" = active ] || continue
+      case "$revision" in ''|*[!0-9]*) continue ;; esac
+      [ "$revision" -gt 0 ] || continue
+      active_group_rows="$active_group_rows$gid	$revision	$source	$source_spec$nl"
+    done <<DEVELOPER_GROUP_ROWS
+$groups
+DEVELOPER_GROUP_ROWS
+    # Each row is the latest approved decision id and its specification. An id alone is not enough:
+    # a task cannot relabel approval A as belonging to a different specification.
+    approved_task_sources="$nl"
+    decision_rows=$(scan_architect_decisions "$wf")
+    while IFS='	' read -r kind first second third fourth; do
+      [ "$kind" = A ] || continue
+      [ -n "$first" ] || continue
+      approved_task_sources="$approved_task_sources$first	$second$nl"
+    done <<DEVELOPER_DECISION_ROWS
+$decision_rows
+DEVELOPER_DECISION_ROWS
+    scanned=$(scan_tasks "$wf")
+    known_ids=" "
+    sat_ids=" "
+    edge_map="$nl"
+    lease_paths=" "
+    lease_scope_bad=0
+    rows=""
+    # 훑기 결과를 한 번 읽어 선행 해석용 표와 후보 목록을 만든다. 후보 하나가 자기보다 뒤에 오는
+    # 문서를 선행으로 가리킬 수 있으므로 표가 먼저 완성돼야 하고, 그래서 읽기가 두 번이다.
+    # 후보를 보는 차례는 두 번째 읽기가 지키는 글롭 순서 그대로다.
+    while IFS= read -r meta; do
+      case "$meta" in M*) ;; *) continue ;; esac
+      meta=${meta#M}
+      flags=${meta%%" "*}
+      ids=${meta#* }
+      cand=${flags%????}
+      sat=${flags#?}
+      sat=${sat%???}
+      depn=${flags#??}
+      depn=${depn%??}
+      scopen=${flags#???}
+      scopen=${scopen%?}
+      solon=${flags#????}
+      tid=""
+      task_group=""
+      task_group_revision=""
+      task_source_decision=""
+      task_source_spec=""
+      dep_value=""
+      scope_value=""
+      solo_value=""
+      # 후보는 todo, in_progress, 그리고 definition_error가 아닌 blocked다. 죽은 세션이 남긴
+      # in_progress 작업은 그 작업을 덮는 미만료 lease가 없으므로 아래 lease_active가 통과시키고,
+      # 살아 있는 세션의 작업은 그 lease가 막는다(SPEC-035 R1). blocked 복구에도 lease·선행·겹침
+      # 조건은 완전히 같다. definition_error는 위 아키텍트 분기의 대상이라 후보로 내지 않는다.
+      if [ "$cand" = 1 ]; then
+        IFS='	' read -r tid task_group_token task_group_revision_token task_source_decision_token task_source_spec_token
+        case "$task_group_token" in 1*) task_group=${task_group_token#1} ;; esac
+        case "$task_group_revision_token" in 1*) task_group_revision=${task_group_revision_token#1} ;; esac
+        case "$task_source_decision_token" in 1*) task_source_decision=${task_source_decision_token#1} ;; esac
+        case "$task_source_spec_token" in 1*) task_source_spec=${task_source_spec_token#1} ;; esac
+      fi
+      [ "$depn" = 1 ] && IFS= read -r dep_value
+      [ "$scopen" = 1 ] && IFS= read -r scope_value
+      [ "$solon" = 1 ] && IFS= read -r solo_value
+      if deps_of "$depn" "$dep_value"; then deps=$parsed; deps_ok=1; else deps=""; deps_ok=0; fi
+      if scope_of "$scopen" "$scope_value"; then scope=$parsed; scope_ok=1; else scope=""; scope_ok=0; fi
+      if solo_run_of "$solon" "$solo_value"; then solo_ok=1; else solo_ok=0; fi
+      for v in $ids; do
+        # 같은 id를 담은 문서가 여럿이면 글롭 순서로 첫 문서가 이긴다. 원래 본문의
+        # grep -ls ... | head -1이 고르던 문서가 그것이다.
+        case "$known_ids" in *" $v "*) continue ;; esac
+        known_ids="$known_ids$v "
+        [ "$sat" = 1 ] && sat_ids="$sat_ids$v "
+        [ -n "$deps" ] && edge_map="$edge_map$v $deps$nl"
+        # 활성 lease가 잡은 문서를 처음 만나면 그 겹침 선언을 여기서 읽어 둔다. 원래 본문이
+        # 후보마다 다시 읽던 값이고, 막는 쪽의 선언이 형식 오류이면 그 사실만 남는다.
+        case "$active_leases" in
+          *"$nl$v$nl"*)
+            if [ "$scope_ok" -eq 1 ]; then
+              for a in $scope; do
+                case "$lease_paths" in *" $a "*) ;; *) lease_paths="$lease_paths$a " ;; esac
+              done
+            else
+              lease_scope_bad=1
+            fi
+            ;;
+        esac
+      done
+      [ "$cand" = 1 ] || continue
+      [ -n "$tid" ] || continue
+      rows="$rows$deps_ok$scope_ok$solo_ok|$deps|$scope|$tid|$task_group|$task_group_revision|$task_source_decision|$task_source_spec$nl"
+    done <<SCAN
+$scanned
+SCAN
+    while IFS= read -r row; do
+      case "$row" in ???"|"*) ;; *) continue ;; esac
+      flags=${row%%"|"*}
+      rest=${row#*"|"}
+      deps=${rest%%"|"*}
+      rest=${rest#*"|"}
+      scope=${rest%%"|"*}
+      rest=${rest#*"|"}
+      tid=${rest%%"|"*}
+      rest=${rest#*"|"}
+      task_group=${rest%%"|"*}
+      task_group_revision=${rest#*"|"}
+      task_source_decision=${task_group_revision#*"|"}
+      task_group_revision=${task_group_revision%%"|"*}
+      task_source_spec=${task_source_decision#*"|"}
+      task_source_decision=${task_source_decision%%"|"*}
+      deps_ok=${flags%??}
+      scope_ok=${flags#?}
+      scope_ok=${scope_ok%?}
+      solo_ok=${flags#??}
+      group_available=0
+      group_source_decision=""
+      group_source_spec=""
+      case "$task_group_revision" in ''|*[!0-9]*) ;; *)
+        if [ "$task_group_revision" -gt 0 ]; then
+          while IFS='	' read -r gid group_revision group_source group_spec; do
+            [ "$gid" = "$task_group" ] || continue
+            if [ "$task_group_revision" -le "$group_revision" ]; then
+              origin_available=0
+              if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ] && \
+                 [ "$task_source_decision" = "$group_source" ] && \
+                 [ "$task_source_spec" = "$group_spec" ]; then
+                origin_available=1
+              else
+                legacy_decision_ok=0
+                legacy_spec_ok=0
+                if [ -z "$task_source_decision" ]; then
+                  case "$group_source" in LEGACY-*) legacy_decision_ok=1 ;; esac
+                else
+                  case "$task_source_decision:$group_source" in
+                    LEGACY-*:"$task_source_decision") legacy_decision_ok=1 ;;
+                  esac
+                fi
+                if [ -z "$task_source_spec" ] || [ "$task_source_spec" = "$group_spec" ]; then
+                  legacy_spec_ok=1
+                fi
+                case "$task_group:$group_source" in GROUP-*-LEGACY:LEGACY-*) ;; *) legacy_decision_ok=0 ;; esac
+                [ "$legacy_decision_ok" -eq 1 ] && [ "$legacy_spec_ok" -eq 1 ] && origin_available=1
+              fi
+              if [ "$origin_available" -eq 1 ]; then
+                group_available=1
+                group_source_decision=$group_source
+                group_source_spec=$group_spec
+              fi
+            fi
+            break
+          done <<ACTIVE_GROUP_ROWS
+$active_group_rows
+ACTIVE_GROUP_ROWS
+        fi
+        ;;
+      esac
+      if [ "$pass_mode" = verdict ]; then
+        lease_active "$tid" && { note_candidate leased "$tid"; continue; }
+      else
+        [ "$solo_ok" -eq 1 ] || continue
+      fi
+      # 선행 관련 제외는 사유가 하나다. 선언을 읽지 못한 것과 선행이 아직 끝나지 않은 것과 고리가
+      # 있는 것은 세션이 할 일이 같다 — 그 선언을 보고 앞의 작업을 먼저 끝내는 것이다.
+      [ "$deps_ok" -eq 1 ] || { pass_reject dependencies-unsatisfied "$tid"; continue; }
+      ok=1
+      # 선행 셋이 모두 참이어야 자격이고 셋 중 어느 것도 다른 것을 바꾸지 않으므로, 보는 차례는
+      # 답을 바꾸지 않는다. 값싼 둘을 먼저 보고 순환 탐색은 그 둘을 통과한 선언에만 돈다.
+      for dep in $deps; do
+        case "$known_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
+        case "$sat_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
+      done
+      [ "$ok" -eq 1 ] || { pass_reject dependencies-unsatisfied "$tid"; continue; }
+      for dep in $deps; do
+        reaches "$dep" "$tid" && { ok=0; break; }
+      done
+      [ "$ok" -eq 1 ] || { pass_reject dependencies-unsatisfied "$tid"; continue; }
+      if [ "$pass_mode" = verdict ]; then
+        overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
+      fi
+      # 통합 대기는 lease·선행·겹침 뒤, 원천 결정과 그룹 판정 앞에서 본다. 앞의 셋은 통합 대기와
+      # 무관하게 성립하는 조건이고, 통합을 기다리는 작업은 이미 승인된 원천에서 나와 착수까지 간
+      # 작업이라 뒤의 두 판정까지 갈 이유가 없다.
+      integration_waiting_blocks "$tid" && { pass_reject integration-waiting "$tid"; continue; }
+      source_approved=0
+      if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ]; then
+        case "$approved_task_sources" in
+          *"$nl$task_source_decision	$task_source_spec$nl"*) source_approved=1 ;;
+        esac
+      fi
+      if [ "$source_approved" -eq 0 ] && [ "$group_available" -eq 1 ]; then
+        case "$task_group:$group_source_decision" in
+          GROUP-*-LEGACY:LEGACY-*) source_approved=1 ;;
+        esac
+      fi
+      [ "$source_approved" -eq 1 ] || { pass_reject source-decision-not-approved "$tid"; continue; }
+      [ "$group_available" -eq 1 ] || { pass_reject work-group-unavailable "$tid"; continue; }
+      if [ "$pass_mode" = solo ]; then
+        solo_candidates="$solo_candidates$tid$nl"
+        continue
+      fi
+      note_target "$tid"
+    done <<ROWS
+$rows
+ROWS
+}
+
+# 후보를 제외한다. 단독 후보를 모으는 훑기에서는 사유를 내지 않는다 — 그 훑기의 결과는 어느 역할의
+# 답도 아니고, 사유 목록은 판정한 후보를 판정한 차례대로 담는 자리이기 때문이다.
+pass_reject() { # $1=제외 사유 코드 $2=후보 id
+  [ "$pass_mode" = solo ] || note_candidate "$1" "$2"
+  return 0
+}
+
+# 프로젝트 전체의 단독 점유 상태를 정한다(SPEC-065 R3). 단독 후보 집합과 대표 작업은 워크플로우
+# 하나가 아니라 프로젝트 하나의 값이므로, 역할 분기에 들어가기 전에 한 번만 정한다.
+#
+# 선언이 하나도 없는 프로젝트는 grep 한 번에서 끝난다. 그때 이 함수는 아무 값도 세우지 않으므로
+# 세 역할의 판정이 이 절이 생기기 전과 한 글자도 다르지 않다(SPEC-065 C6).
+collect_solo_state() {
+  grep -qs '^solo_run:' .workflow/*/tasks/*.md || return 0
+  scan_leases
+  solo_candidates="$nl"
+  pass_mode=solo
+  for wf in .workflow/*/; do
+    [ -d "${wf}tasks" ] || continue
+    developer_pass "$wf"
+  done
+  pass_mode=verdict
+  # 대표 작업은 판정 차례가 가장 앞선 원소다. 훑기가 워크플로우 글롭 순서로 돌고 그 안에서 파일
+  # 이름 순서로 돌므로, 모인 차례의 첫 원소가 그것이다.
+  solo_representative=${solo_candidates#"$nl"}
+  solo_representative=${solo_representative%%"$nl"*}
+  [ -n "$solo_representative" ] || return 0
+  # 대표 작업 자신을 잡은 lease는 세지 않는다. 대표가 마지막 자리에 도달했다면 그 lease는 이미 앞의
+  # 검사가 걸렀으므로, 남은 수가 곧 "기기가 아직 조용하지 않다"이다.
+  solo_other_leases=$active_count
+  case "$active_leases" in
+    *"$nl$solo_representative$nl"*) solo_other_leases=$((solo_other_leases - 1)) ;;
+  esac
+  return 0
+}
+
+collect_solo_state
 
 case "$role" in
 planner)
@@ -993,195 +1296,7 @@ developer)
   scan_leases
   for wf in .workflow/*/; do
     [ -d "${wf}tasks" ] || continue
-    active_group_rows="$nl"
-    groups=$(scan_work_groups "$wf")
-    while IFS='	' read -r gid status revision source source_spec source_qa; do
-      [ "$status" = active ] || continue
-      case "$revision" in ''|*[!0-9]*) continue ;; esac
-      [ "$revision" -gt 0 ] || continue
-      active_group_rows="$active_group_rows$gid	$revision	$source	$source_spec$nl"
-    done <<DEVELOPER_GROUP_ROWS
-$groups
-DEVELOPER_GROUP_ROWS
-    # Each row is the latest approved decision id and its specification. An id alone is not enough:
-    # a task cannot relabel approval A as belonging to a different specification.
-    approved_task_sources="$nl"
-    decision_rows=$(scan_architect_decisions "$wf")
-    while IFS='	' read -r kind first second third fourth; do
-      [ "$kind" = A ] || continue
-      [ -n "$first" ] || continue
-      approved_task_sources="$approved_task_sources$first	$second$nl"
-    done <<DEVELOPER_DECISION_ROWS
-$decision_rows
-DEVELOPER_DECISION_ROWS
-    scanned=$(scan_tasks "$wf")
-    known_ids=" "
-    sat_ids=" "
-    edge_map="$nl"
-    lease_paths=" "
-    lease_scope_bad=0
-    rows=""
-    # 훑기 결과를 한 번 읽어 선행 해석용 표와 후보 목록을 만든다. 후보 하나가 자기보다 뒤에 오는
-    # 문서를 선행으로 가리킬 수 있으므로 표가 먼저 완성돼야 하고, 그래서 읽기가 두 번이다.
-    # 후보를 보는 차례는 두 번째 읽기가 지키는 글롭 순서 그대로다.
-    while IFS= read -r meta; do
-      case "$meta" in M*) ;; *) continue ;; esac
-      meta=${meta#M}
-      flags=${meta%%" "*}
-      ids=${meta#* }
-      cand=${flags%???}
-      sat=${flags#?}
-      sat=${sat%??}
-      depn=${flags#??}
-      depn=${depn%?}
-      scopen=${flags#???}
-      tid=""
-      task_group=""
-      task_group_revision=""
-      task_source_decision=""
-      task_source_spec=""
-      dep_value=""
-      scope_value=""
-      # 후보는 todo, in_progress, 그리고 definition_error가 아닌 blocked다. 죽은 세션이 남긴
-      # in_progress 작업은 그 작업을 덮는 미만료 lease가 없으므로 아래 lease_active가 통과시키고,
-      # 살아 있는 세션의 작업은 그 lease가 막는다(SPEC-035 R1). blocked 복구에도 lease·선행·겹침
-      # 조건은 완전히 같다. definition_error는 위 아키텍트 분기의 대상이라 후보로 내지 않는다.
-      if [ "$cand" = 1 ]; then
-        IFS='	' read -r tid task_group_token task_group_revision_token task_source_decision_token task_source_spec_token
-        case "$task_group_token" in 1*) task_group=${task_group_token#1} ;; esac
-        case "$task_group_revision_token" in 1*) task_group_revision=${task_group_revision_token#1} ;; esac
-        case "$task_source_decision_token" in 1*) task_source_decision=${task_source_decision_token#1} ;; esac
-        case "$task_source_spec_token" in 1*) task_source_spec=${task_source_spec_token#1} ;; esac
-      fi
-      [ "$depn" = 1 ] && IFS= read -r dep_value
-      [ "$scopen" = 1 ] && IFS= read -r scope_value
-      if deps_of "$depn" "$dep_value"; then deps=$parsed; deps_ok=1; else deps=""; deps_ok=0; fi
-      if scope_of "$scopen" "$scope_value"; then scope=$parsed; scope_ok=1; else scope=""; scope_ok=0; fi
-      for v in $ids; do
-        # 같은 id를 담은 문서가 여럿이면 글롭 순서로 첫 문서가 이긴다. 원래 본문의
-        # grep -ls ... | head -1이 고르던 문서가 그것이다.
-        case "$known_ids" in *" $v "*) continue ;; esac
-        known_ids="$known_ids$v "
-        [ "$sat" = 1 ] && sat_ids="$sat_ids$v "
-        [ -n "$deps" ] && edge_map="$edge_map$v $deps$nl"
-        # 활성 lease가 잡은 문서를 처음 만나면 그 겹침 선언을 여기서 읽어 둔다. 원래 본문이
-        # 후보마다 다시 읽던 값이고, 막는 쪽의 선언이 형식 오류이면 그 사실만 남는다.
-        case "$active_leases" in
-          *"$nl$v$nl"*)
-            if [ "$scope_ok" -eq 1 ]; then
-              for a in $scope; do
-                case "$lease_paths" in *" $a "*) ;; *) lease_paths="$lease_paths$a " ;; esac
-              done
-            else
-              lease_scope_bad=1
-            fi
-            ;;
-        esac
-      done
-      [ "$cand" = 1 ] || continue
-      [ -n "$tid" ] || continue
-      rows="$rows$deps_ok$scope_ok|$deps|$scope|$tid|$task_group|$task_group_revision|$task_source_decision|$task_source_spec$nl"
-    done <<SCAN
-$scanned
-SCAN
-    while IFS= read -r row; do
-      case "$row" in ??"|"*) ;; *) continue ;; esac
-      flags=${row%%"|"*}
-      rest=${row#*"|"}
-      deps=${rest%%"|"*}
-      rest=${rest#*"|"}
-      scope=${rest%%"|"*}
-      rest=${rest#*"|"}
-      tid=${rest%%"|"*}
-      rest=${rest#*"|"}
-      task_group=${rest%%"|"*}
-      task_group_revision=${rest#*"|"}
-      task_source_decision=${task_group_revision#*"|"}
-      task_group_revision=${task_group_revision%%"|"*}
-      task_source_spec=${task_source_decision#*"|"}
-      task_source_decision=${task_source_decision%%"|"*}
-      deps_ok=${flags%?}
-      scope_ok=${flags#?}
-      group_available=0
-      group_source_decision=""
-      group_source_spec=""
-      case "$task_group_revision" in ''|*[!0-9]*) ;; *)
-        if [ "$task_group_revision" -gt 0 ]; then
-          while IFS='	' read -r gid group_revision group_source group_spec; do
-            [ "$gid" = "$task_group" ] || continue
-            if [ "$task_group_revision" -le "$group_revision" ]; then
-              origin_available=0
-              if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ] && \
-                 [ "$task_source_decision" = "$group_source" ] && \
-                 [ "$task_source_spec" = "$group_spec" ]; then
-                origin_available=1
-              else
-                legacy_decision_ok=0
-                legacy_spec_ok=0
-                if [ -z "$task_source_decision" ]; then
-                  case "$group_source" in LEGACY-*) legacy_decision_ok=1 ;; esac
-                else
-                  case "$task_source_decision:$group_source" in
-                    LEGACY-*:"$task_source_decision") legacy_decision_ok=1 ;;
-                  esac
-                fi
-                if [ -z "$task_source_spec" ] || [ "$task_source_spec" = "$group_spec" ]; then
-                  legacy_spec_ok=1
-                fi
-                case "$task_group:$group_source" in GROUP-*-LEGACY:LEGACY-*) ;; *) legacy_decision_ok=0 ;; esac
-                [ "$legacy_decision_ok" -eq 1 ] && [ "$legacy_spec_ok" -eq 1 ] && origin_available=1
-              fi
-              if [ "$origin_available" -eq 1 ]; then
-                group_available=1
-                group_source_decision=$group_source
-                group_source_spec=$group_spec
-              fi
-            fi
-            break
-          done <<ACTIVE_GROUP_ROWS
-$active_group_rows
-ACTIVE_GROUP_ROWS
-        fi
-        ;;
-      esac
-      lease_active "$tid" && { note_candidate leased "$tid"; continue; }
-      # 선행 관련 제외는 사유가 하나다. 선언을 읽지 못한 것과 선행이 아직 끝나지 않은 것과 고리가
-      # 있는 것은 세션이 할 일이 같다 — 그 선언을 보고 앞의 작업을 먼저 끝내는 것이다.
-      [ "$deps_ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
-      ok=1
-      # 선행 셋이 모두 참이어야 자격이고 셋 중 어느 것도 다른 것을 바꾸지 않으므로, 보는 차례는
-      # 답을 바꾸지 않는다. 값싼 둘을 먼저 보고 순환 탐색은 그 둘을 통과한 선언에만 돈다.
-      for dep in $deps; do
-        case "$known_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
-        case "$sat_ids" in *" $dep "*) ;; *) ok=0; break ;; esac
-      done
-      [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
-      for dep in $deps; do
-        reaches "$dep" "$tid" && { ok=0; break; }
-      done
-      [ "$ok" -eq 1 ] || { note_candidate dependencies-unsatisfied "$tid"; continue; }
-      overlap_blocks "$scope_ok" "$scope" && { note_candidate overlap "$tid"; continue; }
-      # 통합 대기는 lease·선행·겹침 뒤, 원천 결정과 그룹 판정 앞에서 본다. 앞의 셋은 통합 대기와
-      # 무관하게 성립하는 조건이고, 통합을 기다리는 작업은 이미 승인된 원천에서 나와 착수까지 간
-      # 작업이라 뒤의 두 판정까지 갈 이유가 없다.
-      integration_waiting_blocks "$tid" && { note_candidate integration-waiting "$tid"; continue; }
-      source_approved=0
-      if [ -n "$task_source_decision" ] && [ -n "$task_source_spec" ]; then
-        case "$approved_task_sources" in
-          *"$nl$task_source_decision	$task_source_spec$nl"*) source_approved=1 ;;
-        esac
-      fi
-      if [ "$source_approved" -eq 0 ] && [ "$group_available" -eq 1 ]; then
-        case "$task_group:$group_source_decision" in
-          GROUP-*-LEGACY:LEGACY-*) source_approved=1 ;;
-        esac
-      fi
-      [ "$source_approved" -eq 1 ] || { note_candidate source-decision-not-approved "$tid"; continue; }
-      [ "$group_available" -eq 1 ] || { note_candidate work-group-unavailable "$tid"; continue; }
-      note_target "$tid"
-    done <<ROWS
-$rows
-ROWS
+    developer_pass "$wf"
   done
   ;;
 *)
@@ -1210,7 +1325,7 @@ const CONDITION_SCRIPT_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 21
+# condition_script_version: 22
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1236,6 +1351,10 @@ $script:machineOutput = ($Output -ceq '--json') -or ($args -ccontains '--json')
 $script:machineTarget = $null
 $script:machineTargetKind = $null
 $script:machineCandidates = @()
+# The solo run state of the whole project (SPEC-065 R2, R3). While the representative is $null this
+# verdict is exactly what it was before the solo clause existed.
+$script:soloRepresentative = $null
+$script:soloOtherLeases = $false
 
 # Reads a file as lines. An unreadable file reads as empty, which is what "grep -s" does.
 function Get-Lines([string]$Path) {
@@ -1345,6 +1464,24 @@ function Get-Scope([string[]]$Lines) {
     if ($token -cnotmatch '^[A-Za-z0-9_./-]+$') { return @{ Ok = $false; Files = @() } }
   }
   return @{ Ok = $true; Files = $tokens }
+}
+
+# Reads the one-line solo run declaration. True means the document reads as a solo declaration.
+# "true" is the declaration, and an absent key and "false" are not declaring one. Every other value
+# is an unreadable declaration and is treated as solo: two declaration lines, an empty value, a
+# quoted value, and a value spread over several lines all land there. Leaning an unreadable verdict
+# to the safe side is the principle Get-Scope already uses.
+function Get-SoloRun([string[]]$Lines) {
+  $found = @()
+  foreach ($line in $Lines) {
+    if ($line.StartsWith('solo_run:', [System.StringComparison]::Ordinal)) { $found += $line }
+  }
+  if ($found.Count -eq 0) { return $false }
+  if ($found.Count -gt 1) { return $true }
+  $value = ($found[0].Substring('solo_run:'.Length)).Trim()
+  if ($value -ceq 'true') { return $true }
+  if ($value -ceq 'false') { return $false }
+  return $true
 }
 
 # Does an unexpired lease on another document block this task from being started? A lease on the
@@ -1468,6 +1605,77 @@ function Test-Reaches([string]$Root, [string]$From, [string]$Target) {
     $frontier = @($next)
   }
   return $false
+}
+
+# Are this task's dependency declarations satisfied? An unreadable declaration, an unfinished
+# predecessor and a cycle are all unsatisfied, because they leave the session the same thing to do.
+# The developer branch and the solo scan call this one function so the rule cannot become two.
+function Test-DependenciesSatisfied([string]$Root, [string]$Id, [string[]]$Lines) {
+  $declaration = Get-Declaration $Lines
+  if (-not $declaration.Ok) { return $false }
+  foreach ($dep in $declaration.Ids) {
+    $file = Find-TaskFile $Root $dep
+    if ($file.Length -eq 0) { return $false }
+    if (Test-Reaches $Root $dep $Id) { return $false }
+    if (-not (Test-DependencySatisfied $file)) { return $false }
+  }
+  return $true
+}
+
+# Reads one task's source decision and work group verdict together, because the migration exception
+# feeds both. The developer branch and the solo scan share it for the same reason as above: the solo
+# candidate set is defined as every exclusion other than the claim ones, and a second copy of that
+# set would drift from the first.
+function Get-TaskOrigin([string[]]$Lines, $Groups, $ApprovedSources) {
+  $taskGroup = Get-Value $Lines 'work_group_id'
+  $taskSourceDecision = Get-Value $Lines 'source_decision_id'
+  $taskSourceSpec = Get-Value $Lines 'source_spec_id'
+  $taskRevision = 0
+  $revisionText = Get-Value $Lines 'work_group_revision'
+  $revisionValid = [int]::TryParse($revisionText, [ref]$taskRevision) -and $taskRevision -gt 0
+  $groupAvailable = $false
+  $matchedGroup = $null
+  if ($revisionValid -and $taskGroup.Length -gt 0) {
+    foreach ($group in $Groups) {
+      if ($group.Id -cne $taskGroup -or $group.Status -cne 'active') { continue }
+      $matchedGroup = $group
+      $groupRevision = 0
+      $revisionAvailable = [int]::TryParse($group.Revision, [ref]$groupRevision) -and
+        $groupRevision -ge $taskRevision
+      $nativeOrigin = $taskSourceDecision.Length -gt 0 -and
+        $taskSourceSpec.Length -gt 0 -and
+        $taskSourceDecision -ceq $group.SourceDecision -and
+        $taskSourceSpec -ceq $group.SourceSpec
+      $legacyDecision = $taskSourceDecision.Length -eq 0 -or
+        ($taskSourceDecision -clike 'LEGACY-*' -and
+          $taskSourceDecision -ceq $group.SourceDecision)
+      $legacySpec = $taskSourceSpec.Length -eq 0 -or $taskSourceSpec -ceq $group.SourceSpec
+      $legacyOrigin = $taskGroup -clike 'GROUP-*-LEGACY' -and
+        $group.SourceDecision -clike 'LEGACY-*' -and $legacyDecision -and $legacySpec
+      if ($revisionAvailable -and ($nativeOrigin -or $legacyOrigin)) {
+        $groupAvailable = $true
+      }
+      break
+    }
+  }
+  $sourceApproved = $false
+  if ($taskSourceDecision.Length -gt 0) {
+    foreach ($approval in $ApprovedSources) {
+      if ($approval.Id -ceq $taskSourceDecision -and
+          $approval.Spec -ceq $taskSourceSpec) { $sourceApproved = $true; break }
+    }
+  }
+  $legacyTaskSource = $taskSourceDecision.Length -eq 0 -or
+    ($taskSourceDecision -clike 'LEGACY-*' -and $null -ne $matchedGroup -and
+      $taskSourceDecision -ceq $matchedGroup.SourceDecision)
+  if (-not $sourceApproved -and $groupAvailable -and
+      $taskGroup -clike 'GROUP-*-LEGACY' -and $null -ne $matchedGroup -and
+      $matchedGroup.SourceDecision -clike 'LEGACY-*' -and $legacyTaskSource) {
+    # v1 migration cannot forge a user approval. Only its deterministic legacy group carries
+    # the synthetic source; every native v2 task still needs a real latest approval above.
+    $sourceApproved = $true
+  }
+  return @{ SourceApproved = $sourceApproved; GroupAvailable = $groupAvailable }
 }
 
 # The next two functions gather the verdict material. One branch reads each directory of one
@@ -1811,6 +2019,14 @@ function Write-Candidate([string]$Code, [string]$Id) {
 # The candidate picked as the target. Both lines are written so the list alone shows where the
 # target came from.
 function Write-Target([string]$Id, [string]$Kind = '') {
+  # The last check of the solo run state (SPEC-065 R2, R3). Every role's candidates pass through
+  # this function, so the check lives in one place, and it sits *after* the exclusions that already
+  # existed, so a candidate that used to carry one of those reasons still carries it. With no
+  # representative this does nothing at all.
+  if ($null -ne $script:soloRepresentative) {
+    if ($Id -cne $script:soloRepresentative) { Write-Candidate 'solo-run-active' $Id; return }
+    if ($script:soloOtherLeases) { Write-Candidate 'solo-run-wait' $Id; return }
+  }
   if ($script:machineOutput) {
     Write-Candidate 'eligible' $Id
     if ($null -eq $script:machineTarget) { $script:machineTarget = $Id }
@@ -1824,8 +2040,68 @@ function Write-Target([string]$Id, [string]$Kind = '') {
   Write-Verdict 'eligible' 0
 }
 
+# Is any unexpired lease held on something other than $Except? The representative's own lease is
+# not counted: had it reached the last position, the lease check before it would already have
+# removed it, so what is left is exactly "the machine is not quiet yet".
+function Test-OtherLeaseExists([string]$Except) {
+  if (-not (Test-Path -LiteralPath $leases -PathType Container)) { return $false }
+  foreach ($file in @(Get-ChildItem -LiteralPath $leases -Filter '*.yml' -File -ErrorAction SilentlyContinue)) {
+    if ($file.BaseName -ceq $Except) { continue }
+    if (Test-Leased $file.BaseName) { return $true }
+  }
+  return $false
+}
+
+# The representative of the solo candidate set (SPEC-065 R3), or $null when the set is empty. The
+# set and its representative are values of the whole project, not of one workflow, so they are
+# settled once before any role branch runs.
+#
+# Membership is every developer exclusion other than the claim ones. A lease on the task itself and
+# a file overlap are deliberately not conditions: both are facts attached to a lease and both
+# release on their own, while a solo task that can never start would lock the project forever if it
+# joined the set - its predecessor would be held by the very gate that waits for it.
+#
+# A project declaring nothing stops at the first pass below, and then no value is set and all three
+# verdicts read exactly as they did before this clause existed.
+function Get-SoloRepresentative() {
+  $roots = @(Get-WorkflowRoots)
+  $declared = $false
+  foreach ($root in $roots) {
+    foreach ($path in (Get-Documents $root 'tasks')) {
+      if (Get-SoloRun (Get-Lines $path)) { $declared = $true; break }
+    }
+    if ($declared) { break }
+  }
+  if (-not $declared) { return $null }
+  foreach ($root in $roots) {
+    $groups = @(Get-WorkGroups $root)
+    $approvedSources = @(Get-DecisionCandidates $root 'outcome: approved' $false)
+    foreach ($path in (Get-Documents $root 'tasks')) {
+      $lines = Get-Lines $path
+      if (-not (Get-SoloRun $lines)) { continue }
+      $ordinary = Test-Match $lines '^status: (todo|in_progress)'
+      $blocked = Test-Match $lines '^status: blocked'
+      $definitionError = (Get-Value $lines 'blocked_kind') -ceq 'definition_error'
+      if (-not $ordinary -and (-not $blocked -or $definitionError)) { continue }
+      $tid = Get-Value $lines 'id'
+      if ($tid.Length -eq 0) { continue }
+      if (-not (Test-DependenciesSatisfied $root $tid $lines)) { continue }
+      if (Test-IntegrationWaiting $tid) { continue }
+      $origin = Get-TaskOrigin $lines $groups $approvedSources
+      if (-not $origin.SourceApproved -or -not $origin.GroupAvailable) { continue }
+      return $tid
+    }
+  }
+  return $null
+}
+
 if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
   Write-Verdict 'migration-lock' 1
+}
+
+$script:soloRepresentative = Get-SoloRepresentative
+if ($null -ne $script:soloRepresentative) {
+  $script:soloOtherLeases = Test-OtherLeaseExists $script:soloRepresentative
 }
 
 switch -CaseSensitive ($Role) {
@@ -1966,78 +2242,25 @@ switch -CaseSensitive ($Role) {
         if (-not $ordinary -and (-not $blocked -or $definitionError)) { continue }
         $tid = Get-Value $lines 'id'
         if ($tid.Length -eq 0) { continue }
-        $taskGroup = Get-Value $lines 'work_group_id'
-        $taskSourceDecision = Get-Value $lines 'source_decision_id'
-        $taskSourceSpec = Get-Value $lines 'source_spec_id'
-        $taskRevision = 0
-        $revisionText = Get-Value $lines 'work_group_revision'
-        $revisionValid = [int]::TryParse($revisionText, [ref]$taskRevision) -and $taskRevision -gt 0
-        $groupAvailable = $false
-        $matchedGroup = $null
-        if ($revisionValid -and $taskGroup.Length -gt 0) {
-          foreach ($group in $groups) {
-            if ($group.Id -cne $taskGroup -or $group.Status -cne 'active') { continue }
-            $matchedGroup = $group
-            $groupRevision = 0
-            $revisionAvailable = [int]::TryParse($group.Revision, [ref]$groupRevision) -and
-              $groupRevision -ge $taskRevision
-            $nativeOrigin = $taskSourceDecision.Length -gt 0 -and
-              $taskSourceSpec.Length -gt 0 -and
-              $taskSourceDecision -ceq $group.SourceDecision -and
-              $taskSourceSpec -ceq $group.SourceSpec
-            $legacyDecision = $taskSourceDecision.Length -eq 0 -or
-              ($taskSourceDecision -clike 'LEGACY-*' -and
-                $taskSourceDecision -ceq $group.SourceDecision)
-            $legacySpec = $taskSourceSpec.Length -eq 0 -or $taskSourceSpec -ceq $group.SourceSpec
-            $legacyOrigin = $taskGroup -clike 'GROUP-*-LEGACY' -and
-              $group.SourceDecision -clike 'LEGACY-*' -and $legacyDecision -and $legacySpec
-            if ($revisionAvailable -and ($nativeOrigin -or $legacyOrigin)) {
-              $groupAvailable = $true
-            }
-            break
-          }
-        }
-        $sourceApproved = $false
-        if ($taskSourceDecision.Length -gt 0) {
-          foreach ($approval in $approvedSources) {
-            if ($approval.Id -ceq $taskSourceDecision -and
-                $approval.Spec -ceq $taskSourceSpec) { $sourceApproved = $true; break }
-          }
-        }
-        $legacyTaskSource = $taskSourceDecision.Length -eq 0 -or
-          ($taskSourceDecision -clike 'LEGACY-*' -and $null -ne $matchedGroup -and
-            $taskSourceDecision -ceq $matchedGroup.SourceDecision)
-        if (-not $sourceApproved -and $groupAvailable -and
-            $taskGroup -clike 'GROUP-*-LEGACY' -and $null -ne $matchedGroup -and
-            $matchedGroup.SourceDecision -clike 'LEGACY-*' -and $legacyTaskSource) {
-          # v1 migration cannot forge a user approval. Only its deterministic legacy group carries
-          # the synthetic source; every native v2 task still needs a real latest approval above.
-          $sourceApproved = $true
-        }
+        $origin = Get-TaskOrigin $lines $groups $approvedSources
         if (Test-Leased $tid) { Write-Candidate 'leased' $tid; continue }
         # Every dependency exclusion shares one reason. An unreadable declaration, an unfinished
         # predecessor and a cycle all leave the session the same thing to do: read the declaration
         # and finish what comes first.
-        $declaration = Get-Declaration $lines
-        if (-not $declaration.Ok) { Write-Candidate 'dependencies-unsatisfied' $tid; continue }
-        $ok = $true
-        foreach ($dep in $declaration.Ids) {
-          $file = Find-TaskFile $root $dep
-          if ($file.Length -eq 0) { $ok = $false; break }
-          if (Test-Reaches $root $dep $tid) { $ok = $false; break }
-          if (-not (Test-DependencySatisfied $file)) { $ok = $false; break }
+        if (-not (Test-DependenciesSatisfied $root $tid $lines)) {
+          Write-Candidate 'dependencies-unsatisfied' $tid
+          continue
         }
-        if (-not $ok) { Write-Candidate 'dependencies-unsatisfied' $tid; continue }
         if (Test-Overlapped $root $tid $lines) { Write-Candidate 'overlap' $tid; continue }
         # Integration waiting is read after lease, dependency, and overlap and before the source
         # decision and work group. The first three hold independently of it, and a task waiting to
         # be integrated already came from an approved source, so the last two add nothing.
         if (Test-IntegrationWaiting $tid) { Write-Candidate 'integration-waiting' $tid; continue }
-        if (-not $sourceApproved) {
+        if (-not $origin.SourceApproved) {
           Write-Candidate 'source-decision-not-approved' $tid
           continue
         }
-        if (-not $groupAvailable) {
+        if (-not $origin.GroupAvailable) {
           Write-Candidate 'work-group-unavailable' $tid
           continue
         }
@@ -2224,7 +2447,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 21"));
+        assert!(script.contains("# condition_script_version: 22"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -2238,8 +2461,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 22",
             "# condition_script_version: 21",
-            "# condition_script_version: 20",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -2504,7 +2727,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 21보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 22보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -4395,6 +4618,66 @@ mod tests {
 
     const WIDENED_SCENARIOS: &[WidenedScenario] = &[
         WidenedScenario {
+            // 단독 작업은 다른 대상을 잡은 lease가 살아 있는 동안 기다린다. 겹침 선언을 함께 적는
+            // 것은 단독 검사가 후보의 마지막 자리에 있기 때문이다 — 선언이 없으면 활성 lease
+            // 하나가 겹침으로 먼저 막아 이 사유까지 오지 못한다.
+            name: "개발자: 단독 작업이 마지막 lease가 끝나기를 기다린다",
+            role: "developer",
+            expected: 1,
+            reason: "no-target",
+            target: None,
+            candidates: &["solo-run-wait TASK-001"],
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("scope_files: [src/a.rs]\nsolo_run: true"),
+                );
+                write_lease(control, "DECISION-OTHER");
+            },
+        },
+        WidenedScenario {
+            // 기다리는 동안 이 프로젝트에서는 어떤 역할도 새 세션을 시작하지 않는다. 기획자 후보인
+            // 아이디어도 같은 사유로 빠진다.
+            name: "기획자: 단독 작업이 도는 동안 아이디어가 열리지 않는다",
+            role: "planner",
+            expected: 1,
+            reason: "no-target",
+            target: None,
+            candidates: &["solo-run-active IDEA-001"],
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("scope_files: [src/a.rs]\nsolo_run: true"),
+                );
+                write_lease(control, "TASK-001");
+            },
+        },
+        WidenedScenario {
+            // 미만료 lease가 하나도 없으면 대표 작업이 그대로 대상이 된다. 단독 작업이 여럿일 때
+            // 뒤엣것이 어떤 사유로 빠지는지는 이 표에 세우지 않는다 — 두 검사가 이 행을 각각
+            // 표준 오류와 --json으로 읽는데, 대상 뒤의 후보는 앞엣것에만 없어 한 값으로 둘을
+            // 만족시킬 수 없다. 그 상황은 role_eligibility.rs의 대조가 고정한다.
+            name: "개발자: 조용해지면 단독 작업이 그대로 대상이 된다",
+            role: "developer",
+            expected: 0,
+            reason: "eligible",
+            target: Some("TASK-001"),
+            candidates: &["eligible TASK-001"],
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "todo",
+                    Some("scope_files: [src/a.rs]\nsolo_run: true"),
+                );
+            },
+        },
+        WidenedScenario {
             name: "기획자: 후보 셋 중 셋째가 대상이다",
             role: "planner",
             expected: 0,
@@ -5065,6 +5348,8 @@ mod tests {
             "work-group-unavailable",
             "dependencies-unsatisfied",
             "overlap",
+            "solo-run-wait",
+            "solo-run-active",
         ];
 
         for code in EXCLUSION_CODES {
@@ -5133,9 +5418,8 @@ mod tests {
         // (SPEC-041 R5). 선형이어도 후보 하나당 상수가 커지면 한도에 닿기 때문에 비율만으로는
         // 부족하고, 값이 하나면 가장 비싼 분기 하나만 보게 되어 나머지 둘의 회귀가 그대로 지나간다.
         //
-        // 기획자·개발자는 TASK-125 착지 후 실측 + 1이고, 아키텍트는 work-group v2 후보군을 더한 뒤
-        // 같은 검사로 다시 잰 실측 + 1이다. 세 분기 모두 문서 수와 무관한 상수라 1배와 3배가 같다.
-        // 예산은 각 역할의 3배 값 위에 세운다.
+        // 세 값 모두 단독 수행 판정(SPEC-065)이 붙은 뒤 같은 검사로 다시 잰 실측 + 1이다. 세 분기
+        // 모두 문서 수와 무관한 상수라 1배와 3배가 같다. 예산은 각 역할의 3배 값 위에 세운다.
         //
         // 여유를 1로 두는 근거는 이 검사가 잡아야 하는 회귀의 최소 단위다. 상수 분기에서 그 단위는
         // "본문에 외부 명령 호출이 하나 새로 생긴다"이고 그것이 곧 +1이므로, 여유 1이면 **두 개째에서
@@ -5144,31 +5428,38 @@ mod tests {
         // 후보 수는 build_fixture가 정한다. 3배에서 기획자 후보는 아이디어 96건과 수정 요청
         // 결정 6건, 아키텍트 후보는 승인 결정 93건, 개발자 후보는 작업 289건이다.
 
-        /// 실측 3개(3배 `awk` 3회) + 1. 워크플로우 하나마다 `scan_nondraft_refs`·`scan_ideas`·
-        /// `scan_decisions`가 각각 한 번씩 훑는 값이고, 후보 수와 무관하다.
+        /// 실측 4개(3배 `awk` 3회 · `grep` 1회) + 1. 워크플로우 하나마다 `scan_nondraft_refs`·
+        /// `scan_ideas`·`scan_decisions`가 각각 한 번씩 훑고, 여기에 단독 수행 선언이 프로젝트에
+        /// 하나라도 있는지 보는 `grep` 하나가 더 붙는다(SPEC-065). 모두 후보 수와 무관하다.
         ///
-        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 5개가 되어 걸린다. 후보당 상수가 하나
-        /// 늘면 3배에서 102개가 늘어 105개가 되고 예산을 101개 넘는다. 워크플로우당 훑기가 하나 늘어도
+        /// 그 `grep`이 세 역할에 공통으로 +1을 얹은 값이 이번 실측이다. 선언이 하나도 없으면 훑기가
+        /// 그 한 번에서 끝나므로 판정 비용이 여기서 멈춘다. 선언이 있는 프로젝트는 세 역할 모두
+        /// 개발자 후보 훑기 한 벌을 더 치르며, 그 비용은 이 픽스처가 재지 않는다.
+        ///
+        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 6개가 되어 걸린다. 후보당 상수가 하나
+        /// 늘면 3배에서 102개가 늘어 106개가 되고 예산을 101개 넘는다. 워크플로우당 훑기가 하나 늘어도
         /// 이 픽스처(워크플로우 1개)에서 +1이라 두 번째 것에서 걸린다.
-        const PLANNER_PROCESS_BUDGET: usize = 4;
+        const PLANNER_PROCESS_BUDGET: usize = 5;
 
-        /// work-group v2 실측 3개(3배 `awk` 3회) + 1. 워크플로우 하나마다 `scan_refs`·
-        /// `scan_work_groups`·`scan_architect_decisions` 각 한 번이다. 그룹 QA·과거 task 정의 수정·승인
-        /// 세 결정 후보군은 마지막 훑기 하나로 합쳐, 후보군 수만큼 decisions/를 다시 읽지 않는다.
+        /// 실측 4개(3배 `awk` 3회 · `grep` 1회) + 1. 워크플로우 하나마다 `scan_refs`·
+        /// `scan_work_groups`·`scan_architect_decisions` 각 한 번이고, 단독 선언 유무를 보는 `grep`
+        /// 하나가 더 붙는다. 그룹 QA·과거 task 정의 수정·승인 세 결정 후보군은 마지막 훑기 하나로
+        /// 합쳐, 후보군 수만큼 decisions/를 다시 읽지 않는다.
         ///
-        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 5개가 되어 걸린다. 후보당 상수가 하나
-        /// 늘면 3배에서 93개가 늘어 96개가 되고 예산을 92개 넘는다.
-        const ARCHITECT_PROCESS_BUDGET: usize = 4;
+        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 6개가 되어 걸린다. 후보당 상수가 하나
+        /// 늘면 3배에서 93개가 늘어 97개가 되고 예산을 92개 넘는다.
+        const ARCHITECT_PROCESS_BUDGET: usize = 5;
 
-        /// work-group v2 승인 게이트 실측 7개(3배 `awk` 3 · `date` 1 · `head` 1 · `sed` 1 · `tr` 1) + 1.
-        /// `scan_tasks`·active 그룹 표·최신 승인 표의 `awk` 셋, `scan_leases`의 `date` 하나,
-        /// 그리고 lease 파일 하나당 `sed`·`head`·`tr` 셋이다(이 픽스처의 lease는 1건).
+        /// 실측 8개(3배 `awk` 3 · `date` 1 · `grep` 1 · `head` 1 · `sed` 1 · `tr` 1) + 1.
+        /// `scan_tasks`·active 그룹 표·최신 승인 표의 `awk` 셋, `scan_leases`의 `date` 하나, 단독 선언
+        /// 유무를 보는 `grep` 하나, 그리고 lease 파일 하나당 `sed`·`head`·`tr` 셋이다(이 픽스처의
+        /// lease는 1건).
         ///
-        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 9개가 되어 걸린다. 후보당 상수가 하나
-        /// 늘면 3배에서 289개가 늘어 296개가 되고 예산을 288개 넘는다 — TASK-125 이전의 어법이 정확히
+        /// 무엇이 늘면 걸리는가: 본문에 외부 명령 호출이 둘 늘면 10개가 되어 걸린다. 후보당 상수가 하나
+        /// 늘면 3배에서 289개가 늘어 297개가 되고 예산을 288개 넘는다 — TASK-125 이전의 어법이 정확히
         /// 그 모양이었고 그때 3배가 2,743개였다. lease 파일당 명령이 하나 늘면 이 픽스처에서 +1이므로
         /// 두 번째 것에서 걸린다.
-        const DEVELOPER_PROCESS_BUDGET: usize = 8;
+        const DEVELOPER_PROCESS_BUDGET: usize = 9;
 
         const _: () = assert!(
             PLANNER_PROCESS_BUDGET < BUDGET_CEILING
