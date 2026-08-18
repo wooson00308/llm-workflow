@@ -3006,7 +3006,7 @@ fn read_integration_waiting_base(path: &Path) -> Option<String> {
 /// 조회에 실패하면 `None`이다. 더러운지 깨끗한지 모르는 것과 깨끗한 것은 다른 사실이므로 합치지
 /// 않는다.
 fn shared_workspace_is_dirty(project_root: &Path) -> Option<bool> {
-    let output = std::process::Command::new("git")
+    let output = crate::infrastructure::quiet_command::quiet_command("git")
         .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(project_root)
         .output()
@@ -3021,7 +3021,7 @@ fn shared_workspace_is_dirty(project_root: &Path) -> Option<bool> {
 /// Git 작업 트리가 아니거나 아직 커밋이 없으면 `rev-parse`가 실패하고, 둘 다 고정할 기준이 없는
 /// 경우이므로 `None`으로 합쳐 다룬다.
 fn current_base_commit(project_root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::infrastructure::quiet_command::quiet_command("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(project_root)
         .output()

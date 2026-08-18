@@ -9,7 +9,9 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
+
+use crate::infrastructure::quiet_command::quiet_command;
 use std::time::Duration;
 
 /// 하트비트 실행 파일 이름. PATH 후보와 사용자 설치 후보가 같은 이름을 쓴다.
@@ -158,7 +160,7 @@ pub fn run_capturing(candidates: &[PathBuf], arguments: &[&str]) -> Result<Captu
 ///
 /// 작업 디렉터리를 지정하지 않는다. 잡의 cwd는 하트비트가 slug에서 정한다(확인 사실 14).
 fn status_of(program: &Path, job_name: &str) -> std::io::Result<ExitStatus> {
-    Command::new(program)
+    quiet_command(program)
         .arg(SUBCOMMAND)
         .arg(JOB_FLAG)
         .arg(job_name)
@@ -174,7 +176,7 @@ fn status_of(program: &Path, job_name: &str) -> std::io::Result<ExitStatus> {
 /// 작업 디렉터리를 지정하지 않는 것은 `status_of`와 같다.
 fn output_of(program: &Path, arguments: &[&str]) -> std::io::Result<Output> {
     retry_executable_busy(|| {
-        Command::new(program)
+        quiet_command(program)
             .args(arguments)
             .stdin(Stdio::null())
             .output()

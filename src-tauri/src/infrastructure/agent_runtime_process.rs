@@ -9,12 +9,13 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::domain::agent_runtime::{RuntimeStatus, UpdateApplication, UpdatePlan};
+use crate::infrastructure::quiet_command::quiet_command;
 
 /// 런타임 계약의 API 버전. 요청 봉투에 그대로 싣는다.
 const API_VERSION: &str = "1";
@@ -155,7 +156,7 @@ impl RuntimeCaller for LauncherCaller {
                 looked: self.launcher.clone(),
             });
         }
-        let mut command = Command::new(&self.launcher);
+        let mut command = quiet_command(&self.launcher);
         // 서비스 정의가 PATH의 개발용 heartbeat를 우연히 고르지 않도록 현재 앱이 검증한 stable
         // launcher를 런타임에 명시한다. 런타임은 이 값이 실제 파일일 때만 우선한다.
         command.env("HEARTBEAT_RUNTIME_LAUNCHER", &self.launcher);
