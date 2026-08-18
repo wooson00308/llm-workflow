@@ -18,9 +18,9 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 31;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 32;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
-pub(crate) const ARCHITECT_RULES_VERSION: u32 = 20;
+pub(crate) const ARCHITECT_RULES_VERSION: u32 = 21;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 23;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 31
+rules_version: 32
 ---
 
 # LLM Workflow agent protocol
@@ -279,6 +279,8 @@ An architect creates one `workflow-labs/work-group@1` document under `groups/` f
 - The app records one group decision per QA submission under `decisions/` with `schema: workflow-labs/group-qa-decision@1`. It records `group_id`, `group_revision`, `outcome`, `request_id`, `created_by: user`, and `created_at`. An agent never writes or edits that decision.
 - A current-revision `revision_requested` group decision is the architect's highest-priority target. Claim that decision, increment the existing group's revision, set `status: preparing`, link the decision in `source_qa_decision_id`, and create only the new corrective tasks the comment requires. Preserve unaffected verified tasks and every prior decision.
 - After all tasks for the current revision are verified, a user-mode group is ready for one group QA. A confirmed group decision completes the group without changing task files.
+- A group whose configuration an architect examined and could not repair from the documents records that judgement in the optional `configuration_unresolved_revision` field, holding the group's `revision` at the time of the judgement, and states in the body section `## 사람의 판단이 필요한 이유` what the user has to judge. `.workflow/rules/roles/architect.md` says when an architect writes those two, and no other role writes either of them.
+- A group that carries neither is valid exactly as it is, and so is one whose recorded revision is older than its current `revision`. Every group written before these two existed reads that way, and nothing is filled in retroactively.
 
 ### Recording why a task is blocked
 
@@ -373,6 +375,7 @@ history:
 - A task that can only be performed while nothing else runs declares it in the optional `solo_run` field: one line starting at column 0, written at most once, holding `true` or `false` — `solo_run: true`. `true` is the declaration; `false` and a missing key are both the absence of one, which is how every task written before this field reads. `scope_files` says which tasks must not be started at the same time as each other, and this field says the task starts only while the project holds no other unexpired lease at all.
 - A value that cannot be read as that form is treated as a declared solo run. A second `solo_run:` line, an empty value, a quoted or capitalized word, and a value spread over several lines are all that case. Leaning a value that cannot be judged to the safe side is the same principle `scope_files` already applies to its own.
 - Preserve the declaration when you change the task for another reason. A status transition, the `## 막힌 사유` record §5 defines, and an architect's correction of a definition error all leave the value exactly as it was written. The role contracts state which role writes it and which one never does.
+- The architect judgement that a group's configuration cannot be repaired from the documents lives in the optional `configuration_unresolved_revision` field: one line starting at column 0, written at most once, holding the group's `revision` at the time of that judgement — `configuration_unresolved_revision: 2`. The body section `## 사람의 판단이 필요한 이유`, written in exactly those characters, carries what the user has to judge. A group that has neither leaves the key out and writes no such section, which is how every group written before them reads, and that group stays valid.
 - What kind of block a task is under lives in the optional `blocked_kind` field, and the task-definition revision request a task has already answered lives in the optional `revision_request_id` field. §5 defines both, and a task that has neither fact leaves both keys out.
 - Do not combine user decisions with an agent-authored specification, work group, or task file.
 - Do not change schema versions. Schema upgrades are performed only by the app migration flow.
@@ -578,12 +581,12 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 20
+rules_version: 21
 ---
 
 # Project architect role
 
-Handle one architect target: create or recover a work group, reclassify a group rejected in QA, or correct one task blocked by a definition error.
+Handle one architect target: create or recover a work group, reclassify a group rejected in QA, repair a group the app reports as a configuration error, or correct one task blocked by a definition error.
 
 ## Runtime reservation handoff
 
@@ -599,6 +602,7 @@ A group recovery and a task correction preserve their identifiers.
 One of these must hold:
 
 - The latest app-owned decision for a work group's current revision is `revision_requested`. A `source_qa_decision_id` names the rejection answered by an earlier revision; it never hides a rejection on the current revision.
+- A work group is in the configuration-error state the app reports, and no unexpired lease covers its id. A group covered by an unexpired lease is not a target, judged for expiry exactly as every other item on this list is. A group whose `configuration_unresolved_revision` names its current `revision` is not a target either: an architect already examined it and recorded that the documents hold nothing to repair.
 - An unhandled historical task-definition revision request names a `todo` or `blocked` task.
 - A task is `blocked` with `blocked_kind: definition_error`; no user request is required.
 - A work group is `preparing` and no unexpired lease covers its id, its source approval, or its source QA decision.
@@ -608,13 +612,13 @@ No unexpired lease may cover the selected QA decision, group, request, task, or 
 
 ## Choose in this order
 
-- Take a current group QA rejection first, then a historical or direct task definition correction, then an interrupted `preparing` group, then a new specification approval.
+- Take a current group QA rejection first, then a group in the configuration-error state, then a historical or direct task definition correction, then an interrupted `preparing` group, then a new specification approval.
 - When the claim fails, move to the next eligible target in that order. One session still handles exactly one target.
 
 ## Claim first
 
-- Claim the selected target as `.workflow/rules/workflow.md` §4 describes. Group QA rework claims its decision id; interrupted preparation claims the group id; a direct definition correction claims the task id; a historical revision path claims the request id; approval decomposition claims the approval decision id.
-- Re-verify eligibility after claiming. If another session handled the group QA decision, resumed the group, corrected the task, or created a group from the approval, release the lease and report `NO_ELIGIBLE_WORK`.
+- Claim the selected target as `.workflow/rules/workflow.md` §4 describes. Group QA rework claims its decision id; a configuration-error repair claims the group id, and so does interrupted preparation; a direct definition correction claims the task id; a historical revision path claims the request id; approval decomposition claims the approval decision id.
+- Re-verify eligibility after claiming. If another session handled the group QA decision, resumed the group, repaired the configuration error, corrected the task, or created a group from the approval, release the lease and report `NO_ELIGIBLE_WORK`.
 
 ## Create the work group before its tasks
 
@@ -638,6 +642,18 @@ No unexpired lease may cover the selected QA decision, group, request, task, or 
 - Read the existing `preparing` group, its tasks, the linked approval or QA decision, and any architect report. Evaluate stopped-session residue under `.workflow/rules/workflow.md` §4.
 - Continue the same group and revision. Do not create a replacement identifier or increment revision merely because a lease expired.
 - Finish the missing group definition and tasks, then set the same group to `active`. Record what was kept, discarded, and rewritten in the architect report.
+
+## Repairing a group the app reports as a configuration error
+
+A work group can sit in the configuration-error state the app reports: its own frontmatter, its tasks, or its user QA flow does not satisfy the conditions the app judges it by. Repairing one such group is architect work, and it never waits for user action.
+
+- Keep the same group identifier. Do not create a replacement group document, and do not derive another group from the same approval.
+- Do not increment `revision`. This is not the rework that answers a user rejection, and `## Reclassify a group after QA rejection` above stays the only path that raises that number.
+- What you may change is that group document and the task documents that belong to it. The user's decision documents, the approval records, and the judgement conditions themselves stay as they are: a group is repaired by making its documents satisfy those conditions, never by loosening a condition.
+- Once the documents satisfy the conditions, the group returns to the ordinary flow and needs no further step. The app reads the documents again and reports the state they now describe.
+- When the documents hold nothing you can repair, record that judgement instead of guessing at a repair. Write `configuration_unresolved_revision` into the group frontmatter with the same number as the group's current `revision`, write the body section `## 사람의 판단이 필요한 이유` — in exactly those characters — saying what the user has to judge, write the same judgement into your report under `reports/`, and leave the rest of the group as you found it.
+- While that field names the current `revision`, the same group is never selected as an automatic target again. A cause that sits outside the documents produces the same result however many sessions try it, and this is what keeps those retries from consuming the run budget. A later revision of the same group is a target again, because the documents changed.
+- One session attempts one repair. Do not claim the same target a second time to try again.
 
 ## Split for parallel safety
 
@@ -699,7 +715,7 @@ A task can be blocked because the task document itself is wrong. `.workflow/rule
 
 ## Completion
 
-- For an approval target, finish one active group and its executable tasks. For a group QA target, finish the next active revision and only its corrective tasks. For an interrupted group, finish that same revision. For a correction target, correct only that task and return it to `todo`. In every case write the architect report, release the lease, and stop.
+- For an approval target, finish one active group and its executable tasks. For a group QA target, finish the next active revision and only its corrective tasks. For an interrupted group, finish that same revision. For a configuration-error group, finish one repair attempt on that same revision, or record the judgement that the documents hold nothing to repair. For a correction target, correct only that task and return it to `todo`. In every case write the architect report, release the lease, and stop.
 - Write every completion condition and verification step the task needs into the task document itself. A developer session starts from that one document, as `.workflow/rules/roles/developer.md` describes, so a condition left outside it is a condition nobody reads.
 - Do not reference the specification's requirement statement and leave only a summary of it in the task. Whatever the task's own work needs from that statement is carried in the task document, stated in full and in terms the implementer can act on.
 - This decides how you decompose an approval into task documents. It does not shorten or remove the requirement statement in the approved specification, which stays exactly as the user approved it.
@@ -1501,7 +1517,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1523,7 +1539,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1545,7 +1561,7 @@ mod tests {
             "Do not write `qa_waiting`, `completed`, `revision_requested`, `resumed`, or `migrated_verified` entries."
         ));
         assert!(rules.contains("`resumed` never stands in for `in_progress`"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(architect.contains("`history`"));
         assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("`history`"));
@@ -1568,11 +1584,11 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
     }
@@ -1592,7 +1608,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1603,7 +1619,7 @@ mod tests {
         assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains("Runtime reservation handoff"));
         assert!(planner.contains("lowest unused three-digit number"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(architect.contains("TASK-S<spec number>-<ordinal>"));
         assert!(
             architect.contains("A group recovery and a task correction preserve their identifiers")
@@ -1624,7 +1640,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(developer.contains("rules_version: 23"));
 
         // 표시를 남기는 경로가 헬퍼 호출 하나뿐임을 공통 규칙이 정한다.
@@ -1660,7 +1676,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1685,7 +1701,7 @@ mod tests {
         assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("status is `verified`"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
         assert!(planner.contains("rules_version: 12"));
@@ -1702,7 +1718,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1736,14 +1752,14 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
@@ -1767,9 +1783,9 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 31);
+        assert_eq!(WORKFLOW_RULES_VERSION, 32);
         assert_eq!(PLANNER_RULES_VERSION, 12);
-        assert_eq!(ARCHITECT_RULES_VERSION, 20);
+        assert_eq!(ARCHITECT_RULES_VERSION, 21);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
     }
 
@@ -1823,7 +1839,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1904,7 +1920,7 @@ mod tests {
         assert!(planner.contains("Never delete the document and never merge it"));
 
         // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(!architect.contains("Taking over"));
     }
 
@@ -1923,7 +1939,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1998,7 +2014,7 @@ mod tests {
         assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains("what the user decides in this document"));
         assert!(planner.contains("what stays exactly as it is if it is not"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 자동검증 보고와 그룹 경계 유지.
@@ -2027,8 +2043,8 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 31"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(rules.contains("rules_version: 32"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
 
@@ -2160,10 +2176,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
 
         // 전이와 같은 편집에서 남기는 고정 절.
         assert!(rules.contains("### Recording why a task is blocked"));
@@ -2250,7 +2266,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("### The structured summary"));
 
         // 네 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·전후·위험으로 끝난다.
@@ -2329,7 +2345,7 @@ mod tests {
             "Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request"
         ));
         assert!(planner.contains("what stays exactly as it is while this document is not approved"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(architect.contains("Write that summary in the structured form §8 defines"));
         assert!(architect
             .contains("the closing heading names the automated result this task contributes to"));
@@ -2358,7 +2374,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2400,8 +2416,97 @@ mod tests {
             developer.contains("changes, automated verification, risks, and architect handoffs")
         );
         assert!(planner.contains("rules_version: 12"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
+    }
+
+    #[test]
+    fn records_the_configuration_error_repair_contract_in_the_installed_rules() {
+        let root = tempdir().expect("project root");
+        let control = root.path().join(".workflow");
+        fs::create_dir(&control).expect("control root");
+
+        install_project_instructions(root.path(), &control).expect("install instructions");
+
+        let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
+        let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
+        let architect =
+            fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
+        let developer =
+            fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
+
+        // 구성 확인 필요 기능이 아키텍트 대상이고, 선점이 걸린 기능은 대상이 아니다.
+        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains(
+            "A work group is in the configuration-error state the app reports, and no unexpired lease covers its id"
+        ));
+        assert!(architect.contains("A group covered by an unexpired lease is not a target"));
+
+        // 대상 순서는 사용자 확인 반려, 구성 확인 필요, 작업 정의 수정 순이고, 선점은 기능 식별자로 건다.
+        assert!(architect.contains(
+            "Take a current group QA rejection first, then a group in the configuration-error state, then a historical or direct task definition correction"
+        ));
+        assert!(architect.contains("a configuration-error repair claims the group id"));
+
+        // 같은 기능 식별자를 유지하고 새 기능 문서를 만들지 않는다.
+        assert!(architect.contains("## Repairing a group the app reports as a configuration error"));
+        assert!(architect.contains("Keep the same group identifier"));
+        assert!(architect.contains("Do not create a replacement group document"));
+
+        // 구성 버전을 올리지 않는다.
+        assert!(architect.contains("Do not increment `revision`"));
+        assert!(architect.contains("This is not the rework that answers a user rejection"));
+
+        // 고칠 수 있는 범위는 그 기능 문서와 그 기능의 작업 문서이고, 결정과 판정 조건은 그대로 둔다.
+        assert!(architect.contains(
+            "What you may change is that group document and the task documents that belong to it"
+        ));
+        assert!(architect.contains(
+            "The user's decision documents, the approval records, and the judgement conditions themselves stay as they are"
+        ));
+        assert!(architect.contains("never by loosening a condition"));
+
+        // 문서를 고쳐 판정 조건을 충족시키면 평소 흐름으로 돌아간다.
+        assert!(architect.contains(
+            "Once the documents satisfy the conditions, the group returns to the ordinary flow"
+        ));
+
+        // 고칠 곳이 없을 때 남기는 셋과, 같은 구성 버전에서 다시 자동 대상이 되지 않는다는 문장.
+        assert!(architect.contains(
+            "Write `configuration_unresolved_revision` into the group frontmatter with the same number as the group\'s current `revision`"
+        ));
+        assert!(architect.contains("write the body section `## 사람의 판단이 필요한 이유`"));
+        assert!(architect.contains("write the same judgement into your report under `reports/`"));
+        assert!(architect.contains(
+            "While that field names the current `revision`, the same group is never selected as an automatic target again"
+        ));
+        assert!(architect.contains(
+            "A group whose `configuration_unresolved_revision` names its current `revision` is not a target either"
+        ));
+        assert!(architect.contains("One session attempts one repair"));
+
+        // 공통 규칙이 선택 필드와 본문 절을 적고, 둘 다 없는 기존 기능 문서도 그대로 유효하다.
+        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("the optional `configuration_unresolved_revision` field"));
+        assert!(rules.contains("`configuration_unresolved_revision: 2`"));
+        assert!(rules.contains(
+            "The body section `## 사람의 판단이 필요한 이유`, written in exactly those characters"
+        ));
+        assert!(rules
+            .contains("A group that has neither leaves the key out and writes no such section"));
+        assert!(rules.contains("A group that carries neither is valid exactly as it is"));
+
+        // 이 기획서에 기획자와 개발자 계약의 변경분이 없다.
+        assert!(planner.contains("rules_version: 12"));
+        assert!(!planner.contains("configuration_unresolved_revision"));
+        assert!(developer.contains("rules_version: 23"));
+        assert!(!developer.contains("configuration_unresolved_revision"));
+
+        // 두 판 번호만 올랐고 나머지 둘은 그대로다.
+        assert_eq!(WORKFLOW_RULES_VERSION, 32);
+        assert_eq!(PLANNER_RULES_VERSION, 12);
+        assert_eq!(ARCHITECT_RULES_VERSION, 21);
+        assert_eq!(DEVELOPER_RULES_VERSION, 23);
     }
 
     #[test]
@@ -2460,7 +2565,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2491,9 +2596,9 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 31"));
+        assert!(rules.contains("rules_version: 32"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 20"));
+        assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
     }
 
