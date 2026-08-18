@@ -2,7 +2,7 @@
 schema: workflow-labs/agent-role@1
 role: developer
 managed_by: workflow-labs
-rules_version: 20
+rules_version: 21
 ---
 
 # Developer role
@@ -109,9 +109,11 @@ Immediately before integrating, compare the shared base against the base the can
 
 The shared workspace is where the user works too, and what they have not finished is not this session's to move.
 
-- Do not begin an automatic integration while the shared workspace holds uncommitted changes to tracked files outside `.workflow/`, staged changes, or a base change in progress. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
-- Control documents under `.workflow/` are the pipeline's own writing — task status, reports, and role records that sessions produce as they work. Before judging cleanliness, land those changes in a documents-only commit of their own. They are not the user's unfinished work, and they must never hold integration hostage to the pipeline's paperwork (2026-08-15: a candidate that had passed every check waited behind the very reports that recorded it).
-- Do not stash, commit, reset, check out, or delete changes outside `.workflow/`, and do not guess whose they are. A workspace you did not find clean is a reason to wait, not something to clear.
+- Before integrating, read two sets of paths: the files the recorded integration candidate changes, and the tracked files outside `.workflow/` that hold uncommitted or staged changes in the shared workspace. When the two sets share no path, integrate. Landing the change touches none of the user's files, and their unfinished work stays in the working tree exactly as they left it. The user is never required to commit, stash, or otherwise clear their own changes to let the pipeline proceed (2026-08-18: a consuming project held a fully verified candidate behind thirteen unrelated uncommitted files, and five developer sessions in a row could only re-verify and wait).
+- Integration waits only for an actual collision: the user's uncommitted changes touch a file the candidate changes, a base change is in progress in the shared workspace, or one of the two sets cannot be read — not knowing what would collide is not the same as knowing nothing would. The task stays waiting for integration, and while it waits, isolated implementation of other tasks continues.
+- Control documents under `.workflow/` are the pipeline's own writing — task status, reports, and role records that sessions produce as they work. Before judging collision, land those changes in a documents-only commit of their own. They are not the user's unfinished work, and they must never hold integration hostage to the pipeline's paperwork (2026-08-15: a candidate that had passed every check waited behind the very reports that recorded it).
+- Do not stash, commit, reset, check out, or delete changes outside `.workflow/`, and do not guess whose they are. A collision you found is a reason to wait, not something to clear.
+- After integrating beside unrelated uncommitted changes, run the post-integration checks against the integrated commit in a clean copy — the isolated copy moved onto that commit suffices. The user's half-finished work is not part of what was integrated, and a check that reads it can fail work that is sound or pass work that is not.
 - When a conflict can be resolved inside the task's approved scope and its `scope_files`, resolve it and run the isolated checks again.
 - When resolving it would mean changing something outside that scope, or choosing what the user intended, take neither side. Record the specific conflict and the condition for resuming in the four labels `.workflow/rules/workflow.md` §5 defines.
 
