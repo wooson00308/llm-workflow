@@ -330,6 +330,62 @@ describe("AgentRuntimeView cockpit", () => {
     expect(dialog).toHaveTextContent("중복 등록하거나 삭제하지 않습니다");
   });
 
+  it("calls a service-only plan a connection instead of a runtime change", () => {
+    renderView(state({
+      plan: {
+        kind: "install",
+        plan: {
+          planId: "plan-2", bundledVersion: "0.9.0", target: "macos-universal",
+          versionDirectory: "/runtime/versions/0.9.0", launcher: "/runtime/bin/heartbeat",
+          alreadyInstalled: true, installedVersion: "0.9.0", serviceTransitionRequired: true,
+          service, serviceAction: "register",
+        },
+      },
+    }));
+    const dialog = screen.getByRole("dialog", { name: "관리형 서비스 연결 확인" });
+    expect(within(dialog).getByRole("heading", { name: "관리형 서비스 연결" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { level: 2 }).textContent ?? "").not.toMatch(/설치/);
+    expect(dialog).toHaveTextContent("앱이 관리하는 서비스 연결만 새로 만듭니다");
+    expect(dialog).not.toHaveTextContent("앱이 관리하는 런타임만 변경합니다");
+    // 버전이 달라지지 않는데 화살표 양쪽에 같은 값을 적으면 무엇이 바뀌는지 되묻게 된다.
+    expect(dialog).toHaveTextContent("0.9.0 그대로 유지");
+    expect(dialog).not.toHaveTextContent("0.9.0 → 0.9.0");
+  });
+
+  it("keeps the runtime change wording when the versions differ or one is missing", () => {
+    const notInstalled = renderView(state({
+      plan: {
+        kind: "install",
+        plan: {
+          planId: "plan-3", bundledVersion: "0.9.0", target: "macos-universal",
+          versionDirectory: "/runtime/versions/0.9.0", launcher: "/runtime/bin/heartbeat",
+          alreadyInstalled: false, installedVersion: null, serviceTransitionRequired: true,
+          service, serviceAction: "register",
+        },
+      },
+    }));
+    let dialog = screen.getByRole("dialog", { name: "실행 환경 변경 확인" });
+    expect(within(dialog).getByRole("heading", { name: "실행 환경 변경" })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent("설치 안 됨 → 0.9.0");
+    notInstalled.unmount();
+
+    renderView(state({
+      plan: {
+        kind: "repair",
+        plan: {
+          planId: "plan-4", result: "planned", targetVersion: "0.9.0", target: "macos-universal",
+          manifestVerified: true, launcherSwitchRequired: false, serviceTransitionRequired: false,
+          recoverableOnFailure: true, installedVersion: "0.9.0", runningVersion: "0.9.0",
+          activeRuns: 2, projects: ["prj_1"], service,
+        },
+      },
+    }));
+    dialog = screen.getByRole("dialog", { name: "실행 환경 변경 확인" });
+    expect(within(dialog).getByRole("heading", { name: "실행 환경 변경" })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent("0.9.0 그대로 유지");
+    expect(dialog).not.toHaveTextContent("0.9.0 → 0.9.0");
+  });
+
   it("checks the published runtime from the advanced drawer without downloading", () => {
     const { runtimeActions } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));

@@ -432,22 +432,31 @@ function RuntimeReleaseRow({ actions, state }: { actions: AgentRuntimeActions; s
 function RuntimePlanDialog({ actions, onApplied, state }: { actions: AgentRuntimeActions; onApplied(): void; state: AgentRuntimeState }) {
   useDismissOnEscape(actions.cancelPlan);
   const plan = state.plan!;
+  // 계획 종류마다 버전 줄이 비교하는 값이 다르다. 설치와 내려받기는 설치 버전과 앱에 포함된 버전을,
+  // 업데이트와 복구는 설치 버전과 목표 버전을 견준다.
+  const comparedVersion = plan.kind === "install" || plan.kind === "download" ? plan.plan.bundledVersion : plan.plan.targetVersion;
+  // 두 값이 모두 있고 서로 같을 때만 버전이 바뀌지 않는 계획으로 본다. 한쪽이 비어 있으면 무엇과
+  // 무엇을 견준 것인지 알 수 없으므로, 그 경우는 지금까지의 문구를 그대로 쓴다.
+  const versionUnchanged = Boolean(plan.plan.installedVersion) && plan.plan.installedVersion === comparedVersion;
+  // 런타임이 이미 설치되어 있고 서비스에 할 일이 새 연결뿐이면, 사용자가 하는 일은 설치가 아니라
+  // 서비스 연결이다. 제목이 실행 환경 변경이라고 먼저 말하면 설치를 다시 하는 것으로 읽히므로
+  // (2026-08-18 Windows 새 기기 실측), 이 계획에서만 제목과 안내 문장이 연결을 말한다.
+  const serviceConnectOnly = (plan.kind === "install" || plan.kind === "download") && versionUnchanged && plan.plan.serviceAction === "register";
   return (
     <div className="agent-overlay">
-      <section aria-label="실행 환경 변경 확인" aria-modal="true" className="agent-dialog" role="dialog">
-        <header><div><p className="eyebrow">RUNTIME</p><h2>실행 환경 변경</h2></div><button aria-label="닫기" onClick={() => actions.cancelPlan()} type="button">×</button></header>
-        <p className="agent-dialog-note">실행 중인 세션은 유지하고 앱이 관리하는 런타임만 변경합니다.</p>
+      <section aria-label={serviceConnectOnly ? "관리형 서비스 연결 확인" : "실행 환경 변경 확인"} aria-modal="true" className="agent-dialog" role="dialog">
+        <header><div><p className="eyebrow">RUNTIME</p><h2>{serviceConnectOnly ? "관리형 서비스 연결" : "실행 환경 변경"}</h2></div><button aria-label="닫기" onClick={() => actions.cancelPlan()} type="button">×</button></header>
+        <p className="agent-dialog-note">{serviceConnectOnly ? "실행 중인 세션은 유지하고 앱이 관리하는 서비스 연결만 새로 만듭니다." : "실행 중인 세션은 유지하고 앱이 관리하는 런타임만 변경합니다."}</p>
         <ul className="agent-runtime-plan-summary">
+          <li><strong>버전</strong><span>{versionUnchanged
+            ? `${plan.plan.installedVersion} 그대로 유지`
+            : plan.kind === "install" || plan.kind === "download"
+              ? `${plan.plan.installedVersion ?? "설치 안 됨"} → ${plan.plan.bundledVersion}`
+              : `${plan.plan.installedVersion ?? "확인 안 됨"} → ${plan.plan.targetVersion ?? "현재 버전 복구"}`}</span></li>
           {plan.kind === "install" || plan.kind === "download" ? (
-            <>
-              <li><strong>버전</strong><span>{plan.plan.installedVersion ?? "설치 안 됨"} → {plan.plan.bundledVersion}</span></li>
-              <li><strong>서비스</strong><span>{serviceActionLabel(plan.plan.serviceAction)}</span></li>
-            </>
+            <li><strong>서비스</strong><span>{serviceActionLabel(plan.plan.serviceAction)}</span></li>
           ) : (
-            <>
-              <li><strong>버전</strong><span>{plan.plan.installedVersion ?? "확인 안 됨"} → {plan.plan.targetVersion ?? "현재 버전 복구"}</span></li>
-              <li><strong>실행 중 세션</strong><span>{plan.plan.activeRuns}개 유지</span></li>
-            </>
+            <li><strong>실행 중 세션</strong><span>{plan.plan.activeRuns}개 유지</span></li>
           )}
         </ul>
         {(plan.kind === "install" || plan.kind === "download") && plan.plan.serviceAction === "migration_required" && (
