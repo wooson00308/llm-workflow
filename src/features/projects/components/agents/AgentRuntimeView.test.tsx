@@ -919,6 +919,116 @@ describe("AgentRuntimeView diagnostic export", () => {
   });
 });
 
+/** 준비 안내 하나를 이름으로 집는다. 세 단계가 모두 끝나면 이 이름의 구역 자체가 없다. */
+function setupGuide() {
+  return screen.getByRole("region", { name: "에이전트 준비" });
+}
+
+/** 안내 안의 세 단계. 선언 순서가 그대로 배열 순서다. */
+function setupStepRows() {
+  return within(setupGuide()).getAllByRole("listitem");
+}
+
+describe("AgentRuntimeView 준비 안내", () => {
+  function unregistered() {
+    const runtime = inspection();
+    runtime.status!.service = { ...service, registered: false, running: false };
+    return runtime;
+  }
+
+  function needingConsent(overrides: Partial<AgentRuntimeState> = {}) {
+    return state({ policy: policy({ consent: consent({ status: "required", noticeVersion: null, grantedAt: null }) }), ...overrides });
+  }
+
+  it("새 기기에서 연결·동의·켜기를 한 안내에 선언한 순서로 세운다", () => {
+    renderView(needingConsent({ inspection: unregistered() }));
+
+    const steps = setupStepRows();
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toHaveTextContent("자동 배정 서비스 연결 필요");
+    expect(steps[1]).toHaveTextContent("실행 권한 동의");
+    expect(steps[2]).toHaveTextContent("자동 배정 켜기");
+    // 아직 아무 단계도 끝나지 않았으므로 완료 표시가 하나도 없다.
+    expect(within(setupGuide()).queryByText("완료")).not.toBeInTheDocument();
+    // 연결은 지금 진행할 수 있고, 켜기는 앞 단계가 남아 있어 버튼 대신 사유가 선다.
+    expect(within(steps[0]).getByRole("button", { name: "연결 계획" })).toBeInTheDocument();
+    expect(within(steps[2]).queryByRole("button")).not.toBeInTheDocument();
+    expect(steps[2]).toHaveTextContent("앞의 실행 환경 준비를 먼저 마쳐야 켤 수 있습니다");
+  });
+
+  it("자동 배정이 꺼져 있어도 동의 단계에서 동의를 기록하고 정책은 저장하지 않는다", async () => {
+    const runtimeActions = actions();
+    renderView(needingConsent(), runtimeActions);
+    expect(screen.getByRole("checkbox", { name: "자동 배정 켜기" })).not.toBeChecked();
+
+    fireEvent.click(within(setupStepRows()[1]).getByRole("button", { name: "고지 읽고 동의" }));
+    const dialog = screen.getByRole("dialog", { name: "실행 권한 동의" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "동의하고 계속" }));
+
+    await waitFor(() => expect(runtimeActions.grantConsent).toHaveBeenCalledWith(1));
+    expect(runtimeActions.save).not.toHaveBeenCalled();
+  });
+
+  it("실행 환경이 정상이면 연결 단계를 완료로 표시하고 조치를 주지 않는다", () => {
+    renderView(needingConsent());
+
+    const connect = setupStepRows()[0];
+    expect(connect).toHaveTextContent("실행 환경 정상");
+    expect(connect).toHaveTextContent("완료");
+    expect(within(connect).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("동의를 물어볼 수 없는 두 상태를 각각의 사유로 적고 완료로 다루지 않는다", () => {
+    renderView(state({ policy: policy({ consent: consent({ status: "unsupported", noticeVersion: null, grantedAt: null }) }) }));
+    const unsupported = setupStepRows()[1];
+    expect(unsupported).toHaveTextContent("실행 환경이 실행 권한 동의를 지원하지 않습니다");
+    expect(unsupported).not.toHaveTextContent("완료");
+    expect(within(unsupported).queryByRole("button")).not.toBeInTheDocument();
+
+    cleanup();
+    renderView(state({ policy: policy({ consent: consent({ status: "unreadable", noticeVersion: null, grantedAt: null, detail: "런타임을 실행하지 못했습니다." }) }) }));
+    const unreadable = setupStepRows()[1];
+    expect(unreadable).toHaveTextContent("동의 상태를 확인하지 못했습니다");
+    expect(unreadable).toHaveTextContent("런타임을 실행하지 못했습니다.");
+    expect(unreadable).not.toHaveTextContent("실행 환경이 실행 권한 동의를 지원하지 않습니다");
+    expect(unreadable).not.toHaveTextContent("완료");
+    expect(within(unreadable).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("연결과 동의를 마치면 켜기 단계가 자동 배정 켜기 확인 창을 연다", () => {
+    renderView();
+
+    const steps = setupStepRows();
+    expect(steps[0]).toHaveTextContent("완료");
+    expect(steps[1]).toHaveTextContent("완료");
+    fireEvent.click(within(steps[2]).getByRole("button", { name: "자동 배정 켜기" }));
+    expect(screen.getByRole("dialog", { name: "자동 배정 켜기" })).toBeInTheDocument();
+  });
+
+  it("세 단계를 모두 마치면 안내가 사라지고 화면이 원래 구성으로 돌아간다", () => {
+    const enabled = policy();
+    enabled.policy = { ...enabled.policy, automationEnabled: true };
+    renderView(state({ policy: enabled }));
+
+    expect(screen.queryByRole("region", { name: "에이전트 준비" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "에이전트" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "자동 배정 켜기" })).toBeChecked();
+    expect(screen.getByRole("heading", { name: "배정 대기" })).toBeInTheDocument();
+  });
+
+  it("외부 서비스를 쓰는 기기에서는 연결 단계가 고급 설정을 연다", () => {
+    const foreign = inspection();
+    foreign.status!.service = { ...service, label: "com.catze.dream-heartbeat", executable: "/legacy/dream-heartbeat", running: false };
+    renderView(state({ inspection: foreign }));
+
+    const connect = setupStepRows()[0];
+    expect(connect).toHaveTextContent("자동 배정 서비스 전환 필요");
+    fireEvent.click(within(connect).getByRole("button", { name: "전환 준비" }));
+    expect(screen.getByRole("dialog", { name: "고급 설정" })).toBeInTheDocument();
+  });
+});
+
 describe("AgentRuntimeView execution consent", () => {
   function runPlan() {
     return {
@@ -1092,7 +1202,8 @@ describe("AgentRuntimeView execution consent", () => {
     enabled.policy = { ...enabled.policy, automationEnabled: true };
     renderView(state({ policy: enabled }), runtimeActions);
 
-    expect(screen.getByText("실행 권한 동의 필요")).toBeInTheDocument();
+    // 동의 입구는 준비 안내의 동의 단계로 옮겼다. 자동 배정이 이미 켜져 있어도 그 자리에 선다.
+    expect(within(setupGuide()).getByText("실행 권한 동의")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "고지 읽고 동의" }));
     const dialog = screen.getByRole("dialog", { name: "실행 권한 동의" });
     fireEvent.click(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ }));

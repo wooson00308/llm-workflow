@@ -43,6 +43,21 @@
 .agent-runtime-attention p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 /* 작업 공간 껍데기에서는 다른 배너와 같은 자리에 서므로 그쪽 여백 규칙을 따른다. */
 .workspace-content > .agent-runtime-attention { margin-top: 0; margin-bottom: 20px; }
+/* 준비 단계 안내. 남은 준비를 연결·동의·켜기 순서로 세우고, 세 단계가 모두 끝나면 그리지
+   않으므로 준비를 마친 기기에서는 이 자리가 비어 있다. 자동 배정 토글 바로 위에 서기 때문에
+   토글과 같은 좌우 여백과 모서리를 쓴다. */
+.agent-setup-guide { margin-bottom: 12px; padding: 14px 18px; border: 1px solid color-mix(in srgb, #d9903d 34%, var(--line)); border-radius: 14px; background: color-mix(in srgb, #d9903d 7%, var(--paper)); }
+.agent-setup-heading strong { display: block; font-size: 15px; }
+.agent-setup-heading p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.agent-setup-guide ol { list-style: none; counter-reset: agent-setup; margin: 10px 0 0; padding: 0; }
+.agent-setup-guide li { display: flex; align-items: center; gap: 12px; padding: 10px 0; counter-increment: agent-setup; }
+.agent-setup-guide li + li { border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
+.agent-setup-guide li::before { content: counter(agent-setup); display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; background: #e8e5dc; color: var(--muted); font-size: 12px; }
+.agent-setup-guide li.is-done::before { content: "\2713"; background: #45a77a; color: white; }
+.agent-setup-copy { flex: 1 1 auto; min-width: 0; }
+.agent-setup-copy strong { display: block; font-size: 14px; }
+.agent-setup-copy p { margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: break-word; }
+.agent-setup-state { flex: 0 0 auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .agent-operations { display: grid; gap: 12px; margin-top: 18px; }
 .agent-ops-section { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
 .agent-ops-section > header { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0 16px; border-bottom: 1px solid var(--line); }

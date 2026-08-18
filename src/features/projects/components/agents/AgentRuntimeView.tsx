@@ -92,6 +92,15 @@ export function readinessOf(state: AgentRuntimeState): Readiness {
   }
 }
 
+/** 준비 안내의 한 단계. `done`이면 조치가 없고, 진행할 수 없는 단계는 `action`이 비어 있다. */
+interface SetupStep {
+  key: string;
+  title: string;
+  detail: string;
+  done: boolean;
+  action: { label: string; run(): void } | null;
+}
+
 interface Props {
   actions: AgentRuntimeActions;
   project?: ProjectSummary;
@@ -125,6 +134,61 @@ export function AgentRuntimeView({ actions, project, projectName, state }: Props
     await actions.save({ ...policy, automationEnabled: false });
   }
 
+  const consentBlocked = consent ? consentBlockMessage(consent) : null;
+  const enableBlockReason = !policy
+    ? "에이전트 설정을 읽는 중입니다."
+    : state.saving
+      ? "설정을 저장하는 중입니다. 저장이 끝나면 켤 수 있습니다."
+      : !automationReady
+        ? "앞의 실행 환경 준비를 먼저 마쳐야 켤 수 있습니다."
+        : null;
+
+  /*
+   * 연결, 동의, 켜기는 하나의 준비 절차인데 화면은 서로 모르는 안내 두 개와 토글 하나로 흩어
+   * 놓고 있었다. 동의 안내가 자동 배정을 켠 뒤에만 나타나서, 서비스가 연결되지 않아 자동 배정을
+   * 켤 수 없는 새 기기에서는 동의를 여는 길 자체가 없었다. 세 단계를 한 목록에 순서대로 세워
+   * 그 자리에서 각 단계를 실행하게 한다.
+   */
+  const setupSteps: SetupStep[] = [
+    {
+      key: "connect",
+      title: readiness.title,
+      detail: readiness.detail,
+      done: readiness.tone === "ready",
+      action: readiness.operation && readiness.actionLabel
+        ? { label: readiness.actionLabel, run: () => void actions.plan(readiness.operation!) }
+        : readiness.title === "자동 배정 서비스 전환 필요"
+          ? { label: "전환 준비", run: () => setAdvancedOpen(true) }
+          : null,
+    },
+    {
+      key: "consent",
+      // 동의를 물어볼 수 없는 상태의 사유가 있으면 그것이 이 단계의 설명이다. 동의한 것으로
+      // 다루지 않으므로 완료 표시도 조치 버튼도 주지 않는다.
+      title: "실행 권한 동의",
+      detail: consentBlocked
+        ?? (!consent
+          ? "에이전트 설정을 읽는 중입니다."
+          : consent.status === "granted"
+            ? "세션이 파일을 다루고 명령을 실행하는 권한에 이미 동의했습니다."
+            : "세션이 파일을 다루고 명령을 실행하는 권한에 동의해야 세션을 시작합니다."),
+      done: consent?.status === "granted",
+      action: consent?.status === "required" ? { label: "고지 읽고 동의", run: () => setConsentOpen(true) } : null,
+    },
+    {
+      key: "enable",
+      title: "자동 배정 켜기",
+      detail: automationEnabled
+        ? "새 작업을 감지하면 빈 자리에 안전하게 배정합니다."
+        : enableBlockReason ?? "참여할 역할을 고른 뒤 자동 배정을 켭니다.",
+      done: automationEnabled,
+      action: !automationEnabled && !enableBlockReason
+        ? { label: "자동 배정 켜기", run: () => setEnableConfirmOpen(true) }
+        : null,
+    },
+  ];
+  const setupDone = setupSteps.every((step) => step.done);
+
   return (
     <section className="agents-view agent-cockpit">
       <header className="agent-cockpit-heading">
@@ -142,25 +206,29 @@ export function AgentRuntimeView({ actions, project, projectName, state }: Props
         </div>
       </header>
 
+      {!setupDone && (
+        <section aria-label="에이전트 준비" className="agent-setup-guide">
+          <div className="agent-setup-heading"><strong>에이전트 준비</strong><p>아래 순서를 모두 마치면 자동 배정을 사용할 수 있습니다.</p></div>
+          <ol>
+            {setupSteps.map((step) => (
+              <li className={step.done ? "is-done" : ""} key={step.key}>
+                <div className="agent-setup-copy"><strong>{step.title}</strong><p>{step.detail}</p></div>
+                {step.done
+                  ? <span className="agent-setup-state">완료</span>
+                  : step.action
+                    ? <button className="secondary-button agent-compact-action" onClick={step.action.run} type="button">{step.action.label}</button>
+                    : <span className="agent-setup-state">대기</span>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
       <section aria-label="자동 배정" className={`agent-automation-master ${automationEnabled ? "is-on" : ""}`}>
         <div><strong>자동 배정</strong><p>{automationEnabled ? "새 작업을 감지하면 빈 자리에 안전하게 배정합니다." : "직접 배정만 사용합니다. 켜기 전에는 자동으로 시작하지 않습니다."}</p></div>
         <label className="agent-switch" title={automationReady ? undefined : "실행 환경 전환을 마친 뒤 켤 수 있습니다."}><input aria-label="자동 배정 켜기" checked={automationEnabled} disabled={!policy || state.saving || (!automationEnabled && !automationReady)} onChange={(event) => { if (event.target.checked) setEnableConfirmOpen(true); else void disableAutomation(); }} type="checkbox" /><span aria-hidden="true" /></label>
       </section>
 
-      {automationEnabled && consent?.status === "required" && (
-        <section className="agent-runtime-attention" role="status">
-          <div><strong>실행 권한 동의 필요</strong><p>자동 배정이 켜져 있지만 실행 권한에 동의하기 전에는 새 세션을 시작하지 않습니다.</p></div>
-          <button className="secondary-button agent-compact-action" onClick={() => setConsentOpen(true)} type="button">고지 읽고 동의</button>
-        </section>
-      )}
-
-      {readiness.tone !== "ready" && (
-        <section className="agent-runtime-attention" role="status">
-          <div><strong>{readiness.title}</strong><p>{readiness.detail}</p></div>
-          {readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}
-          {!readiness.operation && readiness.title === "자동 배정 서비스 전환 필요" && <button className="secondary-button agent-compact-action" onClick={() => setAdvancedOpen(true)} type="button">전환 준비</button>}
-        </section>
-      )}
       {state.readError && <p className="agent-error" role="status">실행 환경 상태를 읽지 못했습니다. 잠시 후 자동으로 다시 확인합니다.</p>}
       {state.planError && <p className="agent-error" role="status">{humanRuntimeMessage(state.planError)}</p>}
       {state.applyError && <p className="agent-error" role="status">{humanRuntimeMessage(state.applyError)}</p>}

@@ -1896,13 +1896,16 @@ describe("WorkspaceShell 에이전트 진입점", () => {
       expect(screen.queryByText("실행 권한 동의 필요")).not.toBeInTheDocument();
     });
 
-    // 에이전트 화면이 같은 안내를 이미 담고 있어 두 번 보일 이유가 없다.
+    // 에이전트 화면이 같은 안내를 이미 담고 있어 두 번 보일 이유가 없다. 그 화면의 동의 입구가
+    // 준비 안내의 동의 단계로 옮겨졌으므로, 첫 화면 알림의 문구가 사라지는 것과 그 화면의 동의
+    // 입구가 하나만 남는 것을 함께 확인한다.
     it("에이전트 화면을 보고 있는 동안에는 그 화면의 안내만 남는다", () => {
       renderShell({ agentRuntime: consentState(true, "required"), agentRuntimeActions: agentActions });
 
       fireEvent.click(screen.getByRole("button", { name: "에이전트" }));
 
-      expect(screen.getAllByText("실행 권한 동의 필요")).toHaveLength(1);
+      expect(screen.queryByText("실행 권한 동의 필요")).not.toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: "고지 읽고 동의" })).toHaveLength(1);
     });
   });
 });
