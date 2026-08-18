@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::agent_runtime::RunState;
+
 pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -420,6 +422,56 @@ pub struct WorkflowReportSummary {
 pub struct ReportDocument {
     pub summary: WorkflowReportSummary,
     pub body: String,
+}
+
+/// 보고서를 남겼는지 판정할 실행 하나가 넘기는 실행 행의 값(SPEC-063 R-01). 런타임이 답한 값을
+/// 화면이 그대로 옮기므로 앱은 여기서 값을 해석하지 않고 비어 있는 값을 다른 값으로 메우지 않는다.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReportAudit {
+    pub run_id: String,
+    /// 이 실행이 배정받은 대상 문서 식별자. 배정 없이 끝난 실행에서는 비어 있다.
+    pub target_id: Option<String>,
+    /// 런타임이 이 실행에 예약한 결과 접두어. 이 값을 싣지 않는 구형 실행 행에서는 비어 있다.
+    #[serde(default)]
+    pub result_prefix: Option<String>,
+    pub role: String,
+    pub state: RunState,
+    pub started_at: Option<String>,
+    /// 종료 상태로 전환한 시각. 구형 런타임과 활성 실행에서는 비어 있다.
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    /// 실행이 끊긴 이유 값. 런타임이 싣지 않았으면 비어 있다.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// 실행 하나에 대한 보고서 판정(SPEC-063 R-01).
+///
+/// 실행의 상태 값과 따로 매긴다. 상태가 성공이어도 이 실행의 보고서를 찾지 못했으면 `Silent`다
+/// (R-02). 확신이 서지 않는 경우는 모두 `Unknown`이고, 확인 실패는 보고 누락으로 올리지 않는다.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunReportVerdict {
+    /// 이름 조건을 통과한 보고서가 이 실행의 시간대 안에 있다.
+    Reported,
+    /// 이 실행이 남긴 보고서를 찾지 못했다.
+    Silent,
+    /// 판정에 필요한 값을 읽지 못했다.
+    Unknown,
+    /// 대상을 배정받지 않았거나, 취소되었거나, 아직 끝나지 않은 실행이다.
+    NotApplicable,
+}
+
+/// 실행 하나의 판정 결과.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReportAuditResult {
+    pub run_id: String,
+    pub verdict: RunReportVerdict,
+    /// 보고 누락 기록이 프로젝트 안에 남아 있는지. 이번에 새로 만든 경우와 이미 있던 경우가 모두
+    /// `true`다. 판정이 `Silent`인데 이 값이 `false`이면 기록을 남기지 못한 것이다.
+    pub recorded: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

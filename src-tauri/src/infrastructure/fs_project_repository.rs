@@ -1,26 +1,28 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::domain::agent_runtime::RunState;
 use crate::domain::project::{
     AgentLease, AgentLeaseSummary, CustomRulesDocument, CustomRulesDraft, CustomRulesPreview,
     IdeaDocument, ManagedAssetState, ManagedAssetStatus, ManagedAssetSyncResult,
     ManagedAssetSyncStatus, PendingRoleWork, PendingRoleWorkDetail, ProjectManifest,
-    ProjectSummary, ReportDocument, SaveCustomRulesRequest, SaveCustomRulesResult,
-    SchemaCompatibility, SpecDecisionOutcome, SpecDocument, TaskDependency, TaskDependencyState,
-    TaskDocument, TaskEvent, TaskOverlapBlock, TaskResumeRecovery, TaskResumeRequest,
-    TaskResumeResult, TaskResumeStatus, TaskRevisionRequest, TaskRevisionRequestInput,
-    TaskRevisionRequestResult, TaskRevisionRequestStatus, TaskScopeDeclaration, TaskScopeStatus,
-    WorkGroupDisplayStatus, WorkGroupQaMode, WorkGroupQaOutcome, WorkGroupQaScenario,
-    WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkGroupQaSubmissionStatus,
-    WorkGroupStatus, WorkGroupSummary, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
-    WorkflowItems, WorkflowManifest, WorkflowReportSummary, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    ProjectSummary, ReportDocument, RunReportAudit, RunReportAuditResult, RunReportVerdict,
+    SaveCustomRulesRequest, SaveCustomRulesResult, SchemaCompatibility, SpecDecisionOutcome,
+    SpecDocument, TaskDependency, TaskDependencyState, TaskDocument, TaskEvent, TaskOverlapBlock,
+    TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
+    TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
+    TaskScopeDeclaration, TaskScopeStatus, WorkGroupDisplayStatus, WorkGroupQaMode,
+    WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission, WorkGroupQaSubmissionResult,
+    WorkGroupQaSubmissionStatus, WorkGroupStatus, WorkGroupSummary, WorkflowCounts, WorkflowEntry,
+    WorkflowItemSummary, WorkflowItems, WorkflowManifest, WorkflowReportSummary, WorkflowStatus,
+    PROJECT_SCHEMA_VERSION,
 };
 #[cfg(test)]
 use crate::domain::project::{
@@ -52,6 +54,18 @@ const RUNTIME_DIRECTORY: &str = ".runtime";
 const QA_BASE_DIRECTORY: &str = "qa-base";
 /// 격리 준비 기록을 두는 실행 상태 디렉터리. 대상 하나가 파일 하나이고 파일 이름이 곧 대상 id다.
 const ISOLATION_DIRECTORY: &str = "isolation";
+/// 보고 없이 끝난 실행의 기록을 두는 실행 상태 디렉터리. 실행 하나가 파일 하나이고 파일 이름이 곧
+/// 실행 id다(SPEC-063 R-11).
+const SILENT_RUN_DIRECTORY: &str = "silent-runs";
+/// 보고 누락 기록의 규격 이름과 버전. 문서 스키마와 같은 어법을 쓰되 워크플로우 문서가 아니므로
+/// 어떤 문서 판정에도 섞이지 않는다.
+const SILENT_RUN_SCHEMA: &str = "workflow-labs/silent-run@1";
+/// 소급 판정을 막는 기준 시각 파일의 이름. 실행 기록은 `<실행 id>.json`이고 실행 id에는 `.`이 들어올
+/// 수 없으므로, 이 이름을 실행 기록이 가져가는 일이 없다.
+const SILENT_RUN_BASELINE_FILE: &str = "baseline.yml";
+/// 보고서 파일 시각이 실행 종료 시각보다 늦게 찍히는 시계 오차를 흡수하는 여유(초). 보고서를 쓴
+/// 직후 프로세스가 끝나므로 종료 시각이 파일 시각보다 나중이고, 이 여유는 그 어긋남만 흡수한다.
+const REPORT_TIME_SLACK_SECONDS: i64 = 60;
 /// 격리 검사를 마치고 공유 작업 공간 반영을 기다리는 상태를 가리키는 준비 기록의 단계 값. 값을
 /// 읽는 쪽이 이 모듈이고, 기록에 실제로 적는 주체는 별도로 배포되는 실행 환경이다.
 const INTEGRATION_WAITING_STEP: &str = "integration_waiting";
@@ -492,6 +506,44 @@ impl FileSystemProjectRepository {
         validate_workflow_directories(&control_root, &project)?;
         let workflow_root = registered_workflow_root(&control_root, &project, workflow_directory)?;
         Ok(run_reports(&workflow_root, target_id, result_prefix))
+    }
+
+    /// 대상을 배정받고 끝난 실행마다 그 실행이 결과 보고서를 남겼는지 판정하고, 남기지 않은 실행을
+    /// 프로젝트 안 기록으로 남긴다(SPEC-063 R-01, R-11).
+    ///
+    /// [`list_run_reports`](Self::list_run_reports)와 달리 이름만 보지 않는다. 같은 대상을 앞서 다룬
+    /// 세션의 보고서도 이름 조건은 통과하므로, 이름 조건을 통과한 파일 중 이 실행의 시간대 안에 놓인
+    /// 것이 있어야 보고서를 남긴 것으로 센다(R-03). 찾는 범위는 프로젝트에 등록된 모든 워크플로의
+    /// `reports/`다. 화면이 워크플로 하나를 정해 넘기지 않는다.
+    ///
+    /// 판정이 틀리면 정상적으로 끝난 실행이 끊긴 것처럼 보인다. 그래서 확신이 서지 않는 모든 경우가
+    /// `Unknown`이고, 확인 실패는 보고 누락으로 올리지 않는다(R-06).
+    ///
+    /// 이 명령은 워크플로 문서와 선점 파일을 하나도 쓰지 않는다(R-15, R-16). 쓰는 자리는 앱만 쓰고
+    /// 형상 관리에 올라가지 않는 실행 상태 디렉터리 하나뿐이다.
+    pub fn audit_run_reports(
+        &self,
+        root: &Path,
+        runs: &[RunReportAudit],
+    ) -> Result<Vec<RunReportAuditResult>, ProjectError> {
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        // 둘 다 실행 목록 전체가 함께 보는 값이다. 실행마다 매니페스트를 다시 읽거나 기준 시각을
+        // 다시 세우면 한 번의 판정 안에서 근거가 흔들린다.
+        let baseline = silent_run_baseline(&control_root);
+        let catalog = report_catalog(&control_root);
+        Ok(runs
+            .iter()
+            .map(|run| {
+                let verdict = run_report_verdict(run, catalog.as_deref());
+                RunReportAuditResult {
+                    run_id: run.run_id.clone(),
+                    verdict,
+                    recorded: verdict == RunReportVerdict::Silent
+                        && record_silent_run(&control_root, run, baseline),
+                }
+            })
+            .collect())
     }
 
     /// 보고서 하나의 전문. 파일을 쓰지 않고 어떤 문서의 상태도 바꾸지 않는다.
@@ -4874,6 +4926,218 @@ fn run_reports(
         .into_iter()
         .filter(|report| keys.iter().any(|key| report.file_name.contains(key)))
         .collect()
+}
+
+/// 보고서 파일 하나의 이름과 시각. 이름 조건만으로는 같은 대상을 다룬 여러 세션의 보고서가 함께
+/// 잡히므로, 어느 실행의 것인지는 이 시각이 가른다.
+struct ReportFile {
+    name: String,
+    /// 생성 시각을 먼저 쓰고, 그 플랫폼이 생성 시각을 주지 않으면 수정 시각을 쓴다. 둘 다 읽지
+    /// 못하면 `None`이고, 이름 조건을 통과한 파일이 그 상태이면 그 실행은 확인 불가다.
+    time: Option<DateTime<Utc>>,
+}
+
+/// 등록된 모든 워크플로의 `reports/` 아래 보고서 파일. 등록 목록은 `project.yml`이 정본이고,
+/// 등록되지 않은 디렉터리는 보지 않는다(SPEC-063 C5).
+///
+/// 매니페스트나 워크플로 목록을 읽지 못하면 `None`이고, 그때는 모든 실행이 확인 불가다(R-06).
+fn report_catalog(control_root: &Path) -> Option<Vec<ReportFile>> {
+    let project = read_manifest(&control_root.join(PROJECT_MANIFEST)).ok()?;
+    validate_workflow_directories(control_root, &project).ok()?;
+    let mut files = Vec::new();
+    for workflow in &project.workflows {
+        files.extend(report_files(
+            &control_root.join(&workflow.directory).join("reports"),
+        )?);
+    }
+    Some(files)
+}
+
+/// 디렉터리 하나의 보고서 파일. 디렉터리가 아예 없으면 그 워크플로에 보고서가 없다는 확인된
+/// 사실이므로 빈 목록이고, 그 밖의 읽기 실패는 확인하지 못한 것이므로 `None`이다(R-06).
+fn report_files(reports_root: &Path) -> Option<Vec<ReportFile>> {
+    let entries = match fs::read_dir(reports_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry.ok()?.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        files.push(ReportFile {
+            name: name.to_owned(),
+            time: report_file_time(&path),
+        });
+    }
+    Some(files)
+}
+
+/// 보고서 파일 하나의 시각.
+fn report_file_time(path: &Path) -> Option<DateTime<Utc>> {
+    let metadata = fs::metadata(path).ok()?;
+    metadata
+        .created()
+        .or_else(|_| metadata.modified())
+        .ok()
+        .map(DateTime::<Utc>::from)
+}
+
+/// 실행 하나의 보고서 판정(SPEC-063 R-01). 기록은 남기지 않고 값만 만든다.
+fn run_report_verdict(run: &RunReportAudit, catalog: Option<&[ReportFile]>) -> RunReportVerdict {
+    // 대상을 배정받지 않은 실행과 취소된 실행에는 보고 의무가 없고, 종료 시각이 없는 실행은 아직
+    // 끝나지 않았거나 그 값을 싣지 않는 구형 실행 행이다(R-04, R-05).
+    let Some(target_id) = present(run.target_id.as_deref()) else {
+        return RunReportVerdict::NotApplicable;
+    };
+    if run.state == RunState::Cancelled {
+        return RunReportVerdict::NotApplicable;
+    }
+    let Some(finished_at) = present(run.finished_at.as_deref()) else {
+        return RunReportVerdict::NotApplicable;
+    };
+    // 여기서부터는 판정에 필요한 값을 읽지 못한 경우다. 확신이 서지 않으므로 보고 누락으로 올리지
+    // 않는다(R-06).
+    let (Some(started), Some(finished)) = (
+        present(run.started_at.as_deref()).and_then(parse_event_instant),
+        parse_event_instant(finished_at),
+    ) else {
+        return RunReportVerdict::Unknown;
+    };
+    let Some(files) = catalog else {
+        return RunReportVerdict::Unknown;
+    };
+    let until = finished + Duration::seconds(REPORT_TIME_SLACK_SECONDS);
+    let keys: Vec<&str> = [Some(target_id), present(run.result_prefix.as_deref())]
+        .into_iter()
+        .flatten()
+        .collect();
+    let matched: Vec<&ReportFile> = files
+        .iter()
+        .filter(|file| keys.iter().any(|key| file.name.contains(key)))
+        .collect();
+    // 시간대 안의 보고서를 하나라도 찾았으면 확인이 끝난다. 시각을 읽지 못한 파일이 남아 있어도 이
+    // 실행이 보고서를 남겼다는 사실 자체는 이미 확인되었다.
+    if matched.iter().any(|file| {
+        file.time
+            .is_some_and(|time| time >= started && time <= until)
+    }) {
+        return RunReportVerdict::Reported;
+    }
+    // 이름 조건을 통과한 파일의 시각을 하나라도 읽지 못했으면, 그 파일이 이번 실행의 것인지 앞선
+    // 세션의 것인지 가릴 수 없다(R-06).
+    if matched.iter().any(|file| file.time.is_none()) {
+        return RunReportVerdict::Unknown;
+    }
+    RunReportVerdict::Silent
+}
+
+/// 보고 없이 끝난 실행 하나의 기록. 기록이 남아 있으면 `true`이고, 이번에 새로 만든 경우와 이미
+/// 있던 경우가 모두 여기에 든다(SPEC-063 R-11).
+fn record_silent_run(
+    control_root: &Path,
+    run: &RunReportAudit,
+    baseline: Option<DateTime<Utc>>,
+) -> bool {
+    // 기준 시각을 세우지 못했으면 이 판정이 언제부터 섰는지 알 수 없다. 근거 없이 적으면 판정이
+    // 서기 전에 끝난 실행까지 소급해 보고 누락으로 남는다(R-14).
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    let Some(finished) = present(run.finished_at.as_deref()).and_then(parse_event_instant) else {
+        return false;
+    };
+    if finished < baseline {
+        return false;
+    }
+    let Some(path) = silent_run_path(control_root, &run.run_id) else {
+        return false;
+    };
+    write_text_once(&path, &silent_run_document(run)).is_ok()
+}
+
+/// 보고 누락 기록 하나의 경로. 실행 식별자가 `A-Za-z0-9`, `_`, `-` 밖의 문자를 담고 있으면 `None`이고
+/// 기록을 만들지 않는다. 파일 이름이 그 디렉터리 밖을 가리키는 길을 막는다(SPEC-063 C9).
+fn silent_run_path(control_root: &Path, run_id: &str) -> Option<PathBuf> {
+    let safe = !run_id.is_empty()
+        && run_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    safe.then(|| {
+        control_root
+            .join(RUNTIME_DIRECTORY)
+            .join(SILENT_RUN_DIRECTORY)
+            .join(format!("{run_id}.json"))
+    })
+}
+
+/// 보고 누락 기록 하나의 본문. 실행 행이 싣지 않은 값은 지어내지 않고 빈 값으로 둔다(SPEC-063 C7).
+fn silent_run_document(run: &RunReportAudit) -> String {
+    let document = serde_json::json!({
+        "schema": SILENT_RUN_SCHEMA,
+        "runId": run.run_id,
+        "targetId": run.target_id.as_deref().unwrap_or_default(),
+        "role": run.role,
+        "startedAt": run.started_at.as_deref().unwrap_or_default(),
+        "finishedAt": run.finished_at.as_deref().unwrap_or_default(),
+        "reason": run.reason.as_deref().unwrap_or_default(),
+        "recordedAt": Utc::now().to_rfc3339(),
+    });
+    format!("{document:#}\n")
+}
+
+/// 보고 누락 기록의 기준 시각. 기록 디렉터리를 처음 만들 때 그 순간의 시각을 함께 남기고, 그 뒤로는
+/// 남아 있는 값을 읽는다. 종료 시각이 이 값보다 이른 실행은 기록을 만들지 않는다(SPEC-063 R-14).
+///
+/// 기준 시각을 세우지 못하면 `None`이고, 그때는 어떤 기록도 남기지 않는다.
+fn silent_run_baseline(control_root: &Path) -> Option<DateTime<Utc>> {
+    let directory = control_root
+        .join(RUNTIME_DIRECTORY)
+        .join(SILENT_RUN_DIRECTORY);
+    let path = directory.join(SILENT_RUN_BASELINE_FILE);
+    if let Some(recorded) = read_silent_run_baseline(&path) {
+        return Some(recorded);
+    }
+    fs::create_dir_all(&directory).ok()?;
+    let document = format!(
+        "schema_version: 1\nsince: {}\n",
+        yaml_scalar(&Utc::now().to_rfc3339())
+    );
+    write_text_once(&path, &document).ok()?;
+    // 방금 쓴 값을 다시 읽는다. 같은 순간의 다른 판정이 기준을 먼저 세웠으면 그쪽 값이 기준이다.
+    read_silent_run_baseline(&path)
+}
+
+fn read_silent_run_baseline(path: &Path) -> Option<DateTime<Utc>> {
+    let contents = fs::read_to_string(path).ok()?;
+    let document = serde_yaml::from_str::<serde_yaml::Value>(&contents).ok()?;
+    parse_event_instant(&yaml_text(Some(&document), "since")?)
+}
+
+/// 같은 이름의 파일이 없을 때만 쓴다. 이미 있으면 그대로 두고 성공으로 다룬다(SPEC-063 C8).
+fn write_text_once(path: &Path, value: &str) -> Result<(), ProjectError> {
+    let parent = path.parent().ok_or_else(|| {
+        ProjectError::Persist(format!("상위 디렉터리가 없습니다: {}", path.display()))
+    })?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(value.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(ProjectError::Persist(error.error.to_string())),
+    }
+}
+
+/// 공백만 담긴 값은 값이 아니다. 걸러 두지 않으면 빈 값이 이름 조건의 열쇠가 되어 워크플로의 모든
+/// 보고서가 그 실행의 것으로 잡힌다.
+fn present(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// 보고서 파일 하나의 목록 항목. 제목은 본문에서 찾고, 찾지 못하면 파일 이름의 줄기를 그대로 쓴다.
@@ -13270,5 +13534,275 @@ mod report_surface_tests {
             task_before
         );
         assert!(!workflow_root.join("groups/GROUP-DECISION-1.md").exists());
+    }
+}
+
+/// 끝난 실행에 그 실행의 보고서가 있는지 판정하는 경로의 검사(SPEC-063 TASK-S063-01).
+///
+/// 판정 값과 기록을 함께 본다. 판정이 맞아도 기록이 소급해 남으면 다음 세션이 정상 완료된 실행을
+/// 끊긴 것으로 읽고, 기록이 맞아도 판정이 틀리면 화면이 같은 오해를 그린다.
+#[cfg(test)]
+mod run_report_audit_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use chrono::{Duration, Utc};
+    use pretty_assertions::assert_eq;
+    use tempfile::{tempdir, TempDir};
+
+    use super::{FileSystemProjectRepository, CONTROL_DIRECTORY};
+    use crate::domain::agent_runtime::RunState;
+    use crate::domain::project::{RunReportAudit, RunReportVerdict};
+
+    const TARGET_ID: &str = "TASK-S063-77";
+
+    /// 지금으로부터 `offset_seconds`만큼 떨어진 시각. 보고서 파일 시각은 검사가 정할 수 없으므로
+    /// 실행의 시간대를 지금 기준으로 잡아 파일 시각과의 앞뒤를 확정한다.
+    fn at(offset_seconds: i64) -> String {
+        (Utc::now() + Duration::seconds(offset_seconds)).to_rfc3339()
+    }
+
+    /// 등록된 워크플로 하나와 선점 파일 하나를 갖춘 임시 프로젝트.
+    fn audit_project() -> (TempDir, PathBuf, PathBuf) {
+        let root = tempdir().expect("temp project");
+        let project = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let workflow_root = root
+            .path()
+            .join(CONTROL_DIRECTORY)
+            .join(&project.workflows[0].directory);
+        let leases = root
+            .path()
+            .join(CONTROL_DIRECTORY)
+            .join(".runtime")
+            .join("leases");
+        fs::create_dir_all(&leases).expect("lease directory");
+        fs::write(
+            leases.join("TASK-S063-77.yml"),
+            "schema_version: 1\nlease_id: lease-1\n",
+        )
+        .expect("lease file");
+        let reports = workflow_root.join("reports");
+        (root, workflow_root, reports)
+    }
+
+    /// 판정이 언제부터 섰는지를 검사가 정한다. 기준 시각을 심지 않으면 첫 판정이 그 순간을 기준으로
+    /// 세우므로, 과거 시각으로 끝난 실행을 다루는 검사가 기록을 남기지 못한다.
+    fn plant_baseline(root: &Path, since: &str) {
+        let directory = root
+            .join(CONTROL_DIRECTORY)
+            .join(".runtime")
+            .join("silent-runs");
+        fs::create_dir_all(&directory).expect("silent run directory");
+        fs::write(
+            directory.join("baseline.yml"),
+            format!("schema_version: 1\nsince: {since}\n"),
+        )
+        .expect("baseline file");
+    }
+
+    fn silent_run_record(root: &TempDir, run_id: &str) -> PathBuf {
+        root.path()
+            .join(CONTROL_DIRECTORY)
+            .join(".runtime")
+            .join("silent-runs")
+            .join(format!("{run_id}.json"))
+    }
+
+    fn run(
+        run_id: &str,
+        started_at: Option<String>,
+        finished_at: Option<String>,
+    ) -> RunReportAudit {
+        RunReportAudit {
+            run_id: run_id.to_owned(),
+            target_id: Some(TARGET_ID.to_owned()),
+            result_prefix: None,
+            role: "developer".to_owned(),
+            state: RunState::Succeeded,
+            started_at,
+            finished_at,
+            reason: Some("usage_limit".to_owned()),
+        }
+    }
+
+    /// 디렉터리 하나 아래 모든 파일의 경로와 내용. 판정이 아무것도 쓰지 않았음을 파일로 확인한다.
+    fn tree_snapshot(root: &Path) -> Vec<(PathBuf, String)> {
+        let mut entries = Vec::new();
+        let Ok(directory) = fs::read_dir(root) else {
+            return entries;
+        };
+        for entry in directory.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                entries.extend(tree_snapshot(&path));
+            } else {
+                entries.push((path.clone(), fs::read_to_string(&path).unwrap_or_default()));
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    fn a_finished_run_without_its_own_report_is_silent_and_leaves_one_record() {
+        let (root, _workflow_root, reports) = audit_project();
+        fs::write(reports.join("REPORT-TASK-OTHER-01-DEV.md"), "# 다른 실행\n")
+            .expect("other report");
+        plant_baseline(root.path(), &at(-3600));
+        let audited = run("run-silent", Some(at(-60)), Some(at(60)));
+
+        let results = FileSystemProjectRepository
+            .audit_run_reports(root.path(), std::slice::from_ref(&audited))
+            .expect("audit");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].verdict, RunReportVerdict::Silent);
+        assert!(results[0].recorded);
+        let record: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(silent_run_record(&root, "run-silent")).expect("record file"),
+        )
+        .expect("record json");
+        assert_eq!(record["runId"], "run-silent");
+        assert_eq!(record["targetId"], TARGET_ID);
+        assert_eq!(record["role"], "developer");
+        assert_eq!(record["startedAt"], audited.started_at.clone().unwrap());
+        assert_eq!(record["finishedAt"], audited.finished_at.clone().unwrap());
+        assert_eq!(record["reason"], "usage_limit");
+    }
+
+    #[test]
+    fn a_report_left_by_an_earlier_session_does_not_answer_this_run() {
+        let (root, _workflow_root, reports) = audit_project();
+        // 이름 조건만 보면 이 파일은 두 실행 모두의 것이다. 가르는 것은 파일 시각뿐이다.
+        fs::write(
+            reports.join(format!("REPORT-{TARGET_ID}-DEV.md")),
+            "# 앞선 세션\n",
+        )
+        .expect("earlier report");
+        plant_baseline(root.path(), &at(-3600));
+
+        let results = FileSystemProjectRepository
+            .audit_run_reports(
+                root.path(),
+                &[
+                    run("run-later", Some(at(3600)), Some(at(7200))),
+                    run("run-owner", Some(at(-60)), Some(at(60))),
+                ],
+            )
+            .expect("audit");
+
+        assert_eq!(results[0].verdict, RunReportVerdict::Silent);
+        assert!(results[0].recorded);
+        assert_eq!(results[1].verdict, RunReportVerdict::Reported);
+        assert!(!results[1].recorded);
+        assert!(!silent_run_record(&root, "run-owner").exists());
+    }
+
+    #[test]
+    fn a_run_without_a_target_and_a_cancelled_run_are_not_judged() {
+        let (root, _workflow_root, _reports) = audit_project();
+        plant_baseline(root.path(), &at(-3600));
+        let mut unassigned = run("run-unassigned", Some(at(-60)), Some(at(60)));
+        unassigned.target_id = None;
+        let mut cancelled = run("run-cancelled", Some(at(-60)), Some(at(60)));
+        cancelled.state = RunState::Cancelled;
+
+        let results = FileSystemProjectRepository
+            .audit_run_reports(root.path(), &[unassigned, cancelled])
+            .expect("audit");
+
+        assert_eq!(results[0].verdict, RunReportVerdict::NotApplicable);
+        assert_eq!(results[1].verdict, RunReportVerdict::NotApplicable);
+        assert!(results.iter().all(|result| !result.recorded));
+        assert!(!silent_run_record(&root, "run-unassigned").exists());
+        assert!(!silent_run_record(&root, "run-cancelled").exists());
+    }
+
+    #[test]
+    fn a_run_without_a_start_time_cannot_be_confirmed() {
+        let (root, _workflow_root, _reports) = audit_project();
+        plant_baseline(root.path(), &at(-3600));
+
+        let results = FileSystemProjectRepository
+            .audit_run_reports(root.path(), &[run("run-unknown", None, Some(at(60)))])
+            .expect("audit");
+
+        assert_eq!(results[0].verdict, RunReportVerdict::Unknown);
+        assert!(!results[0].recorded);
+        assert!(!silent_run_record(&root, "run-unknown").exists());
+    }
+
+    #[test]
+    fn judging_the_same_run_twice_leaves_the_first_record_untouched() {
+        let (root, _workflow_root, _reports) = audit_project();
+        plant_baseline(root.path(), &at(-3600));
+        let audited = run("run-twice", Some(at(-60)), Some(at(60)));
+
+        let first = FileSystemProjectRepository
+            .audit_run_reports(root.path(), std::slice::from_ref(&audited))
+            .expect("first audit");
+        let written = fs::read_to_string(silent_run_record(&root, "run-twice")).expect("record");
+        let second = FileSystemProjectRepository
+            .audit_run_reports(root.path(), std::slice::from_ref(&audited))
+            .expect("second audit");
+
+        assert_eq!(first[0].verdict, RunReportVerdict::Silent);
+        assert_eq!(second[0].verdict, RunReportVerdict::Silent);
+        assert!(second[0].recorded);
+        assert_eq!(
+            fs::read_to_string(silent_run_record(&root, "run-twice")).expect("record"),
+            written
+        );
+    }
+
+    #[test]
+    fn a_run_that_finished_before_the_baseline_is_answered_but_not_recorded() {
+        let (root, _workflow_root, _reports) = audit_project();
+        plant_baseline(root.path(), &at(-3600));
+
+        let results = FileSystemProjectRepository
+            .audit_run_reports(
+                root.path(),
+                &[run("run-old", Some(at(-7200)), Some(at(-5400)))],
+            )
+            .expect("audit");
+
+        assert_eq!(results[0].verdict, RunReportVerdict::Silent);
+        assert!(!results[0].recorded);
+        assert!(!silent_run_record(&root, "run-old").exists());
+    }
+
+    #[test]
+    fn judging_runs_writes_no_workflow_document_and_no_lease() {
+        let (root, workflow_root, reports) = audit_project();
+        fs::write(
+            reports.join(format!("REPORT-{TARGET_ID}-DEV.md")),
+            "# 앞선 세션\n",
+        )
+        .expect("earlier report");
+        plant_baseline(root.path(), &at(-3600));
+        let leases = root
+            .path()
+            .join(CONTROL_DIRECTORY)
+            .join(".runtime")
+            .join("leases");
+        let documents_before = tree_snapshot(&workflow_root);
+        let leases_before = tree_snapshot(&leases);
+        let runs = [
+            run("run-first", Some(at(-60)), Some(at(60))),
+            run("run-second", Some(at(3600)), Some(at(7200))),
+        ];
+
+        FileSystemProjectRepository
+            .audit_run_reports(root.path(), &runs)
+            .expect("first audit");
+        FileSystemProjectRepository
+            .audit_run_reports(root.path(), &runs)
+            .expect("second audit");
+
+        assert_eq!(tree_snapshot(&workflow_root), documents_before);
+        assert_eq!(tree_snapshot(&leases), leases_before);
     }
 }

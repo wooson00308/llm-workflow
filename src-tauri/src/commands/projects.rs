@@ -7,10 +7,10 @@ use tauri::{AppHandle, Emitter, State};
 use crate::application::project_service::ProjectService;
 use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
-    ManagedAssetSyncResult, ProjectSummary, ReportDocument, SaveCustomRulesRequest,
-    SaveCustomRulesResult, SpecDecisionOutcome, SpecDocument, TaskDocument, TaskResumeRequest,
-    TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult, WorkGroupQaSubmission,
-    WorkGroupQaSubmissionResult, WorkflowReportSummary,
+    ManagedAssetSyncResult, ProjectSummary, ReportDocument, RunReportAudit, RunReportAuditResult,
+    SaveCustomRulesRequest, SaveCustomRulesResult, SpecDecisionOutcome, SpecDocument, TaskDocument,
+    TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
+    WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkflowReportSummary,
 };
 use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
 
@@ -197,6 +197,19 @@ pub fn list_run_reports(
             target_id.as_deref(),
             result_prefix.as_deref(),
         )
+        .map_err(|error| error.to_string())
+}
+
+/// 끝난 실행마다 그 실행이 결과 보고서를 남겼는지 판정한다. 같은 대상을 앞서 다룬 세션의 보고서는
+/// 이번 실행의 답에 들어가지 않고, 확신이 서지 않는 경우는 모두 확인 불가로 온다. 보고 없이 끝난
+/// 실행은 프로젝트 안 기록 하나로 남으며, 이 명령은 워크플로 문서를 하나도 쓰지 않는다.
+#[tauri::command]
+pub fn audit_run_reports(
+    path: String,
+    runs: Vec<RunReportAudit>,
+) -> Result<Vec<RunReportAuditResult>, String> {
+    FileSystemProjectRepository
+        .audit_run_reports(Path::new(&path), &runs)
         .map_err(|error| error.to_string())
 }
 
