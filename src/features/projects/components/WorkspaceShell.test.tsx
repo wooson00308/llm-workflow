@@ -2004,6 +2004,36 @@ describe("WorkspaceShell 사이드 메뉴 대기 표시", () => {
 
     expect(within(primaryNav()).getByRole("button", { name: /^기획서/ })).toHaveAccessibleName("기획서");
   });
+
+  // 사람 판단 필요는 사용자가 읽고 판단할 자리이지, 앱이 도장을 받아 가는 자리가 아니다. 내 선택
+  // 대기가 담는 것은 지금도 기획서 승인과 사용자 QA 대기 둘뿐이다.
+  it("사람 판단 필요 기능은 내 선택 대기에 들어가지 않는다", () => {
+    shell({
+      project: waiting(
+        [pendingSpec("SPEC-A", "카드 등록 흐름")],
+        [
+          workGroup("GROUP-A", "카드 등록 흐름", "qa_ready"),
+          workGroup("GROUP-B", "알림 재설계", "human_judgment_required"),
+          workGroup("GROUP-C", "검색 개편", "configuration_error"),
+          workGroup("GROUP-D", "결제 정리", "blocked"),
+        ],
+      ),
+    });
+
+    // 기획서 1건 + 사용자 QA 대기 1건. 나머지 세 상태는 세지 않는다.
+    expect(document.querySelector(".attention-card .count-badge")).toHaveTextContent("2");
+    const nav = primaryNav();
+    expect(within(nav).getByRole("button", { name: /품질 확인/ }).querySelector(".nav-badge")).toHaveTextContent("1");
+    // 목록에 실제로 두 줄이 서 있고, 그 둘이 기획서 승인과 품질 확인이다.
+    const attention = screen.getByRole("heading", { name: "내 선택 대기" }).closest(".attention-card") as HTMLElement;
+    const rows = within(attention).getAllByRole("button");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("기획서 승인 필요");
+    expect(rows[1]).toHaveTextContent("품질 확인 시작 →");
+    expect(within(attention).queryByText("알림 재설계")).not.toBeInTheDocument();
+    expect(within(attention).queryByText("검색 개편")).not.toBeInTheDocument();
+    expect(within(attention).queryByText("결제 정리")).not.toBeInTheDocument();
+  });
 });
 
 describe("WorkspaceShell 사이드 메뉴 변경 점", () => {

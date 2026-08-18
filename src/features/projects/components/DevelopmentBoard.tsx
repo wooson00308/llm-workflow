@@ -3,6 +3,7 @@ import { Icon } from "../../../shared/ui/Icon";
 import { MarkdownBody } from "./MarkdownBody";
 import type {
   TaskDocument,
+  WorkGroupConfigurationIssue,
   WorkGroupDisplayStatus,
   WorkGroupSummary,
   WorkflowItemSummary,
@@ -38,6 +39,80 @@ export const statusLabels: Record<string, string> = {
 
 /** 레인 수치와 신호가 무엇을 센 값인지 밝히는 문장. 레인마다 반복하지 않고 목록 위에 한 번만 둔다. */
 const LANE_BASIS_NOTE = "작업 그룹 상태는 소속 태스크의 진행 상태를 기준으로 계산됩니다";
+
+/**
+ * 사용자 차례가 아닌 상태에 붙는 설명 한 벌. 상태마다 무엇이 문제인지, 누가 처리하는지, 사용자가
+ * 지금 무엇을 하면 되는지 셋을 담는다. 개발 보드·품질 확인 화면·기획서 화면이 같은 문장을 쓰도록
+ * 표를 여기 한 자리에만 두고 세 화면이 가져다 쓴다. 여기 없는 상태에는 설명을 붙이지 않는다.
+ */
+const attentionNotices: Partial<Record<WorkGroupDisplayStatus, {
+  problem: string;
+  owner: string;
+  userAction: string;
+}>> = {
+  configuration_error: {
+    problem: "기능 구성이 규격과 맞지 않아 품질 확인을 열 수 없습니다.",
+    owner: "아키텍트가 구성을 다시 맞춥니다.",
+    userAction: "지금 사용자가 할 일은 없습니다.",
+  },
+  preparing_stalled: {
+    problem: "기능 구성을 쓰던 작업이 중간에 멈춘 것으로 보입니다.",
+    owner: "아키텍트가 이어서 구성을 마칩니다.",
+    userAction: "지금 사용자가 할 일은 없습니다.",
+  },
+  blocked: {
+    problem: "개발이 막혀 다음 작업으로 넘어가지 못하고 있습니다.",
+    owner: "개발자가 막힌 곳을 풀어 갑니다.",
+    userAction: "지금 사용자가 할 일은 없습니다.",
+  },
+  human_judgment_required: {
+    problem: "아키텍트가 문서만으로는 고칠 수 없다고 남겼습니다.",
+    owner: "사용자가 판단할 차례입니다.",
+    userAction: "판단이 정해지기 전에는 이 기능이 다음 단계로 넘어가지 않습니다.",
+  },
+};
+
+/**
+ * 그 상태로 판정하게 만든 조건 하나를 사용자 문장으로 옮긴 표. 백엔드가 조건마다 따로 내려주므로
+ * 여럿이면 여럿을 그대로 세워 보여 주고 하나로 합치지 않는다.
+ */
+const configurationIssueNotes: Record<WorkGroupConfigurationIssue, string> = {
+  metadata_invalid: "기능 구성표에 적힌 정보가 규격과 맞지 않습니다.",
+  tasks_missing: "이 기능에 배정된 작업이 하나도 없습니다.",
+  task_link_mismatch: "일부 작업이 이 기능의 지금 구성과 다른 곳을 가리킵니다.",
+  user_scenario_unusable: "사용자가 따라 할 확인 절차가 없거나 그대로 쓸 수 없습니다.",
+  automatic_scenario_present: "사용자 확인 없이 끝나는 기능인데 확인 절차가 들어 있습니다.",
+  task_not_verified: "아직 끝나지 않은 작업이 남아 있습니다.",
+};
+
+/**
+ * 상태 이름 옆에 세우는 설명 자리. 사용자에게 처리를 요구하지 않는 자리라서 알약도 버튼도 아닌
+ * 글 덩이로 세우고, 눌러도 아무 일이 일어나지 않는다. 설명을 정하지 않은 상태에서는 아무것도
+ * 그리지 않으므로 사용자 QA 대기 기능에는 확인 시작 입구만 남는다.
+ */
+export function GroupAttentionNote({ group }: { group: WorkGroupSummary }) {
+  const notice = attentionNotices[group.displayStatus];
+  if (!notice) return null;
+
+  // 사유를 못 만든 기능도 목록에서 사라지지 않게, 값이 없으면 사유 없이 상태와 처리 주체만 세운다.
+  const issues = group.configurationIssues ?? [];
+  const judgment = group.humanJudgmentNote?.trim() ?? "";
+
+  return (
+    <div aria-label="상태 설명" className="group-attention" role="note">
+      <p className="group-attention-problem">{notice.problem}</p>
+      <p className="group-attention-owner">{notice.owner} {notice.userAction}</p>
+      {issues.length > 0 && (
+        <ul className="group-attention-reasons">
+          {issues.map((issue) => <li key={issue}>{configurationIssueNotes[issue]}</li>)}
+        </ul>
+      )}
+      {judgment && (
+        <p className="group-attention-judgment"><b>판단할 내용</b>{judgment}</p>
+      )}
+    </div>
+  );
+}
 
 const viewModes = [
   { value: "board", label: "보드" },
@@ -449,6 +524,8 @@ function WorkGroupLaneBoard({
                 {laneCollapsed ? "펼치기" : "접기"}
               </button>
             </header>
+            {/* 레인을 접어도 설명은 남긴다. 상세를 열지 않고 목록만 훑어도 갈리는 것이 이 자리다. */}
+            <GroupAttentionNote group={lane.group} />
             {!laneCollapsed && (
               <div className="task-lane-scroll">
                 {lane.items.length > 0 ? (

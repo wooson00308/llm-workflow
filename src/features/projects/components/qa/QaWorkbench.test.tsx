@@ -218,3 +218,99 @@ describe("QaWorkbench work-group flow", () => {
     expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
   });
 });
+
+/** `DevelopmentBoard.test.tsx`가 쓰는 것과 같은 목록. 세 화면이 같은 기준으로 C11을 확인한다. */
+const internalNames = [
+  "configuration_error", "preparing_stalled", "human_judgment_required", "qa_ready",
+  "metadata_invalid", "tasks_missing", "task_link_mismatch", "user_scenario_unusable",
+  "automatic_scenario_present", "task_not_verified",
+  "configurationIssues", "humanJudgmentNote", "displayStatus",
+  "QaWorkbench.tsx", "src/features",
+];
+
+describe("QaWorkbench attention notes", () => {
+  it("explains the problem, the owner and the absent user action in the upcoming queue", () => {
+    render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([
+      group({
+        id: "GROUP-B", fileName: "GROUP-B.md", title: "알림 재설계",
+        displayStatus: "configuration_error",
+        configurationIssues: ["tasks_missing", "user_scenario_unusable"],
+      }),
+    ])} />);
+
+    const upcoming = screen.getByRole("region", { name: "준비 중인 기능" });
+    const note = within(upcoming).getByRole("note", { name: "상태 설명" });
+    expect(within(upcoming).getByText("알림 재설계")).toBeInTheDocument();
+    expect(within(upcoming).getByText("구성 확인 필요")).toBeInTheDocument();
+    expect(note).toHaveTextContent("품질 확인을 열 수 없습니다");
+    expect(note).toHaveTextContent("아키텍트가 구성을 다시 맞춥니다.");
+    expect(note).toHaveTextContent("지금 사용자가 할 일은 없습니다.");
+    expect(within(note).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("names the architect for a stalled preparation and the developer for blocked development", () => {
+    render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([
+      group({ id: "GROUP-B", fileName: "GROUP-B.md", title: "검색 개편", displayStatus: "preparing_stalled" }),
+      group({ id: "GROUP-C", fileName: "GROUP-C.md", title: "알림 재설계", displayStatus: "blocked" }),
+    ])} />);
+
+    const notes = within(screen.getByRole("region", { name: "준비 중인 기능" })).getAllByRole("note", { name: "상태 설명" });
+    expect(notes[0]).toHaveTextContent("아키텍트가 이어서 구성을 마칩니다.");
+    expect(notes[1]).toHaveTextContent("개발자가 막힌 곳을 풀어 갑니다.");
+  });
+
+  it("adds no attention note beside the quality-check entry", () => {
+    render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group()])} />);
+
+    const ready = screen.getByRole("region", { name: "지금 확인할 기능" });
+    expect(within(ready).getByRole("button", { name: /카드 등록 흐름/ })).toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "상태 설명" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a group in the upcoming queue when no reason came down with the status", () => {
+    render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([
+      group({ id: "GROUP-B", fileName: "GROUP-B.md", title: "알림 재설계", displayStatus: "configuration_error" }),
+    ])} />);
+
+    const upcoming = screen.getByRole("region", { name: "준비 중인 기능" });
+    const note = within(upcoming).getByRole("note", { name: "상태 설명" });
+    expect(within(upcoming).getByText("알림 재설계")).toBeInTheDocument();
+    expect(note).toHaveTextContent("아키텍트가 구성을 다시 맞춥니다.");
+    expect(within(note).queryAllByRole("listitem")).toHaveLength(0);
+  });
+
+  it("shows the same explanation on a feature that can no longer be opened", () => {
+    render(<QaWorkbench initialFeatureKey="GROUP-A" onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([
+      group({
+        displayStatus: "human_judgment_required",
+        configurationIssues: ["task_link_mismatch"],
+        humanJudgmentNote: "작업 둘이 서로 다른 구성 버전을 가리켜 어느 쪽을 살릴지 정해야 합니다.",
+      }),
+    ])} />);
+
+    const held = screen.getByRole("region", { name: "준비 중인 이유" });
+    const note = within(held).getByRole("note", { name: "상태 설명" });
+    expect(within(held).getByRole("heading", { name: "지금은 확인할 수 없습니다" })).toBeInTheDocument();
+    expect(note).toHaveTextContent("사용자가 판단할 차례입니다.");
+    expect(note).toHaveTextContent("어느 쪽을 살릴지 정해야 합니다");
+    expect(within(note).getByText("판단할 내용")).toBeInTheDocument();
+  });
+
+  it("keeps the note a reading place and hides internal names", () => {
+    const view = render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([
+      group({
+        id: "GROUP-B", fileName: "GROUP-B.md", title: "알림 재설계",
+        displayStatus: "configuration_error",
+        configurationIssues: ["metadata_invalid", "tasks_missing", "task_link_mismatch", "user_scenario_unusable", "automatic_scenario_present", "task_not_verified"],
+      }),
+    ])} />);
+
+    const note = screen.getByRole("note", { name: "상태 설명" });
+    expect(within(note).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(note).queryByRole("link")).not.toBeInTheDocument();
+    expect(note.querySelector(".qa-queue-state, .qa-queue-row")).toBeNull();
+
+    const shown = view.container.textContent ?? "";
+    for (const name of internalNames) expect(shown).not.toContain(name);
+  });
+});

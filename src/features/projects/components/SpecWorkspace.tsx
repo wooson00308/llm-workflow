@@ -10,7 +10,7 @@ import type {
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
-import { taskColumns } from "./DevelopmentBoard";
+import { GroupAttentionNote, taskColumns } from "./DevelopmentBoard";
 import { DocumentReader } from "./DocumentReader";
 
 interface Props {
@@ -353,6 +353,7 @@ function SpecWorkGroupProgress({ groups, specId, tasks }: {
         </>
       )}
       {group && <small>{TASK_COUNT_BASIS_NOTE}</small>}
+      {group && <GroupAttentionNote group={group} />}
     </section>
   );
 }

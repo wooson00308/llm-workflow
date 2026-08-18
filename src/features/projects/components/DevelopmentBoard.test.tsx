@@ -746,3 +746,123 @@ describe("DevelopmentBoard", () => {
     expect(JSON.parse(stored.get(LANE_COLLAPSE_KEY) ?? "{}")["feature--wf_1"]["GROUP-A"]).toBe(true);
   });
 });
+
+/** 화면 어디에도 그대로 나오면 안 되는 기계 이름들. C11이 세 화면에서 같은 목록으로 확인한다. */
+const internalNames = [
+  "configuration_error", "preparing_stalled", "human_judgment_required", "qa_ready",
+  "metadata_invalid", "tasks_missing", "task_link_mismatch", "user_scenario_unusable",
+  "automatic_scenario_present", "task_not_verified",
+  "configurationIssues", "humanJudgmentNote", "displayStatus",
+  "DevelopmentBoard.tsx", "src/features",
+];
+
+describe("DevelopmentBoard attention notes", () => {
+  it("explains the problem, the owner and the absent user action for a configuration error", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({
+        title: "카드 등록",
+        displayStatus: "configuration_error",
+        configurationIssues: ["tasks_missing", "user_scenario_unusable"],
+      }),
+    ])} />);
+
+    // 상세를 열지 않고 목록만 보는 자리에서 셋이 함께 보인다.
+    const note = screen.getByRole("note", { name: "상태 설명" });
+    expect(screen.getByText("구성 확인 필요")).toBeInTheDocument();
+    expect(within(note).getByText(/품질 확인을 열 수 없습니다/)).toBeInTheDocument();
+    expect(within(note).getByText(/아키텍트가 구성을 다시 맞춥니다/)).toBeInTheDocument();
+    expect(within(note).getByText(/지금 사용자가 할 일은 없습니다/)).toBeInTheDocument();
+
+    // 사유가 둘이면 둘이 따로 선다.
+    const reasons = within(note).getAllByRole("listitem");
+    expect(reasons).toHaveLength(2);
+    expect(reasons[0]).toHaveTextContent("이 기능에 배정된 작업이 하나도 없습니다.");
+    expect(reasons[1]).toHaveTextContent("사용자가 따라 할 확인 절차가 없거나 그대로 쓸 수 없습니다.");
+  });
+
+  it("names the architect for a stalled preparation and the developer for blocked development", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({ id: "GROUP-A", title: "검색 개편", displayStatus: "preparing_stalled", sourceSpecId: "SPEC-A", sourceDecisionId: "DECISION-A" }),
+      testGroup({ id: "GROUP-B", fileName: "GROUP-B.md", title: "알림 재설계", displayStatus: "blocked", sourceSpecId: "SPEC-B", sourceDecisionId: "DECISION-B" }),
+    ])} />);
+
+    const notes = screen.getAllByRole("note", { name: "상태 설명" });
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toHaveTextContent("아키텍트가 이어서 구성을 마칩니다.");
+    expect(notes[0]).toHaveTextContent("지금 사용자가 할 일은 없습니다.");
+    expect(notes[1]).toHaveTextContent("개발이 막혀 다음 작업으로 넘어가지 못하고 있습니다.");
+    expect(notes[1]).toHaveTextContent("개발자가 막힌 곳을 풀어 갑니다.");
+  });
+
+  it("leaves a qa-ready group with its entry alone and adds no attention note", () => {
+    const items = [laneTask("TASK-210", "verified", "SPEC-A", { workGroupId: "GROUP-A", workGroupRevision: 2 })];
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith(items, [], [
+      testGroup({ revision: 2, displayStatus: "qa_ready" }),
+    ])} />);
+
+    expect(screen.getByRole("button", { name: "품질 확인 시작 →" })).toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "상태 설명" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/지금 사용자가 할 일은 없습니다/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the group on the board when no reason came down with the status", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({ title: "카드 등록", displayStatus: "configuration_error" }),
+    ])} />);
+
+    const note = screen.getByRole("note", { name: "상태 설명" });
+    expect(screen.getByText("카드 등록")).toBeInTheDocument();
+    expect(screen.getByText("구성 확인 필요")).toBeInTheDocument();
+    expect(within(note).getByText(/아키텍트가 구성을 다시 맞춥니다/)).toBeInTheDocument();
+    expect(within(note).queryAllByRole("listitem")).toHaveLength(0);
+  });
+
+  it("shows what the user has to judge, and only the fact when nothing was written", () => {
+    const view = render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({
+        title: "카드 등록",
+        displayStatus: "human_judgment_required",
+        configurationIssues: ["task_link_mismatch"],
+        humanJudgmentNote: "작업 둘이 서로 다른 구성 버전을 가리켜 어느 쪽을 살릴지 정해야 합니다.",
+      }),
+    ])} />);
+
+    const note = screen.getByRole("note", { name: "상태 설명" });
+    expect(within(note).getByText(/사용자가 판단할 차례입니다/)).toBeInTheDocument();
+    expect(within(note).getByText(/어느 쪽을 살릴지 정해야 합니다/)).toBeInTheDocument();
+    expect(within(note).getByText("판단할 내용")).toBeInTheDocument();
+
+    view.rerender(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({ title: "카드 등록", displayStatus: "human_judgment_required", humanJudgmentNote: "  " }),
+    ])} />);
+
+    const empty = screen.getByRole("note", { name: "상태 설명" });
+    expect(screen.getByText("사람 판단 필요")).toBeInTheDocument();
+    expect(within(empty).getByText(/사용자가 판단할 차례입니다/)).toBeInTheDocument();
+    expect(within(empty).queryByText("판단할 내용")).not.toBeInTheDocument();
+  });
+
+  it("keeps the note a reading place, not a quality-check entry", () => {
+    render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({ displayStatus: "configuration_error", configurationIssues: ["metadata_invalid"] }),
+    ])} />);
+
+    const note = screen.getByRole("note", { name: "상태 설명" });
+    expect(within(note).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(note).queryByRole("link")).not.toBeInTheDocument();
+    expect(note.querySelector(".task-lane-signal, .status-pill, .task-lane-qa-entry")).toBeNull();
+    expect(screen.queryByRole("button", { name: "품질 확인 시작 →" })).not.toBeInTheDocument();
+  });
+
+  it("keeps internal status and reason names out of the words on screen", () => {
+    const view = render(<DevelopmentBoard onOpenQa={vi.fn()} onReadTask={taskReader()} workflow={workflowWith([], [], [
+      testGroup({
+        displayStatus: "configuration_error",
+        configurationIssues: ["metadata_invalid", "tasks_missing", "task_link_mismatch", "user_scenario_unusable", "automatic_scenario_present", "task_not_verified"],
+      }),
+    ])} />);
+
+    const shown = view.container.textContent ?? "";
+    for (const name of internalNames) expect(shown).not.toContain(name);
+  });
+});

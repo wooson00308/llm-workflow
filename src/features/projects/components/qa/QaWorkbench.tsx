@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkGroupSummary, WorkflowSummary } from "../../domain/types";
 import { browserQaReviewDraftStore } from "../../infrastructure/browserQaReviewDraftStore";
+import { GroupAttentionNote } from "../DevelopmentBoard";
 import { QaFlowReview } from "./QaFlowReview";
 import "./QaWorkbench.css";
 
@@ -100,6 +101,7 @@ export function QaWorkbench({ initialFeatureKey = null, onSubmit, workflow }: Pr
                       <span className="qa-queue-title">{group.title}</span>
                     </span>
                     <span className="qa-queue-counts"><span>{groupStatusLabel(group.displayStatus)}</span></span>
+                    <GroupAttentionNote group={group} />
                   </li>
                 ))}
               </ul>
@@ -145,6 +147,7 @@ function QaFeatureHeld({ feature, onBack }: { feature: WorkGroupSummary; onBack(
       <section aria-label="준비 중인 이유" className="qa-scope-block">
         <h2>지금은 확인할 수 없습니다</h2>
         <p>이 기능이 {groupStatusLabel(feature.displayStatus)} 상태로 바뀌었습니다. 남긴 임시 결정은 삭제하지 않았으며, 다시 확인할 수 있게 되면 새 상태에서 시작합니다.</p>
+        <GroupAttentionNote group={feature} />
       </section>
     </section>
   );

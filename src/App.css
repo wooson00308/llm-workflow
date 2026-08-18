@@ -713,6 +713,20 @@ button.task-lane-qa-entry:focus-visible { outline: 2px solid var(--green); outli
 .task-lane-signal.group-status-completed,
 .task-lane-signal.group-status-automatic_completed { color: #286042; background: #dfeee4; }
 .task-lane-hidden { margin: 0; color: #a0a39a; font-size: 11px; }
+
+/* 사용자 차례가 아닌 기능에 붙는 설명. 알약은 이 앱에서 입구 표시라서, 처리를 요구하지 않는 이
+   자리는 알약도 버튼도 아닌 왼쪽 선 하나짜리 글 덩이로 세운다. 좁은 폭에서도 잘리지 않게 줄바꿈만
+   하고 줄 수를 자르지 않는다. */
+.group-attention { display: grid; gap: 4px; width: 100%; min-width: 0; margin: 8px 0 0; padding: 9px 12px; border-left: 2px solid #d6d4c9; border-radius: 0 8px 8px 0; background: rgba(240,238,230,.7); color: #6c7068; font-size: 11px; line-height: 1.6; word-break: keep-all; overflow-wrap: anywhere; }
+.group-attention p { margin: 0; }
+.group-attention-problem { color: #55594f; font-weight: 650; }
+.group-attention-reasons { list-style: none; display: grid; gap: 3px; margin: 2px 0 0; padding: 0; }
+.group-attention-reasons li { position: relative; padding-left: 10px; }
+.group-attention-reasons li::before { content: "·"; position: absolute; left: 2px; }
+.group-attention-judgment { margin-top: 2px; white-space: pre-line; }
+.group-attention-judgment b { display: block; color: #55594f; font-weight: 650; }
+.task-lane > .group-attention { margin: 0 3px 10px; }
+.spec-task-counts > .group-attention { flex-basis: 100%; }
 .task-lane-toggle { padding: 4px 9px; border: 1px solid #dbdad1; border-radius: 999px; color: #888b83; background: var(--paper); font-size: 11px; font-weight: 700; cursor: pointer; }
 /* `.task-board`의 min-width가 950px이라 좁은 창에서 레인 테두리 밖으로 열이 빠져나간다. 레인 안에서
    가로로 스크롤시켜 가둔다. 헤더는 이 상자 밖이라 스크롤해도 남는다. */

@@ -17,7 +17,10 @@
 .qa-queue-counts { display: block; color: #92968d; font-size: 11px; }
 .qa-queue-state { flex: 0 0 auto; padding: 7px 14px; border: 1px solid #b9cabd; border-radius: 999px; color: var(--green); font-size: 12px; font-weight: 700; }
 .qa-queue-section-upcoming .qa-queue-list { gap: 0; }
-.qa-queue-row-upcoming { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 2px; border: 0; border-bottom: 1px solid #ebe9e1; border-radius: 0; background: transparent; cursor: default; }
+/* 제목과 상태는 한 줄로 두고, 설명은 그 아래 두 칸을 가로질러 눕는다. 목록이 좁아져도 설명이
+   상태 이름 옆으로 끼어들지 않는다. */
+.qa-queue-row-upcoming { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 16px; padding: 11px 2px; border: 0; border-bottom: 1px solid #ebe9e1; border-radius: 0; background: transparent; cursor: default; }
+.qa-queue-row-upcoming .group-attention { grid-column: 1 / -1; margin-top: 7px; }
 .qa-queue-row-upcoming .qa-queue-title { font-size: 12px; font-weight: 600; color: #555a52; }
 .qa-queue-empty { margin: 14px 0 0; color: #92968d; font-size: 12px; }
 

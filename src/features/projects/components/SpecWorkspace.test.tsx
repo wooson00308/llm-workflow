@@ -576,3 +576,91 @@ describe("SpecWorkspace", () => {
     expect(screen.getByText(preserved)).toBeInTheDocument();
   });
 });
+
+/** `DevelopmentBoard.test.tsx`가 쓰는 것과 같은 목록. 세 화면이 같은 기준으로 C11을 확인한다. */
+const internalNames = [
+  "configuration_error", "preparing_stalled", "human_judgment_required", "qa_ready",
+  "metadata_invalid", "tasks_missing", "task_link_mismatch", "user_scenario_unusable",
+  "automatic_scenario_present", "task_not_verified",
+  "configurationIssues", "humanJudgmentNote", "displayStatus",
+  "SpecWorkspace.tsx", "src/features",
+];
+
+function withGroup(overrides: Partial<WorkGroupSummary>): WorkflowSummary {
+  const base = workflowWithTasks([]);
+  return {
+    ...base,
+    items: { ...base.items, workGroups: base.items.workGroups.map((group) => ({ ...group, ...overrides })) },
+  };
+}
+
+function renderProgress(overrides: Partial<WorkGroupSummary>) {
+  return render(
+    <SpecWorkspace
+      busy={false}
+      document={document}
+      loading={false}
+      onDecision={vi.fn()}
+      onSelect={vi.fn()}
+      workflow={withGroup(overrides)}
+    />,
+  );
+}
+
+describe("SpecWorkspace attention notes", () => {
+  it("explains the problem, the owner and the absent user action beside the feature status", () => {
+    renderProgress({ displayStatus: "configuration_error", configurationIssues: ["tasks_missing", "user_scenario_unusable"] });
+
+    const progress = screen.getByRole("region", { name: "작업 그룹 진행" });
+    const note = within(progress).getByRole("note", { name: "상태 설명" });
+    expect(within(progress).getByText("구성 확인 필요")).toBeInTheDocument();
+    expect(note).toHaveTextContent("품질 확인을 열 수 없습니다");
+    expect(note).toHaveTextContent("아키텍트가 구성을 다시 맞춥니다.");
+    expect(note).toHaveTextContent("지금 사용자가 할 일은 없습니다.");
+    expect(within(note).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("names the developer for blocked development and adds nothing while it is qa-ready", () => {
+    renderProgress({ displayStatus: "blocked" });
+    expect(screen.getByRole("note", { name: "상태 설명" })).toHaveTextContent("개발자가 막힌 곳을 풀어 갑니다.");
+
+    cleanup();
+    renderProgress({ displayStatus: "qa_ready" });
+    expect(screen.getByText("사용자 QA 대기")).toBeInTheDocument();
+    expect(screen.queryByRole("note", { name: "상태 설명" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the row when no reason came down, and shows what the user has to judge", () => {
+    renderProgress({ displayStatus: "configuration_error" });
+    const bare = screen.getByRole("note", { name: "상태 설명" });
+    expect(screen.getByText("완료 0 / 0")).toBeInTheDocument();
+    expect(bare).toHaveTextContent("아키텍트가 구성을 다시 맞춥니다.");
+    expect(within(bare).queryAllByRole("listitem")).toHaveLength(0);
+
+    cleanup();
+    renderProgress({ displayStatus: "human_judgment_required", humanJudgmentNote: "어느 구성 버전을 살릴지 정해야 합니다." });
+    const judged = screen.getByRole("note", { name: "상태 설명" });
+    expect(judged).toHaveTextContent("사용자가 판단할 차례입니다.");
+    expect(within(judged).getByText("판단할 내용")).toBeInTheDocument();
+
+    cleanup();
+    renderProgress({ displayStatus: "human_judgment_required" });
+    const onlyFact = screen.getByRole("note", { name: "상태 설명" });
+    expect(onlyFact).toHaveTextContent("사용자가 판단할 차례입니다.");
+    expect(within(onlyFact).queryByText("판단할 내용")).not.toBeInTheDocument();
+  });
+
+  it("keeps the note a reading place and hides internal names", () => {
+    const view = renderProgress({
+      displayStatus: "configuration_error",
+      configurationIssues: ["metadata_invalid", "tasks_missing", "task_link_mismatch", "user_scenario_unusable", "automatic_scenario_present", "task_not_verified"],
+    });
+
+    const note = screen.getByRole("note", { name: "상태 설명" });
+    expect(within(note).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(note).queryByRole("link")).not.toBeInTheDocument();
+
+    const shown = view.container.textContent ?? "";
+    for (const name of internalNames) expect(shown).not.toContain(name);
+  });
+});
