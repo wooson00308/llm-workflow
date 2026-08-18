@@ -33,6 +33,7 @@ use crate::infrastructure::agent_runtime_process::{self, LauncherCaller, Runtime
 use crate::infrastructure::agent_runtime_release::{
     self, HttpReleaseFetcher, ReleaseCheck, DOWNLOADS_DIRECTORY,
 };
+use crate::infrastructure::provider_hold;
 
 /// 번들 안에서 런타임 자산이 놓이는 디렉터리 이름.
 const RESOURCE_DIRECTORY: &str = "runtime";
@@ -184,7 +185,10 @@ pub async fn repair_agent_runtime(
     .await
 }
 
-/// 프로젝트 하나의 역할 정책과 provider 진단을 읽는다. 아무것도 쓰지 않는다.
+/// 프로젝트 하나의 역할 정책과 provider 진단을 읽는다.
+///
+/// 설정은 실행 환경 쪽에 그대로 둔다. 이 커맨드가 쓰는 것은 역할·실행 도구 대응표 하나뿐이며, 그 쓰기가
+/// 실패해도 응답은 달라지지 않는다.
 #[tauri::command]
 pub async fn read_agent_runtime_policy(
     app: tauri::AppHandle,
@@ -197,7 +201,14 @@ pub async fn read_agent_runtime_policy(
         let compatibility = AgentRuntimeInstallService::new(&resource, &install_root)
             .inspect(&caller)
             .compatibility;
-        AgentRuntimeConfigService.read(&caller, &project_id, &working_directory, compatibility)
+        let snapshot = AgentRuntimeConfigService.read(
+            &caller,
+            &project_id,
+            &working_directory,
+            compatibility,
+        )?;
+        provider_hold::write_role_providers(&snapshot.policy);
+        Ok(snapshot)
     })
     .await
 }
@@ -205,6 +216,9 @@ pub async fn read_agent_runtime_policy(
 /// 역할 정책을 저장한다. 읽을 때 받은 revision이 지금 값과 같을 때만 쓴다.
 ///
 /// 이 커맨드는 provider 프로세스를 시작하지 않는다. 진단은 조회에서 오고 저장과 갈라져 있다.
+///
+/// 저장이 끝나면 조회와 같은 대응표를 남긴다. 두 자리에서 모두 남겨야 사용자가 실행 도구를 바꾼 직후에도
+/// 조건 검사가 옛 대응으로 보류를 판정하지 않는다.
 #[tauri::command]
 pub async fn save_agent_runtime_policy(
     app: tauri::AppHandle,
@@ -217,7 +231,10 @@ pub async fn save_agent_runtime_policy(
         let compatibility = AgentRuntimeInstallService::new(&resource, &install_root)
             .inspect(&caller)
             .compatibility;
-        AgentRuntimeConfigService.save(&caller, &policy, &baseline_revision, compatibility)
+        let snapshot =
+            AgentRuntimeConfigService.save(&caller, &policy, &baseline_revision, compatibility)?;
+        provider_hold::write_role_providers(&snapshot.policy);
+        Ok(snapshot)
     })
     .await
 }

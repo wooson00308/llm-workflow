@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 22;
+const CONDITION_SCRIPT_VERSION: u32 = 23;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 22;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 22
+# condition_script_version: 23
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -155,10 +155,9 @@ note_target() { # $1=대상 id $2=대상 종류(없으면 빈 값)
   verdict eligible 0
 }
 
-[ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
-
 # 만료 표기 판정 한 자리. 자리수가 고정된 UTC 표기는 사전순 비교가 곧 시각 비교다. POSIX sh에는
-# 이식 가능한 날짜 파싱이 없다.
+# 이식 가능한 날짜 파싱이 없다. lease의 만료와 한도 보류의 재개 시각이 같은 표기를 쓰므로 두 판정이
+# 이 함수 하나를 쓴다 — 날짜 파싱을 자리마다 새로 만들면 표기 계약이 그만큼 갈라진다.
 # 읽을 수 없는 표기를 선점으로 세지 않는다. 선점 헬퍼(wf-claim.sh)는 같은 상황을 반대로 다루는데,
 # 헬퍼가 지는 위험은 살아 있는 남의 lease를 인수하는 것이고 이 판정이 지는 위험은 대상이 영원히
 # 열리지 않는 것이다. 실제 선점은 배타적 생성이 막으므로 이 판정이 관대해도 중복 선점이 되지 않는다.
@@ -168,6 +167,44 @@ lease_unexpired() { # $1=만료 표기 $2=판정 시각
     *) return 1 ;;
   esac
 }
+
+# 이 역할이 쓰는 실행 도구가 사용 한도로 대기 중이면 0(SPEC-071 R-05·R-09). 기록은 기기 단위라
+# 프로젝트 밖 사용자 홈 아래에 있고, 역할과 실행 도구를 잇는 대응표는 프로젝트 안에 있다.
+# 확인 실패는 보류가 아니다(R-23). 홈을 얻지 못했거나, 대응표가 없거나, 이 역할 줄이 없거나, 실행
+# 도구 이름이 정해진 문자 밖이거나, 기록이 없거나, 재개 시각이 표기 계약을 벗어나면 1을 돌려주어
+# 지금과 똑같이 판정하게 한다. 읽지 못한 것을 보류로 바꾸면 입출력 오류 한 번이 배정을 통째로 멈춘다.
+# 이 함수는 파일을 읽기만 한다. 기록도 대응표도 만들거나 고치거나 지우지 않는다(R-21·R-22).
+provider_limit_waiting() { # $1=역할
+  hold_home=${HOME:-}
+  [ -n "$hold_home" ] || return 1
+  hold_map=".workflow/.runtime/role-providers.yml"
+  [ -f "$hold_map" ] || return 1
+  # 역할 이름은 인자로 들어온 값이라 sed 패턴에 넣지 않는다. 따옴표로 감싼 case 패턴은 글롭 문자를
+  # 글자 그대로 보므로, 어떤 인자가 와도 다른 역할 줄을 집어 오지 않는다.
+  hold_provider=""
+  while IFS= read -r hold_line; do
+    case "$hold_line" in
+      "$1:"*) hold_provider=${hold_line#"$1":}; break ;;
+    esac
+  done < "$hold_map"
+  while :; do
+    case "$hold_provider" in ' '*) hold_provider=${hold_provider# } ;; *) break ;; esac
+  done
+  # 이름이 곧 파일 이름이다. 정해진 문자 밖의 값으로는 경로를 만들지 않는다.
+  case "$hold_provider" in
+    ''|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  hold_record="$hold_home/.workflow-labs/provider-holds/$hold_provider.yml"
+  [ -f "$hold_record" ] || return 1
+  hold_stamp=$(sed -n 's/^resume_at: *//p' "$hold_record" | head -1 | tr -d '"'\''')
+  lease_unexpired "$hold_stamp" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+[ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
+# 후보를 하나도 보기 전에 끝낸다. 대상이 있어도 그 실행 도구로는 세션을 시작할 수 없으므로, 대상을
+# 내주면 배정 주기가 즉시 실패할 세션을 계속 만든다. 기계 출력에서도 대상이 비어 나가 예약 헬퍼가
+# 예약하지 않는다.
+provider_limit_waiting "$role" && verdict provider-limit-wait 1
 
 # 유효한(미만료) lease가 있으면 0. 파일이 없거나 시각을 읽을 수 없으면 1.
 # 기획자·아키텍트 분기가 쓴다. 개발자 분기는 후보마다 이 함수를 부르는 대신 scan_leases가 모아 둔
@@ -1325,7 +1362,7 @@ const CONDITION_SCRIPT_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 22
+# condition_script_version: 23
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1408,15 +1445,44 @@ function Get-Documents([string]$Root, [string]$Kind) {
 # shell "case" glob, which counts characters and not digits, so both implementations accept and
 # reject the same stamps. Fixed-width UTC compares lexicographically, so ordinal comparison is the
 # time comparison. This reads the lease file and never writes it.
+# The fixed-width UTC stamp judgement, in one place. This is the twin of the shell
+# "lease_unexpired": a lease expiry and a provider hold resume time carry the same stamp form, so
+# both callers share this one comparison instead of parsing dates in two places. A stamp outside the
+# form is not a time at all and never holds anything.
+function Test-StampAhead([string]$Stamp) {
+  $Stamp = $Stamp.Replace([string][char]34, '').Replace([string][char]39, '')
+  if ($Stamp -cnotmatch '^.{4}-.{2}-.{2}T.{2}:.{2}:.{2}Z$') { return $false }
+  $now = [System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ',
+    [System.Globalization.CultureInfo]::InvariantCulture)
+  return ([string]::CompareOrdinal($Stamp, $now) -gt 0)
+}
+
 function Test-Leased([string]$Id) {
   $path = Join-Path $leases ($Id + '.yml')
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
-  $stamp = Get-Value (Get-Lines $path) 'expires_at'
-  $stamp = $stamp.Replace([string][char]34, '').Replace([string][char]39, '')
-  if ($stamp -cnotmatch '^.{4}-.{2}-.{2}T.{2}:.{2}:.{2}Z$') { return $false }
-  $now = [System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ',
-    [System.Globalization.CultureInfo]::InvariantCulture)
-  return ([string]::CompareOrdinal($stamp, $now) -gt 0)
+  return (Test-StampAhead (Get-Value (Get-Lines $path) 'expires_at'))
+}
+
+# True while the provider this role uses is waiting out a usage limit (SPEC-071 R-05, R-09). The
+# hold record is per machine, so it sits under the user home outside the project, and the map that
+# ties a role to a provider sits inside the project.
+# A failed read is not a hold (R-23). No home, no map, no line for this role, a provider name outside
+# the fixed character set, no record, or a resume time outside the stamp form all answer false, and
+# the verdict is then exactly what it is today. Turning an unread file into a hold would let one I/O
+# error stop every assignment.
+# This function only reads. It never creates, edits, or removes the record or the map (R-21, R-22).
+function Test-ProviderLimitWaiting([string]$RoleName) {
+  $profileHome = $env:USERPROFILE
+  if ([string]::IsNullOrEmpty($profileHome)) { return $false }
+  $map = '.workflow/.runtime/role-providers.yml'
+  if (-not (Test-Path -LiteralPath $map -PathType Leaf)) { return $false }
+  $provider = Get-Value (Get-Lines $map) $RoleName
+  # The name becomes a file name, so a value outside the set builds no path.
+  if ($provider -cnotmatch '^[A-Za-z0-9_-]+$') { return $false }
+  $record = Join-Path (Join-Path (Join-Path $profileHome '.workflow-labs') 'provider-holds') `
+    ($provider + '.yml')
+  if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { return $false }
+  return (Test-StampAhead (Get-Value (Get-Lines $record) 'resume_at'))
 }
 
 # Reads the one-line declaration. Ok=$false means the key is present but not in contract form,
@@ -2099,6 +2165,12 @@ if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
   Write-Verdict 'migration-lock' 1
 }
 
+# Stands before a single candidate is read. A target would only start a session that fails at once
+# for the same reason, so the answer carries no target and the reservation helper reserves nothing.
+if (Test-ProviderLimitWaiting $Role) {
+  Write-Verdict 'provider-limit-wait' 1
+}
+
 $script:soloRepresentative = Get-SoloRepresentative
 if ($null -ne $script:soloRepresentative) {
   $script:soloOtherLeases = Test-OtherLeaseExists $script:soloRepresentative
@@ -2385,6 +2457,11 @@ pub(crate) mod test_support {
         run_condition_with_arguments(project_root, &[role, "--json"])
     }
 
+    /// 러너가 스크립트에 물려 주는 사용자 홈. 한도 대기 관문이 보류 기록을 홈 아래에서 찾으므로,
+    /// 실행하는 사람의 진짜 홈을 그대로 두면 그 기기에 남은 기록 하나가 표 전체의 답을 바꾼다.
+    /// 프로젝트 루트 아래에 두는 것은 픽스처를 세우는 쪽이 이 경로를 계산할 수 있어야 하기 때문이다.
+    pub(crate) const TEST_HOME: &str = ".test-home";
+
     fn run_condition_with_arguments(project_root: &Path, arguments: &[&str]) -> ConditionRun {
         let script = CONDITION_SCRIPT.relative_path();
         let mut command = if cfg!(windows) {
@@ -2400,6 +2477,8 @@ pub(crate) mod test_support {
         let output = command
             .args(arguments)
             .current_dir(project_root)
+            .env("HOME", project_root.join(TEST_HOME))
+            .env("USERPROFILE", project_root.join(TEST_HOME))
             .output()
             .expect("run condition script");
         ConditionRun {
@@ -2417,7 +2496,7 @@ mod tests {
 
     use tempfile::{tempdir, TempDir};
 
-    use super::test_support::{run_condition, run_machine_condition, ConditionRun};
+    use super::test_support::{run_condition, run_machine_condition, ConditionRun, TEST_HOME};
 
     #[test]
     fn the_powershell_body_carries_a_byte_order_mark_and_the_shell_body_does_not() {
@@ -2447,7 +2526,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 22"));
+        assert!(script.contains("# condition_script_version: 23"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -2461,8 +2540,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 23",
             "# condition_script_version: 22",
-            "# condition_script_version: 21",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -2640,7 +2719,13 @@ mod tests {
     /// 그 셋 중 하나라도 빠지면 실패한다.
     ///
     /// ASCII만 쓴다. PowerShell 본문이 같은 코드를 내야 하는데 그 본문은 ASCII 제약이 있다.
-    const REASON_CODES: &[&str] = &["eligible", "no-target", "migration-lock", "usage"];
+    const REASON_CODES: &[&str] = &[
+        "eligible",
+        "no-target",
+        "migration-lock",
+        "usage",
+        "provider-limit-wait",
+    ];
 
     /// 판정 로직이 조건 문자열이 아니라 파일에 있다(D1). 두 본문 모두 역할 셋과 종료 코드를 갖는다.
     #[test]
@@ -2727,7 +2812,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 22보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 23보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -3499,6 +3584,43 @@ mod tests {
         write_task(&tasks, id, status, extra);
     }
 
+    /// 프로젝트 안 역할·실행 도구 대응표. `build`가 받는 것은 컨트롤 루트이고 앱이 쓰는 자리도
+    /// 컨트롤 루트 아래이므로, 두 자리가 같은 경로를 가리킨다.
+    fn write_role_provider_map(control_root: &Path, lines: &str) {
+        let runtime = control_root.join(".runtime");
+        fs::create_dir_all(&runtime).expect("runtime root");
+        fs::write(
+            runtime.join("role-providers.yml"),
+            format!("schema_version: 1\n{lines}"),
+        )
+        .expect("write role provider map");
+    }
+
+    /// 기기 단위 보류 기록. 프로젝트 밖 사용자 홈 아래에 있으므로 러너가 물려 주는
+    /// [`TEST_HOME`] 아래에 쓴다. 본문은 앱이 쓰는 여섯 줄과 같다.
+    fn write_provider_hold(control_root: &Path, provider: &str, resume_at: &str) {
+        let holds = control_root
+            .parent()
+            .expect("project root")
+            .join(TEST_HOME)
+            .join(".workflow-labs")
+            .join("provider-holds");
+        fs::create_dir_all(&holds).expect("holds root");
+        fs::write(
+            holds.join(format!("{provider}.yml")),
+            format!("schema_version: 1\nprovider: {provider}\nresume_at: {resume_at}\nresume_at_known: true\nrecorded_at: 2026-08-01T00:00:00Z\nrun_id: run-1\n"),
+        )
+        .expect("write provider hold");
+    }
+
+    /// 지금을 기준으로 한 계약 표기의 시각. 보류 판정이 실행 시점의 지금과 비교하므로 표에 시각을
+    /// 박아 둘 수 없다.
+    fn hold_stamp(minutes: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::minutes(minutes))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
     fn write_idea_document(control_root: &Path, id: &str) {
         write_document(
             control_root,
@@ -4052,6 +4174,85 @@ mod tests {
                 let runtime = control.join(".runtime");
                 fs::create_dir_all(&runtime).expect("runtime root");
                 fs::write(runtime.join("migration.lock"), "").expect("migration lock");
+            },
+        },
+        // ── SPEC-071 한도 대기 관문 ─────────────────────────────────────────────────
+        //
+        // 관문은 대응표(프로젝트 안)와 보류 기록(기기 단위 홈) 둘을 함께 읽어야 서므로, 두 본문이
+        // 같은 값을 같은 자리에서 읽는지는 실행 결과 대조로만 확인된다. 아래 여섯 행이 관문이 서는
+        // 경우 하나와, 서지 않아야 하는 경우 다섯을 덮는다.
+        Scenario {
+            // 처리할 대상이 있는 저장소에서 본다. 관문이 후보 판정보다 앞에 선다는 사실이 이 행에서만
+            // 드러난다 — 대상이 없는 픽스처였다면 1이 관문 때문인지 대상이 없어서인지 갈리지 않는다.
+            name: "개발자: 한도 대기 중인 실행 도구는 대상이 있어도 배정하지 않는다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "provider-limit-wait",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                write_role_provider_map(control, "developer: claude\n");
+                write_provider_hold(control, "claude", &hold_stamp(30));
+            },
+        },
+        Scenario {
+            // 보류는 실행 도구 단위다(R-07). 같은 대응표에서 다른 도구를 가리키는 역할은 평소대로다.
+            name: "기획자: 다른 실행 도구를 쓰는 역할은 한도 대기에 걸리지 않는다",
+            roles: &["planner"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_idea_document(control, "IDEA-001");
+                write_role_provider_map(control, "developer: claude\nplanner: codex\n");
+                write_provider_hold(control, "claude", &hold_stamp(30));
+            },
+        },
+        Scenario {
+            // 재개 시각이 지나면 사용자가 아무 조작을 하지 않아도 배정이 돌아온다(R-10).
+            name: "개발자: 지난 재개 시각은 관문을 세우지 않는다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                write_role_provider_map(control, "developer: claude\n");
+                write_provider_hold(control, "claude", &hold_stamp(-30));
+            },
+        },
+        Scenario {
+            // 대응표가 없으면 역할이 어느 도구를 쓰는지 알 수 없다. 모르는 것은 보류가 아니다(R-23).
+            name: "개발자: 대응표가 없으면 지금과 같이 판정한다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                write_provider_hold(control, "claude", &hold_stamp(30));
+            },
+        },
+        Scenario {
+            // 오프셋 표기는 이 계약의 읽는 쪽이 받지 않는다. 읽히지 않은 값은 시각이 아니므로 관문을
+            // 세우지 않는다(R-23).
+            name: "개발자: 기록의 시각 표기가 계약 밖이면 지금과 같이 판정한다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                write_role_provider_map(control, "developer: claude\n");
+                write_provider_hold(control, "claude", "2099-01-01T00:00:00+09:00");
+            },
+        },
+        Scenario {
+            // 이름이 곧 파일 이름이다. 정해진 문자 밖의 값으로는 기록을 찾지 않고, 그 상태를 보류로도
+            // 바꾸지 않는다. 대응표에 줄이 아예 없는 경우와 같은 답이어야 한다.
+            name: "개발자: 실행 도구 이름이 쓸 수 없는 값이면 지금과 같이 판정한다",
+            roles: &["developer"],
+            expected: 0,
+            reason: "eligible",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                write_role_provider_map(control, "developer: cla ude\n");
+                write_provider_hold(control, "claude", &hold_stamp(30));
             },
         },
         Scenario {

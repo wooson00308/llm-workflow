@@ -11,6 +11,14 @@
 //!
 //! **기록을 쓰지 않는 조건은 이 모듈이 판정한다.** 화면이 2.5초마다 같은 실행 행을 다시 보내므로,
 //! 같은 행으로 보류를 무한히 연장하지 않는 규칙이 부르는 쪽이 아니라 여기 있어야 한다.
+//!
+//! **역할·실행 도구 대응표도 여기서 쓴다.** 보류 기록은 실행 도구 이름으로 찾는데 조건 검사 스크립트가
+//! 아는 것은 역할 이름뿐이라, 둘을 잇는 대응표가 있어야 판정이 선다. 기록과 대응표는 한 판정을 이루는
+//! 한 쌍이므로 형식을 두 파일에 나누지 않고 이 모듈이 함께 갖는다.
+//!
+//! 대응표의 자리는 프로젝트 안 [`ROLE_PROVIDER_MAP`]이고 본문은 `schema_version: 1` 한 줄 다음에
+//! `<역할 이름>: <실행 도구 이름>` 줄이 역할 이름 오름차순으로 온다. 읽는 쪽은 역할 이름으로 줄을 찾아
+//! 콜론 뒤의 값을 실행 도구 이름으로 쓰고, 파일이 없거나 그 역할 줄이 없으면 보류를 걸지 않는다.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,10 +26,13 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use serde::Deserialize;
 
-use crate::domain::agent_runtime::{ProviderHold, RunSummary};
+use crate::domain::agent_runtime::{ProjectPolicy, ProviderHold, RunSummary};
 
 /// 보류 기록 루트 아래에서 기록들이 놓이는 디렉터리 이름.
 const HOLD_DIRECTORY: &str = "provider-holds";
+
+/// 프로젝트 루트 기준 역할·실행 도구 대응표의 자리. 조건 검사 스크립트가 같은 경로를 읽는다.
+pub const ROLE_PROVIDER_MAP: &str = ".workflow/.runtime/role-providers.yml";
 
 /// 기록 규격 버전. 기록을 나중에 읽는 쪽이 형태를 판단하는 값이다.
 const SCHEMA_VERSION: u32 = 1;
@@ -66,6 +77,34 @@ pub fn record(root: &Path, run: &RunSummary, now: DateTime<Utc>) {
         now.format(STAMP),
         run.run_id,
     );
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(directory).is_err() {
+        return;
+    }
+    let _ = fs::write(&path, body);
+}
+
+/// 역할·실행 도구 대응표를 프로젝트 안에 남긴다.
+///
+/// 정책은 실행 환경이 갖고 있고 조건 검사 스크립트는 그 값을 물을 길이 없다. 그래서 정책을 읽거나
+/// 저장한 커맨드가 그때 손에 쥔 값으로 이 파일을 갱신한다.
+///
+/// 쓰기에 실패해도 오류를 올리지 않는다. 대응표를 남기지 못한 것이 정책 조회나 저장을 실패로 만들지는
+/// 않으며, 대응표가 없으면 스크립트가 보류를 걸지 않고 지금과 같이 판정한다.
+///
+/// 이름에 쓸 수 없는 문자가 들어간 역할과 실행 도구는 줄을 만들지 않는다. 줄바꿈이 섞인 값 하나가
+/// 파일 전체의 줄 구조를 깨뜨리는 것을 막는 자리다.
+pub fn write_role_providers(policy: &ProjectPolicy) {
+    let path = Path::new(&policy.working_directory).join(ROLE_PROVIDER_MAP);
+    let mut body = format!("schema_version: {SCHEMA_VERSION}\n");
+    for (role, value) in &policy.roles {
+        if !is_safe_name(role) || !is_safe_name(&value.provider) {
+            continue;
+        }
+        body.push_str(&format!("{role}: {}\n", value.provider));
+    }
     let Some(directory) = path.parent() else {
         return;
     };
@@ -131,14 +170,19 @@ fn resume_at(run: &RunSummary) -> Option<(DateTime<Utc>, bool)> {
 /// 이름이 정해진 문자 밖의 값을 담고 있으면 경로를 만들지 않는다. 파일 이름이 그 디렉터리 밖을
 /// 가리키는 길을 막는 자리다.
 fn hold_path(root: &Path, provider: &str) -> Option<PathBuf> {
-    if provider.is_empty()
-        || !provider
-            .chars()
-            .all(|letter| letter.is_ascii_alphanumeric() || letter == '_' || letter == '-')
-    {
+    if !is_safe_name(provider) {
         return None;
     }
     Some(root.join(HOLD_DIRECTORY).join(format!("{provider}.yml")))
+}
+
+/// 파일 이름과 대응표 줄에 그대로 쓸 수 있는 이름인지. 조건 검사 스크립트가 대응표에서 읽은 실행 도구
+/// 이름에 거는 조건과 같은 집합이다.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|letter| letter.is_ascii_alphanumeric() || letter == '_' || letter == '-')
 }
 
 /// 파일 이름에서 실행 도구 이름을 읽는다. 확장자가 다른 파일은 이 기록이 아니다.
@@ -170,8 +214,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
-    use super::{active_holds, hold_for, record};
-    use crate::domain::agent_runtime::{RunState, RunSummary, USAGE_LIMIT_REACHED};
+    use super::{active_holds, hold_for, record, write_role_providers, ROLE_PROVIDER_MAP};
+    use crate::domain::agent_runtime::{
+        default_policy, ProjectPolicy, RunState, RunSummary, USAGE_LIMIT_REACHED,
+    };
 
     fn now() -> DateTime<Utc> {
         Utc::now()
@@ -337,6 +383,71 @@ mod tests {
         assert!(hold_for(root.path(), "gemini", at).is_none());
         assert!(active_holds(root.path(), at).is_empty());
         assert!(active_holds(&root.path().join("없는-자리"), at).is_empty());
+    }
+
+    /// 대응표를 읽는 쪽은 조건 검사 스크립트이므로, 검사도 파일 본문을 그대로 본다.
+    fn map_body(root: &Path) -> String {
+        fs::read_to_string(root.join(ROLE_PROVIDER_MAP)).expect("대응표 파일")
+    }
+
+    fn policy(root: &Path, providers: &[(&str, &str)]) -> ProjectPolicy {
+        let mut policy = default_policy("p1", root.to_str().expect("경로"));
+        for (role, provider) in providers {
+            policy.roles.get_mut(*role).expect("역할").provider = (*provider).to_owned();
+        }
+        policy
+    }
+
+    #[test]
+    fn the_map_carries_one_line_for_each_role_in_the_policy() {
+        let root = tempdir().expect("root");
+
+        write_role_providers(&policy(root.path(), &[("developer", "codex")]));
+
+        assert_eq!(
+            map_body(root.path()),
+            "schema_version: 1\n\
+             architect: claude\n\
+             developer: codex\n\
+             planner: claude\n"
+        );
+    }
+
+    #[test]
+    fn writing_the_map_again_replaces_it_with_the_current_policy() {
+        let root = tempdir().expect("root");
+
+        // 정책 조회와 저장이 같은 함수를 부른다. 두 번째 호출이 첫 값을 남겨 두면 저장한 뒤에도
+        // 스크립트가 옛 실행 도구를 읽는다.
+        write_role_providers(&policy(root.path(), &[("developer", "codex")]));
+        write_role_providers(&policy(root.path(), &[("developer", "gemini")]));
+
+        assert!(map_body(root.path()).contains("developer: gemini\n"));
+        assert!(!map_body(root.path()).contains("codex"));
+    }
+
+    #[test]
+    fn a_provider_name_outside_the_safe_set_makes_no_line() {
+        let root = tempdir().expect("root");
+
+        write_role_providers(&policy(root.path(), &[("developer", "co dex\nplanner: x")]));
+
+        assert_eq!(
+            map_body(root.path()),
+            "schema_version: 1\narchitect: claude\nplanner: claude\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_map_write_raises_nothing() {
+        let root = tempdir().expect("root");
+        // 대응표가 놓일 자리를 디렉터리가 차지하고 있다. 쓰기는 실패하지만 부르는 쪽은 그 사실로
+        // 응답을 바꾸지 않으므로, 이 함수가 값을 돌려주지 않고 조용히 끝나야 한다.
+        fs::create_dir_all(root.path().join(ROLE_PROVIDER_MAP)).expect("자리를 막는 디렉터리");
+
+        write_role_providers(&policy(root.path(), &[]));
+
+        assert!(fs::read_to_string(root.path().join(ROLE_PROVIDER_MAP)).is_err());
     }
 
     #[test]
