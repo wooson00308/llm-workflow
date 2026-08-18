@@ -1196,6 +1196,42 @@ describe("AgentRuntimeView execution consent", () => {
     await waitFor(() => expect(runtimeActions.revokeConsent).toHaveBeenCalled());
   });
 
+  it("reopens the notice from advanced settings when the consent is missing, without saving a policy", async () => {
+    const runtimeActions = actions();
+    renderView(requiring(), runtimeActions);
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    const drawer = screen.getByRole("dialog", { name: "고급 설정" });
+
+    expect(drawer).toHaveTextContent("동의 필요");
+    fireEvent.click(within(drawer).getByRole("button", { name: "고지 읽고 동의" }));
+    const dialog = screen.getByRole("dialog", { name: "실행 권한 동의" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /실행 권한에 동의/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "동의하고 계속" }));
+
+    await waitFor(() => expect(runtimeActions.grantConsent).toHaveBeenCalledWith(1));
+    expect(runtimeActions.save).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "실행 권한 동의" })).not.toBeInTheDocument());
+  });
+
+  it("never stands the consent and the revoke buttons together in advanced settings", () => {
+    renderView(state());
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    let drawer = screen.getByRole("dialog", { name: "고급 설정" });
+    expect(within(drawer).queryByRole("button", { name: "고지 읽고 동의" })).not.toBeInTheDocument();
+    expect(within(drawer).getByRole("button", { name: "동의 철회" })).toBeInTheDocument();
+
+    // 동의를 물어볼 수 없는 두 상태는 동의도 철회도 받지 않는다. 상태 줄만 남는다.
+    for (const [status, label] of [["unsupported", "실행 환경이 지원하지 않음"], ["unreadable", "확인하지 못함"]] as const) {
+      cleanup();
+      renderView(state({ policy: policy({ consent: consent({ status, noticeVersion: null, grantedAt: null }) }) }));
+      fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+      drawer = screen.getByRole("dialog", { name: "고급 설정" });
+      expect(drawer).toHaveTextContent(label);
+      expect(within(drawer).queryByRole("button", { name: "고지 읽고 동의" })).not.toBeInTheDocument();
+      expect(within(drawer).queryByRole("button", { name: "동의 철회" })).not.toBeInTheDocument();
+    }
+  });
+
   it("records consent without saving a policy when automation is already on", async () => {
     const runtimeActions = actions();
     const enabled = policy({ consent: consent({ status: "required", noticeVersion: null, grantedAt: null }) });

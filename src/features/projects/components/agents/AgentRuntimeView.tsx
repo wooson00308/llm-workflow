@@ -347,13 +347,20 @@ function AdvancedDrawer({ actions, onClose, projectName, readiness, state }: {
   );
 }
 
-/** 고급 설정의 동의 상태 자리. 지금 동의가 어떤 상태인지 보여 주고 철회를 여기서만 받는다. */
+/**
+ * 고급 설정의 동의 상태 자리. 지금 동의가 어떤 상태인지 보여 주고, 동의가 필요하면 고지를 여기서
+ * 열어 동의를 받고, 동의한 상태의 철회를 여기서만 받는다.
+ *
+ * 동의 입구를 이 자리에도 둔 것은 철회한 직후 때문이다. 철회하면 이 자리는 동의 필요만 적어 놓고
+ * 다시 동의할 길을 주지 않아, 방금 철회한 사용자가 다른 화면으로 돌아가야 했다.
+ */
 function ConsentSettings({ actions, consent, state }: {
   actions: AgentRuntimeActions;
   consent: AgentProjectConsent;
   state: AgentRuntimeState;
 }) {
   const [revokeOpen, setRevokeOpen] = useState(false);
+  const [grantOpen, setGrantOpen] = useState(false);
   const granted = consent.status === "granted";
   return (
     <details open={consent.status !== "granted"}>
@@ -365,9 +372,11 @@ function ConsentSettings({ actions, consent, state }: {
           <li><strong>고지 버전</strong><span>{consent.noticeVersion ?? "기록 없음"}</span></li>
         </ul>
         <details><summary>고지 전문 다시 읽기</summary><ul className="agent-consent-notice-list">{EXECUTION_NOTICE_FACTS.map((fact) => <li key={fact}>{fact}</li>)}</ul></details>
+        {consent.status === "required" && <button className="secondary-button agent-compact-action" disabled={state.consentBusy} onClick={() => setGrantOpen(true)} type="button">고지 읽고 동의</button>}
         {granted && <button className="secondary-button agent-compact-action" disabled={state.consentBusy} onClick={() => setRevokeOpen(true)} type="button">동의 철회</button>}
         {state.consentError && <p className="agent-error">{consentFailureMessage(state.consentError)}</p>}
       </div>
+      {grantOpen && <ExecutionConsentDialog actions={actions} consent={consent} onClose={() => setGrantOpen(false)} state={state} />}
       {revokeOpen && (
         <div className="agent-overlay">
           <section aria-labelledby="consent-revoke-title" aria-modal="true" className="agent-dialog" role="dialog">
