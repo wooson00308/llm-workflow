@@ -3286,7 +3286,6 @@ fn task_is_valid_for_group(
 }
 
 fn parse_work_group_body(body: &str) -> (String, Vec<WorkGroupQaScenario>, bool) {
-    let mut description_lines = Vec::new();
     let mut scenarios = Vec::new();
     let mut current: Option<(String, String, Vec<String>)> = None;
     let mut structure_valid = true;
@@ -3319,8 +3318,6 @@ fn parse_work_group_body(body: &str) -> (String, Vec<WorkGroupQaScenario>, bool)
             }
         } else if let Some((_, _, lines)) = current.as_mut() {
             lines.push(line.to_owned());
-        } else if !line.starts_with("# ") && line.trim() != "## 기능 설명" {
-            description_lines.push(line.to_owned());
         }
     }
     if let Some((id, title, lines)) = current {
@@ -3337,10 +3334,57 @@ fn parse_work_group_body(body: &str) -> (String, Vec<WorkGroupQaScenario>, bool)
     seen.clear();
     scenarios.retain(|scenario| seen.insert(scenario.id.clone()));
     (
-        description_lines.join("\n").trim().to_owned(),
+        parse_work_group_description(body),
         scenarios,
         structure_valid && ids_unique,
     )
+}
+
+/// 기능 문서 본문에서 사용자에게 보여줄 소개 문단만 뽑는다. `## 기능 설명` 절이 있으면 그 절의
+/// 본문만, 없으면 문서 제목 다음부터 첫 절 제목 앞까지를 쓴다. 소개 뒤의 내부 절은 어떤 경우에도
+/// 값에 들어가지 않는다.
+fn parse_work_group_description(body: &str) -> String {
+    let lines = body.lines().collect::<Vec<_>>();
+    // 절 제목은 우물 정 기호 두 개 이상으로 시작하는 줄이다. 시나리오 절 제목도 여기에 해당하므로
+    // 소개는 시나리오가 시작되기 전에 끝난다.
+    let is_section_heading = |line: &&str| line.starts_with("##");
+    let intro = lines
+        .iter()
+        .position(|line| line.trim() == "## 기능 설명")
+        .map(|heading| {
+            let start = heading + 1;
+            let end = start
+                + lines[start..]
+                    .iter()
+                    .position(is_section_heading)
+                    .unwrap_or(lines.len() - start);
+            &lines[start..end]
+        })
+        .unwrap_or_else(|| {
+            let end = lines
+                .iter()
+                .position(is_section_heading)
+                .unwrap_or(lines.len());
+            let start = lines[..end]
+                .iter()
+                .position(|line| line.starts_with("# "))
+                .map_or(0, |title| title + 1);
+            &lines[start..end]
+        });
+    // 한 문단 안에서 나뉜 줄은 공백 하나로 잇고, 문단 사이는 빈 줄 하나로 남긴다. 이 값을 읽는
+    // 화면이 문단 구분을 살려 그릴 수 있게 하려는 것이다.
+    intro
+        .split(|line| line.trim().is_empty())
+        .map(|paragraph| {
+            paragraph
+                .iter()
+                .map(|line| line.trim())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|paragraph| !paragraph.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn scenario_is_user_safe(scenario: &WorkGroupQaScenario) -> bool {
@@ -11599,10 +11643,10 @@ mod report_surface_tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        contains_internal_qa_instruction, current_base_commit, read_qa_base_pin, run_reports,
-        scenario_describes_user_observable_flow, scenario_is_user_safe, workflow_reports,
-        FileSystemProjectRepository, ProjectError, CONTROL_DIRECTORY, GROUP_QA_DECISION_SCHEMA,
-        QA_BASE_DIRECTORY, RUNTIME_DIRECTORY,
+        contains_internal_qa_instruction, current_base_commit, parse_work_group_body,
+        read_qa_base_pin, run_reports, scenario_describes_user_observable_flow,
+        scenario_is_user_safe, workflow_reports, FileSystemProjectRepository, ProjectError,
+        CONTROL_DIRECTORY, GROUP_QA_DECISION_SCHEMA, QA_BASE_DIRECTORY, RUNTIME_DIRECTORY,
     };
     use crate::domain::project::{
         SchemaCompatibility, WorkGroupDisplayStatus, WorkGroupQaMode, WorkGroupQaOutcome,
@@ -11838,6 +11882,62 @@ mod report_surface_tests {
                 matches!(refused, Err(ProjectError::UnsafeDocumentFile(_))),
                 "{file_name}을 거절하지 않았다: {refused:?}"
             );
+        }
+    }
+
+    #[test]
+    fn work_group_description_keeps_only_the_intro_section_and_drops_the_internal_sections() {
+        let body = "# 품질 확인 화면\n\n## 기능 설명\n\n확인 대기 목록의 기능 카드에\n소개 문단만 실린다.\n\n## 작업 구성\n\nTASK-S066-01이 값을 좁힌다.\n\n### QA-01 · 카드를 훑는다\n\n품질 확인 화면을 열어 카드를 본다.\n";
+
+        let (description, scenarios, ids_unique) = parse_work_group_body(body);
+
+        assert_eq!(
+            description,
+            "확인 대기 목록의 기능 카드에 소개 문단만 실린다."
+        );
+        assert_eq!(scenarios.len(), 1, "시나리오가 그대로 뽑히지 않았다");
+        assert_eq!(scenarios[0].id, "QA-01");
+        assert_eq!(scenarios[0].body, "품질 확인 화면을 열어 카드를 본다.");
+        assert!(ids_unique, "시나리오 식별자 판정이 달라졌다");
+    }
+
+    #[test]
+    fn work_group_description_reads_the_lines_after_the_title_when_no_intro_section_exists() {
+        let body = "# 품질 확인 화면\n\n제목 다음에 곧바로 쓴 소개다.\n\n## 작업 구성\n\n내부 절이다.\n\n### QA-01 · 카드를 훑는다\n\n화면을 열어 확인한다.\n";
+
+        let (description, scenarios, ids_unique) = parse_work_group_body(body);
+
+        assert_eq!(description, "제목 다음에 곧바로 쓴 소개다.");
+        assert_eq!(scenarios.len(), 1, "시나리오가 그대로 뽑히지 않았다");
+        assert_eq!(scenarios[0].body, "화면을 열어 확인한다.");
+        assert!(ids_unique, "시나리오 식별자 판정이 달라졌다");
+    }
+
+    #[test]
+    fn work_group_description_joins_a_paragraph_with_one_space_and_keeps_one_blank_line_between_paragraphs(
+    ) {
+        let body = "# 품질 확인 화면\n\n## 기능 설명\n\n첫 문단의 앞줄과\n뒷줄이다.\n\n\n둘째 문단이다.\n\n## 작업 구성\n\n내부 절이다.\n\n### QA-01 · 카드를 훑는다\n\n화면을 열어 확인한다.\n";
+
+        let (description, scenarios, ids_unique) = parse_work_group_body(body);
+
+        assert_eq!(description, "첫 문단의 앞줄과 뒷줄이다.\n\n둘째 문단이다.");
+        assert_eq!(scenarios.len(), 1, "시나리오가 그대로 뽑히지 않았다");
+        assert_eq!(scenarios[0].body, "화면을 열어 확인한다.");
+        assert!(ids_unique, "시나리오 식별자 판정이 달라졌다");
+    }
+
+    #[test]
+    fn work_group_description_is_empty_when_the_body_carries_no_intro() {
+        for body in [
+            "# 품질 확인 화면\n\n## 기능 설명\n\n   \n\n## 작업 구성\n\n내부 절이다.\n\n### QA-01 · 카드를 훑는다\n\n화면을 열어 확인한다.\n",
+            "# 품질 확인 화면\n\n## 작업 구성\n\n내부 절이다.\n\n### QA-01 · 카드를 훑는다\n\n화면을 열어 확인한다.\n",
+        ] {
+            let (description, scenarios, ids_unique) = parse_work_group_body(body);
+
+            assert_eq!(description, "", "소개가 없는 본문이 빈 값을 주지 않았다");
+            assert_eq!(scenarios.len(), 1, "시나리오가 그대로 뽑히지 않았다");
+            assert_eq!(scenarios[0].body, "화면을 열어 확인한다.");
+            assert!(ids_unique, "시나리오 식별자 판정이 달라졌다");
         }
     }
 
