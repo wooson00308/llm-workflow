@@ -11,6 +11,8 @@ export interface QaReviewDraftEntry {
   comment: string;
   /** 이 시나리오를 마지막으로 확인할 때 읽은 그룹 갱신 시각. */
   expectedUpdatedAt: string;
+  /** 이 시나리오를 마지막으로 확인할 때 읽은 확인 대상 기준 커밋. Git 작업 트리가 아니면 null이다. */
+  qaBaseCommit: string | null;
 }
 
 /** 작업 그룹 revision 하나의 제출 전 검토. request id는 성공 여부를 모르는 재시도에서도 유지한다. */
@@ -38,7 +40,11 @@ function readEntry(value: unknown): QaReviewDraftEntry | null {
   const outcome = entry.outcome;
   if (outcome !== null && outcome !== "confirmed" && outcome !== "revision_requested") return null;
   if (typeof entry.comment !== "string" || typeof entry.expectedUpdatedAt !== "string") return null;
-  return { outcome, comment: entry.comment, expectedUpdatedAt: entry.expectedUpdatedAt };
+  // 확인 대상 기준이 없는 항목은 무엇을 확인한 결과인지 알 수 없으므로 버린다. 기준 값을 담기
+  // 전에 저장된 항목이 여기로 들어오고, 물려받으면 확인하지 않은 코드에 결과가 붙는다.
+  const qaBaseCommit = entry.qaBaseCommit;
+  if (qaBaseCommit !== null && typeof qaBaseCommit !== "string") return null;
+  return { outcome, comment: entry.comment, expectedUpdatedAt: entry.expectedUpdatedAt, qaBaseCommit };
 }
 
 function readDraft(value: unknown): QaReviewDraft | null {

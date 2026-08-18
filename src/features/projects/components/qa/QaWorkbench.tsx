@@ -50,7 +50,7 @@ export function QaWorkbench({ initialFeatureKey = null, onSubmit, workflow }: Pr
       <QaFeatureFrame feature={opened} onBack={leaveFeature}>
         <QaFlowReview
           feature={opened}
-          key={`${workflow.directory}:${opened.id}:${opened.revision}`}
+          key={`${workflow.directory}:${opened.id}:${opened.revision}:${opened.qaBaseCommit ?? ""}`}
           onRecorded={leaveFeature}
           onSubmit={onSubmit}
           workflowDirectory={workflow.directory}

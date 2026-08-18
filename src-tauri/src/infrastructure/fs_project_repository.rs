@@ -750,12 +750,15 @@ impl FileSystemProjectRepository {
                     return Err(ProjectError::WorkGroupQaStale);
                 }
                 // 사용자가 확인한 코드 상태와 지금의 코드 상태가 다르면 결정 문서를 만들지 않는다.
-                // 문서 최신성 거절과 다른 값으로 돌려주어, 화면이 "그룹이 바뀌었다"와 "확인 대상
-                // 코드가 바뀌었다"를 구분해 안내할 수 있게 한다.
-                if group
-                    .qa_base_commit
-                    .as_deref()
-                    .is_some_and(|pinned| qa_base.current() != Some(pinned))
+                // 대조 대상은 요청이 실어 온 확인 시점의 기준이다. 그룹 요약의 기록은 바로 위
+                // `parse_work_group`이 지금 값으로 갱신했으므로 그것과 대조하면 어떤 제출도 거절되지
+                // 않는다. 요청이 값을 담지 않았으면 확인 대상을 알 수 없으므로 같은 거절로 다룬다.
+                // Git 작업 트리가 아니어서 현재 기준을 확정할 수 없으면 이 판정을 건너뛴다. 문서
+                // 최신성 거절과 다른 값으로 돌려주어, 화면이 "그룹이 바뀌었다"와 "확인 대상 코드가
+                // 바뀌었다"를 구분해 안내할 수 있게 한다.
+                if qa_base
+                    .current()
+                    .is_some_and(|current| submission.qa_base_commit.as_deref() != Some(current))
                 {
                     return Err(ProjectError::WorkGroupQaBaseChanged);
                 }
@@ -2855,8 +2858,8 @@ fn legacy_task_qa_is_confirmed(records: &[LegacyTaskQaRecord], task_id: &str) ->
         .is_some_and(|record| record.outcome == "confirmed")
 }
 
-/// 품질 확인이 대상으로 삼는 코드 상태를 그룹·구성 버전마다 한 번 고정하고, 뒤이은 판정이 같은
-/// 값을 보게 하는 자리(SPEC-RES-20260815T030040Z R9). 고정 값은 앱이 소유하는 실행 상태이므로
+/// 품질 확인이 대상으로 삼는 코드 상태를 그룹·구성 버전마다 기록하는 자리
+/// (SPEC-RES-20260815T030040Z R9). 기록 값은 앱이 소유하는 실행 상태이므로
 /// `.workflow/.runtime/qa-base/` 아래에 두고 워크플로우 문서에는 넣지 않는다.
 ///
 /// 현재 기준 커밋은 요청 한 번에 한 번만 읽는다. 상태 조회는 자주 일어나는데 그룹 대부분은 품질
@@ -2883,19 +2886,11 @@ impl<'a> QaBasePin<'a> {
             .as_deref()
     }
 
-    /// 이 그룹과 구성 버전의 고정 값. 아직 없으면 지금 기준 커밋으로 고정하고 그 값을 돌려준다.
-    /// 이미 있으면 그대로 읽어 돌려주며 다시 쓰지 않는다.
-    fn pin(&self, group_id: &str, revision: u32) -> Option<String> {
-        let path = qa_base_pin_path(self.control_root, group_id, revision)?;
-        if let Some(pinned) = read_qa_base_pin(&path) {
-            return Some(pinned);
-        }
-        self.write_pin(&path, group_id, revision)
-    }
-
-    /// 판정 시점의 기준 커밋을 이 그룹과 구성 버전의 값으로 기록하고 그 값을 돌려준다. 저장된 값이
-    /// 지금 기준과 다르면 지금 값으로 다시 적는다. 자동 확인 그룹은 사용자가 나중에 확인할 자리가
-    /// 없어 처음 값을 붙들 이유가 없고, 완료를 판정한 코드 상태를 남기는 쪽이 기록의 뜻과 맞는다.
+    /// 이 시점의 기준 커밋을 이 그룹과 구성 버전의 값으로 기록하고 그 값을 돌려준다. 저장된 값이
+    /// 지금 기준과 다르면 지금 값으로 다시 적는다. 두 확인 방식 모두 이 동작을 쓴다. 자동 확인
+    /// 그룹은 완료를 판정한 코드 상태를 남기는 쪽이 기록의 뜻과 맞고, 사용자 확인 그룹은 확인한
+    /// 코드 상태를 확인 화면이 임시 결정과 함께 들고 있다가 제출에 실어 오므로 여기서 처음 값을
+    /// 붙들 필요가 없다.
     fn pin_to_current(&self, group_id: &str, revision: u32) -> Option<String> {
         let path = qa_base_pin_path(self.control_root, group_id, revision)?;
         let current = self.current()?;
@@ -3187,15 +3182,16 @@ fn parse_work_group(
         WorkGroupDisplayStatus::AutomaticCompleted
     };
 
-    // 확인 대상 코드 상태를 기록하는 자리다. 두 모드가 이 값을 다르게 다룬다. 사용자 모드는 확인
-    // 화면을 열어 둔 채 제출 시점에 판정하므로, 사용자가 확인을 시작한 코드 상태를 한 번만 고정한다.
-    // 자동 모드는 사용자가 확인할 자리 없이 판정과 동시에 완료되므로, 완료를 판정한 이 시점의 코드
-    // 상태를 기록한다.
-    let qa_base_commit = match display_status {
-        WorkGroupDisplayStatus::QaReady => qa_base.pin(&id, revision),
-        WorkGroupDisplayStatus::AutomaticCompleted => qa_base.pin_to_current(&id, revision),
-        _ => None,
-    };
+    // 확인 대상 코드 상태를 기록하는 자리다. 두 모드 모두 이 요약을 계산한 시점의 코드 상태를
+    // 기록한다. 사용자 모드에서 확인한 코드 상태를 붙드는 일은 확인 화면이 맡는다. 화면이 결과를
+    // 고를 때 읽은 이 값을 임시 결정과 함께 저장했다가 제출에 실어 오므로, 여기 기록은 그 제출을
+    // 대조할 현재 값이면 된다.
+    let qa_base_commit = matches!(
+        display_status,
+        WorkGroupDisplayStatus::QaReady | WorkGroupDisplayStatus::AutomaticCompleted
+    )
+    .then(|| qa_base.pin_to_current(&id, revision))
+    .flatten();
 
     Some(WorkGroupSummary {
         file_name: path.file_name()?.to_str()?.to_owned(),
@@ -11631,6 +11627,7 @@ mod report_surface_tests {
             file_name: "GROUP-DECISION-1.md".to_owned(),
             expected_revision: 1,
             expected_updated_at: "2026-08-14T00:00:00Z".to_owned(),
+            qa_base_commit: None,
             request_id: "request-group-1".to_owned(),
             entries: vec![WorkGroupQaSubmissionEntry {
                 scenario_id: "QA-01".to_owned(),
@@ -11711,10 +11708,10 @@ mod report_surface_tests {
             .count()
     }
 
-    /// 완료 조건 1·2. 품질 확인을 열 수 있는 상태가 되는 시점에 기준 커밋이 고정되고, 그 뒤로 다시
-    /// 계산해도 값이 바뀌지 않는다. 아직 열 수 없는 그룹은 고정하지 않는다.
+    /// 완료 조건 1·2. 품질 확인을 열 수 있는 상태가 되는 시점에 기준 커밋이 기록되고, 그 뒤 코드가
+    /// 바뀌면 다시 읽을 때 지금 값으로 갱신된다. 아직 열 수 없는 그룹은 기록하지 않는다.
     #[test]
-    fn work_group_pins_its_qa_base_commit_when_qa_can_open_and_never_repins_it() {
+    fn work_group_records_its_qa_base_commit_when_qa_can_open_and_updates_it_as_the_base_moves() {
         let (root, directory) = git_work_group_fixture("in_progress", "user");
         let workflow_root = root.path().join(CONTROL_DIRECTORY).join(&directory);
         let task_path = workflow_root.join("tasks/TASK-1.md");
@@ -11749,6 +11746,9 @@ mod report_surface_tests {
         );
 
         advance_base(root.path(), "after-open");
+        let moved = current_base_commit(root.path()).expect("moved base commit");
+        assert_ne!(moved, pinned);
+
         let reread = FileSystemProjectRepository
             .inspect(root.path())
             .expect("inspect after base moved");
@@ -11756,34 +11756,39 @@ mod report_surface_tests {
             reread.workflows[0].items.work_groups[0]
                 .qa_base_commit
                 .as_deref(),
-            Some(pinned.as_str())
+            Some(moved.as_str())
         );
         assert_eq!(
             qa_base_pin(root.path(), "GROUP-DECISION-1", 1).as_deref(),
-            Some(pinned.as_str())
+            Some(moved.as_str())
         );
     }
 
-    /// 완료 조건 4. 확인이 열린 뒤 기준 커밋이 움직이면 제출을 기록하지 않고, 문서 최신성 거절과
-    /// 구분되는 오류를 돌려준다. 결정 문서도 작업 문서도 그대로 남는다.
+    /// 완료 조건 4. 사용자가 확인한 코드 상태를 실은 제출은 그 뒤 기준 커밋이 움직이면 기록되지
+    /// 않고, 문서 최신성 거절과 구분되는 오류를 돌려준다. 결정 문서도 작업 문서도 그대로 남는다.
     #[test]
     fn work_group_qa_rejects_a_submission_after_the_base_commit_moves() {
         let (root, directory) = git_work_group_fixture("verified", "user");
         let workflow_root = root.path().join(CONTROL_DIRECTORY).join(&directory);
         let task_path = workflow_root.join("tasks/TASK-1.md");
         let task_before = fs::read_to_string(&task_path).expect("task before");
-        FileSystemProjectRepository
+        let reviewed = FileSystemProjectRepository
             .inspect(root.path())
-            .expect("open qa");
+            .expect("open qa")
+            .workflows[0]
+            .items
+            .work_groups[0]
+            .qa_base_commit
+            .clone()
+            .expect("reviewed base commit");
         let decisions_before = recorded_decision_count(&workflow_root);
 
         advance_base(root.path(), "during-qa");
 
+        let mut submission = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        submission.qa_base_commit = Some(reviewed);
         let error = FileSystemProjectRepository
-            .submit_work_group_qa(
-                root.path(),
-                &group_submission(&directory, WorkGroupQaOutcome::Confirmed),
-            )
+            .submit_work_group_qa(root.path(), &submission)
             .expect_err("base commit moved");
         assert!(matches!(error, ProjectError::WorkGroupQaBaseChanged));
         assert_eq!(recorded_decision_count(&workflow_root), decisions_before);
@@ -11793,12 +11798,13 @@ mod report_surface_tests {
         );
     }
 
-    /// 완료 조건 3·5. 기준 커밋이 그대로면 지금처럼 결정이 기록되고, 같은 요청 식별자의 재전송은
-    /// 그 뒤 기준이 움직였더라도 이미 남은 결정을 그대로 돌려준다.
+    /// 완료 조건 3·5. 확인한 코드 상태가 지금의 코드 상태와 같으면 지금처럼 결정이 기록되고, 같은
+    /// 요청 식별자의 재전송은 그 뒤 기준이 움직였더라도 이미 남은 결정을 그대로 돌려준다.
     #[test]
-    fn work_group_qa_records_on_the_pinned_base_and_replays_a_recorded_request() {
+    fn work_group_qa_records_on_the_reviewed_base_and_replays_a_recorded_request() {
         let (root, directory) = git_work_group_fixture("verified", "user");
-        let submission = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        let mut submission = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        submission.qa_base_commit = current_base_commit(root.path());
 
         let recorded = FileSystemProjectRepository
             .submit_work_group_qa(root.path(), &submission)
@@ -11814,6 +11820,79 @@ mod report_surface_tests {
         assert_eq!(retried.status, WorkGroupQaSubmissionStatus::AlreadyRecorded);
         assert_eq!(retried.outcome, WorkGroupQaOutcome::Confirmed);
         assert_eq!(retried.decision_file_name, recorded.decision_file_name);
+    }
+
+    /// 수용 기준 5·6. 확인 도중 코드가 바뀌어 제출이 거절된 뒤, 지금의 코드 상태에서 다시 확인해
+    /// 제출하면 결정이 기록된다. 같은 거절만 되돌아오는 상태가 남지 않는다.
+    #[test]
+    fn work_group_qa_records_a_resubmission_reviewed_after_the_rejecting_base_move() {
+        let (root, directory) = git_work_group_fixture("verified", "user");
+        let workflow_root = root.path().join(CONTROL_DIRECTORY).join(&directory);
+        let decisions_before = recorded_decision_count(&workflow_root);
+        let first_review = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("open qa")
+            .workflows[0]
+            .items
+            .work_groups[0]
+            .qa_base_commit
+            .clone()
+            .expect("first reviewed base commit");
+
+        advance_base(root.path(), "during-qa");
+
+        let mut rejected = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        rejected.qa_base_commit = Some(first_review.clone());
+        let error = FileSystemProjectRepository
+            .submit_work_group_qa(root.path(), &rejected)
+            .expect_err("reviewed base moved");
+        assert!(matches!(error, ProjectError::WorkGroupQaBaseChanged));
+        assert_eq!(recorded_decision_count(&workflow_root), decisions_before);
+
+        // 거절 직후 화면이 프로젝트를 다시 읽는 자리. 갱신된 요약이 지금의 코드 상태를 싣는다.
+        let second_review = FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("reopen qa")
+            .workflows[0]
+            .items
+            .work_groups[0]
+            .qa_base_commit
+            .clone()
+            .expect("second reviewed base commit");
+        assert_ne!(second_review, first_review);
+
+        let mut resubmitted = group_submission(&directory, WorkGroupQaOutcome::Confirmed);
+        resubmitted.qa_base_commit = Some(second_review);
+        let recorded = FileSystemProjectRepository
+            .submit_work_group_qa(root.path(), &resubmitted)
+            .expect("record after reviewing again");
+        assert_eq!(recorded.status, WorkGroupQaSubmissionStatus::Recorded);
+        assert_eq!(recorded.outcome, WorkGroupQaOutcome::Confirmed);
+        assert_eq!(
+            recorded_decision_count(&workflow_root),
+            decisions_before + 1
+        );
+    }
+
+    /// 완료 조건 3. Git 작업 트리인데 요청이 확인 대상 기준을 담지 않으면 무엇을 확인한 제출인지
+    /// 알 수 없으므로, 기준이 움직였을 때와 같은 오류로 거절한다.
+    #[test]
+    fn work_group_qa_rejects_a_submission_that_carries_no_reviewed_base_commit() {
+        let (root, directory) = git_work_group_fixture("verified", "user");
+        let workflow_root = root.path().join(CONTROL_DIRECTORY).join(&directory);
+        FileSystemProjectRepository
+            .inspect(root.path())
+            .expect("open qa");
+        let decisions_before = recorded_decision_count(&workflow_root);
+
+        let error = FileSystemProjectRepository
+            .submit_work_group_qa(
+                root.path(),
+                &group_submission(&directory, WorkGroupQaOutcome::Confirmed),
+            )
+            .expect_err("submission without a reviewed base commit");
+        assert!(matches!(error, ProjectError::WorkGroupQaBaseChanged));
+        assert_eq!(recorded_decision_count(&workflow_root), decisions_before);
     }
 
     /// 완료 조건 6. 새 구성 버전은 그 시점의 기준 커밋을 새로 고정하고, 이전 버전의 고정 값은

@@ -19,7 +19,7 @@ function draft(overrides: Partial<QaReviewDraft> = {}): QaReviewDraft {
     startedAt: "2026-08-14T09:00:00Z",
     requestId: "qa-request-1",
     entries: {
-      "QA-01": { outcome: "confirmed", comment: "확인", expectedUpdatedAt: "2026-08-14T08:00:00Z" },
+      "QA-01": { outcome: "confirmed", comment: "확인", expectedUpdatedAt: "2026-08-14T08:00:00Z", qaBaseCommit: "commit-a" },
     },
     ...overrides,
   };
@@ -96,13 +96,32 @@ describe("browserQaReviewDraftStore v2", () => {
         requestId: "qa-request-1",
         entries: {
           "QA-01": { outcome: "wrong", comment: "", expectedUpdatedAt: "" },
-          "QA-02": { outcome: "revision_requested", comment: "다름", expectedUpdatedAt: "now" },
+          "QA-02": { outcome: "revision_requested", comment: "다름", expectedUpdatedAt: "now", qaBaseCommit: "commit-a" },
         },
       } } },
     }));
 
     expect(browserQaReviewDraftStore.load("wf-a", "GROUP-A", 1)?.entries).toEqual({
-      "QA-02": { outcome: "revision_requested", comment: "다름", expectedUpdatedAt: "now" },
+      "QA-02": { outcome: "revision_requested", comment: "다름", expectedUpdatedAt: "now", qaBaseCommit: "commit-a" },
+    });
+  });
+
+  it("drops a stored entry that carries no reviewed base commit", () => {
+    storage.set(STORAGE_KEY, JSON.stringify({
+      "wf-a": { "GROUP-A": { 1: {
+        startedAt: "2026-08-14T09:00:00Z",
+        requestId: "qa-request-1",
+        entries: {
+          "QA-01": { outcome: "confirmed", comment: "", expectedUpdatedAt: "2026-08-14T08:00:00Z" },
+          "QA-02": { outcome: "confirmed", comment: "", expectedUpdatedAt: "2026-08-14T08:00:00Z", qaBaseCommit: null },
+        },
+      } } },
+    }));
+
+    // 기준 커밋을 담기 전에 저장된 항목이 QA-01이다. null은 Git 작업 트리가 아닌 프로젝트의
+    // 정상 값이므로 남는다.
+    expect(browserQaReviewDraftStore.load("wf-a", "GROUP-A", 1)?.entries).toEqual({
+      "QA-02": { outcome: "confirmed", comment: "", expectedUpdatedAt: "2026-08-14T08:00:00Z", qaBaseCommit: null },
     });
   });
 

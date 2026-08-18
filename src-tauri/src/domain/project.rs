@@ -306,9 +306,10 @@ pub struct WorkGroupSummary {
     pub updated_at: String,
     pub description: String,
     pub scenarios: Vec<WorkGroupQaScenario>,
-    /// 이 그룹과 구성 버전의 품질 확인이 대상으로 고정한 기준 커밋 해시. 그룹이 품질 확인을 열 수
-    /// 있는 상태가 된 시점에 한 번 고정되고 그 뒤로 바뀌지 않는다. 프로젝트가 Git 작업 트리가
-    /// 아니면 `None`이며, 그 경우 그룹 상태 계산과 제출 판정은 고정 값이 없던 때와 같이 동작한다.
+    /// 이 그룹과 구성 버전의 품질 확인이 대상으로 삼는 기준 커밋 해시. 이 요약을 계산한 시점의
+    /// 값이며 코드가 바뀌면 함께 갱신된다. 사용자가 확인한 코드 상태를 붙드는 일은 확인 화면이
+    /// 맡고, 화면은 결과를 고를 때 읽은 이 값을 제출에 실어 보낸다. 프로젝트가 Git 작업 트리가
+    /// 아니면 `None`이며, 그 경우 그룹 상태 계산과 제출 판정은 이 값이 없던 때와 같이 동작한다.
     pub qa_base_commit: Option<String>,
 }
 
@@ -444,6 +445,11 @@ pub struct WorkGroupQaSubmission {
     pub file_name: String,
     pub expected_revision: u32,
     pub expected_updated_at: String,
+    /// 사용자가 확인 결과를 고를 때 화면이 읽고 있던 확인 대상 기준 커밋. 판정은 이 값을 그 시점의
+    /// 현재 기준 커밋과 대조한다. 값을 담지 않은 요청도 역직렬화되며, Git 작업 트리에서는 그런
+    /// 요청이 확인 대상을 알 수 없는 제출로 거절된다.
+    #[serde(default)]
+    pub qa_base_commit: Option<String>,
     pub request_id: String,
     pub entries: Vec<WorkGroupQaSubmissionEntry>,
 }

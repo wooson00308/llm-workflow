@@ -84,7 +84,7 @@ describe("QaWorkbench work-group flow", () => {
       startedAt: "2026-08-14T09:30:00Z",
       requestId: "request-a",
       entries: {
-        "QA-01": { outcome: "confirmed", comment: "", expectedUpdatedAt: "2026-08-14T09:00:00Z" },
+        "QA-01": { outcome: "confirmed", comment: "", expectedUpdatedAt: "2026-08-14T09:00:00Z", qaBaseCommit: null },
       },
     });
 
@@ -153,10 +153,39 @@ describe("QaWorkbench work-group flow", () => {
       startedAt: "2026-08-14T09:30:00Z",
       requestId: "request-a",
       entries: {
-        "QA-01": { outcome: "confirmed", comment: "이전 메모", expectedUpdatedAt: "old" },
+        "QA-01": { outcome: "confirmed", comment: "이전 메모", expectedUpdatedAt: "old", qaBaseCommit: null },
       },
     });
     render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group()])} />);
+
+    await user.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
+    expect(screen.getByText(/기능 내용이 바뀌어/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "기대대로 동작함" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "기능 승인 기록하기" })).toBeDisabled();
+  });
+
+  it("submits the base commit the reviewer was looking at", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(recordedResult());
+    render(<QaWorkbench onSubmit={onSubmit} workflow={workflow([group({ qaBaseCommit: "commit-reviewed" })])} />);
+
+    await user.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
+    await user.click(screen.getByRole("button", { name: "기대대로 동작함" }));
+    await user.click(screen.getByRole("button", { name: "기능 승인 기록하기" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ qaBaseCommit: "commit-reviewed" }));
+  });
+
+  it("drops a saved draft when the reviewed code changed and says so", async () => {
+    const user = userEvent.setup();
+    browserQaReviewDraftStore.save("feature--wf-1", "GROUP-A", 2, {
+      startedAt: "2026-08-14T09:30:00Z",
+      requestId: "request-a",
+      entries: {
+        "QA-01": { outcome: "confirmed", comment: "이전 메모", expectedUpdatedAt: "2026-08-14T09:00:00Z", qaBaseCommit: "commit-before" },
+      },
+    });
+    render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group({ qaBaseCommit: "commit-after" })])} />);
 
     await user.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
     expect(screen.getByText(/기능 내용이 바뀌어/)).toBeInTheDocument();

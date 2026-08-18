@@ -194,6 +194,11 @@ export interface WorkGroupSummary {
   updatedAt: string;
   description: string;
   scenarios: WorkGroupQaScenario[];
+  /**
+   * 이 그룹과 구성 버전의 품질 확인이 대상으로 삼는 기준 커밋. 이 요약을 읽은 시점의 값이며,
+   * Git 작업 트리가 아니면 null이다. 확인 화면은 결과를 고를 때 이 값을 임시 결정과 함께 저장한다.
+   */
+  qaBaseCommit?: string | null;
 }
 
 /** 그룹 QA에서 시나리오 하나에 남기는 결과. 한 문제라도 있으면 전체 그룹이 반려된다. */
@@ -209,6 +214,8 @@ export interface WorkGroupQaSubmission {
   fileName: string;
   expectedRevision: number;
   expectedUpdatedAt: string;
+  /** 사용자가 확인 결과를 고를 때 화면이 읽고 있던 확인 대상 기준 커밋. 백엔드가 지금 값과 대조한다. */
+  qaBaseCommit?: string | null;
   requestId: string;
   entries: WorkGroupQaSubmissionEntry[];
 }

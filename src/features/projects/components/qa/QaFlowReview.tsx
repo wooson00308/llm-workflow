@@ -25,13 +25,19 @@ export function QaFlowReview({ feature, workflowDirectory, onRecorded, onSubmit 
     () => browserQaReviewDraftStore.load(workflowDirectory, feature.id, feature.revision),
     [feature.id, feature.revision, workflowDirectory],
   );
-  // 저장해 둔 임시 결정은 그룹 내용이 그대로일 때만 물려받는다. 내용이 바뀌었으면 처음부터 다시 본다.
+  // 사용자가 지금 확인하고 있는 코드 상태. 이 값이 바뀌면 QaWorkbench가 이 화면을 처음 상태로
+  // 되돌리므로, 한 번 열린 화면 안에서 이 값은 사용자가 실제로 확인한 코드 상태 하나로 유지된다.
+  const reviewedBaseCommit = feature.qaBaseCommit ?? null;
+  // 저장해 둔 임시 결정은 그룹 내용도 확인 대상 코드도 그대로일 때만 물려받는다. 둘 중 하나라도
+  // 바뀌었으면 처음부터 다시 본다.
   const fresh = useMemo(() => {
     const entries = stored ? Object.values(stored.entries) : [];
-    return entries.length > 0 && entries.every((entry) => entry.expectedUpdatedAt === feature.updatedAt)
+    return entries.length > 0
+      && entries.every((entry) =>
+        entry.expectedUpdatedAt === feature.updatedAt && entry.qaBaseCommit === reviewedBaseCommit)
       ? entries[0]
       : null;
-  }, [feature.updatedAt, stored]);
+  }, [feature.updatedAt, reviewedBaseCommit, stored]);
   const [requestId] = useState(() => stored?.requestId ?? createQaReviewRequestId());
   const [startedAt] = useState(() => stored?.startedAt ?? new Date().toISOString());
   const [outcome, setOutcome] = useState<WorkGroupQaOutcome | null>(fresh?.outcome ?? null);
@@ -49,6 +55,7 @@ export function QaFlowReview({ feature, workflowDirectory, onRecorded, onSubmit 
         outcome: nextOutcome,
         comment: nextComment,
         expectedUpdatedAt: feature.updatedAt,
+        qaBaseCommit: reviewedBaseCommit,
       }])),
     };
     browserQaReviewDraftStore.save(workflowDirectory, feature.id, feature.revision, draft);
@@ -84,6 +91,10 @@ export function QaFlowReview({ feature, workflowDirectory, onRecorded, onSubmit 
       fileName: feature.fileName,
       expectedRevision: feature.revision,
       expectedUpdatedAt: feature.updatedAt,
+      // 임시 결정에 저장한 값과 같은 값이다. 제출하는 순간의 최신 요약을 다시 읽지 않는다. 거절
+      // 직후 화면은 프로젝트를 다시 읽어 새 요약을 갖는데, 그 값을 실으면 사용자가 확인하지 않은
+      // 코드에 결과가 붙는다.
+      qaBaseCommit: reviewedBaseCommit,
       requestId,
       entries: feature.scenarios.map((scenario) => ({
         scenarioId: scenario.id,
