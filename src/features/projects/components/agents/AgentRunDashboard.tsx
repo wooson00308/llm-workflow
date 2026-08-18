@@ -102,9 +102,14 @@ export function AgentRunDashboard({
   const waitingForUser = userDecisions(project);
   // 문서 선점은 파일이 진실이다. 앱이 돌리지 않은 세션(터미널에서 직접 연 것)도 문서를 선점하면
   // 여기서 보인다. 앱이 돌린 실행이 잡은 대상은 진행 중 목록이 이미 말하므로 겹치지 않게 뺀다.
-  const externalLeases = project.activeLeases.filter(
-    (lease) => !lease.taskId || !claimedByRuns.has(lease.taskId),
-  );
+  // 역할이 비어 있는 선점은 같은 대상을 맡은 실행의 역할로 채운다. 카드·행·역할별 개수 요약이
+  // 모두 이 목록 하나를 읽으므로, 여기서 한 번 채우면 세 자리가 같은 값을 그린다.
+  const runRoles = runRoleByTarget(runs);
+  const externalLeases = project.activeLeases
+    .filter((lease) => !lease.taskId || !claimedByRuns.has(lease.taskId))
+    .map((lease) => (
+      lease.role || !lease.taskId ? lease : { ...lease, role: runRoles.get(lease.taskId) ?? null }
+    ));
   // 신호 나이와 만료 잔여는 시간이 흐르면 저절로 낡는 값이라 30초마다 다시 계산한다.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -593,6 +598,28 @@ function runClaimedTargets(state: AgentRuntimeState): Set<string> {
       .map((run) => run.targetId)
       .filter((id): id is string => Boolean(id)),
   );
+}
+
+/**
+ * 대상 문서별 실행 역할. 선점 기록에 역할이 없을 때 화면이 채워 넣는 근거다. 실행이 활성 상태인지
+ * 는 따지지 않는다 — 활성에서 벗어난 실행을 빼면 선점이 앱 밖 세션 목록으로 넘어오는 바로 그
+ * 순간에 근거가 사라져, 한 세션의 역할 표시가 그 자리에서 바뀐다. 역할이 없는 실행은 근거로
+ * 세지 않고, 같은 대상을 가리키는 실행이 여럿이면 가장 최근에 시작한 실행의 역할을 쓴다.
+ */
+function runRoleByTarget(runs: AgentRunSummary[]): Map<string, string> {
+  const latest = new Map<string, AgentRunSummary>();
+  for (const run of runs) {
+    if (!run.targetId || !run.role) continue;
+    const previous = latest.get(run.targetId);
+    if (!previous || startedLater(run.startedAt, previous.startedAt)) latest.set(run.targetId, run);
+  }
+  return new Map([...latest].map(([targetId, run]) => [targetId, run.role]));
+}
+
+/** 시작 시각 비교. 시작 시각이 없는 실행은 가장 오래된 것으로 다룬다. */
+function startedLater(candidate: string | null, current: string | null) {
+  if (candidate === null) return false;
+  return current === null || candidate > current;
 }
 
 function eligibleQueue(project: ProjectSummary, items: Map<string, NamedWorkflowItem>): QueueItem[] {

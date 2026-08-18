@@ -1376,6 +1376,136 @@ describe("앱 밖 세션 표시", () => {
     fireEvent.click(within(section).getByRole("button", { name: "접기" }));
     expect(within(section).getAllByRole("listitem")).toHaveLength(8);
   });
+
+  const withRuns = (...runs: AgentRunSummary[]) =>
+    state({ queue: { projectId: "prj_1", paused: false, runs, errors: [], providers: [], unavailable: null } });
+
+  it("역할이 없는 선점을 같은 대상을 맡은 실행의 역할로 채운다", () => {
+    const withLeases = {
+      ...project(),
+      activeLeases: [
+        lease("lease-blank", "runtime-planner", null, "TASK-2"),
+        lease("lease-known", "terminal-claude", "developer", "TASK-QA"),
+      ],
+    };
+    render(
+      <AgentRuntimeView
+        actions={actions()}
+        project={withLeases}
+        state={withRuns({ ...run("run-1", "succeeded", "TASK-2"), role: "planner" })}
+      />,
+    );
+
+    const section = screen.getByRole("region", { name: "앱 밖 세션" });
+    const row = within(section).getByText("runtime-planner").closest("li");
+    const chip = within(row as HTMLElement).getByText("기획자");
+    expect(chip).toHaveClass("agent-role-chip");
+    // 채운 역할도 아는 역할이므로 그 역할의 색 칩으로 그려진다.
+    expect(chip).toHaveClass("role-planner");
+    expect(section.querySelector(".worker-role-summary")).toHaveTextContent("기획자1");
+  });
+
+  it("실행이 활성 상태를 벗어나도 같은 세션의 역할 표시가 그대로다", () => {
+    const withLeases = { ...project(), activeLeases: [lease("lease-blank", "runtime-architect", null, "TASK-2")] };
+    const started = { ...run("run-1", "running", "TASK-2", "2026-08-11T00:00:00Z", null), role: "architect" };
+
+    // 실행이 진행 중인 동안에는 같은 세션이 진행 중 목록에서 아키텍트로 보인다.
+    render(<AgentRuntimeView actions={actions()} project={withLeases} state={withRuns(started)} />);
+    expect(within(screen.getByRole("region", { name: "진행 중" })).getByText(/아키텍트/)).toBeInTheDocument();
+    cleanup();
+
+    // 실행이 끝나면 같은 선점이 앱 밖 세션 목록으로 옮겨 가지만 역할 표시는 바뀌지 않는다.
+    render(
+      <AgentRuntimeView
+        actions={actions()}
+        project={withLeases}
+        state={withRuns({ ...started, state: "succeeded", finishedAt: "2026-08-11T00:00:09Z" })}
+      />,
+    );
+    const section = screen.getByRole("region", { name: "앱 밖 세션" });
+    const row = within(section).getByText("runtime-architect").closest("li");
+    expect(within(row as HTMLElement).getByText("아키텍트")).toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByText("미기재")).not.toBeInTheDocument();
+  });
+
+  it("채울 실행이 없는 선점은 미기재로 남는다", () => {
+    const withLeases = {
+      ...project(),
+      activeLeases: [
+        lease("lease-blank", "terminal-claude", null, "TASK-2"),
+        lease("lease-none", "terminal-codex", null, null),
+      ],
+    };
+    render(<AgentRuntimeView actions={actions()} project={withLeases} state={withRuns(run("run-1", "succeeded", "TASK-QA"))} />);
+
+    const section = screen.getByRole("region", { name: "앱 밖 세션" });
+    const row = within(section).getByText("terminal-claude").closest("li");
+    expect(within(row as HTMLElement).getByText("미기재")).toBeInTheDocument();
+    expect(section.querySelector(".worker-role-summary")).toHaveTextContent("역할 미기재2");
+  });
+
+  it("선점 기록에 역할이 있으면 실행 정보의 역할과 달라도 선점 기록을 따른다", () => {
+    const withLeases = { ...project(), activeLeases: [lease("lease-known", "terminal-claude", "developer", "TASK-2")] };
+    render(
+      <AgentRuntimeView
+        actions={actions()}
+        project={withLeases}
+        state={withRuns({ ...run("run-1", "succeeded", "TASK-2"), role: "planner" })}
+      />,
+    );
+
+    const row = within(screen.getByRole("region", { name: "앱 밖 세션" })).getByText("terminal-claude").closest("li");
+    expect(within(row as HTMLElement).getByText("개발자")).toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByText("기획자")).not.toBeInTheDocument();
+  });
+
+  it("같은 대상을 가리키는 실행이 여럿이면 가장 최근에 시작한 실행의 역할을 쓴다", () => {
+    const withLeases = { ...project(), activeLeases: [lease("lease-blank", "runtime-session", null, "TASK-2")] };
+    render(
+      <AgentRuntimeView
+        actions={actions()}
+        project={withLeases}
+        state={withRuns(
+          { ...run("run-late", "succeeded", "TASK-2", "2026-08-11T02:00:00Z"), role: "architect" },
+          { ...run("run-early", "succeeded", "TASK-2", "2026-08-11T01:00:00Z"), role: "planner" },
+          // 시작 시각이 없는 실행은 가장 오래된 것으로 다루므로 근거가 되지 못한다.
+          { ...run("run-unstarted", "cancelled", "TASK-2"), role: "developer", startedAt: null, finishedAt: null },
+        )}
+      />,
+    );
+
+    const row = within(screen.getByRole("region", { name: "앱 밖 세션" })).getByText("runtime-session").closest("li");
+    expect(within(row as HTMLElement).getByText("아키텍트")).toBeInTheDocument();
+  });
+
+  it("역할이 없는 선점 여럿이 각자의 실행으로 채워져 역할별로 나뉜다", () => {
+    const withLeases = {
+      ...project(),
+      activeLeases: [
+        lease("lease-1", "runtime-planner", null, "SPEC-1"),
+        lease("lease-2", "runtime-architect", null, "TASK-1"),
+        lease("lease-3", "runtime-developer", null, "TASK-2"),
+      ],
+    };
+    render(
+      <AgentRuntimeView
+        actions={actions()}
+        project={withLeases}
+        state={withRuns(
+          { ...run("run-1", "succeeded", "SPEC-1"), role: "planner" },
+          { ...run("run-2", "succeeded", "TASK-1"), role: "architect" },
+          { ...run("run-3", "succeeded", "TASK-2"), role: "developer" },
+        )}
+      />,
+    );
+
+    const summary = screen.getByRole("region", { name: "앱 밖 세션" }).querySelector(".worker-role-summary");
+    expect(summary).toHaveTextContent("기획자1");
+    expect(summary).toHaveTextContent("아키텍트1");
+    expect(summary).toHaveTextContent("개발자1");
+    expect(summary?.textContent).not.toContain("역할 미기재");
+  });
+
 });
 
 describe("AgentRuntimeView 실행 환경 적용 결과", () => {
