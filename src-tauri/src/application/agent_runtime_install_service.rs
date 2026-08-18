@@ -429,6 +429,9 @@ impl<'a> AgentRuntimeInstallService<'a> {
     ///
     /// 적용 전에 호환을 먼저 본다. 지원 범위 밖 API 주 버전이면 런타임을 부르지도 않는다 — 부르면
     /// 그쪽이 파일을 바꾸기 시작한다.
+    ///
+    /// 호환을 통과하면 번들 버전의 파일이 버전 자리에 있는지 확인하고, 없을 때만 놓은 뒤 런타임에게
+    /// 적용을 요청한다. 파일을 놓은 경우에만 결과의 단계 목록 맨 앞에 `version_install`이 붙는다.
     pub fn apply_update(
         &self,
         caller: &dyn RuntimeCaller,
@@ -446,14 +449,33 @@ impl<'a> AgentRuntimeInstallService<'a> {
             }
         }
         let version_dir = self.version_directory(&manifest);
-        agent_runtime_process::apply_update(
+
+        // 앱만 새 버전으로 올라간 기기에서는 번들에 새 파일이 있어도 버전 자리는 아직 비어 있다.
+        // 런타임은 그 자리가 채워져 있다고 전제하고 전환하므로, 비어 있으면 설치 적용이 쓰는 그
+        // 함수로 먼저 놓는다. 존재 확인을 먼저 하는 이유는 비용이다 — `install`은 검증이 존재
+        // 확인보다 먼저라, 조건 없이 부르면 이미 설치된 기기가 번들 전체를 매번 해시한다.
+        let version_installed = if version_dir.is_dir() {
+            false
+        } else {
+            agent_runtime_package::install(self.resource, self.install_root, &manifest)
+                .map_err(InstallFailure::Package)?;
+            true
+        };
+
+        let mut application = agent_runtime_process::apply_update(
             caller,
             self.install_root,
             &version_dir,
             plan_id,
             confirmed,
         )
-        .map_err(InstallFailure::Runtime)
+        .map_err(InstallFailure::Runtime)?;
+        if version_installed {
+            application
+                .stages
+                .insert(0, stage(UpdateStage::VersionInstall, "ok", None));
+        }
+        Ok(application)
     }
 
     /// launcher나 서비스 등록만 어긋난 경우를 되돌린다.
@@ -588,9 +610,13 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{AgentRuntimeInstallService, InstallFailure, InstallServiceAction};
-    use crate::domain::agent_runtime::{Compatibility, ServiceResult};
+    use crate::domain::agent_runtime::{
+        Compatibility, ServiceResult, UpdateApplication, UpdateStage,
+    };
     use crate::infrastructure::agent_runtime_package::tests::bundled;
-    use crate::infrastructure::agent_runtime_package::{host_target, VERSIONS_DIRECTORY};
+    use crate::infrastructure::agent_runtime_package::{
+        host_target, MANIFEST_NAME, VERSIONS_DIRECTORY,
+    };
     use crate::infrastructure::agent_runtime_process::tests::{
         plan_body, service_body, status_body, FakeCaller,
     };
@@ -613,6 +639,27 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// 런타임이 돌려주는 적용 응답. 단계 목록만 시험마다 달리 싣는다.
+    fn update_applied(stages: serde_json::Value) -> serde_json::Value {
+        json!({
+            "apiVersion": "1", "requestId": "r", "command": "update.apply", "outcome": "success",
+            "data": {
+                "planId": "plan-9", "result": "success", "checkedAt": "2026-08-08T09:00:00Z",
+                "stages": stages,
+                "runnableVersion": "0.9.0", "recoveryActions": [], "detail": null,
+            },
+        })
+    }
+
+    /// 단계 목록을 이름과 상태의 순서 있는 쌍으로 줄인다.
+    fn stage_pairs(application: &UpdateApplication) -> Vec<(UpdateStage, String)> {
+        application
+            .stages
+            .iter()
+            .map(|entry| (entry.stage, entry.status.clone()))
+            .collect()
     }
 
     fn installed_status(version: &str) -> serde_json::Value {
@@ -1184,5 +1231,122 @@ mod tests {
 
         assert_eq!(repaired.result, "success");
         assert_eq!(fs::read(&database).expect("read"), b"state");
+    }
+
+    #[test]
+    fn repairing_an_empty_version_slot_installs_the_bundled_runtime_first() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let caller = answering(vec![
+            installed_status("0.9.0"),
+            update_applied(json!([
+                {"stage": "launcher_switch", "status": "ok", "detail": null},
+                {"stage": "service_transition", "status": "ok", "detail": null},
+            ])),
+        ]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+
+        let repaired = service.repair(&caller, "plan-9", true).expect("repair");
+
+        let version_dir = root.path().join(VERSIONS_DIRECTORY).join("0.9.0");
+        assert!(version_dir.join(MANIFEST_NAME).is_file());
+        assert!(version_dir.join("heartbeat").is_file());
+        // 앱이 붙인 단계가 맨 앞이고, 런타임이 돌려준 단계들이 순서 그대로 그 뒤에 온다.
+        assert_eq!(
+            stage_pairs(&repaired),
+            vec![
+                (UpdateStage::VersionInstall, "ok".to_owned()),
+                (UpdateStage::LauncherSwitch, "ok".to_owned()),
+                (UpdateStage::ServiceTransition, "ok".to_owned()),
+            ]
+        );
+        assert_eq!(repaired.result, "success");
+        assert_eq!(repaired.runnable_version.as_deref(), Some("0.9.0"));
+    }
+
+    #[test]
+    fn an_update_into_an_empty_version_slot_ends_the_same_way_as_a_repair() {
+        let stages = json!([{"stage": "launcher_switch", "status": "ok", "detail": null}]);
+        let repair_resource = bundled("0.9.0");
+        let repair_root = install_root();
+        let repair_caller = answering(vec![
+            installed_status("0.9.0"),
+            update_applied(stages.clone()),
+        ]);
+        let repaired = AgentRuntimeInstallService::new(repair_resource.path(), repair_root.path())
+            .repair(&repair_caller, "plan-9", true)
+            .expect("repair");
+
+        let update_resource = bundled("0.9.0");
+        let update_root = install_root();
+        let update_caller = answering(vec![installed_status("0.9.0"), update_applied(stages)]);
+        let updated = AgentRuntimeInstallService::new(update_resource.path(), update_root.path())
+            .apply_update(&update_caller, "plan-9", true)
+            .expect("update");
+
+        assert_eq!(stage_pairs(&updated), stage_pairs(&repaired));
+        assert_eq!(updated.result, repaired.result);
+        assert_eq!(updated.runnable_version, repaired.runnable_version);
+        assert_eq!(updated.stages[0].stage, UpdateStage::VersionInstall);
+    }
+
+    #[test]
+    fn a_filled_version_slot_is_left_alone_and_gains_no_stage() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let version_dir = root.path().join(VERSIONS_DIRECTORY).join("0.9.0");
+        fs::create_dir_all(&version_dir).expect("fixture directory");
+        fs::write(version_dir.join("heartbeat"), b"already installed").expect("fixture file");
+        let caller = answering(vec![
+            installed_status("0.9.0"),
+            update_applied(json!([
+                {"stage": "launcher_switch", "status": "ok", "detail": null},
+            ])),
+        ]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+
+        let repaired = service.repair(&caller, "plan-9", true).expect("repair");
+
+        assert_eq!(
+            stage_pairs(&repaired),
+            vec![(UpdateStage::LauncherSwitch, "ok".to_owned())]
+        );
+        assert_eq!(
+            fs::read(version_dir.join("heartbeat")).expect("read"),
+            b"already installed"
+        );
+    }
+
+    #[test]
+    fn a_bundle_that_fails_verification_leaves_the_version_slot_empty() {
+        let resource = bundled("0.9.0");
+        // manifest가 적은 해시와 어긋나게 만든다. 검증이 파일을 하나도 옮기기 전에 걸려야 한다.
+        fs::write(resource.path().join("_internal/runtime.bin"), b"tampered").expect("fixture");
+        let root = install_root();
+        let caller = answering(vec![installed_status("0.9.0")]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+
+        let failure = service
+            .repair(&caller, "plan-9", true)
+            .expect_err("refused");
+
+        assert!(matches!(failure, InstallFailure::Package(_)));
+        assert!(!root.path().join(VERSIONS_DIRECTORY).join("0.9.0").exists());
+        // 조회 한 번만 나가고 적용 호출은 나가지 않는다.
+        assert_eq!(caller.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn planning_an_update_never_fills_the_version_slot() {
+        let resource = bundled("0.9.0");
+        let root = install_root();
+        let caller = answering(vec![plan_body("plan-9", 1, json!(["one"]))]);
+        let service = AgentRuntimeInstallService::new(resource.path(), root.path());
+
+        let plan = service.plan_update(&caller).expect("plan");
+
+        assert_eq!(plan.plan_id, "plan-9");
+        assert_eq!(plan.active_runs, 1);
+        assert!(!root.path().join(VERSIONS_DIRECTORY).exists());
     }
 }
