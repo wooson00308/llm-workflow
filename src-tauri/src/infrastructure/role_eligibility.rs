@@ -30,9 +30,9 @@
 use std::collections::HashSet;
 
 use crate::domain::project::{
-    PendingRoleWorkDetail, RoleWorkVerdict, WorkGroupStatus, WorkflowItemSummary, WorkflowItems,
-    DECOMPOSED, DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS, INTEGRATION_WAITING, LEASED, OVERLAP,
-    SOLO_RUN_ACTIVE, SOLO_RUN_WAIT, SPEC_EXISTS, SPEC_LEASED,
+    PendingRoleWorkDetail, RoleWorkVerdict, WorkGroupDisplayStatus, WorkGroupStatus,
+    WorkflowItemSummary, WorkflowItems, DECOMPOSED, DEPENDENCIES_UNSATISFIED, FOLLOW_UP_EXISTS,
+    INTEGRATION_WAITING, LEASED, OVERLAP, SOLO_RUN_ACTIVE, SOLO_RUN_WAIT, SPEC_EXISTS, SPEC_LEASED,
 };
 
 /// 워크플로우 하나의 판정 재료. 스크립트가 워크플로우 하나 안에서 아이디어↔기획서, 결정↔작업을
@@ -102,6 +102,7 @@ const TASK_REVISION_REQUEST_KIND: &str = "task_revision_request";
 const BLOCKED_TASK_KIND: &str = "blocked_task";
 const GROUP_QA_REVISION_KIND: &str = "group_qa_revision";
 const WORK_GROUP_KIND: &str = "work_group";
+const CONFIGURATION_ERROR_KIND: &str = "configuration_error";
 const SOURCE_DECISION_NOT_APPROVED: &str = "source-decision-not-approved";
 const WORK_GROUP_UNAVAILABLE: &str = "work-group-unavailable";
 
@@ -347,9 +348,10 @@ fn architect_verdict(
     verdict
 }
 
-/// 그룹 QA 반려를 모든 워크플로우에서 가장 먼저 판정한다. 그다음 작업 정의 수정, lease가 끊긴
-/// `preparing` 그룹 복구, 신규 승인 분해 순으로 넘어간다. 사용자 승인 단위의 재작업이 내부 작업
-/// 정의 수정보다 앞서고, 이미 시작된 그룹 구성이 새 승인보다 앞선다는 역할 계약의 순서다.
+/// 그룹 QA 반려를 모든 워크플로우에서 가장 먼저 판정한다. 그다음 구성 확인 필요 기능, 작업 정의
+/// 수정, lease가 끊긴 `preparing` 그룹 복구, 신규 승인 분해 순으로 넘어간다. 사용자 승인 단위의
+/// 재작업이 내부 작업 정의 수정보다 앞서고, 문서가 성립하지 않는 기능이 그 기능에서 나온 작업
+/// 정의 수정보다 앞서며, 이미 시작된 그룹 구성이 새 승인보다 앞선다는 역할 계약의 순서다.
 fn architect_workflows_verdict(
     workflows: &[WorkflowInput<'_>],
     lease_ids: &HashSet<String>,
@@ -378,6 +380,40 @@ fn architect_workflows_verdict(
             continue;
         }
         solo.select(&mut verdict, &request.id, Some(GROUP_QA_REVISION_KIND));
+    }
+
+    // 구성 확인 필요로 판정된 기능은 사용자 확인 반려 다음, 작업 정의 수정 요청 앞이다. 사용자
+    // 승인 단위의 재작업이 여전히 가장 앞이고, 문서가 성립하지 않는 기능은 그 기능에서 나온 작업
+    // 정의를 고치는 일보다 앞선다 — 기능이 성립하지 않으면 그 작업 정의를 고칠 근거도 없다.
+    // 선점 판정은 preparing 그룹 복구와 같은 세 id를 본다. 아키텍트가 문서로는 고칠 수 없다고
+    // 남긴 기능은 표시 상태가 사람 판단 필요로 갈라져 이 단계에 오지 않는다(SPEC-073 R-17).
+    let configuration_errors = judge_workflows(workflows, |workflow| {
+        let mut errors = RoleWorkVerdict::default();
+        let mut groups: Vec<_> = workflow.items.work_groups.iter().collect();
+        groups.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        for group in groups {
+            if group.display_status != WorkGroupDisplayStatus::ConfigurationError {
+                continue;
+            }
+            let source_qa_leased = group
+                .source_qa_decision_id
+                .as_ref()
+                .is_some_and(|id| lease_ids.contains(id));
+            if lease_ids.contains(&group.id)
+                || lease_ids.contains(&group.source_decision_id)
+                || source_qa_leased
+            {
+                errors.exclude(&group.id, LEASED);
+                continue;
+            }
+            solo.select(&mut errors, &group.id, Some(CONFIGURATION_ERROR_KIND));
+        }
+        errors
+    });
+    verdict.candidates.extend(configuration_errors.candidates);
+    if verdict.target.is_none() && configuration_errors.target.is_some() {
+        verdict.target = configuration_errors.target;
+        verdict.target_kind = configuration_errors.target_kind;
     }
 
     let mut requests: Vec<(&str, &TaskRevisionRequestCandidate)> = workflows
@@ -1046,6 +1082,22 @@ mod tests {
             format!("---\nschema: workflow-labs/work-group@1\nid: {id}\ntitle: 작업 그룹\nstatus: {status}\nrevision: {revision}\nqa_mode: user\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\n{source_qa}created_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 작업 그룹\n\n### QA-01 · 화면 확인\n\n화면에서 결과를 확인한다.\n"),
         )
         .expect("write work group");
+    }
+
+    /// 기능 하나를 그 자체로 성립하게 만드는 검증 완료 작업. 기능에 속한 작업이 하나도 없으면
+    /// 표시 상태가 구성 확인 필요가 되어 아키텍트 대상이 되므로, 분해 여부만 보는 시나리오는 이
+    /// 작업을 함께 놓아 그 상태를 피한다.
+    fn write_group_member_task(
+        workflow_root: &Path,
+        id: &str,
+        group_id: &str,
+        source_decision_id: &str,
+    ) {
+        fs::write(
+            workflow_root.join(format!("tasks/{id}.md")),
+            format!("---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: verified\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\nwork_group_id: {group_id}\nwork_group_revision: 1\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"),
+        )
+        .expect("write group member task");
     }
 
     fn write_group_qa_revision_request(
@@ -1755,6 +1807,7 @@ mod tests {
             "DECISION-001",
             None,
         );
+        write_group_member_task(&workflow_root, "TASK-001", "GROUP-001", "DECISION-001");
 
         assert!(!assert_matches_condition_script(root.path()).architect);
     }
@@ -1864,6 +1917,7 @@ mod tests {
             "DECISION-002",
             None,
         );
+        write_group_member_task(&workflow_root, "TASK-002", "GROUP-001", "DECISION-002");
 
         assert!(!assert_matches_condition_script(root.path()).architect);
     }
@@ -1928,6 +1982,7 @@ mod tests {
             "DECISION-001",
             None,
         );
+        write_group_member_task(&workflow_root, "TASK-001", "GROUP-001", "DECISION-001");
         write_decision(
             &workflow_root,
             "DECISION-002",
@@ -2937,6 +2992,445 @@ mod tests {
         );
     }
 
+    /// 확인 절차 하나. 화면·행동·눈에 보이는 결과를 모두 담아 사용자 행동으로 인정된다.
+    const SOUND_SCENARIO: &str =
+        "### QA-01 · 화면 확인\n\n목록 화면에서 버튼을 누르면 결과가 표시된다.\n";
+
+    /// 성립하는 기능 문서 하나. 구성 확인 필요 판정 시험은 여기서 한 자리만 어긋나게 한다.
+    /// 조각을 받는 helper 대신 본문을 만들어 돌려주는 것은, 갈래마다 바꾸는 자리가 프런트매터와
+    /// 확인 절차 양쪽에 걸쳐 있기 때문이다.
+    fn group_document(
+        id: &str,
+        source_decision_id: &str,
+        qa_mode: &str,
+        extra: &str,
+        scenario: &str,
+    ) -> String {
+        format!("---\nschema: workflow-labs/work-group@1\nid: {id}\ntitle: 작업 그룹\nstatus: active\nrevision: 1\nqa_mode: {qa_mode}\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\n{extra}created_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 작업 그룹\n\n{scenario}")
+    }
+
+    fn write_group_document(workflow_root: &Path, id: &str, contents: &str) {
+        fs::write(workflow_root.join(format!("groups/{id}.md")), contents)
+            .expect("write group document");
+    }
+
+    /// 승인 하나와 그 승인에서 나온 성립하는 기능 하나. 이 상태에서 아키텍트는 할 일이 없고,
+    /// 아래 시험들은 기능 문서나 작업 문서에서 한 자리만 바꿔 판정이 갈리는 것을 본다.
+    fn configuration_project() -> (TempDir, PathBuf) {
+        let (root, workflow_root) = project();
+        write_decision(
+            &workflow_root,
+            "DECISION-001",
+            "SPEC-001",
+            "approved",
+            "2026-08-01T00:00:00Z",
+        );
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document("GROUP-001", "DECISION-001", "user", "", SOUND_SCENARIO),
+        );
+        write_group_member_task(&workflow_root, "TASK-001", "GROUP-001", "DECISION-001");
+        (root, workflow_root)
+    }
+
+    /// 성립하는 기능은 아무도 집지 않는다. 아래 갈래 시험들이 무엇을 바꿔 판정을 얻었는지 이
+    /// 기준선이 말해 준다.
+    #[test]
+    fn a_sound_work_group_is_not_architect_work() {
+        let (root, _workflow_root) = configuration_project();
+
+        assert!(!assert_matches_condition_script(root.path()).architect);
+    }
+
+    /// 구성 확인 필요 기능이 있고 선점이 없으면 아키텍트 대상이다(기획서 R-11, 인수 조건 7).
+    #[test]
+    fn a_group_that_needs_a_configuration_check_is_architect_work() {
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("configuration_error")
+        );
+    }
+
+    /// 구성 확인 필요로 판정하는 여섯 갈래를 하나씩 세운다. 갈래마다 그 하나만 어긋나게 두어,
+    /// 앱과 스크립트가 같은 갈래에서 같은 답을 내는지 본다(완료 조건 7).
+    #[test]
+    fn every_configuration_issue_makes_the_group_architect_work() {
+        // 필수 형식이 빠진 경우. 최종 변경 시각을 지운다.
+        let (root, workflow_root) = configuration_project();
+        let without_stamp = group_document("GROUP-001", "DECISION-001", "user", "", SOUND_SCENARIO)
+            .replace("updated_at: 2026-08-01T00:00:00Z\n", "");
+        write_group_document(&workflow_root, "GROUP-001", &without_stamp);
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "필수 형식이 빠진 기능"
+        );
+
+        // 속한 작업이 하나도 없는 경우.
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "속한 작업이 없는 기능"
+        );
+
+        // 작업이 가리키는 출처가 기능 문서와 어긋난 경우.
+        let (root, workflow_root) = configuration_project();
+        write_group_member_task(&workflow_root, "TASK-001", "GROUP-001", "DECISION-OTHER");
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "출처가 어긋난 작업"
+        );
+
+        // 확인 절차가 없는 경우.
+        let (root, workflow_root) = configuration_project();
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document("GROUP-001", "DECISION-001", "user", "", ""),
+        );
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "확인 절차가 없는 기능"
+        );
+
+        // 확인 절차가 사용자 행동으로 인정되지 않는 경우.
+        let (root, workflow_root) = configuration_project();
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document(
+                "GROUP-001",
+                "DECISION-001",
+                "user",
+                "",
+                "### QA-01 · 확인\n\n터미널에서 테스트를 실행한다.\n",
+            ),
+        );
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "사용자 행동이 아닌 확인 절차"
+        );
+
+        // 자동 확인 모드인데 확인 절차가 적힌 경우.
+        let (root, workflow_root) = configuration_project();
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document("GROUP-001", "DECISION-001", "automatic", "", SOUND_SCENARIO),
+        );
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "자동 확인 모드에 적힌 절차"
+        );
+
+        // 속한 작업이 검증을 끝내지 않은 경우.
+        let (root, workflow_root) = configuration_project();
+        let waiting = fs::read_to_string(workflow_root.join("tasks/TASK-001.md"))
+            .expect("member task")
+            .replace("status: verified", "status: qa_waiting");
+        fs::write(workflow_root.join("tasks/TASK-001.md"), waiting).expect("waiting task");
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "검증을 끝내지 않은 작업"
+        );
+    }
+
+    /// 선점된 구성 확인 필요 기능은 후보로만 남는다. 기능 식별자, 출처 승인, 출처 확인 결정 어느
+    /// 것으로 걸려도 같고, 만료된 선점은 막지 않는다(기획서 R-12, 인수 조건 8).
+    #[test]
+    fn a_leased_configuration_error_group_is_only_a_candidate() {
+        for lease_target in ["GROUP-001", "DECISION-001", "GROUP-QA-001"] {
+            let (root, workflow_root) = configuration_project();
+            write_group_document(
+                &workflow_root,
+                "GROUP-001",
+                &group_document(
+                    "GROUP-001",
+                    "DECISION-001",
+                    "user",
+                    "source_qa_decision_id: GROUP-QA-001\n",
+                    SOUND_SCENARIO,
+                ),
+            );
+            fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+            write_lease(root.path(), lease_target, &future());
+
+            let detail = detail_matching_condition_script(root.path());
+
+            assert_eq!(detail.architect.target, None, "{lease_target} 선점");
+            assert_eq!(
+                candidate_lines(&detail.architect),
+                ["leased GROUP-001", "decomposed DECISION-001"],
+                "{lease_target} 선점"
+            );
+        }
+
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_lease(root.path(), "GROUP-001", &past());
+
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001"),
+            "만료된 선점"
+        );
+    }
+
+    /// 사용자 확인 반려가 구성 확인 필요보다 먼저다(인수 조건 9).
+    #[test]
+    fn user_qa_rework_comes_before_a_configuration_error() {
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_group_document(
+            &workflow_root,
+            "GROUP-002",
+            &group_document("GROUP-002", "DECISION-002", "user", "", SOUND_SCENARIO),
+        );
+        write_group_member_task(&workflow_root, "TASK-002", "GROUP-002", "DECISION-002");
+        write_group_qa_revision_request(
+            &workflow_root,
+            "GROUP-QA-002",
+            "GROUP-002",
+            1,
+            "2026-08-02T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-QA-002"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("group_qa_revision")
+        );
+    }
+
+    /// 구성 확인 필요가 작업 정의 수정 요청과 정의 오류 복구보다 먼저다(인수 조건 9).
+    #[test]
+    fn a_configuration_error_comes_before_task_definition_work() {
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_blocked_task(&workflow_root, "TASK-BLOCKED", Some("definition_error"));
+        write_task_revision_request(
+            &workflow_root,
+            "REVISION-001",
+            "TASK-BLOCKED",
+            "2026-08-02T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("configuration_error")
+        );
+    }
+
+    /// 구성 확인 필요가 중단된 준비 중 기능과 아직 분해되지 않은 승인보다 먼저다. 두 단계의
+    /// 기존 차례는 그대로다.
+    #[test]
+    fn a_configuration_error_comes_before_group_preparation_and_new_approvals() {
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_work_group(
+            &workflow_root,
+            "GROUP-PREP",
+            "preparing",
+            1,
+            "DECISION-002",
+            None,
+        );
+        write_decision(
+            &workflow_root,
+            "DECISION-003",
+            "SPEC-003",
+            "approved",
+            "2026-08-02T00:00:00Z",
+        );
+
+        let detail = detail_matching_condition_script(root.path());
+
+        assert_eq!(detail.architect.target.as_deref(), Some("GROUP-001"));
+        assert_eq!(
+            detail.architect.target_kind.as_deref(),
+            Some("configuration_error")
+        );
+    }
+
+    /// 아키텍트가 문서로는 고칠 수 없다고 남긴 기능은 다시 나가지 않는다. 그 표시를 지우면 다시
+    /// 대상이 된다(기획서 R-17, 인수 조건 11).
+    #[test]
+    fn a_group_marked_beyond_a_document_fix_is_not_architect_work() {
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document(
+                "GROUP-001",
+                "DECISION-001",
+                "user",
+                "configuration_unresolved_revision: 1\n",
+                SOUND_SCENARIO,
+            ),
+        );
+
+        assert!(!assert_matches_condition_script(root.path()).architect);
+
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document("GROUP-001", "DECISION-001", "user", "", SOUND_SCENARIO),
+        );
+
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target
+                .as_deref(),
+            Some("GROUP-001")
+        );
+    }
+
+    /// 구성 확인 필요가 아닌 상태의 기능은 이 단계의 대상이 되지 않는다(완료 조건 8). 어느
+    /// 상태에서도 속한 작업이 없다는 사실만으로 이 단계가 열리지 않는다는 것이 요지다.
+    #[test]
+    fn states_other_than_a_configuration_check_are_not_selected_here() {
+        // 완료. 사용자 확인이 끝난 기능.
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_group_qa_decision(
+            &workflow_root,
+            "GROUP-QA-001",
+            "GROUP-QA-001",
+            "GROUP-001",
+            1,
+            "confirmed",
+            Some("REQUEST-001"),
+            "2026-08-02T00:00:00Z",
+        );
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target_kind
+                .as_deref(),
+            None,
+            "완료"
+        );
+
+        // 재분류 대기. 사용자 확인이 반려된 기능.
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_group_qa_revision_request(
+            &workflow_root,
+            "GROUP-QA-001",
+            "GROUP-001",
+            1,
+            "2026-08-02T00:00:00Z",
+        );
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target_kind
+                .as_deref(),
+            Some("group_qa_revision"),
+            "재분류 대기"
+        );
+
+        // 준비 중. 아키텍트가 아직 쓰고 있는 기능.
+        let (root, workflow_root) = configuration_project();
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        write_group_document(
+            &workflow_root,
+            "GROUP-001",
+            &group_document("GROUP-001", "DECISION-001", "user", "", SOUND_SCENARIO)
+                .replace("status: active", "status: preparing"),
+        );
+        assert_eq!(
+            detail_matching_condition_script(root.path())
+                .architect
+                .target_kind
+                .as_deref(),
+            Some("work_group"),
+            "준비 중"
+        );
+
+        // 개발 막힘·개발 중·사용자 QA 대기. 어느 쪽도 아키텍트 대상이 아니다.
+        for (label, status) in [
+            ("개발 막힘", "blocked"),
+            ("개발 중", "todo"),
+            ("사용자 QA 대기", "verified"),
+        ] {
+            let (root, workflow_root) = configuration_project();
+            let task = fs::read_to_string(workflow_root.join("tasks/TASK-001.md"))
+                .expect("member task")
+                .replace("status: verified", &format!("status: {status}"));
+            fs::write(workflow_root.join("tasks/TASK-001.md"), task).expect("member task status");
+
+            assert!(
+                !assert_matches_condition_script(root.path()).architect,
+                "{label}"
+            );
+        }
+    }
+
+    /// 구성 확인 필요 기능이 하나도 없는 저장소에서는 세 역할의 답이 이 단계가 없던 때와 같다
+    /// (기획서 R-19, R-22). 개발자와 기획자는 구성 확인 필요 기능이 있어도 답이 같다.
+    #[test]
+    fn the_other_roles_do_not_change_when_a_configuration_error_appears() {
+        let (root, workflow_root) = configuration_project();
+        write_idea(&workflow_root, "IDEA-001");
+        write_task(&workflow_root, "TASK-DEV", "todo", Some("DECISION-001"));
+        let before = detail_matching_condition_script(root.path());
+        let planner_before = before.planner.target.clone();
+        let developer_before = before.developer.target.clone();
+
+        fs::remove_file(workflow_root.join("tasks/TASK-001.md")).expect("drop member task");
+        let after = detail_matching_condition_script(root.path());
+
+        assert_eq!(after.planner.target, planner_before);
+        assert_eq!(after.developer.target, developer_before);
+        assert_eq!(after.architect.target.as_deref(), Some("GROUP-001"));
+    }
+
     /// 아키텍트 후보 셋. 첫째는 이미 분해됐고 둘째는 그 기획서가 선점됐으므로 셋째가 대상이다.
     #[test]
     fn the_architect_answer_names_the_target_and_why_the_earlier_approvals_were_excluded() {
@@ -2962,6 +3456,7 @@ mod tests {
             "DECISION-A01",
             None,
         );
+        write_group_member_task(&workflow_root, "TASK-A01", "GROUP-001", "DECISION-A01");
         write_lease(root.path(), "SPEC-002", &future());
 
         let detail = detail_matching_condition_script(root.path());

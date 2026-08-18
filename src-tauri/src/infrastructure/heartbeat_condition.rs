@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 23;
+const CONDITION_SCRIPT_VERSION: u32 = 24;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 23;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 23
+# condition_script_version: 24
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -606,6 +606,486 @@ scan_work_groups() { # $1=워크플로우 경로
       if (index($0, "schema: workflow-labs/work-group@1") == 1) schema = 1
     }
     END { emit() }
+  ' "$@"
+}
+
+# 기능 문서의 표시 상태가 "구성 확인 필요"인지 앱과 같은 규칙으로 판정한다. 앱 쪽 정본은
+# fs_project_repository.rs의 표시 상태 사슬이고, 그 사슬이 이 상태로 답하려면 그룹 확인 결정과
+# 그 기능에 속한 작업과 확인 절차 본문을 함께 보아야 한다. 그래서 이 훑기가 groups, tasks,
+# decisions 세 디렉터리를 한 번에 읽는다. 파일 종류는 경로 앞자리로 가른다 — 빈 파일은 awk가
+# 레코드를 하나도 내지 않아 파일 번호로 세면 자리가 밀린다.
+# 출력은 "id<TAB>출처 승인<TAB>출처 확인 결정"이고 구성 확인 필요인 기능만 낸다. 아키텍트가
+# 문서로는 고칠 수 없다고 남긴 기능(configuration_unresolved_revision이 현재 구성 버전과 같은
+# 기능)은 사람 판단 필요로 갈라지므로 여기서 내지 않는다.
+scan_configuration_errors() { # $1=워크플로우 경로
+  conf_wf=$1
+  set --
+  scan_any=0
+  for f in "$conf_wf"groups/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && { set -- "$@" "$f"; scan_any=1; }
+  done
+  [ "$scan_any" -eq 0 ] && return 0
+  for f in "$conf_wf"tasks/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  for f in "$conf_wf"decisions/*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  LC_ALL=C awk -v gdir="${conf_wf}groups/" -v tdir="${conf_wf}tasks/" \
+    -v ddir="${conf_wf}decisions/" '
+    function ord_init(  i) { for (i = 1; i < 256; i++) byte_code[sprintf("%c", i)] = i }
+    # UTF-8 바이트열을 코드포인트 배열로 푼다. 한글 낱말 대조가 음절 단위로 이루어져야 하므로
+    # 바이트가 아니라 코드포인트가 필요하다. LC_ALL=C로 돌리는 것은 substr가 바이트를 세게 하려는
+    # 것이며, 로캘에 따라 awk가 글자를 세면 이 계산이 어긋난다.
+    function codes(s, out,   i, len, b, c, need, cp, n) {
+      len = length(s); i = 1; n = 0
+      while (i <= len) {
+        b = byte_code[substr(s, i, 1)]
+        if (b >= 240) { cp = b - 240; need = 3 }
+        else if (b >= 224) { cp = b - 224; need = 2 }
+        else if (b >= 192) { cp = b - 192; need = 1 }
+        else { cp = b; need = 0 }
+        i++
+        while (need > 0 && i <= len) {
+          c = byte_code[substr(s, i, 1)]
+          if (c < 128 || c >= 192) break
+          cp = cp * 64 + (c - 128); i++; need--
+        }
+        n++; out[n] = cp
+      }
+      return n
+    }
+    # 어미가 달라진 형태를 같은 낱말로 읽는 대조. 앱 이식본은 음절을 초성·중성·종성으로 풀어
+    # 비교하는데, 그 비교의 결과는 "마지막 음절에 종성이 없으면 종성만 다른 음절도 같은 낱말이고
+    # 그 앞 음절은 정확히 같아야 한다"와 같다. 그래서 "보이"가 "보인다"에 걸리고 "창"은 "차이"에
+    # 걸리지 않는다.
+    function ending_match(tok, cp, n,   tcp, tn, i, j, ok, last, tail) {
+      tn = codes(tok, tcp)
+      if (tn == 0 || tn > n) return 0
+      for (j = 1; j + tn - 1 <= n; j++) {
+        ok = 1
+        for (i = 1; i < tn; i++) if (cp[j + i - 1] != tcp[i]) { ok = 0; break }
+        if (!ok) continue
+        last = tcp[tn]; tail = cp[j + tn - 1]
+        if (last >= 44032 && last <= 55203 && (last - 44032) % 28 == 0) {
+          if (tail < 44032 || tail > 55203) continue
+          if (int((tail - 44032) / 28) != int((last - 44032) / 28)) continue
+        } else if (tail != last) continue
+        return 1
+      }
+      return 0
+    }
+    function mentions(lowered, cp, n, tok) {
+      return index(lowered, tok) > 0 || ending_match(tok, cp, n)
+    }
+    function mentions_any(lowered, cp, n, list,   part, k, i) {
+      k = split(list, part, "\n")
+      for (i = 1; i <= k; i++) if (mentions(lowered, cp, n, part[i])) return 1
+      return 0
+    }
+    function strip_tick(s) { sub(/^`+/, "", s); sub(/`+$/, "", s); return s }
+    function cli_exe(s) {
+      return s == "curl" || s == "docker" || s == "docker-compose" || s == "mvn" ||
+        s == "maven" || s == "xcodebuild" || s == "kubectl" || s == "helm" || s == "bash" ||
+        s == "sh" || s == "zsh" || s == "pwsh" || s == "powershell" || s == "npm" ||
+        s == "npx" || s == "pnpm" || s == "yarn" || s == "cargo" || s == "pytest" ||
+        s == "gradle" || s == "gradlew" || s == "dotnet" || s == "phpunit" ||
+        s == "composer" || s == "bundle" || s == "rspec" || s == "cmake" || s == "ctest"
+    }
+    function git_arg(s) {
+      return s == "add" || s == "bisect" || s == "branch" || s == "checkout" || s == "clone" ||
+        s == "commit" || s == "diff" || s == "fetch" || s == "grep" || s == "log" ||
+        s == "merge" || s == "pull" || s == "push" || s == "rebase" || s == "reset" ||
+        s == "restore" || s == "show" || s == "status" || s == "switch" || s == "tag"
+    }
+    function cli_line(line,   c, p, prompt, num, cmd, tmp, exe, arg, w, cnt) {
+      c = line
+      sub(/^[ \t\r]+/, "", c); sub(/[ \t\r]+$/, "", c)
+      if (c == "") return 0
+      if (index(c, "$ ") == 1 || index(c, "% ") == 1 || index(c, ">>> ") == 1 ||
+          index(c, "ps> ") == 1) return 1
+      if (index(c, "ps ") == 1 && index(c, "> ") > 0) return 1
+      p = index(c, "$ ")
+      if (p > 1) {
+        prompt = substr(c, 1, p - 1)
+        if (index(prompt, "@") > 0 || substr(prompt, length(prompt), 1) == ":" ||
+            index(prompt, "/") > 0) return 1
+      }
+      if (length(c) > 3 && substr(c, 1, 1) ~ /^[A-Za-z]$/ && substr(c, 2, 1) == ":" &&
+          (substr(c, 3, 1) == "\\" || substr(c, 3, 1) == "/") && index(c, "> ") > 0) return 1
+      if (index(c, "- ") == 1 || index(c, "* ") == 1 || index(c, "+ ") == 1) {
+        c = substr(c, 3); sub(/^[ \t\r]+/, "", c)
+      } else {
+        p = index(c, ". ")
+        if (p > 1) {
+          num = substr(c, 1, p - 1)
+          if (num ~ /^[0-9]+$/) { c = substr(c, p + 2); sub(/^[ \t\r]+/, "", c) }
+        }
+      }
+      if (index(c, HASH1) == 1) {
+        cmd = substr(c, 3)
+        tmp = cmd; sub(/^[ \t\r]+/, "", tmp); sub(/[ \t\r].*$/, "", tmp)
+        exe = strip_tick(tmp)
+        if (cli_exe(exe) || index(cmd, "go test") == 1 || index(cmd, "go build") == 1 ||
+            index(cmd, "swift test") == 1 || index(cmd, "./") == 1) return 1
+      }
+      sub(/^`+/, "", c)
+      if (index(c, "./") == 1 || index(c, "../") == 1 || index(c, ".\\") == 1 ||
+          index(c, "/bin/") == 1 || index(c, "/usr/bin/") == 1) return 1
+      tmp = c; sub(/^[ \t\r]+/, "", tmp)
+      cnt = split(tmp, w, /[ \t\r]+/)
+      exe = cnt >= 1 ? strip_tick(w[1]) : ""
+      arg = cnt >= 2 ? strip_tick(w[2]) : ""
+      if (cli_exe(exe)) return 1
+      if (exe == "swift" && index(c, "swift test") == 1) return 1
+      if (exe == "go" && (index(c, "go test") == 1 || index(c, "go build") == 1)) return 1
+      if (exe == "git" && git_arg(arg)) return 1
+      if (exe == "node" && (index(arg, "-") == 1 || index(arg, "/") > 0 ||
+          arg ~ /\.(js|mjs|cjs|ts)$/)) return 1
+      if (exe == "deno" && (arg == "run" || arg == "test" || arg == "task" || arg == "check" ||
+          arg == "lint" || arg == "fmt" || arg == "compile")) return 1
+      if (exe == "php" && (index(arg, "-") == 1 || index(arg, "/") > 0 || arg ~ /\.php$/)) return 1
+      if (exe == "ruby" && (index(arg, "-") == 1 || index(arg, "/") > 0 || arg ~ /\.rb$/)) return 1
+      if (exe == "make" && arg != "" && arg != "a" && arg != "an" && arg != "it" &&
+          arg != "sure" && arg != "the" && arg != "this" && arg != "that") return 1
+      return 0
+    }
+    function internal(text,   lowered, part, k, i, rows, m) {
+      lowered = tolower(text)
+      k = split(CMD, part, "\n")
+      for (i = 1; i <= k; i++) if (index(lowered, part[i]) > 0) return 1
+      m = split(lowered, rows, "\n")
+      for (i = 1; i <= m; i++) if (cli_line(rows[i])) return 1
+      return 0
+    }
+    function user_safe(title, body,   lowered, cp, n) {
+      if (body == "" || index(body, "```") > 0) return 0
+      if (internal(title) || internal(body)) return 0
+      lowered = tolower(body)
+      n = codes(lowered, cp)
+      return mentions_any(lowered, cp, n, SURFACE) && mentions_any(lowered, cp, n, ACTION) &&
+        mentions_any(lowered, cp, n, RESULT)
+    }
+    function leap(y) { return (y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0)) }
+    function month_days(y, m) {
+      if (m == 2) return leap(y) ? 29 : 28
+      return (m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31
+    }
+    function leaps_before(y) {
+      if (y <= 0) return 0
+      return int((y - 1) / 4) - int((y - 1) / 100) + int((y - 1) / 400) + 1
+    }
+    # scan_architect_decisions와 같은 RFC3339 판독이다. 두 자리가 다른 표기를 받아들이면 같은
+    # 문서에서 다른 답이 나온다.
+    function rfc3339(s,   y, mo, d, h, mi, se, p, c, start, frac, zone, sign, oh, om,
+                          offset, days, m, nanos) {
+      if (length(s) < 20) return 0
+      if (substr(s, 5, 1) != "-" || substr(s, 8, 1) != "-" ||
+          substr(s, 14, 1) != ":" || substr(s, 17, 1) != ":") return 0
+      c = substr(s, 11, 1)
+      if (c != "T" && c != "t" && c != " ") return 0
+      if (substr(s, 1, 4) !~ /^[0-9][0-9][0-9][0-9]$/ ||
+          substr(s, 6, 2) !~ /^[0-9][0-9]$/ || substr(s, 9, 2) !~ /^[0-9][0-9]$/ ||
+          substr(s, 12, 2) !~ /^[0-9][0-9]$/ || substr(s, 15, 2) !~ /^[0-9][0-9]$/ ||
+          substr(s, 18, 2) !~ /^[0-9][0-9]$/) return 0
+      y = substr(s, 1, 4) + 0; mo = substr(s, 6, 2) + 0; d = substr(s, 9, 2) + 0
+      h = substr(s, 12, 2) + 0; mi = substr(s, 15, 2) + 0; se = substr(s, 18, 2) + 0
+      if (mo < 1 || mo > 12 || d < 1 || d > month_days(y, mo) || h > 23 || mi > 59 ||
+          se > 60) return 0
+      p = 20; frac = ""
+      if (substr(s, p, 1) == ".") {
+        p++; start = p
+        while (p <= length(s) && substr(s, p, 1) ~ /^[0-9]$/) p++
+        if (p == start) return 0
+        frac = substr(s, start, p - start)
+      }
+      zone = substr(s, p)
+      if (zone == "Z" || zone == "z") {
+        offset = 0
+      } else {
+        if (length(zone) != 6 || substr(zone, 4, 1) != ":") return 0
+        sign = substr(zone, 1, 1)
+        if (sign != "+" && sign != "-") return 0
+        if (substr(zone, 2, 2) !~ /^[0-9][0-9]$/ ||
+            substr(zone, 5, 2) !~ /^[0-9][0-9]$/) return 0
+        oh = substr(zone, 2, 2) + 0; om = substr(zone, 5, 2) + 0
+        if (oh > 23 || om > 59) return 0
+        offset = oh * 3600 + om * 60
+        if (sign == "-") offset = -offset
+      }
+      days = y * 365 + leaps_before(y)
+      for (m = 1; m < mo; m++) days += month_days(y, m)
+      days += d - 1
+      nanos = 0
+      if (frac != "") nanos = substr(frac "000000000", 1, 9) + 0
+      if (se == 60) { se = 59; nanos += 1000000000 }
+      rfc_sec = days * 86400 + h * 3600 + mi * 60 + se - offset
+      rfc_nano = nanos
+      return 1
+    }
+    function push_scenario(  body) {
+      if (!cur_open) return
+      body = cur_body
+      sub(/^[ \t\r\n]+/, "", body); sub(/[ \t\r\n]+$/, "", body)
+      g_scen[gn] = g_scen[gn] + 1
+      scen_title[gn, g_scen[gn]] = cur_title
+      scen_body[gn, g_scen[gn]] = body
+      cur_open = 0
+    }
+    function head_value(line, key) { return substr(line, length(key) + 1) }
+    BEGIN {
+      ord_init()
+      HASH1 = sprintf("%c ", 35)
+      HASH3 = sprintf("%c%c%c ", 35, 35, 35)
+      SURFACE = "화면\n페이지\n창\n대화상자\n다이얼로그\n목록\n메뉴\n버튼\n폼\n카드\n패널\n탭"
+      SURFACE = SURFACE "\n앱\n브라우저\n모달\n알림\n토스트\n배너\n대시보드\n설정\n입력란"
+      SURFACE = SURFACE "\nscreen\npage\nwindow\ndialog\nlist\nmenu\nbutton\nform\ncard\npanel"
+      SURFACE = SURFACE "\ntab\napp\nbrowser\nmodal\nnotice\ntoast\nbanner\ndashboard"
+      SURFACE = SURFACE "\nsettings\nfield"
+      ACTION = "누르\n눌\n클릭\n선택\n입력\n열\n이동\n저장\n전환\n확인\n스크롤\n드래그"
+      ACTION = ACTION "\n켜\n끄\n바꾸\n지정\n돌아"
+      ACTION = ACTION "\ntap\nclick\nselect\nenter\ntype\nopen\nnavigate\nsave\nswitch\ncheck"
+      ACTION = ACTION "\nscroll\ndrag"
+      RESULT = "보여\n보이\n표시\n나타\n사라\n완료\n변경\n유지\n결과\n안내\n메시지\n활성"
+      RESULT = RESULT "\n비활성\n추가\n삭제\n선택되어\n그대로\n적혀\n열리\n나오\n바뀌\n같아지\n남아"
+      RESULT = RESULT "\nvisible\nappears\nshows\ndisplay\nhidden\ndisappears\ncomplete\nupdated"
+      RESULT = RESULT "\nsaved\nresult\nmessage\nenabled\ndisabled\nadded\nremoved"
+      CMD = "npx \nnpm \npnpm \nyarn \ncargo \npytest\ngo test\ngo build\npython -m "
+      CMD = CMD "\ngradle test\ngradle build\ngradlew test\ngradlew build\ndotnet test"
+      CMD = CMD "\ndotnet build\ncurl http://\ncurl https://\ncurl -\ndocker run "
+      CMD = CMD "\ndocker build \ndocker exec \ndocker compose up\ndocker compose run"
+      CMD = CMD "\ndocker compose exec\nmvn test\nmvn verify\nmvn package\nmaven test"
+      CMD = CMD "\n./scripts/\n.\\scripts\\\nswift test\nxcodebuild \nbash \nzsh \npwsh "
+      CMD = CMD "\npowershell \nmake test\nbun test\ntypecheck\ntype-check\ntsc \nrun lint"
+      CMD = CMD "\nrun build\nlint command\nbuild command\nlint/build\nterminal\n터미널"
+      CMD = CMD "\n명령어\ncommand line\n테스트를 실행\n테스트 실행\n테스트를 돌\n테스트 돌"
+      CMD = CMD "\n타입 검사\n타입검사\nlint 검사\nlint를 실행\nlint 실행\n린트\n빌드를 실행"
+      CMD = CMD "\n빌드 실행\n빌드를 돌"
+    }
+    FILENAME != prev {
+      push_scenario()
+      prev = FILENAME
+      base = FILENAME; sub(/^.*\//, "", base)
+      kind = 0
+      cur_open = 0; cur_title = ""; cur_body = ""
+      if (index(FILENAME, gdir) == 1) {
+        kind = 1; gn++
+        g_stem[gn] = base; sub(/\.md$/, "", g_stem[gn])
+        g_schema[gn] = 0; g_id[gn] = ""; g_status[gn] = ""; g_mode[gn] = ""; g_rev[gn] = ""
+        g_spec[gn] = ""; g_dec[gn] = ""; g_qa[gn] = ""; g_upd[gn] = ""; g_unres[gn] = ""
+        g_scen[gn] = 0; g_struct[gn] = 1
+        got_id = 0; got_status = 0; got_mode = 0; got_rev = 0; got_spec = 0; got_dec = 0
+        got_qa = 0; got_upd = 0; got_unres = 0
+      } else if (index(FILENAME, tdir) == 1) {
+        kind = 2; tn++
+        t_stem[tn] = base; sub(/\.md$/, "", t_stem[tn])
+        t_id[tn] = ""; t_group[tn] = ""; t_rev[tn] = ""; t_spec[tn] = ""; t_dec[tn] = ""
+        t_status[tn] = ""
+        got_id = 0; got_group = 0; got_rev = 0; got_spec = 0; got_dec = 0; got_status = 0
+      } else if (index(FILENAME, ddir) == 1) {
+        kind = 3; dn++
+        d_file[dn] = base
+        d_gschema[dn] = 0; d_tschema[dn] = 0; d_id[dn] = ""; d_group[dn] = ""; d_rev[dn] = ""
+        d_out[dn] = ""; d_by[dn] = ""; d_at[dn] = ""; d_req[dn] = ""; d_task[dn] = ""
+        got_id = 0; got_group = 0; got_rev = 0; got_out = 0; got_by = 0; got_at = 0
+        got_req = 0; got_task = 0
+      }
+    }
+    {
+      if (kind == 1) {
+        if (index($0, HASH3) == 1) {
+          rest = substr($0, 5)
+          sep = index(rest, " · ")
+          handled = 0
+          if (sep > 0) {
+            sid = substr(rest, 1, sep - 1)
+            if (index(sid, "QA-") == 1) {
+              handled = 1
+              stitle = substr(rest, sep + length(" · "))
+              sub(/^[ \t\r]+/, "", stitle); sub(/[ \t\r]+$/, "", stitle)
+              if (sid == sprintf("QA-%02d", g_scen[gn] + cur_open + 1) && stitle != "") {
+                push_scenario()
+                cur_open = 1; cur_title = stitle; cur_body = ""
+              } else {
+                g_struct[gn] = 0
+                if (cur_open) cur_body = cur_body $0 "\n"
+              }
+            }
+          }
+          if (!handled) {
+            if (index($0, HASH3 "QA-") == 1) g_struct[gn] = 0
+            if (cur_open) cur_body = cur_body $0 "\n"
+          }
+        } else {
+          if (cur_open) cur_body = cur_body $0 "\n"
+          if (!got_id && index($0, "id:") == 1) {
+            got_id = 1; g_id[gn] = head_value($0, "id:"); sub(/^ */, "", g_id[gn])
+          }
+          if (!got_status && index($0, "status:") == 1) {
+            got_status = 1; g_status[gn] = head_value($0, "status:")
+            sub(/^ */, "", g_status[gn])
+          }
+          if (!got_mode && index($0, "qa_mode:") == 1) {
+            got_mode = 1; g_mode[gn] = head_value($0, "qa_mode:"); sub(/^ */, "", g_mode[gn])
+          }
+          if (!got_rev && index($0, "revision:") == 1) {
+            got_rev = 1; g_rev[gn] = head_value($0, "revision:"); sub(/^ */, "", g_rev[gn])
+          }
+          if (!got_spec && index($0, "source_spec_id:") == 1) {
+            got_spec = 1; g_spec[gn] = head_value($0, "source_spec_id:")
+            sub(/^ */, "", g_spec[gn])
+          }
+          if (!got_dec && index($0, "source_decision_id:") == 1) {
+            got_dec = 1; g_dec[gn] = head_value($0, "source_decision_id:")
+            sub(/^ */, "", g_dec[gn])
+          }
+          if (!got_qa && index($0, "source_qa_decision_id:") == 1) {
+            got_qa = 1; g_qa[gn] = head_value($0, "source_qa_decision_id:")
+            sub(/^ */, "", g_qa[gn])
+          }
+          if (!got_upd && index($0, "updated_at:") == 1) {
+            got_upd = 1; g_upd[gn] = head_value($0, "updated_at:"); sub(/^ */, "", g_upd[gn])
+          }
+          if (!got_unres && index($0, "configuration_unresolved_revision:") == 1) {
+            got_unres = 1; g_unres[gn] = head_value($0, "configuration_unresolved_revision:")
+            sub(/^ */, "", g_unres[gn])
+          }
+          if (index($0, "schema: workflow-labs/work-group@1") == 1) g_schema[gn] = 1
+        }
+      } else if (kind == 2) {
+        if (!got_id && index($0, "id:") == 1) {
+          got_id = 1; t_id[tn] = head_value($0, "id:"); sub(/^ */, "", t_id[tn])
+        }
+        if (!got_group && index($0, "work_group_id:") == 1) {
+          got_group = 1; t_group[tn] = head_value($0, "work_group_id:")
+          sub(/^ */, "", t_group[tn])
+        }
+        if (!got_rev && index($0, "work_group_revision:") == 1) {
+          got_rev = 1; t_rev[tn] = head_value($0, "work_group_revision:")
+          sub(/^ */, "", t_rev[tn])
+        }
+        if (!got_spec && index($0, "source_spec_id:") == 1) {
+          got_spec = 1; t_spec[tn] = head_value($0, "source_spec_id:"); sub(/^ */, "", t_spec[tn])
+        }
+        if (!got_dec && index($0, "source_decision_id:") == 1) {
+          got_dec = 1; t_dec[tn] = head_value($0, "source_decision_id:"); sub(/^ */, "", t_dec[tn])
+        }
+        if (!got_status && index($0, "status:") == 1) {
+          got_status = 1; t_status[tn] = head_value($0, "status:"); sub(/^ */, "", t_status[tn])
+        }
+      } else if (kind == 3) {
+        if (!got_id && index($0, "id:") == 1) {
+          got_id = 1; d_id[dn] = head_value($0, "id:"); sub(/^ */, "", d_id[dn])
+        }
+        if (!got_group && index($0, "group_id:") == 1) {
+          got_group = 1; d_group[dn] = head_value($0, "group_id:"); sub(/^ */, "", d_group[dn])
+        }
+        if (!got_rev && index($0, "group_revision:") == 1) {
+          got_rev = 1; d_rev[dn] = head_value($0, "group_revision:"); sub(/^ */, "", d_rev[dn])
+        }
+        if (!got_out && index($0, "outcome:") == 1) {
+          got_out = 1; d_out[dn] = head_value($0, "outcome:"); sub(/^ */, "", d_out[dn])
+        }
+        if (!got_by && index($0, "created_by:") == 1) {
+          got_by = 1; d_by[dn] = head_value($0, "created_by:"); sub(/^ */, "", d_by[dn])
+        }
+        if (!got_at && index($0, "created_at:") == 1) {
+          got_at = 1; d_at[dn] = head_value($0, "created_at:"); sub(/^ */, "", d_at[dn])
+        }
+        if (!got_req && index($0, "request_id:") == 1) {
+          got_req = 1; d_req[dn] = head_value($0, "request_id:"); sub(/^ */, "", d_req[dn])
+        }
+        if (!got_task && index($0, "task_id:") == 1) {
+          got_task = 1; d_task[dn] = head_value($0, "task_id:"); sub(/^ */, "", d_task[dn])
+        }
+        if (index($0, "schema: workflow-labs/group-qa-decision@1") == 1) d_gschema[dn] = 1
+        if (index($0, "schema: workflow-labs/qa-decision@1") == 1) d_tschema[dn] = 1
+      }
+    }
+    END {
+      push_scenario()
+      for (i = 1; i <= dn; i++) {
+        if (d_by[i] != "user") continue
+        if (d_gschema[i]) {
+          if (d_id[i] == "" || d_group[i] == "" || d_rev[i] !~ /^[0-9]+$/ ||
+              (d_rev[i] + 0) > 4294967295 || (d_rev[i] + 0) == 0 || d_req[i] == "") continue
+          if (d_out[i] != "confirmed" && d_out[i] != "revision_requested") continue
+          if (!rfc3339(d_at[i])) continue
+          key = d_group[i] SUBSEP sprintf("%.0f", d_rev[i] + 0)
+          if (!(key in gsel) || rfc_sec > gsec[key] ||
+              (rfc_sec == gsec[key] && rfc_nano > gnano[key]) ||
+              (rfc_sec == gsec[key] && rfc_nano == gnano[key] &&
+               d_file[i] > d_file[gsel[key]])) {
+            gsec[key] = rfc_sec; gnano[key] = rfc_nano; gsel[key] = i
+          }
+        } else if (d_tschema[i]) {
+          if (d_task[i] == "") continue
+          if (d_out[i] != "confirmed" && d_out[i] != "revision_requested") continue
+          if (!rfc3339(d_at[i])) continue
+          tkey = d_task[i]
+          if (!(tkey in tsel) || rfc_sec > tsec[tkey] ||
+              (rfc_sec == tsec[tkey] && rfc_nano > tnano[tkey]) ||
+              (rfc_sec == tsec[tkey] && rfc_nano == tnano[tkey] &&
+               d_file[i] > d_file[tsel[tkey]])) {
+            tsec[tkey] = rfc_sec; tnano[tkey] = rfc_nano; tsel[tkey] = i
+          }
+        }
+      }
+      for (gi = 1; gi <= gn; gi++) {
+        if (!g_schema[gi]) continue
+        gid = g_id[gi] != "" ? g_id[gi] : g_stem[gi]
+        rev_ok = (g_rev[gi] ~ /^[0-9]+$/ && (g_rev[gi] + 0) <= 4294967295)
+        grev = rev_ok ? (g_rev[gi] + 0) : 0
+        status_ok = (g_status[gi] == "preparing" || g_status[gi] == "active")
+        status = status_ok ? g_status[gi] : "active"
+        mode_ok = (g_mode[gi] == "user" || g_mode[gi] == "automatic")
+        mode = mode_ok ? g_mode[gi] : "user"
+        structural = (status_ok && mode_ok && g_id[gi] != "" && grev > 0 && g_spec[gi] != "" &&
+          g_dec[gi] != "" && g_upd[gi] != "" && rfc3339(g_upd[gi]) && g_struct[gi])
+        assigned = 0; link_bad = 0; not_verified = 0; blocked = 0; developing = 0
+        legacy_all = 1
+        for (ti = 1; ti <= tn; ti++) {
+          if (t_group[ti] == "" || t_group[ti] != gid) continue
+          assigned++
+          trev_ok = (t_rev[ti] ~ /^[0-9]+$/ && (t_rev[ti] + 0) <= 4294967295)
+          if (!(trev_ok && (t_rev[ti] + 0) > 0 && (t_rev[ti] + 0) <= grev &&
+                t_spec[ti] != "" && t_spec[ti] == g_spec[gi] &&
+                t_dec[ti] != "" && t_dec[ti] == g_dec[gi])) link_bad = 1
+          st = t_status[ti] != "" ? t_status[ti] : "todo"
+          if (st != "verified") not_verified = 1
+          if (st == "blocked") blocked = 1
+          if (st == "todo" || st == "in_progress") developing = 1
+          tid = t_id[ti] != "" ? t_id[ti] : t_stem[ti]
+          if (!((tid in tsel) && d_out[tsel[tid]] == "confirmed")) legacy_all = 0
+        }
+        key = gid SUBSEP sprintf("%.0f", grev)
+        latest = (key in gsel) ? d_out[gsel[key]] : ""
+        if (latest == "confirmed") continue
+        if (assigned > 0 && !link_bad && legacy_all) continue
+        if (latest == "revision_requested") continue
+        if (status == "preparing") continue
+        if (blocked) continue
+        if (developing) continue
+        issues = 0
+        if (!structural) issues = 1
+        if (assigned == 0) issues = 1
+        if (link_bad) issues = 1
+        if (mode == "user") {
+          if (g_scen[gi] == 0) issues = 1
+          else {
+            for (si = 1; si <= g_scen[gi]; si++) {
+              if (!user_safe(scen_title[gi, si], scen_body[gi, si])) { issues = 1; break }
+            }
+          }
+        }
+        if (mode == "automatic" && g_scen[gi] > 0) issues = 1
+        if (not_verified) issues = 1
+        if (!issues) continue
+        if (g_unres[gi] ~ /^[0-9]+$/ && (g_unres[gi] + 0) <= 4294967295 &&
+            (g_unres[gi] + 0) == grev) continue
+        print gid "\t" g_dec[gi] "\t" g_qa[gi]
+      }
+    }
   ' "$@"
 }
 
@@ -1202,7 +1682,15 @@ architect)
   group_revision_rows=""
   revision_rows=""
   approval_rows=""
+  configuration_rows=""
   for wf in .workflow/*/; do
+    conf_rows=$(scan_configuration_errors "$wf")
+    while IFS='	' read -r cgid csource cqa; do
+      [ -n "$cgid" ] || continue
+      configuration_rows="$configuration_rows$cgid	$csource	$cqa$nl"
+    done <<CONFIGURATION_SCAN_ROWS
+$conf_rows
+CONFIGURATION_SCAN_ROWS
     groups=$(scan_work_groups "$wf")
     while IFS='	' read -r gid status revision source source_spec source_qa; do
       [ -n "$gid" ] && [ -n "$status" ] && [ -n "$revision" ] && [ -n "$source" ] || continue
@@ -1251,6 +1739,21 @@ ARCHITECT_GROUP_ROWS
   done <<ORDERED_GROUP_REVISION_ROWS
 $ordered_group_revision_rows
 ORDERED_GROUP_REVISION_ROWS
+
+  # 구성 확인 필요로 판정된 기능은 사용자 확인 반려 다음, 작업 정의 수정 요청 앞이다. 문서가
+  # 성립하지 않는 기능은 그 기능에서 나온 작업 정의를 고치는 일보다 앞선다. 선점은 중단된
+  # preparing 복구와 같은 세 id를 본다.
+  while IFS='	' read -r cgid csource cqa; do
+    [ -n "$cgid" ] || continue
+    if lease_blocks "$cgid" || { [ -n "$csource" ] && lease_blocks "$csource"; } ||
+       { [ -n "$cqa" ] && lease_blocks "$cqa"; }; then
+      note_candidate leased "$cgid"
+      continue
+    fi
+    note_target "$cgid" configuration_error
+  done <<CONFIGURATION_ROWS
+$configuration_rows
+CONFIGURATION_ROWS
 
   # 작업 정의 수정 요청은 워크플로우 경계를 넘어 모으고 생성 시각으로 정렬한다.
   ordered_revision_rows=$(printf '%s' "$revision_rows" | LC_ALL=C sort)
@@ -1362,7 +1865,7 @@ const CONDITION_SCRIPT_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 23
+# condition_script_version: 24
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -2047,6 +2550,419 @@ function Get-GroupQaRevisionRequests([string]$Root) {
   return @($requests)
 }
 
+# --- Configuration-error groups (SPEC-073) ---------------------------------------------------
+# The app calls a work group a configuration error when its display-status chain lands there, and
+# that chain reads the group document, the tasks that belong to it, and the group QA decisions
+# together. These functions are the twin of the shell body's scan_configuration_errors and of the
+# app's own chain in fs_project_repository.rs. All three have to answer the same thing: a group the
+# screen shows as needing a configuration check is what the architect is handed next.
+
+# The word lists the app uses to decide whether a QA walkthrough reads as user behaviour. Changing
+# one of them here alone makes the two implementations disagree about the same document.
+$script:qaSurfaceTokens = @(
+  '화면', '페이지', '창', '대화상자', '다이얼로그', '목록', '메뉴', '버튼', '폼', '카드', '패널',
+  '탭', '앱', '브라우저', '모달', '알림', '토스트', '배너', '대시보드', '설정', '입력란',
+  'screen', 'page', 'window', 'dialog', 'list', 'menu', 'button', 'form', 'card', 'panel', 'tab',
+  'app', 'browser', 'modal', 'notice', 'toast', 'banner', 'dashboard', 'settings', 'field')
+$script:qaActionTokens = @(
+  '누르', '눌', '클릭', '선택', '입력', '열', '이동', '저장', '전환', '확인', '스크롤', '드래그',
+  '켜', '끄', '바꾸', '지정', '돌아',
+  'tap', 'click', 'select', 'enter', 'type', 'open', 'navigate', 'save', 'switch', 'check',
+  'scroll', 'drag')
+$script:qaResultTokens = @(
+  '보여', '보이', '표시', '나타', '사라', '완료', '변경', '유지', '결과', '안내', '메시지', '활성',
+  '비활성', '추가', '삭제', '선택되어', '그대로', '적혀', '열리', '나오', '바뀌', '같아지', '남아',
+  'visible', 'appears', 'shows', 'display', 'hidden', 'disappears', 'complete', 'updated', 'saved',
+  'result', 'message', 'enabled', 'disabled', 'added', 'removed')
+$script:qaCommandTokens = @(
+  'npx ', 'npm ', 'pnpm ', 'yarn ', 'cargo ', 'pytest', 'go test', 'go build', 'python -m ',
+  'gradle test', 'gradle build', 'gradlew test', 'gradlew build', 'dotnet test', 'dotnet build',
+  'curl http://', 'curl https://', 'curl -', 'docker run ', 'docker build ', 'docker exec ',
+  'docker compose up', 'docker compose run', 'docker compose exec', 'mvn test', 'mvn verify',
+  'mvn package', 'maven test', './scripts/', '.\scripts\', 'swift test', 'xcodebuild ', 'bash ',
+  'zsh ', 'pwsh ', 'powershell ', 'make test', 'bun test', 'typecheck', 'type-check', 'tsc ',
+  'run lint', 'run build', 'lint command', 'build command', 'lint/build', 'terminal', '터미널',
+  '명령어', 'command line', '테스트를 실행', '테스트 실행', '테스트를 돌', '테스트 돌',
+  '타입 검사', '타입검사', 'lint 검사', 'lint를 실행', 'lint 실행', '린트', '빌드를 실행',
+  '빌드 실행', '빌드를 돌')
+$script:qaCliExecutables = @(
+  'curl', 'docker', 'docker-compose', 'mvn', 'maven', 'xcodebuild', 'kubectl', 'helm', 'bash',
+  'sh', 'zsh', 'pwsh', 'powershell', 'npm', 'npx', 'pnpm', 'yarn', 'cargo', 'pytest', 'gradle',
+  'gradlew', 'dotnet', 'phpunit', 'composer', 'bundle', 'rspec', 'cmake', 'ctest')
+$script:qaGitArguments = @(
+  'add', 'bisect', 'branch', 'checkout', 'clone', 'commit', 'diff', 'fetch', 'grep', 'log',
+  'merge', 'pull', 'push', 'rebase', 'reset', 'restore', 'show', 'status', 'switch', 'tag')
+$script:qaFence = [string][char]96 + [string][char]96 + [string][char]96
+
+# Lowercases ASCII letters and nothing else, which is what the app's to_ascii_lowercase does and
+# what the shell twin's tolower does under LC_ALL=C. Lowercasing the whole of Unicode here would
+# make the three implementations disagree on non-ASCII scripts.
+function Get-AsciiLower([string]$Text) {
+  $chars = $Text.ToCharArray()
+  for ($i = 0; $i -lt $chars.Length; $i++) {
+    if ($chars[$i] -ge [char]'A' -and $chars[$i] -le [char]'Z') {
+      $chars[$i] = [char]([int]$chars[$i] + 32)
+    }
+  }
+  return (-join $chars)
+}
+
+# Reads a word whose ending changed as the same word. The app decomposes each syllable into its
+# initial, medial, and final and compares those parts; the result of that comparison is exactly
+# this: every syllable but the last must be identical, and the last one matches syllables that
+# differ only in their final when the token's own last syllable carries none. That is why '보이'
+# matches '보인다' while '창' does not match '차이'.
+function Test-HangulEndingMatch([string]$Text, [string]$Token) {
+  $tn = $Token.Length
+  if ($tn -eq 0 -or $Text.Length -lt $tn) { return $false }
+  $last = [int]$Token[$tn - 1]
+  $lastOpen = ($last -ge 44032 -and $last -le 55203 -and (($last - 44032) % 28) -eq 0)
+  for ($j = 0; ($j + $tn) -le $Text.Length; $j++) {
+    $ok = $true
+    for ($i = 0; $i -lt ($tn - 1); $i++) {
+      if ([int]$Text[$j + $i] -ne [int]$Token[$i]) { $ok = $false; break }
+    }
+    if (-not $ok) { continue }
+    $tail = [int]$Text[$j + $tn - 1]
+    if ($lastOpen) {
+      if ($tail -lt 44032 -or $tail -gt 55203) { continue }
+      if ([Math]::Floor(($tail - 44032) / 28) -ne [Math]::Floor(($last - 44032) / 28)) { continue }
+    } elseif ($tail -ne $last) { continue }
+    return $true
+  }
+  return $false
+}
+
+function Test-MentionsAny([string]$Lowered, [string[]]$Tokens) {
+  foreach ($token in $Tokens) {
+    if ($Lowered.IndexOf($token, [System.StringComparison]::Ordinal) -ge 0) { return $true }
+    if (Test-HangulEndingMatch $Lowered $token) { return $true }
+  }
+  return $false
+}
+
+function Test-QaCliExecutable([string]$Value) {
+  return ($script:qaCliExecutables -ccontains $Value)
+}
+
+# The twin of the app's line_looks_like_cli_command. A walkthrough line that reads as a terminal
+# command is not a user action, whatever else the line says.
+function Test-QaCliLine([string]$Line) {
+  $ordinal = [System.StringComparison]::Ordinal
+  $c = $Line.Trim()
+  if ($c.Length -eq 0) { return $false }
+  if ($c.StartsWith('$ ', $ordinal) -or $c.StartsWith('% ', $ordinal) -or
+      $c.StartsWith('>>> ', $ordinal) -or $c.StartsWith('ps> ', $ordinal)) { return $true }
+  if ($c.StartsWith('ps ', $ordinal) -and $c.IndexOf('> ', $ordinal) -ge 0) { return $true }
+  $p = $c.IndexOf('$ ', $ordinal)
+  if ($p -gt 0) {
+    $prompt = $c.Substring(0, $p)
+    if ($prompt.IndexOf('@', $ordinal) -ge 0 -or $prompt.EndsWith(':', $ordinal) -or
+        $prompt.IndexOf('/', $ordinal) -ge 0) { return $true }
+  }
+  if ($c.Length -gt 3 -and ([string]$c[0]) -cmatch '^[A-Za-z]$' -and $c[1] -eq ':' -and
+      ($c[2] -eq '\' -or $c[2] -eq '/') -and $c.IndexOf('> ', $ordinal) -ge 0) { return $true }
+  if ($c.StartsWith('- ', $ordinal) -or $c.StartsWith('* ', $ordinal) -or
+      $c.StartsWith('+ ', $ordinal)) {
+    $c = $c.Substring(2).TrimStart()
+  } else {
+    $p = $c.IndexOf('. ', $ordinal)
+    if ($p -gt 0) {
+      $number = $c.Substring(0, $p)
+      if ($number -cmatch '^[0-9]+$') { $c = $c.Substring($p + 2).TrimStart() }
+    }
+  }
+  if ($c.StartsWith('# ', $ordinal)) {
+    $command = $c.Substring(2)
+    $head = @($command.TrimStart() -split '\s+')
+    $executable = ''
+    if ($head.Count -ge 1) { $executable = $head[0].Trim([char]96) }
+    if ((Test-QaCliExecutable $executable) -or $command.StartsWith('go test', $ordinal) -or
+        $command.StartsWith('go build', $ordinal) -or $command.StartsWith('swift test', $ordinal) -or
+        $command.StartsWith('./', $ordinal)) { return $true }
+  }
+  $c = $c.TrimStart([char]96)
+  if ($c.StartsWith('./', $ordinal) -or $c.StartsWith('../', $ordinal) -or
+      $c.StartsWith('.\', $ordinal) -or $c.StartsWith('/bin/', $ordinal) -or
+      $c.StartsWith('/usr/bin/', $ordinal)) { return $true }
+  $words = @($c.TrimStart() -split '\s+' | Where-Object { $_.Length -gt 0 })
+  $executable = ''
+  $argument = ''
+  if ($words.Count -ge 1) { $executable = $words[0].Trim([char]96) }
+  if ($words.Count -ge 2) { $argument = $words[1].Trim([char]96) }
+  if (Test-QaCliExecutable $executable) { return $true }
+  if ($executable -ceq 'swift' -and $c.StartsWith('swift test', $ordinal)) { return $true }
+  if ($executable -ceq 'go' -and ($c.StartsWith('go test', $ordinal) -or
+      $c.StartsWith('go build', $ordinal))) { return $true }
+  if ($executable -ceq 'git' -and ($script:qaGitArguments -ccontains $argument)) { return $true }
+  if ($executable -ceq 'node' -and ($argument.StartsWith('-', $ordinal) -or
+      $argument.IndexOf('/', $ordinal) -ge 0 -or $argument -cmatch '\.(js|mjs|cjs|ts)$')) { return $true }
+  if ($executable -ceq 'deno' -and (@('run', 'test', 'task', 'check', 'lint', 'fmt', 'compile') -ccontains $argument)) {
+    return $true
+  }
+  if ($executable -ceq 'php' -and ($argument.StartsWith('-', $ordinal) -or
+      $argument.IndexOf('/', $ordinal) -ge 0 -or $argument -cmatch '\.php$')) { return $true }
+  if ($executable -ceq 'ruby' -and ($argument.StartsWith('-', $ordinal) -or
+      $argument.IndexOf('/', $ordinal) -ge 0 -or $argument -cmatch '\.rb$')) { return $true }
+  if ($executable -ceq 'make' -and $argument.Length -gt 0 -and
+      -not (@('a', 'an', 'it', 'sure', 'the', 'this', 'that') -ccontains $argument)) { return $true }
+  return $false
+}
+
+function Test-InternalQaInstruction([string]$Text) {
+  $lowered = Get-AsciiLower $Text
+  foreach ($token in $script:qaCommandTokens) {
+    if ($lowered.IndexOf($token, [System.StringComparison]::Ordinal) -ge 0) { return $true }
+  }
+  foreach ($line in $lowered.Split([char]10)) {
+    if (Test-QaCliLine $line) { return $true }
+  }
+  return $false
+}
+
+function Test-ScenarioUserSafe([string]$Title, [string]$Body) {
+  if ($Body.Length -eq 0) { return $false }
+  if ($Body.IndexOf($script:qaFence, [System.StringComparison]::Ordinal) -ge 0) { return $false }
+  if (Test-InternalQaInstruction $Title) { return $false }
+  if (Test-InternalQaInstruction $Body) { return $false }
+  $lowered = Get-AsciiLower $Body
+  return (Test-MentionsAny $lowered $script:qaSurfaceTokens) -and
+    (Test-MentionsAny $lowered $script:qaActionTokens) -and
+    (Test-MentionsAny $lowered $script:qaResultTokens)
+}
+
+# Reads the walkthrough sections out of a group document. Section identifiers must run QA-01,
+# QA-02, ... in order and carry a title; anything else leaves the structure invalid, which is one
+# of the conditions that make the document a configuration error.
+function Get-QaScenarios([string[]]$Lines) {
+  $ordinal = [System.StringComparison]::Ordinal
+  $scenarios = @()
+  $structureValid = $true
+  $open = $false
+  $title = ''
+  $body = @()
+  foreach ($line in $Lines) {
+    if (-not $line.StartsWith('### ', $ordinal)) {
+      if ($open) { $body += $line }
+      continue
+    }
+    $handled = $false
+    $rest = $line.Substring(4)
+    $separator = $rest.IndexOf(' · ', $ordinal)
+    if ($separator -ge 0) {
+      $sectionId = $rest.Substring(0, $separator)
+      if ($sectionId.StartsWith('QA-', $ordinal)) {
+        $handled = $true
+        $sectionTitle = $rest.Substring($separator + 3).Trim()
+        $expected = 'QA-' + ($scenarios.Count + [int]$open + 1).ToString('00',
+          [System.Globalization.CultureInfo]::InvariantCulture)
+        if ($sectionId -ceq $expected -and $sectionTitle.Length -gt 0) {
+          if ($open) {
+            $scenarios += [pscustomobject]@{
+              Title = $title
+              Body = (($body -join ([string][char]10)).Trim())
+            }
+          }
+          $open = $true
+          $title = $sectionTitle
+          $body = @()
+        } else {
+          $structureValid = $false
+          if ($open) { $body += $line }
+        }
+      }
+    }
+    if (-not $handled) {
+      if ($line.StartsWith('### QA-', $ordinal)) { $structureValid = $false }
+      if ($open) { $body += $line }
+    }
+  }
+  if ($open) {
+    $scenarios += [pscustomobject]@{ Title = $title; Body = (($body -join ([string][char]10)).Trim()) }
+  }
+  return @{ Scenarios = @($scenarios); StructureValid = $structureValid }
+}
+
+# The latest app-owned group QA decision per group and revision, whatever its outcome. The rework
+# scan next door keeps only the revision_requested ones; the display-status chain needs a confirmed
+# one too, because a confirmed group is complete and never a configuration error.
+function Get-LatestGroupQaOutcomes([string]$Root) {
+  $outcomes = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+  $best = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+  foreach ($path in (Get-Documents $Root 'decisions')) {
+    $lines = Get-Lines $path
+    if (-not (Test-Match $lines '^schema: workflow-labs/group-qa-decision@1')) { continue }
+    if ((Get-Value $lines 'created_by') -cne 'user') { continue }
+    $id = Get-Value $lines 'id'
+    $group = Get-Value $lines 'group_id'
+    $revisionText = Get-Value $lines 'group_revision'
+    $outcome = Get-Value $lines 'outcome'
+    $request = Get-Value $lines 'request_id'
+    [uint32]$revision = 0
+    $revisionOk = $revisionText -cmatch '^[0-9]+$' -and
+      [uint32]::TryParse($revisionText, [ref]$revision)
+    $instant = Get-Rfc3339Instant (Get-Value $lines 'created_at')
+    if ($id.Length -eq 0 -or $group.Length -eq 0 -or (-not $revisionOk) -or $revision -eq 0 -or
+        $request.Length -eq 0 -or $null -eq $instant) { continue }
+    if ($outcome -cne 'confirmed' -and $outcome -cne 'revision_requested') { continue }
+    $key = $group + [char]31 + $revision.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $file = [System.IO.Path]::GetFileName($path)
+    $newer = (-not $best.ContainsKey($key))
+    if (-not $newer) {
+      $previous = $best[$key]
+      $newer = $instant.Seconds -gt $previous.Seconds -or
+        ($instant.Seconds -eq $previous.Seconds -and $instant.Nanos -gt $previous.Nanos) -or
+        ($instant.Seconds -eq $previous.Seconds -and $instant.Nanos -eq $previous.Nanos -and
+          (Compare-Utf8Ordinal $file $previous.File) -gt 0)
+    }
+    if ($newer) {
+      $best[$key] = [pscustomobject]@{ Seconds = $instant.Seconds; Nanos = $instant.Nanos; File = $file }
+      $outcomes[$key] = $outcome
+    }
+  }
+  return $outcomes
+}
+
+# The latest legacy per-task QA decision per task. A group whose tasks all carry a confirmed one is
+# complete under the old contract and is never a configuration error.
+function Get-LatestLegacyTaskQaOutcomes([string]$Root) {
+  $outcomes = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+  $best = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+  foreach ($path in (Get-Documents $Root 'decisions')) {
+    $lines = Get-Lines $path
+    if (-not (Test-Match $lines '^schema: workflow-labs/qa-decision@1')) { continue }
+    if ((Get-Value $lines 'created_by') -cne 'user') { continue }
+    $task = Get-Value $lines 'task_id'
+    $outcome = Get-Value $lines 'outcome'
+    $instant = Get-Rfc3339Instant (Get-Value $lines 'created_at')
+    if ($task.Length -eq 0 -or $null -eq $instant) { continue }
+    if ($outcome -cne 'confirmed' -and $outcome -cne 'revision_requested') { continue }
+    $file = [System.IO.Path]::GetFileName($path)
+    $newer = (-not $best.ContainsKey($task))
+    if (-not $newer) {
+      $previous = $best[$task]
+      $newer = $instant.Seconds -gt $previous.Seconds -or
+        ($instant.Seconds -eq $previous.Seconds -and $instant.Nanos -gt $previous.Nanos) -or
+        ($instant.Seconds -eq $previous.Seconds -and $instant.Nanos -eq $previous.Nanos -and
+          (Compare-Utf8Ordinal $file $previous.File) -gt 0)
+    }
+    if ($newer) {
+      $best[$task] = [pscustomobject]@{ Seconds = $instant.Seconds; Nanos = $instant.Nanos; File = $file }
+      $outcomes[$task] = $outcome
+    }
+  }
+  return $outcomes
+}
+
+# Groups whose display status is a configuration error, in glob order. A group the architect has
+# already marked as beyond a document fix carries configuration_unresolved_revision for the current
+# revision; that one is the user's turn, not this branch's target.
+function Get-ConfigurationErrorGroups([string]$Root) {
+  $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+  $latestGroupQa = Get-LatestGroupQaOutcomes $Root
+  $legacyTaskQa = Get-LatestLegacyTaskQaOutcomes $Root
+  $tasks = @()
+  foreach ($path in (Get-Documents $Root 'tasks')) {
+    $lines = Get-Lines $path
+    $taskId = Get-Value $lines 'id'
+    if ($taskId.Length -eq 0) { $taskId = [System.IO.Path]::GetFileNameWithoutExtension($path) }
+    $taskStatus = Get-Value $lines 'status'
+    if ($taskStatus.Length -eq 0) { $taskStatus = 'todo' }
+    $tasks += [pscustomobject]@{
+      Id = $taskId
+      Group = Get-Value $lines 'work_group_id'
+      Revision = Get-Value $lines 'work_group_revision'
+      Spec = Get-Value $lines 'source_spec_id'
+      Decision = Get-Value $lines 'source_decision_id'
+      Status = $taskStatus
+    }
+  }
+  $rows = @()
+  foreach ($path in (Get-Documents $Root 'groups')) {
+    $lines = Get-Lines $path
+    if (-not (Test-Match $lines '^schema: workflow-labs/work-group@1')) { continue }
+    $explicitId = Get-Value $lines 'id'
+    $id = $explicitId
+    if ($id.Length -eq 0) { $id = [System.IO.Path]::GetFileNameWithoutExtension($path) }
+    $status = Get-Value $lines 'status'
+    $mode = Get-Value $lines 'qa_mode'
+    $spec = Get-Value $lines 'source_spec_id'
+    $decision = Get-Value $lines 'source_decision_id'
+    $sourceQa = Get-Value $lines 'source_qa_decision_id'
+    $updated = Get-Value $lines 'updated_at'
+    $revisionText = Get-Value $lines 'revision'
+    [uint32]$revision = 0
+    if (-not ($revisionText -cmatch '^[0-9]+$' -and
+        [uint32]::TryParse($revisionText, [ref]$revision))) { $revision = 0 }
+    $statusOk = ($status -ceq 'preparing' -or $status -ceq 'active')
+    if (-not $statusOk) { $status = 'active' }
+    $modeOk = ($mode -ceq 'user' -or $mode -ceq 'automatic')
+    if (-not $modeOk) { $mode = 'user' }
+    $parsed = Get-QaScenarios $lines
+    $structural = $statusOk -and $modeOk -and $explicitId.Length -gt 0 -and $revision -gt 0 -and
+      $spec.Length -gt 0 -and $decision.Length -gt 0 -and $updated.Length -gt 0 -and
+      $null -ne (Get-Rfc3339Instant $updated) -and $parsed.StructureValid
+
+    $assigned = 0
+    $linkBad = $false
+    $notVerified = $false
+    $blocked = $false
+    $developing = $false
+    $legacyAll = $true
+    foreach ($task in $tasks) {
+      if ($task.Group.Length -eq 0 -or $task.Group -cne $id) { continue }
+      $assigned++
+      [uint32]$taskRevision = 0
+      $taskRevisionOk = $task.Revision -cmatch '^[0-9]+$' -and
+        [uint32]::TryParse($task.Revision, [ref]$taskRevision)
+      if (-not ($taskRevisionOk -and $taskRevision -gt 0 -and $taskRevision -le $revision -and
+          $task.Spec.Length -gt 0 -and $task.Spec -ceq $spec -and
+          $task.Decision.Length -gt 0 -and $task.Decision -ceq $decision)) { $linkBad = $true }
+      if ($task.Status -cne 'verified') { $notVerified = $true }
+      if ($task.Status -ceq 'blocked') { $blocked = $true }
+      if ($task.Status -ceq 'todo' -or $task.Status -ceq 'in_progress') { $developing = $true }
+      if (-not ($legacyTaskQa.ContainsKey($task.Id) -and
+          $legacyTaskQa[$task.Id] -ceq 'confirmed')) { $legacyAll = $false }
+    }
+
+    $key = $id + [char]31 + $revision.ToString($invariant)
+    $latest = ''
+    if ($latestGroupQa.ContainsKey($key)) { $latest = $latestGroupQa[$key] }
+    if ($latest -ceq 'confirmed') { continue }
+    if ($assigned -gt 0 -and (-not $linkBad) -and $legacyAll) { continue }
+    if ($latest -ceq 'revision_requested') { continue }
+    if ($status -ceq 'preparing') { continue }
+    if ($blocked) { continue }
+    if ($developing) { continue }
+
+    $issues = $false
+    if (-not $structural) { $issues = $true }
+    if ($assigned -eq 0) { $issues = $true }
+    if ($linkBad) { $issues = $true }
+    if ($mode -ceq 'user') {
+      if ($parsed.Scenarios.Count -eq 0) {
+        $issues = $true
+      } else {
+        foreach ($scenario in $parsed.Scenarios) {
+          if (-not (Test-ScenarioUserSafe $scenario.Title $scenario.Body)) { $issues = $true; break }
+        }
+      }
+    }
+    if ($mode -ceq 'automatic' -and $parsed.Scenarios.Count -gt 0) { $issues = $true }
+    if ($notVerified) { $issues = $true }
+    if (-not $issues) { continue }
+
+    $unresolvedText = Get-Value $lines 'configuration_unresolved_revision'
+    [uint32]$unresolved = 0
+    if ($unresolvedText -cmatch '^[0-9]+$' -and
+        [uint32]::TryParse($unresolvedText, [ref]$unresolved) -and $unresolved -eq $revision) {
+      continue
+    }
+    $rows += [pscustomobject]@{ Id = $id; Decision = $decision; SourceQa = $sourceQa }
+  }
+  return @($rows)
+}
+
 # Writes the verdict reason as the first stdout line and exits. The heartbeat daemon copies that
 # line into state.json as last_condition_output, and the app turns the code into a sentence.
 # ASCII codes only: a sentence here could not match the one the sh body would have to print.
@@ -2216,9 +3132,11 @@ switch -CaseSensitive ($Role) {
   'architect' {
     $groups = @()
     $groupRevisions = @()
+    $configurationErrors = @()
     foreach ($root in (Get-WorkflowRoots)) {
       $groups += @(Get-WorkGroups $root)
       $groupRevisions += @(Get-GroupQaRevisionRequests $root)
+      $configurationErrors += @(Get-ConfigurationErrorGroups $root)
     }
     # User-facing group QA rework has priority over internal task-definition correction.
     foreach ($row in @($groupRevisions | Sort-Object -Property CreatedAt, Id -CaseSensitive)) {
@@ -2231,6 +3149,18 @@ switch -CaseSensitive ($Role) {
         continue
       }
       Write-Target $row.Id 'group_qa_revision'
+    }
+
+    # A configuration error comes after user QA rework and before task-definition correction
+    # (SPEC-073 R-11). A group whose document does not hold together gives no ground for correcting
+    # the task definitions derived from it. The lease check reads the same three ids the preparing
+    # recovery below reads.
+    foreach ($row in $configurationErrors) {
+      $leased = (Test-Leased $row.Id)
+      if (-not $leased -and $row.Decision.Length -gt 0) { $leased = Test-Leased $row.Decision }
+      if (-not $leased -and $row.SourceQa.Length -gt 0) { $leased = Test-Leased $row.SourceQa }
+      if ($leased) { Write-Candidate 'leased' $row.Id; continue }
+      Write-Target $row.Id 'configuration_error'
     }
 
     $requests = @()
@@ -2526,7 +3456,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 23"));
+        assert!(script.contains("# condition_script_version: 24"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -2540,8 +3470,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 24",
             "# condition_script_version: 23",
-            "# condition_script_version: 22",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -2705,13 +3635,21 @@ mod tests {
         }
     }
 
-    /// PowerShell 본문은 BOM 뒤로 ASCII만 쓴다. BOM이 인코딩을 고정하므로 비ASCII도 안전하지만,
-    /// 이 스크립트는 굳이 쓸 일이 없어 좁은 쪽을 유지한다.
+    /// PowerShell 본문의 비ASCII는 판정이 쓰는 낱말뿐이다. 확인 절차가 사용자 행동을 말하는지
+    /// 보는 판정이 한글 낱말 목록을 그대로 담아야 하므로(SPEC-073) ASCII만 쓰던 제약은 더 지킬 수
+    /// 없다. 대신 좁힌 것을 남긴다 — 한글 음절과 절 제목의 가운뎃점 말고는 들어오지 않는다.
+    /// 인코딩 자체는 BOM이 고정하고, 그 BOM은 바로 위 테스트가 붙든다.
     #[test]
-    fn the_powershell_implementation_is_ascii_after_its_byte_order_mark() {
-        assert!(CONDITION_SCRIPT_PS1
+    fn the_powershell_implementation_uses_only_the_verdict_vocabulary_beyond_ascii() {
+        let unexpected = CONDITION_SCRIPT_PS1
             .trim_start_matches('\u{feff}')
-            .is_ascii());
+            .chars()
+            .filter(|character| !character.is_ascii())
+            .find(|character| !matches!(character, '\u{ac00}'..='\u{d7a3}' | '\u{b7}'));
+        assert_eq!(
+            unexpected, None,
+            "PowerShell 본문에 판정 낱말이 아닌 비ASCII 글자가 있다"
+        );
     }
 
     /// 스크립트가 낼 수 있는 사유 코드 전부. 앱이 이 코드를 사용자 문장으로 옮긴다(SPEC-023
@@ -2742,7 +3680,7 @@ mod tests {
         }
     }
 
-    /// 사유 코드는 ASCII다. `the_powershell_implementation_is_ascii`가 본문 전체를 보지만, 어휘를
+    /// 사유 코드는 ASCII다. 위의 비ASCII 어휘 검사가 본문 전체를 보지만, 어휘를
     /// 정하는 자리에서도 같은 제약을 걸어 둔다 — 비ASCII 코드를 표에만 적고 본문에 못 넣는 상태로
     /// 시간을 쓰지 않기 위해서다.
     #[test]
@@ -2812,7 +3750,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 23보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 24보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -3435,7 +4373,7 @@ mod tests {
         .expect("approved decision");
         fs::write(
             workflow.join("tasks/TASK-001.md"),
-            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: todo\nsource_decision_id: DECISION-001\ndepends_on: [TASK-999]\n---\n",
+            "---\nschema: workflow-labs/task@1\nid: TASK-001\nstatus: todo\nsource_spec_id: SPEC-001\nsource_decision_id: DECISION-001\nwork_group_id: GROUP-001\nwork_group_revision: 1\ndepends_on: [TASK-999]\n---\n",
         )
         .expect("task with a declaration");
         write_work_group(&control, "GROUP-001", "active", 1, "DECISION-001", None);
@@ -3647,6 +4585,25 @@ mod tests {
             id,
             &format!(
                 "---\nschema: workflow-labs/work-group@1\nid: {id}\ntitle: 그룹 {id}\nstatus: {status}\nrevision: {revision}\nqa_mode: user\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\n{source_qa}created_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n# 그룹 {id}\n\n### QA-01 · 화면 확인\n\n화면에서 결과를 확인한다.\n"
+            ),
+        );
+    }
+
+    /// 기능 하나를 그 자체로 성립하게 만드는 검증 완료 작업. 기능에 속한 작업이 하나도 없으면
+    /// 표시 상태가 구성 확인 필요가 되어 아키텍트 대상이 되므로, 다른 것을 보는 시나리오는 이
+    /// 작업을 함께 놓아 그 상태를 피한다.
+    fn write_group_member_task(
+        control_root: &Path,
+        id: &str,
+        group_id: &str,
+        source_decision_id: &str,
+    ) {
+        write_document(
+            control_root,
+            "tasks",
+            id,
+            &format!(
+                "---\nschema: workflow-labs/task@1\nid: {id}\ntitle: 작업\nstatus: verified\nsource_spec_id: SPEC-001\nsource_decision_id: {source_decision_id}\nwork_group_id: {group_id}\nwork_group_revision: 1\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n작업 본문\n"
             ),
         );
     }
@@ -3871,6 +4828,7 @@ mod tests {
             build: |control: &Path| {
                 write_approved_decision(control, "DECISION-001", "SPEC-001");
                 write_work_group(control, "GROUP-001", "active", 1, "DECISION-001", None);
+                write_group_member_task(control, "TASK-001", "GROUP-001", "DECISION-001");
             },
         },
         Scenario {
@@ -3933,6 +4891,7 @@ mod tests {
                     1,
                     "2026-08-02T00:00:00Z",
                 );
+                write_group_member_task(control, "TASK-001", "GROUP-001", "DECISION-001");
             },
         },
         Scenario {
@@ -4974,6 +5933,7 @@ mod tests {
                 write_approved_decision(control, "DECISION-A02", "SPEC-002");
                 write_approved_decision(control, "DECISION-A03", "SPEC-003");
                 write_work_group(control, "GROUP-001", "active", 1, "DECISION-A01", None);
+                write_group_member_task(control, "TASK-A01", "GROUP-001", "DECISION-A01");
                 write_lease(control, "SPEC-002");
             },
         },
@@ -5808,10 +6768,13 @@ mod tests {
                     &format!("DECISION-A{n:04}"),
                     &format!("---\nschema: workflow-labs/decision@1\nid: DECISION-A{n:04}\nspec_id: SPEC-A{n:04}\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n"),
                 );
+                // 이 그룹들은 속한 작업이 없어 구성 확인 필요 조건에 걸린다. 아키텍트가 문서로는
+                // 고칠 수 없다고 남긴 표시를 함께 두어 사람 판단 필요로 갈라지게 한다. 그래야 판정이
+                // 대상을 찾지 못한 채 전부를 훑는 최악 경로가 그대로 유지되고, 문서 수도 늘지 않는다.
                 write_fixture_document(
                     &groups,
                     &format!("GROUP-A{n:04}"),
-                    &format!("---\nschema: workflow-labs/work-group@1\nid: GROUP-A{n:04}\ntitle: 그룹\nstatus: active\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-A{n:04}\nsource_decision_id: DECISION-A{n:04}\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n"),
+                    &format!("---\nschema: workflow-labs/work-group@1\nid: GROUP-A{n:04}\ntitle: 그룹\nstatus: active\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-A{n:04}\nsource_decision_id: DECISION-A{n:04}\nconfiguration_unresolved_revision: 1\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n"),
                 );
             }
             for n in 1..=revision_count {
