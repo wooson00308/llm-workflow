@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentPolicySnapshot,
   AgentProjectConsent,
+  AgentProviderHold,
   AgentRolePolicy,
   AgentRunSummary,
   AgentRuntimeActions,
@@ -510,8 +511,8 @@ function event(kind: string, elapsedSeconds: number, extra: Record<string, unkno
   return { kind, provider: "codex", role: "developer", targetId: "TASK-2", startedAt: runStart, elapsedSeconds, detail: null, ...extra };
 }
 
-function queueOf(runs: AgentRunSummary[]) {
-  return { projectId: "prj_1", paused: false, runs, errors: [], providers: [], unavailable: null };
+function queueOf(runs: AgentRunSummary[], providerHolds?: AgentProviderHold[]) {
+  return { projectId: "prj_1", paused: false, runs, errors: [], providers: [], providerHolds, unavailable: null };
 }
 
 function logsOf(runId: string, events: unknown[]) {
@@ -1635,5 +1636,105 @@ describe("AgentRuntimeView 실행 환경 적용 결과", () => {
     renderView(state({ application: application([stage("version_install", "ok")], "success") }));
 
     expect(screen.queryByRole("dialog", { name: "실행 환경 적용 결과" })).not.toBeInTheDocument();
+  });
+});
+
+describe("사용 한도 대기 표시", () => {
+  const holdAt = "2026-08-18T12:00:00Z";
+
+  function hold(overrides: Partial<AgentProviderHold> = {}): AgentProviderHold {
+    return { provider: "codex", resumeAt: "2026-08-18T15:00:00Z", resumeAtKnown: true, ...overrides };
+  }
+
+  function plan() {
+    return {
+      planId: "plan-1", projectId: "prj_1", revision: "rev-1", expiresAt: "2026-08-18T13:00:00Z",
+      deviceRemaining: 3, projectRemaining: 2, billingRouteRisk: false, limits: null,
+      roles: [{ role: "developer", provider: "codex", executionMode: "once", requested: 1, granted: 1, excluded: [], manualTargets: ["TASK-1"], diagnostic: null }],
+    };
+  }
+
+  it("어느 실행 도구가 언제 다시 시작하는지를 상세를 열지 않은 첫 화면에서 알린다", () => {
+    withClock(holdAt, () => {
+      renderView(state({ queue: queueOf([], [hold()]) }));
+
+      const notice = screen.getByRole("region", { name: "사용 한도 대기" });
+      expect(notice).toHaveTextContent("codex 실행 도구가 사용 한도에 걸려 쉬고 있습니다");
+      expect(notice).toHaveTextContent(`${clock("2026-08-18T15:00:00Z")}에 다시 시작합니다`);
+      // 자리 소진·대상 없음과 같은 문장으로 합쳐지지 않는다(R-18).
+      expect(notice).not.toHaveTextContent("실행 자리가 모두 사용 중");
+      expect(notice).not.toHaveTextContent("배정할 작업이 없습니다");
+      // 진행 중 구역보다 위, 본문의 첫 자리다. 대기 후보가 없어도 사라지지 않는 자리여야 한다(R-15).
+      expect(document.querySelector(".agent-operations")!.firstElementChild).toBe(notice);
+    });
+  });
+
+  it("보류 중인 실행 도구가 둘이면 둘 다 알린다", () => {
+    withClock(holdAt, () => {
+      renderView(state({ queue: queueOf([], [hold(), hold({ provider: "claude", resumeAt: "2026-08-18T16:00:00Z" })]) }));
+
+      const notice = screen.getByRole("region", { name: "사용 한도 대기" });
+      expect(notice).toHaveTextContent("codex 실행 도구");
+      expect(notice).toHaveTextContent("claude 실행 도구");
+      expect(notice).toHaveTextContent(clock("2026-08-18T16:00:00Z"));
+    });
+  });
+
+  it("재개 시각을 모르면 시각 대신 남은 대기를 보여준다", () => {
+    withClock(holdAt, () => {
+      renderView(state({ queue: queueOf([], [hold({ resumeAt: "2026-08-18T14:30:00Z", resumeAtKnown: false })]) }));
+
+      const notice = screen.getByRole("region", { name: "사용 한도 대기" });
+      expect(notice).toHaveTextContent("다시 시작할 시각은 아직 알 수 없고, 약 2시간 뒤에 다시 시도합니다");
+      expect(notice).not.toHaveTextContent(clock("2026-08-18T14:30:00Z"));
+    });
+  });
+
+  it("보류가 비었거나 항목 자체가 없는 응답에서는 안내를 그리지 않는다", () => {
+    withClock(holdAt, () => {
+      renderView(state({ queue: queueOf([], []) }));
+      expect(screen.queryByRole("region", { name: "사용 한도 대기" })).not.toBeInTheDocument();
+      cleanup();
+
+      renderView(state({ queue: queueOf([]) }));
+      expect(screen.queryByRole("region", { name: "사용 한도 대기" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("한도로 끝난 실행의 사유를 목록과 상세 모두에서 사용 한도로 적는다", () => {
+    withClock("2026-08-18T13:00:00Z", () => {
+      renderView(state({ queue: queueOf([{ ...run("run-1", "failed", "TASK-2"), reason: "usage_limit_reached" }]) }));
+
+      expect(screen.getByRole("region", { name: "최근 종료" })).toHaveTextContent("실행 도구의 사용 한도에 도달했습니다");
+      const drawer = openDetail("후속 작업");
+      expect(cardValue(drawer, "사유")).toHaveTextContent("실행 도구의 사용 한도에 도달했습니다");
+      expect(drawer).not.toHaveTextContent("usage_limit_reached");
+    });
+  });
+
+  it("한도라는 낱말이 들어 있을 뿐인 사유는 지금의 자리 소진 문장을 그대로 쓴다", () => {
+    withClock("2026-08-18T13:00:00Z", () => {
+      renderView(state({ queue: queueOf([{ ...run("run-1", "failed", "TASK-2"), reason: "limit_reached" }]) }));
+
+      const recent = screen.getByRole("region", { name: "최근 종료" });
+      expect(recent).toHaveTextContent("실행 자리가 모두 사용 중입니다");
+      expect(recent).not.toHaveTextContent("사용 한도에 도달했습니다");
+    });
+  });
+
+  it("직접 배정에는 한도 대기를 알리기만 하고 시작을 막지 않는다", () => {
+    withClock(holdAt, () => {
+      renderView(state({ queue: queueOf([], [hold()]) }));
+      fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+      expect(within(screen.getByRole("dialog", { name: "직접 배정" })).getByRole("button", { name: "시작 조건 확인" })).toBeEnabled();
+      cleanup();
+
+      renderView(state({ queue: queueOf([], [hold()]), runPlan: plan() }));
+      fireEvent.click(screen.getByRole("button", { name: "직접 배정" }));
+      const dialog = screen.getByRole("dialog", { name: "직접 배정" });
+      expect(dialog).toHaveTextContent("codex 실행 도구가 사용 한도에 걸려 쉬고 있습니다");
+      expect(dialog).toHaveTextContent("지금 시작하면 그 실행이 한도에 걸려 바로 끝날 수 있습니다");
+      expect(within(dialog).getByRole("button", { name: "배정 시작" })).toBeEnabled();
+    });
   });
 });

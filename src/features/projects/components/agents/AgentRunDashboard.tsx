@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   AgentDiagnosticExport,
+  AgentProviderHold,
   AgentReportView,
   AgentRoleSlotRequest,
   AgentRunStatus,
@@ -110,13 +111,18 @@ export function AgentRunDashboard({
     .map((lease) => (
       lease.role || !lease.taskId ? lease : { ...lease, role: runRoles.get(lease.taskId) ?? null }
     ));
+  // 사용 한도로 쉬고 있는 실행 도구. 이 값을 싣지 않는 실행 환경에서는 빈 목록이 되어 안내가
+  // 그려지지 않고, 화면은 지금과 같다.
+  const holds = state.queue?.providerHolds ?? [];
+  // 재개 시각을 모르는 보류는 남은 대기를 문장으로 쓰므로, 신호 나이와 같은 이유로 낡는다.
+  const holdsAge = holds.some((hold) => !hold.resumeAtKnown);
   // 신호 나이와 만료 잔여는 시간이 흐르면 저절로 낡는 값이라 30초마다 다시 계산한다.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (externalLeases.length === 0) return;
+    if (externalLeases.length === 0 && !holdsAge) return;
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
-  }, [externalLeases.length]);
+  }, [externalLeases.length, holdsAge]);
   // 문제는 크게, 정상은 조용히. 주의가 필요한 세션만 카드로 올리고 나머지는 행으로 깔린다.
   const attentionLeases = externalLeases.filter((lease) => leaseIsStale(lease.heartbeatAt, now));
   const healthyLeases = externalLeases
@@ -128,6 +134,15 @@ export function AgentRunDashboard({
 
   return (
     <div className="agent-operations">
+      {/* 한도 대기는 상세를 열지 않고도 알아야 하는 사실이라 본문 첫 자리에 선다(R-15). 배정 대기
+          구역 안에 두면 대기 후보가 없는 순간 구역과 함께 사라져 그 요구를 충족하지 못한다. */}
+      {holds.length > 0 && (
+        <section aria-labelledby="agent-hold-heading" className="agent-ops-section">
+          <header><h2 id="agent-hold-heading">사용 한도 대기</h2><span>{holds.length}</span></header>
+          {holds.map((hold) => <p className="agent-queue-notice" key={hold.provider}>{holdNotice(hold, now)}</p>)}
+        </section>
+      )}
+
       {attention.length > 0 && (
         <section aria-labelledby="agent-attention-heading" className="agent-ops-section agent-ops-attention">
           <header><h2 id="agent-attention-heading">확인 필요</h2><span>{attention.length}</span></header>
@@ -308,6 +323,12 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
   const plannedRole = state.runPlan?.roles.find((item) => item.role === role);
   const consent = state.policy?.consent ?? null;
   const blocked = consent ? consentBlockMessage(consent) : null;
+  // 고른 역할이 쓰는 실행 도구가 지금 한도 대기 중인지. 정책이나 보류 목록을 읽지 못하면 경고를
+  // 지어내지 않고 지금과 같이 그린다. 이 값은 알리기만 하고 시작을 막지 않는다(R-14).
+  const roleProvider = state.policy?.policy.roles[role]?.provider ?? null;
+  const roleHold = roleProvider
+    ? (state.queue?.providerHolds ?? []).find((hold) => hold.provider === roleProvider) ?? null
+    : null;
   // 앱이 읽어 둔 상태가 동의로 남아 있어도 실행 환경이 시작 직전에 다시 판정하므로, 거절당한
   // 뒤에는 그 자리에서 고지를 다시 보여 준다. 그러지 않으면 사용자가 동의할 자리가 없다.
   const consentRequired = consent?.status === "required" || (state.runError !== null && isConsentRequired(state.runError));
@@ -338,6 +359,7 @@ function DirectAssignDialog({ actions, itemMap, onClose, project, state }: {
         <details><summary>고급 직접 지정</summary><label>작업 ID<input onChange={(event) => { actions.cancelRunPlan(); setTarget(event.target.value); }} placeholder="TASK-…" value={target} /></label></details>
         {state.runError && <p className="agent-error" role="status">{humanRuntimeMessage(state.runError)}</p>}
         {state.consentError && <p className="agent-error" role="status">{consentFailureMessage(state.consentError)}</p>}
+        {roleHold && <p className="agent-dialog-note" role="status">{holdNotice(roleHold, Date.now())} 지금 시작하면 그 실행이 한도에 걸려 바로 끝날 수 있습니다.</p>}
         {plannedRole && <p className="agent-dialog-note">{plannedRole.granted > 0 ? "안전 조건 확인 완료" : exclusionLabel(plannedRole.excluded)}</p>}
         <footer><button className="secondary-button" onClick={onClose} type="button">취소</button>{blocked ? null : plannedRole?.granted ? <button className="stamp-button" disabled={state.runStarting || state.consentBusy || (consentRequired && !agreed)} onClick={() => void start()} type="button">{state.runStarting ? "배정 중" : consentRequired ? "동의하고 직접 배정 시작" : "배정 시작"}</button> : <button className="stamp-button" disabled={!selected || state.runPlanning} onClick={() => void plan()} type="button">{state.runPlanning ? "확인 중" : "시작 조건 확인"}</button>}</footer>
       </section>
@@ -732,13 +754,44 @@ function remainingLabel(expiresAt: string, now: number) {
 function nextCheckLabel(state: AgentRuntimeState) { const next = state.queue?.automation?.roles.map((role) => role.nextPollAt).filter((value): value is string => Boolean(value)).sort()[0]; return next ? new Date(next).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "자동"; }
 function runningDuration(startedAt: string | null) { if (!startedAt) return "시작 중"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)); return seconds < 60 ? "1분 미만" : `${Math.floor(seconds / 60)}분`; }
 function finishedDuration(startedAt: string | null, finishedAt: string | null) { if (!startedAt || !finishedAt) return "시간 기록 없음"; const seconds = Math.max(0, Math.floor((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)); return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분`; }
-function exclusionLabel(reasons: string[]) { if (reasons.some((reason) => /no.?target/.test(reason))) return "지금은 배정할 작업이 없습니다."; if (reasons.includes("limit_reached")) return "현재 실행 자리가 모두 사용 중입니다."; if (reasons.includes("model_unavailable")) return "선택한 모델을 현재 계정에서 사용할 수 없습니다."; return "현재 안전 조건을 충족하지 않습니다."; }
+// 실행 환경이 계정 사용 한도로 끝난 실행에 붙이는 사유 값. 정본은 백엔드
+// `src-tauri/src/domain/agent_runtime.rs`의 `USAGE_LIMIT_REACHED`이고, 여기는 그 값을 화면에서
+// 대조하려고 같은 문자열을 적어 둔 자리다. 두 값이 갈라지면 백엔드 쪽이 정본이다.
+const USAGE_LIMIT_REASON = "usage_limit_reached";
+const USAGE_LIMIT_MESSAGE = "실행 도구의 사용 한도에 도달했습니다";
+/**
+ * 계정 사용 한도로 끝났다는 사유인지. 실행 자리 소진과는 사용자가 할 일이 다르므로, 값이 정확히
+ * 같을 때만 참이다 — `limit`라는 낱말이 들어 있다는 이유로 두 상황을 한 문장으로 합치지 않는다.
+ * 사유를 문장으로 옮기는 세 자리가 모두 이 판정 하나를 쓴다.
+ */
+function reachedUsageLimit(reason: string) { return reason === USAGE_LIMIT_REASON; }
+function exclusionLabel(reasons: string[]) { if (reasons.some((reason) => /no.?target/.test(reason))) return "지금은 배정할 작업이 없습니다."; if (reasons.some(reachedUsageLimit)) return `${USAGE_LIMIT_MESSAGE}.`; if (reasons.includes("limit_reached")) return "현재 실행 자리가 모두 사용 중입니다."; if (reasons.includes("model_unavailable")) return "선택한 모델을 현재 계정에서 사용할 수 없습니다."; return "현재 안전 조건을 충족하지 않습니다."; }
 // 목록에서 보고 없이 끝난 실행에 붙는 짧은 문구. 색만으로 말하지 않도록 문구를 함께 놓는다(R-07).
 const SILENT_RUN_LABEL = "보고서 없음";
 // 보고 없음으로 확정된 실행에만 표시가 붙는다. 확인 불가와 판정 대상 아님, 아직 판정을 받아 오지
 // 못한 실행은 확정된 사실이 아니므로 정상 완료와 같이 조용히 남는다(R-06).
 function silentRun(audits: Record<string, RunReportVerdict>, runId: string) { return audits[runId] === "silent"; }
-function reasonLabel(reason: string | null, state: string) { if (!reason) return stateLabels[state as AgentRunStatus] ?? state; if (/model_unavailable/.test(reason)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다"; if (/no.?target/.test(reason)) return "새 작업을 기다리는 중"; if (/limit/.test(reason)) return "실행 자리가 모두 사용 중입니다"; if (/login|auth/.test(reason)) return "실행 도구 로그인이 필요합니다"; return humanRuntimeMessage(reason); }
+// 한도 도달 판정이 `/limit/`보다 먼저 선다. 뒤에 두면 계정 사용 한도가 자리 소진 문장에 먼저
+// 삼켜져 자기 문장을 갖지 못한다.
+function reasonLabel(reason: string | null, state: string) { if (!reason) return stateLabels[state as AgentRunStatus] ?? state; if (/model_unavailable/.test(reason)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다"; if (/no.?target/.test(reason)) return "새 작업을 기다리는 중"; if (reachedUsageLimit(reason)) return USAGE_LIMIT_MESSAGE; if (/limit/.test(reason)) return "실행 자리가 모두 사용 중입니다"; if (/login|auth/.test(reason)) return "실행 도구 로그인이 필요합니다"; return humanRuntimeMessage(reason); }
+/**
+ * 실행 도구 하나가 왜 쉬고 있고 언제 다시 시작하는지 한 문장(R-16). 재개 시각을 실행 환경에서
+ * 받았을 때만 그 시각을 쓰고, 받지 못했거나 읽지 못했으면 시각을 지어내지 않고 남은 대기만
+ * 말한다(R-17). 실행 도구 이름은 사용자가 설정 화면에서 이미 만나는 이름이라 그대로 쓴다.
+ */
+function holdNotice(hold: AgentProviderHold, now: number) {
+  const resumeAt = Date.parse(hold.resumeAt);
+  return hold.resumeAtKnown && !Number.isNaN(resumeAt)
+    ? `${hold.provider} 실행 도구가 사용 한도에 걸려 쉬고 있습니다. ${clockLabel(hold.resumeAt)}에 다시 시작합니다.`
+    : `${hold.provider} 실행 도구가 사용 한도에 걸려 쉬고 있습니다. 다시 시작할 시각은 아직 알 수 없고, ${holdWaitLabel(resumeAt, now)} 뒤에 다시 시도합니다.`;
+}
+/** 다시 시도할 때까지 남은 대기. 값을 읽지 못했거나 이미 지난 시각이면 길이를 지어내지 않는다. */
+function holdWaitLabel(resumeAt: number, now: number) {
+  const minutes = Math.floor((resumeAt - now) / 60_000);
+  if (Number.isNaN(minutes) || minutes < 1) return "잠시";
+  if (minutes < 60) return `약 ${minutes}분`;
+  return `약 ${Math.floor(minutes / 60)}시간`;
+}
 function clockLabel(value: string | null) { if (!value) return "기록 없음"; const parsed = Date.parse(value); return Number.isNaN(parsed) ? "기록 없음" : new Date(parsed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 function idleLabel(lastActivityAt: string | null) { const seconds = idleSeconds(lastActivityAt, Date.now()); return seconds === null ? "확인 필요" : `${Math.floor(seconds / 60)}분째 조용함`; }
 
@@ -762,6 +815,9 @@ export function humanRuntimeMessage(message: string) {
   if (isConsentRequired(message)) return "실행 권한 동의 필요";
   if (/project_not_configured/.test(message)) return "이 프로젝트의 에이전트 설정을 먼저 저장해 주세요.";
   if (/model_unavailable|model.+(?:not available|unsupported)/i.test(message)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다.";
+  // 자리 소진 판정보다 앞이다. 한도 도달 값은 자리 소진 값을 부분 문자열로 품고 있어, 뒤에 두면
+  // 계정 사용 한도가 자리 소진 문장으로 나간다.
+  if (reachedUsageLimit(message)) return `${USAGE_LIMIT_MESSAGE}.`;
   if (/limit_reached/.test(message)) return "현재 실행 자리가 모두 사용 중입니다.";
   if (/no.?target/.test(message)) return "새 작업을 기다리는 중입니다.";
   if (/login|auth/i.test(message)) return "실행 도구 로그인이 필요합니다.";

@@ -1687,6 +1687,18 @@ export interface AgentRunLogPage {
   nextCursor: number;
 }
 
+/**
+ * 사용 한도로 지금 쉬고 있는 실행 도구 하나. 보류의 단위는 역할이 아니라 실행 도구다 — 한도는
+ * 계정과 실행 도구에 걸리기 때문이다.
+ */
+export interface AgentProviderHold {
+  provider: string;
+  /** 다시 시작할 시각(RFC3339). */
+  resumeAt: string;
+  /** 그 시각을 실행 환경에서 받았는지. 거짓이면 앱이 정한 대기 시간으로 계산한 값이다. */
+  resumeAtKnown: boolean;
+}
+
 export interface AgentQueueSnapshot {
   projectId: string;
   paused: boolean;
@@ -1694,6 +1706,8 @@ export interface AgentQueueSnapshot {
   runs: AgentRunSummary[];
   errors: unknown[];
   providers: unknown[];
+  /** 지금 사용 한도로 보류 중인 실행 도구들. 이 값을 싣지 않는 응답에서는 없음과 같이 다룬다. */
+  providerHolds?: AgentProviderHold[];
   unavailable: string | null;
 }
 
