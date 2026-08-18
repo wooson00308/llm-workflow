@@ -9001,7 +9001,7 @@ mod tests {
         let helper = fs::read_to_string(claim_helper_path(&root.path().join(".workflow")))
             .expect("claim helper");
         assert!(helper.contains("# managed_by: workflow-labs"));
-        assert!(helper.contains("# claim_helper_version: 1"));
+        assert!(helper.contains("# claim_helper_version: 2"));
         let reservation =
             fs::read_to_string(reservation_helper_path(&root.path().join(".workflow")))
                 .expect("reservation helper");

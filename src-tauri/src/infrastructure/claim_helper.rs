@@ -22,7 +22,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CLAIM_HELPER_STEM: &str = "wf-claim";
 const CLAIM_HELPER_LABEL: &str = "선점 헬퍼";
 const VERSION_PREFIX: &str = "# claim_helper_version:";
-const CLAIM_HELPER_VERSION: u32 = 1;
+const CLAIM_HELPER_VERSION: u32 = 2;
 
 /// 설치할 선점 헬퍼의 `sh` 구현.
 ///
@@ -31,10 +31,10 @@ const CLAIM_HELPER_VERSION: u32 = 1;
 /// 설치본을 부른다. 사본을 두면 갱신이 갈라질 자리만 는다.
 const CLAIM_HELPER_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# claim_helper_version: 1
+# claim_helper_version: 2
 # LLM Workflow 선점 헬퍼. 세션은 lease 파일을 직접 만들거나 고치거나 지우지 않고 이 명령만 부른다.
 # 사용법 (프로젝트 루트에서 실행):
-#   sh .workflow/rules/wf-claim.sh acquire <문서-id> <에이전트> <유효분>
+#   sh .workflow/rules/wf-claim.sh acquire <문서-id> <에이전트> <유효분> [<역할>]
 #   sh .workflow/rules/wf-claim.sh renew   <문서-id> <lease-id> <유효분>
 #   sh .workflow/rules/wf-claim.sh release <문서-id> <lease-id>
 #
@@ -63,7 +63,7 @@ leases=".workflow/.runtime/leases"
 migration_lock=".workflow/.runtime/migration.lock"
 
 usage() {
-  echo "usage: wf-claim.sh acquire <target-id> <agent> <minutes>" >&2
+  echo "usage: wf-claim.sh acquire <target-id> <agent> <minutes> [<role>]" >&2
   echo "       wf-claim.sh renew <target-id> <lease-id> <minutes>" >&2
   echo "       wf-claim.sh release <target-id> <lease-id>" >&2
   exit 2
@@ -81,6 +81,15 @@ check_minutes() {
     '' | *[!0-9]*) usage ;;
   esac
   [ "$1" -gt 0 ] || usage
+}
+
+# 역할은 acquire의 선택 인자다. 셋 밖의 값을 여기서 끊으므로 줄바꿈이 섞인 값이 lease 본문에
+# 들어가 다른 항목을 위조하는 경로도 함께 막힌다.
+check_role() {
+  case "$1" in
+    planner | architect | developer) ;;
+    *) usage ;;
+  esac
 }
 
 now() {
@@ -109,9 +118,12 @@ is_expired() { # $1=expires_at 값
   [ "$(printf '%s\n%s\n' "$1" "$(now)" | sort | head -1)" = "$1" ]
 }
 
-lease_body() { # $1=lease-id $2=에이전트 $3=문서-id $4=heartbeat_at $5=expires_at
-  printf 'schema_version: 1\nlease_id: %s\nagent: %s\ntask_id: %s\nheartbeat_at: %s\nexpires_at: %s' \
-    "$1" "$2" "$3" "$4" "$5"
+lease_body() { # $1=lease-id $2=에이전트 $3=문서-id $4=heartbeat_at $5=expires_at $6=역할(없으면 빈 값)
+  printf 'schema_version: 1\nlease_id: %s\nagent: %s\n' "$1" "$2"
+  # 역할을 주지 않은 호출은 줄 자체를 만들지 않는다. 빈 값으로 적으면 역할 없는 lease와 구분이
+  # 사라진다. 자리는 공통 규칙 §4의 예시와 같게 agent 다음이다.
+  [ -n "$6" ] && printf 'role: %s\n' "$6"
+  printf 'task_id: %s\nheartbeat_at: %s\nexpires_at: %s' "$3" "$4" "$5"
 }
 
 # 임시 파일에 쓰고 제자리로 옮긴다. 임시 이름의 확장자가 yml이 아니라 앱의 lease 읽기와 조건
@@ -127,7 +139,14 @@ replace_lease() { # $1=대상 파일 $2=본문
 
 command="${1:-}"
 case "$command" in
-  acquire | renew)
+  acquire)
+    [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || usage
+    check_target "$2"
+    check_minutes "$4"
+    # 역할은 선점할 때 정해지는 값이라 acquire에만 있다. renew는 인자 넷 그대로다.
+    if [ "$#" -eq 5 ]; then check_role "$5"; fi
+    ;;
+  renew)
     [ "$#" -eq 4 ] || usage
     check_target "$2"
     check_minutes "$4"
@@ -153,7 +172,7 @@ if [ "$command" = acquire ]; then
   started=$(now) || exit 1
   expires=$(expires_after "$4") || exit 1
   lease_id="lease-$$-$(printf '%s' "$started" | tr -dc 0-9)"
-  body=$(lease_body "$lease_id" "$3" "$target_id" "$started" "$expires")
+  body=$(lease_body "$lease_id" "$3" "$target_id" "$started" "$expires" "${5:-}")
 
   # 비어 있는 대상은 배타적 생성 한 번으로 끝난다. 리다이렉트 자체가 O_EXCL이라 동시에 들어온 두
   # 호출 중 하나만 성공한다.
@@ -205,10 +224,10 @@ const CLAIM_HELPER_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow claim helper.
 # managed_by: workflow-labs
-# claim_helper_version: 1
+# claim_helper_version: 2
 # A session never creates, edits, or deletes a lease file itself; it calls this script.
 # Usage (run from the project root):
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-claim.ps1 acquire <target-id> <agent> <minutes>
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-claim.ps1 acquire <target-id> <agent> <minutes> [<role>]
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-claim.ps1 renew <target-id> <lease-id> <minutes>
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-claim.ps1 release <target-id> <lease-id>
 #
@@ -248,7 +267,7 @@ $leases = '.workflow/.runtime/leases'
 $migrationLock = '.workflow/.runtime/migration.lock'
 
 function Write-Usage() {
-  [Console]::Error.WriteLine('usage: wf-claim.ps1 acquire <target-id> <agent> <minutes>')
+  [Console]::Error.WriteLine('usage: wf-claim.ps1 acquire <target-id> <agent> <minutes> [<role>]')
   [Console]::Error.WriteLine('       wf-claim.ps1 renew <target-id> <lease-id> <minutes>')
   [Console]::Error.WriteLine('       wf-claim.ps1 release <target-id> <lease-id>')
   exit 2
@@ -279,11 +298,15 @@ function Test-Expired([string]$Stamp) {
   return ([string]::CompareOrdinal($Stamp, (Get-Stamp 0)) -le 0)
 }
 
-function New-LeaseBody([string]$LeaseId, [string]$Agent, [string]$TargetId, [string]$Started, [string]$Expires) {
-  return @(
+function New-LeaseBody([string]$LeaseId, [string]$Agent, [string]$TargetId, [string]$Started, [string]$Expires, [string]$Role) {
+  # A call that gave no role writes no line at all. An empty value would be indistinguishable from
+  # a lease that has a role, and the line sits after agent, as the example in shared rules 4 does.
+  $lines = @(
     'schema_version: 1',
     ('lease_id: ' + $LeaseId),
-    ('agent: ' + $Agent),
+    ('agent: ' + $Agent))
+  if ($Role.Length -gt 0) { $lines += ('role: ' + $Role) }
+  return $lines + @(
     ('task_id: ' + $TargetId),
     ('heartbeat_at: ' + $Started),
     ('expires_at: ' + $Expires))
@@ -325,7 +348,7 @@ function Set-Lease([string]$Path, [string]$Text) {
 if ($null -eq $Arguments -or $Arguments.Count -eq 0) { Write-Usage }
 $command = $Arguments[0]
 switch -CaseSensitive ($command) {
-  'acquire' { if ($Arguments.Count -ne 4) { Write-Usage } }
+  'acquire' { if ($Arguments.Count -ne 4 -and $Arguments.Count -ne 5) { Write-Usage } }
   'renew' { if ($Arguments.Count -ne 4) { Write-Usage } }
   'release' { if ($Arguments.Count -ne 3) { Write-Usage } }
   default { Write-Usage }
@@ -340,6 +363,15 @@ if ($command -cne 'release') {
   if ([int]$Arguments[3] -le 0) { Write-Usage }
 }
 
+# The role is optional and belongs to acquire alone, because it is settled when the claim is made.
+# Stopping the other values here also stops a newline from reaching the lease body and forging
+# another field.
+$role = ''
+if ($Arguments.Count -eq 5) {
+  $role = $Arguments[4]
+  if ($role -cnotin @('planner', 'architect', 'developer')) { Write-Usage }
+}
+
 # Nothing is written to the lease directory while the lock is up, the same verdict as section 1 of
 # the shared rules. Usage errors come first because they fail again with the same arguments anyway.
 if (Test-Path -LiteralPath $migrationLock -PathType Leaf) { exit 1 }
@@ -351,7 +383,7 @@ if ($command -ceq 'acquire') {
   $started = Get-Stamp 0
   $expires = Get-Stamp ([int]$Arguments[3])
   $leaseId = 'lease-' + $PID + '-' + ($started -creplace '[^0-9]', '')
-  $text = ConvertTo-Text (New-LeaseBody $leaseId $Arguments[2] $targetId $started $expires)
+  $text = ConvertTo-Text (New-LeaseBody $leaseId $Arguments[2] $targetId $started $expires $role)
 
   # An empty target is done in one exclusive create: of two calls arriving together, one wins.
   if (New-FileExclusive $lease $text) {
@@ -484,7 +516,7 @@ mod tests {
         let helper = fs::read_to_string(claim_helper_path(&control)).expect("helper");
         assert_eq!(helper, CLAIM_HELPER.platform.body);
         assert!(helper.contains("# managed_by: workflow-labs"));
-        assert!(helper.contains("# claim_helper_version: 1"));
+        assert!(helper.contains("# claim_helper_version: 2"));
         assert!(helper.contains("migration.lock"));
     }
 
@@ -558,7 +590,20 @@ mod tests {
     #[test]
     fn both_implementations_carry_the_same_interface() {
         for body in [CLAIM_HELPER_SH, CLAIM_HELPER_PS1] {
-            for token in ["acquire", "renew", "release", ".yml.lock", "migration.lock"] {
+            for token in [
+                "acquire",
+                "renew",
+                "release",
+                ".yml.lock",
+                "migration.lock",
+                // 역할 인자. 표기·기록 줄·받는 값 셋을 모두 대조해, 한 본문에만 들어간 구현이
+                // 여기서 걸리게 한다.
+                "[<role>]",
+                "role: ",
+                "planner",
+                "architect",
+                "developer",
+            ] {
                 assert!(body.contains(token), "{token}이 한쪽 구현에 없다");
             }
         }
@@ -711,7 +756,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 선점 헬퍼 버전 999이 앱이 아는 버전 1보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 선점 헬퍼 버전 999이 앱이 아는 버전 2보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -809,6 +854,9 @@ mod tests {
             "{contents}"
         );
         assert!(contents.starts_with("schema_version: 1\n"));
+        // 역할을 주지 않은 호출은 role 줄을 빈 값으로도 만들지 않는다. 위의 키 목록 대조가 이미
+        // 이 사실을 지키고 있고, 이 줄은 그 판정을 이름으로 드러낸다.
+        assert!(!contents.contains("role:"), "{contents}");
         assert_eq!(field_of(&path, "lease_id"), printed);
         assert_eq!(field_of(&path, "agent"), "dev-a");
         assert_eq!(field_of(&path, "task_id"), "TASK-001");
@@ -818,6 +866,64 @@ mod tests {
             !path.with_extension("yml.lock").exists(),
             "성공한 선점 뒤 잠금 디렉터리가 남았다"
         );
+    }
+
+    /// 역할을 준 acquire는 그 값을 lease에 남기고, 자리는 agent 다음 task_id 앞이다. 그렇게
+    /// 만들어진 기록을 갱신해도 값이 남는지까지 같은 자리에서 본다.
+    #[test]
+    fn records_the_role_the_acquire_was_given() {
+        let (root, control) = helper_project();
+
+        for role in ["planner", "architect", "developer"] {
+            let target = format!("TASK-{role}");
+            let (code, lease_id) =
+                run_claim(root.path(), &["acquire", &target, "dev-a", "30", role]);
+
+            assert_eq!(code, 0);
+            let path = lease_path(&control, &target);
+            let contents = fs::read_to_string(&path).expect("lease");
+            assert_eq!(
+                contents
+                    .lines()
+                    .filter_map(|line| line.split(':').next())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "schema_version",
+                    "lease_id",
+                    "agent",
+                    "role",
+                    "task_id",
+                    "heartbeat_at",
+                    "expires_at",
+                ],
+                "{contents}"
+            );
+            assert_eq!(field_of(&path, "role"), role);
+
+            // 갱신은 아는 두 줄만 바꾸므로 이 기록의 역할도 그대로 남는다.
+            assert_eq!(
+                run_claim(root.path(), &["renew", &target, &lease_id, "60"]).0,
+                0
+            );
+            assert_eq!(field_of(&path, "role"), role);
+        }
+    }
+
+    /// 인수는 배타적 생성이 아니라 바꿔 쓰는 갈래라 역할이 기록되는지 따로 본다.
+    #[test]
+    fn records_the_role_when_it_takes_over_an_expired_lease() {
+        let (root, control) = helper_project();
+        let path = write_lease(&control, "TASK-001", "expired-owner", &stamp(-5));
+
+        let (code, printed) = run_claim(
+            root.path(),
+            &["acquire", "TASK-001", "dev-a", "30", "architect"],
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(field_of(&path, "lease_id"), printed);
+        assert_eq!(field_of(&path, "role"), "architect");
+        assert_eq!(field_of(&path, "agent"), "dev-a");
     }
 
     #[test]
@@ -1028,8 +1134,8 @@ mod tests {
     /// 문서 id가 그대로 파일 이름이 되므로 경로가 섞인 id는 사용법 오류다.
     #[test]
     fn rejects_calls_that_do_not_match_the_contract() {
-        let (root, _control) = helper_project();
-        let cases: [&[&str]; 8] = [
+        let (root, control) = helper_project();
+        let cases: [&[&str]; 13] = [
             &[],
             &["claim", "TASK-001", "dev-a", "30"],
             &["acquire", "TASK-001", "dev-a"],
@@ -1038,6 +1144,13 @@ mod tests {
             &["acquire", "TASK-001", "dev-a", "half"],
             &["acquire", "../outside", "dev-a", "30"],
             &["acquire", "wf/TASK-001", "dev-a", "30"],
+            // 역할은 셋뿐이고 대조는 대소문자를 구분한다.
+            &["acquire", "TASK-001", "dev-a", "30", "reviewer"],
+            &["acquire", "TASK-001", "dev-a", "30", "Developer"],
+            &["acquire", "TASK-001", "dev-a", "30", ""],
+            &["acquire", "TASK-001", "dev-a", "30", "developer", "extra"],
+            // 역할은 선점할 때 정해지므로 renew는 그 인자를 받지 않는다.
+            &["renew", "TASK-001", "lease", "30", "developer"],
         ];
 
         for arguments in cases {
@@ -1045,6 +1158,10 @@ mod tests {
                 run_claim(root.path(), arguments).0,
                 2,
                 "{arguments:?}는 사용법 오류다"
+            );
+            assert!(
+                !lease_path(&control, "TASK-001").exists(),
+                "{arguments:?}가 lease를 만들었다"
             );
         }
     }

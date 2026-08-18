@@ -1157,7 +1157,7 @@ mod tests {
         let helper = claim_helper_path(&control);
         let old = fs::read_to_string(&helper)
             .expect("helper")
-            .replace("# claim_helper_version: 1", "# claim_helper_version: 0");
+            .replace("# claim_helper_version: 2", "# claim_helper_version: 0");
         fs::write(&helper, old).expect("old helper");
 
         let result = synchronize_managed_project_assets(root.path(), &control).expect("sync");
@@ -1168,10 +1168,10 @@ mod tests {
             .expect("helper state");
 
         assert_eq!(result.status, ManagedAssetSyncStatus::Updated);
-        assert_eq!(state.installed_version, Some(1));
+        assert_eq!(state.installed_version, Some(2));
         assert!(fs::read_to_string(helper)
             .expect("updated helper")
-            .contains("# claim_helper_version: 1"));
+            .contains("# claim_helper_version: 2"));
     }
 
     #[test]

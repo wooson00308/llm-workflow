@@ -12,11 +12,11 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const RESERVATION_HELPER_STEM: &str = "wf-reserve";
 const RESERVATION_HELPER_LABEL: &str = "예약 헬퍼";
 const VERSION_PREFIX: &str = "# reservation_helper_version:";
-pub(crate) const RESERVATION_HELPER_VERSION: u32 = 6;
+pub(crate) const RESERVATION_HELPER_VERSION: u32 = 7;
 
 const RESERVATION_HELPER_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# reservation_helper_version: 6
+# reservation_helper_version: 7
 # LLM Workflow runtime reservation helper.
 # Usage: sh .workflow/rules/wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>
 # Usage: sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>
@@ -316,7 +316,8 @@ while [ "$attempt" -lt "$max_attempts" ]; do
   target=$(target_from_json "$condition_output")
   [ -n "$target" ] || exit 1
 
-  lease_id=$(sh "$claim" acquire "$target" "$agent" "$minutes")
+  # 역할은 위에서 셋 중 하나로 검사해 둔 값이다. 그 값을 선점 기록에도 남긴다.
+  lease_id=$(sh "$claim" acquire "$target" "$agent" "$minutes" "$role")
   claim_status=$?
   case "$claim_status" in
     0) ;;
@@ -360,7 +361,7 @@ const RESERVATION_HELPER_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow runtime reservation helper.
 # managed_by: workflow-labs
-# reservation_helper_version: 6
+# reservation_helper_version: 7
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-reserve.ps1 acquire <role> <agent> <minutes>
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-reserve.ps1 wait-integration <target-id> <lease-id>
 param(
@@ -716,7 +717,8 @@ for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
   $target = [string]$conditionResult.targetId
   if ($target -notmatch '^[A-Za-z0-9_-]+$') { exit 1 }
 
-  $leaseId = & powershell -NoProfile -ExecutionPolicy Bypass -File $claim acquire $target $Agent $Minutes
+  # The role was already checked against the three above; the lease records the same value.
+  $leaseId = & powershell -NoProfile -ExecutionPolicy Bypass -File $claim acquire $target $Agent $Minutes $Role
   $claimStatus = $LASTEXITCODE
   if ($claimStatus -eq 3 -or $claimStatus -eq 4) { continue }
   if ($claimStatus -eq 2) { exit 2 }
@@ -1102,6 +1104,12 @@ mod tests {
         );
         assert!(control.join(".runtime/leases/TASK-001.yml").is_file());
         assert!(control.join(".runtime/leases/TASK-002.yml").is_file());
+        // 예약이 이미 알고 있는 역할이 선점 기록에도 남는다.
+        assert!(
+            fs::read_to_string(control.join(".runtime/leases/TASK-001.yml"))
+                .expect("first lease")
+                .contains("\nrole: developer\n")
+        );
     }
 
     #[test]
@@ -1218,7 +1226,7 @@ mod tests {
         assert_eq!(planner_code, 0);
         assert!(architect_stderr.is_empty(), "no reclaim for an architect");
         assert!(planner_stderr.is_empty(), "no reclaim for a planner");
-        for stdout in [architect_stdout, planner_stdout] {
+        for (stdout, role) in [(architect_stdout, "architect"), (planner_stdout, "planner")] {
             let reservation: serde_json::Value =
                 serde_json::from_str(stdout.trim()).expect("reservation JSON");
             assert_eq!(reservation["contractVersion"], 2);
@@ -1228,6 +1236,18 @@ mod tests {
                     "{absent} belongs to a developer reservation only"
                 );
             }
+            // 개발자 예약과 같이 이 두 역할의 예약도 자기 역할을 선점 기록에 남긴다.
+            let target = reservation["targetId"].as_str().expect("target id");
+            assert!(
+                fs::read_to_string(
+                    control
+                        .join(".runtime/leases")
+                        .join(format!("{target}.yml"))
+                )
+                .expect("lease")
+                .contains(&format!("\nrole: {role}\n")),
+                "{role} reservation must record its role"
+            );
         }
         assert!(!control.join(".runtime/worktrees").exists());
         assert!(!control.join(".runtime/isolation").exists());
@@ -1918,7 +1938,7 @@ mod tests {
         assert!(helper.is_file());
         assert!(fs::read_to_string(&helper)
             .expect("reservation helper")
-            .contains("# reservation_helper_version: 6"));
+            .contains("# reservation_helper_version: 7"));
         let other = control.join("rules").join(if cfg!(windows) {
             "wf-reserve.sh"
         } else {
@@ -1928,7 +1948,7 @@ mod tests {
         fs::write(&other, foreign).expect("other platform helper");
         install_reservation_helper(&control).expect("current platform install");
         assert_eq!(fs::read_to_string(other).expect("other helper"), foreign);
-        assert_eq!(RESERVATION_HELPER_VERSION, 6);
+        assert_eq!(RESERVATION_HELPER_VERSION, 7);
     }
 
     #[test]
@@ -1938,7 +1958,7 @@ mod tests {
         let future = fs::read_to_string(&helper)
             .expect("reservation helper")
             .replace(
-                "# reservation_helper_version: 6",
+                "# reservation_helper_version: 7",
                 "# reservation_helper_version: 999",
             );
         fs::write(&helper, &future).expect("future helper");
