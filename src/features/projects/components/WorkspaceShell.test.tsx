@@ -9,6 +9,7 @@ import type {
   ManagedAssetSyncResult,
   ManagedAssetsState,
   ProjectSummary,
+  WorkflowItemSummary,
   WorkGroupSummary,
 } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
@@ -224,7 +225,9 @@ describe("WorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "주요 메뉴" })).getByRole("button", { name: /^품질 확인/ }),
+    );
     expect(screen.getByRole("heading", { level: 1, name: "품질 확인" })).toBeInTheDocument();
     expect(document.querySelector(".breadcrumbs strong")).toHaveTextContent("품질 확인");
     expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
@@ -289,7 +292,9 @@ describe("WorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "주요 메뉴" })).getByRole("button", { name: /^품질 확인/ }),
+    );
     fireEvent.click(screen.getByRole("button", { name: /첫 워크플로 기능/ }));
     fireEvent.click(screen.getByRole("button", { name: "기대대로 동작함" }));
     expect(screen.getByRole("button", { name: "기대대로 동작함" })).toHaveAttribute("aria-pressed", "true");
@@ -525,7 +530,9 @@ describe("WorkspaceShell", () => {
 
     // 주요 메뉴로 다시 들어가면 대기열에서 시작한다.
     fireEvent.click(screen.getByRole("button", { name: "오늘" }));
-    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "주요 메뉴" })).getByRole("button", { name: /^품질 확인/ }),
+    );
     expect(screen.getByRole("region", { name: "지금 확인할 기능" })).toBeInTheDocument();
   });
 
@@ -605,7 +612,9 @@ describe("WorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "품질 확인" }));
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "주요 메뉴" })).getByRole("button", { name: /^품질 확인/ }),
+    );
     fireEvent.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
     fireEvent.click(screen.getByRole("button", { name: "기대대로 동작함" }));
     fireEvent.click(screen.getByRole("button", { name: "기능 승인 기록하기" }));
@@ -1895,5 +1904,101 @@ describe("WorkspaceShell 에이전트 진입점", () => {
 
       expect(screen.getAllByText("실행 권한 동의 필요")).toHaveLength(1);
     });
+  });
+});
+
+describe("WorkspaceShell 사이드 메뉴 대기 표시", () => {
+  function pendingSpec(id: string, title: string): WorkflowItemSummary {
+    return {
+      fileName: `${id}.md`,
+      id,
+      title,
+      status: "user_review",
+      updatedAt: "2026-08-18T04:00:00Z",
+      dueAt: null,
+      excerpt: `${title} 요약`,
+    };
+  }
+
+  /** 23~37행 리터럴을 펼쳐 워크플로우 하나에 기획서와 작업 그룹만 채운 사본. */
+  function waiting(specs: WorkflowItemSummary[], workGroups: WorkGroupSummary[]): ProjectSummary {
+    return {
+      ...project,
+      workflows: [{
+        ...project.workflows[0],
+        counts: { ...project.workflows[0].counts, specs: specs.length, workGroups: workGroups.length },
+        items: { ...project.workflows[0].items, specs, workGroups },
+      }],
+    };
+  }
+
+  function primaryNav() {
+    return screen.getByRole("navigation", { name: "주요 메뉴" });
+  }
+
+  it("기획서와 품질 확인 메뉴의 숫자가 오늘 화면의 내 선택 대기와 같은 값을 말한다", () => {
+    shell({
+      project: waiting(
+        [pendingSpec("SPEC-A", "카드 등록 흐름"), pendingSpec("SPEC-B", "결제 실패 안내")],
+        [workGroup("GROUP-A", "카드 등록 흐름")],
+      ),
+    });
+
+    const nav = primaryNav();
+    const badges = Array.from(nav.querySelectorAll(".nav-badge"), (badge) => badge.textContent);
+    expect(badges).toEqual(["2", "1"]);
+    expect(within(nav).getByRole("button", { name: /기획서/ }).querySelector(".nav-badge")).toHaveTextContent("2");
+    expect(within(nav).getByRole("button", { name: /품질 확인/ }).querySelector(".nav-badge")).toHaveTextContent("1");
+
+    // 같은 화면의 오늘 화면 배지. 두 자리가 하나의 판정을 거치므로 2 + 1이 그대로 3이다.
+    expect(screen.getByRole("heading", { name: "내 선택 대기" })).toBeInTheDocument();
+    expect(document.querySelector(".attention-card .count-badge")).toHaveTextContent("3");
+  });
+
+  it("기다리는 결정이 없으면 배지 요소도 0이라는 문자도 남기지 않는다", () => {
+    shell({ project: waiting([], [workGroup("GROUP-A", "카드 등록 흐름", "developing")]) });
+
+    const nav = primaryNav();
+    expect(nav.querySelector(".nav-badge")).toBeNull();
+    expect(within(nav).queryByText("0")).not.toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: "기획서" })).toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: "품질 확인" })).toBeInTheDocument();
+  });
+
+  it("선택되지 않은 워크플로우에 기다리는 결정이 있으면 그 항목에만 대기 점이 붙는다", () => {
+    const first = waiting([], []).workflows[0];
+    const second = {
+      ...first,
+      id: "wf_2",
+      directory: "second--wf_2",
+      name: "Second",
+      counts: { ...first.counts, specs: 1, workGroups: 4 },
+      items: { ...first.items, specs: [pendingSpec("SPEC-B", "결제 실패 안내")] },
+    };
+    shell({ project: { ...project, workflows: [first, second] } });
+
+    const selected = screen.getByRole("button", { name: /Feature/ });
+    const other = screen.getByRole("button", { name: /Second/ });
+    expect(selected.querySelector(".workflow-pending-dot")).toBeNull();
+    expect(other.querySelector(".workflow-pending-dot")).not.toBeNull();
+    // 작업 그룹 총 개수는 대기 점과 함께 그대로 남는다.
+    expect(within(other).getByText("4")).toBeInTheDocument();
+    expect(other).toHaveAccessibleName(/기다리는 결정 있음/);
+  });
+
+  it("배지가 붙은 기획서 버튼은 대기 건수를 접근 이름으로 함께 알린다", () => {
+    shell({ project: waiting([pendingSpec("SPEC-A", "카드 등록 흐름")], []) });
+
+    const specs = within(primaryNav()).getByRole("button", { name: /승인 대기 1건/ });
+    expect(specs).toHaveAccessibleName("기획서, 승인 대기 1건");
+    // 이름이 메뉴 이름으로 시작해야 메뉴 이름 앞부분만으로 이 버튼을 고르는 조회가 성립한다.
+    expect(specs).toHaveAccessibleName(/^기획서/);
+    expect(within(primaryNav()).getByRole("button", { name: /^기획서/ })).toBe(specs);
+  });
+
+  it("배지가 없으면 기획서 버튼의 접근 이름은 메뉴 이름 그대로다", () => {
+    shell({ project: waiting([], []) });
+
+    expect(within(primaryNav()).getByRole("button", { name: /^기획서/ })).toHaveAccessibleName("기획서");
   });
 });

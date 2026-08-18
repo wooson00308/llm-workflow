@@ -234,6 +234,12 @@ svg { width: 20px; height: 20px; }
 .workflow-nav > button small { color: #a1a39a; }
 .workflow-dot { width: 7px; height: 7px; border-radius: 50%; background: #9fa69c; }
 .workflow-nav > button.active .workflow-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(49,91,68,.12); }
+/* 사이드 메뉴 대기 표시. 위의 메뉴 버튼 규칙과 워크플로우 항목 규칙은 값을 그대로 두고 새 선택자만 더한다.
+   배지 높이는 같은 줄의 아이콘(17px)보다 작아 버튼 높이가 달라지지 않고, margin-left:auto가 이름과
+   배지 사이를 벌려 이름이 잘리지 않는다. */
+.nav-badge { display: grid; min-width: 16px; height: 16px; margin-left: auto; padding: 0 5px; place-items: center; border-radius: 99px; color: #3f6b4e; background: var(--green-soft); font-size: 11px; font-weight: 700; line-height: 1; }
+/* 선택 표시 점(.workflow-dot)과 뜻이 다른 표시라 클래스와 자리를 따로 둔다. */
+.workflow-pending-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--green); }
 .inline-workflow-form { margin: 5px; padding: 9px; border-radius: 10px; background: rgba(255,255,255,.68); }
 .inline-workflow-form input { padding: 8px; font-size: 12px; }
 .inline-workflow-form div { display: flex; justify-content: flex-end; gap: 5px; margin-top: 7px; }

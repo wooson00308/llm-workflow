@@ -95,6 +95,37 @@ const viewLabels = {
   settings: "설정",
 } as const;
 
+/**
+ * 워크플로우 하나가 지금 사용자에게 요구하는 결정을 센다. 사이드 메뉴의 두 숫자, 오늘 화면의
+ * "내 선택 대기" 배지, 워크플로우 목록의 대기 점이 모두 이 함수를 거치므로 네 자리가 서로 다른
+ * 수를 말하지 않는다. 조건식을 여기 하나로 둔 것이 그 보장의 전부다.
+ * 선택된 워크플로우가 아직 정해지지 않은 첫 렌더에서는 workflow가 없고, 그때는 셀 것이 없다.
+ */
+function pendingDecisions(workflow: WorkflowSummary | undefined) {
+  const specs = workflow?.items.specs.filter((item) => item.status === "user_review") ?? [];
+  const qaFeatures =
+    workflow?.items.workGroups.filter(
+      (group) => group.qaMode === "user" && group.displayStatus === "qa_ready",
+    ) ?? [];
+  return { specs, qaFeatures, total: specs.length + qaFeatures.length };
+}
+
+/**
+ * 메뉴 이름 옆의 대기 건수. 셀 것이 없으면 요소 자체를 그리지 않아 그 메뉴는 변경 전과 같은 모양,
+ * 같은 접근 이름으로 남는다. 숫자는 눈으로만 읽는 표시라 가리고, 무엇이 몇 건인지는 화면 읽기
+ * 도구가 버튼 이름으로 함께 듣도록 따로 적는다.
+ */
+function NavBadge({ count, label }: { count: number; label: string }) {
+  if (count < 1) return null;
+  return (
+    <>
+      <span aria-hidden="true" className="nav-badge">{count}</span>
+      {/* 접근 이름은 형제 노드를 구분자 없이 잇는다. 쉼표를 앞에 두지 않으면 "기획서승인 대기"로 들린다. */}
+      <span className="visually-hidden">, {label} {count}건</span>
+    </>
+  );
+}
+
 export function WorkspaceShell({
   agentRuntime,
   agentRuntimeActions,
@@ -183,16 +214,11 @@ export function WorkspaceShell({
    * 불러 세 화면이 같은 수를 말한다. 지금 확인할 수 있는 묶음만 담기므로 아직 열 수 없는 기능은
    * 목록에도 건수에도 들어가지 않는다.
    */
-  const readyQaFeatures = useMemo(
-    () => workflow?.items.workGroups.filter((group) => group.qaMode === "user" && group.displayStatus === "qa_ready") ?? [],
-    [workflow],
-  );
-  const pendingSpecs = useMemo(
-    () => workflow?.items.specs.filter((item) => item.status === "user_review") ?? [],
-    [workflow],
-  );
+  const decisions = useMemo(() => pendingDecisions(workflow), [workflow]);
+  const readyQaFeatures = decisions.qaFeatures;
+  const pendingSpecs = decisions.specs;
   // 기획서 승인과 그룹 QA만 사용자 판단이다. 태스크 상태는 이 수치에 들어가지 않는다.
-  const decisionCount = pendingSpecs.length + readyQaFeatures.length;
+  const decisionCount = decisions.total;
 
   /** 기능 하나를 지정해 품질 확인 작업대를 연다. 중간 화면을 거치지 않는다. */
   function openQaFeature(featureKey: string) {
@@ -311,9 +337,9 @@ export function WorkspaceShell({
           </div>
           <div className="primary-nav-group">
             <button className={view === "ideas" ? "active" : ""} onClick={() => setView("ideas")}><Icon name="inbox" />아이디어</button>
-            <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서</button>
+            <button className={view === "specs" ? "active" : ""} onClick={() => setView("specs")}><Icon name="stamp" />기획서<NavBadge count={pendingSpecs.length} label="승인 대기" /></button>
             <button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><Icon name="board" />개발</button>
-            <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인</button>
+            <button className={view === "qa" ? "active" : ""} onClick={() => { setQaFeatureTarget(null); setView("qa"); }}><Icon name="stamp" />품질 확인<NavBadge count={readyQaFeatures.length} label="확인 가능" /></button>
           </div>
           <div className="primary-nav-group">
             <button className={view === "archive" ? "active" : ""} onClick={() => setView("archive")}><Icon name="archive" />기록</button>
@@ -322,17 +348,29 @@ export function WorkspaceShell({
 
         <div className="workflow-nav">
           <div className="nav-label"><span>워크플로우</span><button aria-label="워크플로우 추가" onClick={() => setShowWorkflowForm(true)}><Icon name="plus" /></button></div>
-          {project.workflows.map((item) => (
-            <button
-              className={item.directory === selectedDirectory ? "active" : ""}
-              key={item.id}
-              onClick={() => setSelectedDirectory(item.directory)}
-            >
-              <span className="workflow-dot" />
-              <span>{item.name}</span>
-              <small>{item.counts.workGroups}</small>
-            </button>
-          ))}
+          {project.workflows.map((item) => {
+            /* 지금 보고 있지 않은 워크플로우만 부른다. 선택된 워크플로우의 대기는 위 두 메뉴의
+               숫자가 이미 말하고 있어, 같은 사실을 목록에서 한 번 더 말하면 표시가 겹친다. */
+            const waiting =
+              item.directory !== selectedDirectory && pendingDecisions(item).total > 0;
+            return (
+              <button
+                className={item.directory === selectedDirectory ? "active" : ""}
+                key={item.id}
+                onClick={() => setSelectedDirectory(item.directory)}
+              >
+                <span className="workflow-dot" />
+                <span>{item.name}</span>
+                {waiting && (
+                  <>
+                    <span aria-hidden="true" className="workflow-pending-dot" />
+                    <span className="visually-hidden">, 기다리는 결정 있음,</span>
+                  </>
+                )}
+                <small>{item.counts.workGroups}</small>
+              </button>
+            );
+          })}
           {showWorkflowForm && (
             <form className="inline-workflow-form" onSubmit={addWorkflow}>
               <input autoFocus maxLength={80} onChange={(event) => setWorkflowName(event.target.value)} placeholder="워크플로우 이름" value={workflowName} />
