@@ -242,6 +242,55 @@ describe("AgentRuntimeView cockpit", () => {
     expect(screen.queryByRole("heading", { name: "확인 필요" })).not.toBeInTheDocument();
   });
 
+  // 단독 수행 작업이 차례를 기다리는 동안 자격 후보가 하나도 남지 않는다. 그때 배정 대기 구역이
+  // 통째로 사라지면 사용자가 멈춘 것과 기다리는 것을 구별할 수 없다.
+  function soloProject(candidates: { id: string; verdict: string }[]): ProjectSummary {
+    const base = project();
+    return {
+      ...base,
+      pendingDetail: {
+        planner: { target: null, targetKind: null, candidates: [] },
+        architect: { target: null, targetKind: null, candidates: [] },
+        developer: { target: null, targetKind: null, candidates },
+      },
+    };
+  }
+
+  it("names the solo task that is waiting for the running sessions to finish", () => {
+    const waiting = soloProject([{ id: "TASK-2", verdict: "solo-run-wait" }]);
+    render(<AgentRuntimeView actions={actions()} project={waiting} state={state()} />);
+    const notice = screen.getByText(/후속 작업/);
+    expect(notice).toHaveTextContent("혼자 실행해야 해서");
+    expect(notice).toHaveTextContent("진행 중인 세션이 모두 끝나면");
+    expect(notice).toHaveTextContent("따로 하실 일 없이 자동으로 시작합니다");
+    expect(screen.getByRole("heading", { name: "배정 대기" })).toBeInTheDocument();
+  });
+
+  it("explains why nothing else starts while one solo task runs alone", () => {
+    const running = soloProject([{ id: "TASK-2", verdict: "solo-run-active" }]);
+    render(<AgentRuntimeView actions={actions()} project={running} state={state()} />);
+    const notice = screen.getByText(/혼자 실행해야 하는 작업 하나가/);
+    expect(notice).toHaveTextContent("이 프로젝트를 사용하고 있어");
+    expect(notice).toHaveTextContent("다른 작업은 그 작업이 끝난 뒤에 자동으로 시작합니다");
+  });
+
+  it("leaves the screen unchanged when no solo verdict is present", () => {
+    renderView();
+    expect(screen.queryByText(/혼자 실행해야/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "배정 대기" })).toBeInTheDocument();
+    expect(screen.getByText("조종석 HUD 구현")).toBeInTheDocument();
+  });
+
+  it("writes both solo sentences without paths or code identifiers", () => {
+    for (const candidate of [{ id: "TASK-2", verdict: "solo-run-wait" }, { id: "TASK-2", verdict: "solo-run-active" }]) {
+      cleanup();
+      render(<AgentRuntimeView actions={actions()} project={soloProject([candidate])} state={state()} />);
+      const sentence = screen.getByText(/혼자 실행해야/).textContent ?? "";
+      expect(sentence).not.toMatch(/\//);
+      expect(sentence).not.toMatch(/[A-Za-z]+_[A-Za-z]+/);
+    }
+  });
+
   it("translates raw runtime errors and degraded watcher state into user actions", () => {
     renderView(state({
       queueError: '런타임 응답이 계약 밖입니다: {"code":"project_not_configured"}',

@@ -94,6 +94,9 @@ export function AgentRunDashboard({
   // 진행 중을 그리는 것과 같은 실행 데이터에서 바로 뺀다 — 두 목록이 시차로 어긋나지 않는다.
   const queueItems = useMemo(() => eligibleQueue(project, itemMap), [itemMap, project])
     .filter((item) => !claimedByRuns.has(item.id));
+  // 단독 수행 때문에 배정이 비는 순간에는 자격 후보가 하나도 없어 배정 대기 구역이 통째로
+  // 사라진다. 그 자리에 이유 한 문장을 세워, 멈춘 것과 기다리는 것을 화면에서 구별하게 한다.
+  const soloNotice = useMemo(() => soloRunNotice(project, itemMap), [itemMap, project]);
   const attention = attentionItems(project, state);
   const waitingForUser = userDecisions(project);
   // 문서 선점은 파일이 진실이다. 앱이 돌리지 않은 세션(터미널에서 직접 연 것)도 문서를 선점하면
@@ -219,20 +222,23 @@ export function AgentRunDashboard({
         </section>
       )}
 
-      {queueItems.length > 0 && (
+      {(queueItems.length > 0 || soloNotice) && (
         <section aria-labelledby="agent-queue-heading" className="agent-ops-section">
-          <header><h2 id="agent-queue-heading">배정 대기</h2><span>{queueItems.length}</span></header>
-          <ul className="agent-session-list agent-queue-list">
-            {queueItems.map((item) => (
-              <li key={`${item.role}:${item.id}`}>
-                <button onClick={() => setSelectedQueue(item)} type="button">
-                  <span className={roleChipClass("agent-role-chip", item.role)}>{roleLabels[item.role] ?? item.role}</span>
-                  <span className="agent-session-copy"><strong>{item.title}</strong><small>자리가 나면 안전 조건을 다시 확인합니다</small></span>
-                  <span aria-hidden="true" className="agent-row-chevron">›</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          <header><h2 id="agent-queue-heading">배정 대기</h2>{queueItems.length > 0 && <span>{queueItems.length}</span>}</header>
+          {soloNotice && <p className="agent-queue-notice">{soloNotice}</p>}
+          {queueItems.length > 0 && (
+            <ul className="agent-session-list agent-queue-list">
+              {queueItems.map((item) => (
+                <li key={`${item.role}:${item.id}`}>
+                  <button onClick={() => setSelectedQueue(item)} type="button">
+                    <span className={roleChipClass("agent-role-chip", item.role)}>{roleLabels[item.role] ?? item.role}</span>
+                    <span className="agent-session-copy"><strong>{item.title}</strong><small>자리가 나면 안전 조건을 다시 확인합니다</small></span>
+                    <span aria-hidden="true" className="agent-row-chevron">›</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
 
@@ -253,7 +259,7 @@ export function AgentRunDashboard({
         </section>
       )}
 
-      {attention.length === 0 && waitingForUser.length === 0 && active.length === 0 && queueItems.length === 0 && recent.length === 0 && (
+      {attention.length === 0 && waitingForUser.length === 0 && active.length === 0 && queueItems.length === 0 && recent.length === 0 && soloNotice === null && (
         <p className="agent-quiet-empty">새 작업을 기다리는 중 · 다음 안전 확인 {nextCheckLabel(state)}</p>
       )}
 
@@ -581,6 +587,30 @@ function eligibleQueue(project: ProjectSummary, items: Map<string, NamedWorkflow
   return ROLE_ORDER.flatMap((role) => detail[role].candidates
     .filter((candidate) => candidate.verdict === "eligible")
     .map((candidate) => ({ id: candidate.id, role, title: titleOf(candidate.id, items), verdict: candidate.verdict })));
+}
+
+/** 단독 수행 작업이 차례를 기다리는 중이라는 판정 사유. 배정 규약이 못 박아 둔 값이다. */
+const SOLO_WAIT_VERDICT = "solo-run-wait";
+/** 단독 수행 작업 하나가 이 프로젝트를 혼자 쓰는 중이라는 판정 사유. */
+const SOLO_ACTIVE_VERDICT = "solo-run-active";
+
+/**
+ * 단독 수행 때문에 배정이 비어 있는 이유 한 문장. 두 사유가 하나도 없으면 null이라 화면이
+ * 지금과 같다. 기다리는 작업이 있으면 그 작업을 먼저 말한다 — 사용자가 알고 싶은 것은 무엇이
+ * 서 있는지가 아니라 무엇이 다음에 시작하는지다.
+ */
+function soloRunNotice(project: ProjectSummary, items: Map<string, NamedWorkflowItem>): string | null {
+  const detail = project.pendingDetail;
+  if (!detail) return null;
+  const candidates = ROLE_ORDER.flatMap((role) => detail[role].candidates);
+  const waiting = candidates.find((candidate) => candidate.verdict === SOLO_WAIT_VERDICT);
+  if (waiting) {
+    return `${titleOf(waiting.id, items)} 작업은 혼자 실행해야 해서, 지금 진행 중인 세션이 모두 끝나면 따로 하실 일 없이 자동으로 시작합니다.`;
+  }
+  if (candidates.some((candidate) => candidate.verdict === SOLO_ACTIVE_VERDICT)) {
+    return "혼자 실행해야 하는 작업 하나가 지금 이 프로젝트를 사용하고 있어, 다른 작업은 그 작업이 끝난 뒤에 자동으로 시작합니다.";
+  }
+  return null;
 }
 
 function userDecisions(project: ProjectSummary) {
