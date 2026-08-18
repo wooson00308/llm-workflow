@@ -166,7 +166,20 @@ export type WorkGroupDisplayStatus =
   | "developing"
   | "qa_ready"
   | "automatic_completed"
-  | "configuration_error";
+  | "configuration_error"
+  | "human_judgment_required";
+
+/**
+ * 구성 확인 필요·사람 판단 필요로 판정하게 만든 조건 하나. 백엔드가 상태와 함께 내려주며 화면은
+ * 문서를 다시 읽어 원인을 추측하지 않는다.
+ */
+export type WorkGroupConfigurationIssue =
+  | "metadata_invalid"
+  | "tasks_missing"
+  | "task_link_mismatch"
+  | "user_scenario_unusable"
+  | "automatic_scenario_present"
+  | "task_not_verified";
 
 export type WorkGroupQaMode = "user" | "automatic";
 export type WorkGroupQaOutcome = "confirmed" | "revision_requested";
@@ -194,6 +207,15 @@ export interface WorkGroupSummary {
   updatedAt: string;
   description: string;
   scenarios: WorkGroupQaScenario[];
+  /**
+   * 구성 확인 필요·사람 판단 필요로 판정하게 만든 조건 전부. 해당하는 조건이 여럿이면 여럿이
+   * 담겨 오고, 그 두 상태가 아니면 빈 배열이다.
+   */
+  configurationIssues?: WorkGroupConfigurationIssue[];
+  /**
+   * 아키텍트가 기능 문서에 남긴 사람 판단 요청 글. 그 절이 없으면 빈 문자열이다.
+   */
+  humanJudgmentNote?: string;
   /**
    * 이 그룹과 구성 버전의 품질 확인이 대상으로 삼는 기준 커밋. 이 요약을 읽은 시점의 값이며,
    * Git 작업 트리가 아니면 null이다. 확인 화면은 결과를 고를 때 이 값을 임시 결정과 함께 저장한다.

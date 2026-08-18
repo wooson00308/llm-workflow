@@ -383,6 +383,7 @@ function workGroupStatusLabel(group: WorkGroupSummary) {
     qa_ready: "사용자 QA 대기",
     automatic_completed: "완료",
     configuration_error: "구성 확인 필요",
+    human_judgment_required: "사람 판단 필요",
   }[group.displayStatus];
 }
 

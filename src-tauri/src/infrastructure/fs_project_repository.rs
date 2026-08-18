@@ -18,11 +18,11 @@ use crate::domain::project::{
     SpecDocument, TaskDependency, TaskDependencyState, TaskDocument, TaskEvent, TaskOverlapBlock,
     TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
     TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
-    TaskScopeDeclaration, TaskScopeStatus, WorkGroupDisplayStatus, WorkGroupQaMode,
-    WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission, WorkGroupQaSubmissionResult,
-    WorkGroupQaSubmissionStatus, WorkGroupStatus, WorkGroupSummary, WorkflowCounts, WorkflowEntry,
-    WorkflowItemSummary, WorkflowItems, WorkflowManifest, WorkflowReportSummary, WorkflowStatus,
-    PROJECT_SCHEMA_VERSION,
+    TaskScopeDeclaration, TaskScopeStatus, WorkGroupConfigurationIssue, WorkGroupDisplayStatus,
+    WorkGroupQaMode, WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission,
+    WorkGroupQaSubmissionResult, WorkGroupQaSubmissionStatus, WorkGroupStatus, WorkGroupSummary,
+    WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
+    WorkflowReportSummary, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 #[cfg(test)]
 use crate::domain::project::{
@@ -3193,6 +3193,43 @@ fn parse_work_group(
             .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok())
         && scenario_ids_unique;
 
+    // 구성 확인 필요로 답하게 만드는 조건을 조건마다 따로 남긴다. 지금까지 하나의 참·거짓으로
+    // 합쳐 쓰던 다섯 갈래와 같은 조건식이고, 작업 쪽 한 갈래만 작업 없음과 작업 연결 어긋남으로
+    // 나눴다. `task_revisions_valid`가 그 둘의 논리합의 부정이므로 목록이 비어 있다는 것과 구성
+    // 확인 필요 자리가 아니라는 것은 같은 뜻이다.
+    let mut configuration_issues = Vec::new();
+    if !structurally_valid {
+        configuration_issues.push(WorkGroupConfigurationIssue::MetadataInvalid);
+    }
+    if assigned_tasks.is_empty() {
+        configuration_issues.push(WorkGroupConfigurationIssue::TasksMissing);
+    }
+    if assigned_tasks
+        .iter()
+        .any(|task| !task_is_valid_for_group(task, revision, &source_spec_id, &source_decision_id))
+    {
+        configuration_issues.push(WorkGroupConfigurationIssue::TaskLinkMismatch);
+    }
+    if qa_mode == WorkGroupQaMode::User
+        && (scenarios.is_empty()
+            || scenarios
+                .iter()
+                .any(|scenario| !scenario_is_user_safe(scenario)))
+    {
+        configuration_issues.push(WorkGroupConfigurationIssue::UserScenarioUnusable);
+    }
+    if qa_mode == WorkGroupQaMode::Automatic && !scenarios.is_empty() {
+        configuration_issues.push(WorkGroupConfigurationIssue::AutomaticScenarioPresent);
+    }
+    if assigned_tasks.iter().any(|task| task.status != "verified") {
+        configuration_issues.push(WorkGroupConfigurationIssue::TaskNotVerified);
+    }
+    // 아키텍트가 이 구성 버전에서는 문서로 고칠 곳이 없다고 판단해 남긴 표시다. 판정이 구성 확인
+    // 필요로 답할 자리에서만 읽으므로, 다른 상태로 답할 자리에서는 이 값이 있어도 상태가 바뀌지
+    // 않는다.
+    let configuration_unresolved_revision =
+        yaml_u32(Some(metadata), "configuration_unresolved_revision");
+
     let latest_decision = latest_group_qa_decision(group_decisions, &id, revision);
     let source_qa_decision_id = latest_decision
         .filter(|decision| decision.outcome == "revision_requested")
@@ -3227,21 +3264,26 @@ fn parse_work_group(
         .any(|task| task.status == "todo" || task.status == "in_progress")
     {
         WorkGroupDisplayStatus::Developing
-    } else if !structurally_valid
-        || !task_revisions_valid
-        || (qa_mode == WorkGroupQaMode::User
-            && (scenarios.is_empty()
-                || scenarios
-                    .iter()
-                    .any(|scenario| !scenario_is_user_safe(scenario))))
-        || (qa_mode == WorkGroupQaMode::Automatic && !scenarios.is_empty())
-        || assigned_tasks.iter().any(|task| task.status != "verified")
-    {
-        WorkGroupDisplayStatus::ConfigurationError
+    } else if !configuration_issues.is_empty() {
+        if configuration_unresolved_revision == Some(revision) {
+            WorkGroupDisplayStatus::HumanJudgmentRequired
+        } else {
+            WorkGroupDisplayStatus::ConfigurationError
+        }
     } else if qa_mode == WorkGroupQaMode::User {
         WorkGroupDisplayStatus::QaReady
     } else {
         WorkGroupDisplayStatus::AutomaticCompleted
+    };
+
+    // 사유는 그 두 상태를 설명하려고 만든 값이므로 다른 상태로 답한 기능에서는 내려보내지 않는다.
+    let configuration_issues = if matches!(
+        display_status,
+        WorkGroupDisplayStatus::ConfigurationError | WorkGroupDisplayStatus::HumanJudgmentRequired
+    ) {
+        configuration_issues
+    } else {
+        Vec::new()
     };
 
     // 확인 대상 코드 상태를 기록하는 자리다. 두 모드 모두 이 요약을 계산한 시점의 코드 상태를
@@ -3269,6 +3311,8 @@ fn parse_work_group(
         updated_at,
         description,
         scenarios,
+        configuration_issues,
+        human_judgment_note: parse_work_group_section(&body, "## 사람의 판단이 필요한 이유"),
         qa_base_commit,
     })
 }
@@ -3371,9 +3415,33 @@ fn parse_work_group_description(body: &str) -> String {
                 .map_or(0, |title| title + 1);
             &lines[start..end]
         });
-    // 한 문단 안에서 나뉜 줄은 공백 하나로 잇고, 문단 사이는 빈 줄 하나로 남긴다. 이 값을 읽는
-    // 화면이 문단 구분을 살려 그릴 수 있게 하려는 것이다.
-    intro
+    join_paragraphs(intro)
+}
+
+/// 기능 문서 본문에서 절 제목 하나를 찾아 그 절의 본문만 뽑는다. 절은 다음 절 제목 앞에서 끝나고,
+/// 절이 없으면 빈 문자열이다. 소개 판독과 같은 규칙으로 절 경계를 보므로 이 절을 새로 두어도
+/// 소개와 확인 절차 판독 결과는 달라지지 않는다.
+fn parse_work_group_section(body: &str, heading: &str) -> String {
+    let lines = body.lines().collect::<Vec<_>>();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.trim() == heading)
+        .map(|position| position + 1)
+    else {
+        return String::new();
+    };
+    let end = start
+        + lines[start..]
+            .iter()
+            .position(|line| line.starts_with("##"))
+            .unwrap_or(lines.len() - start);
+    join_paragraphs(&lines[start..end])
+}
+
+/// 한 문단 안에서 나뉜 줄은 공백 하나로 잇고, 문단 사이는 빈 줄 하나로 남긴다. 이 값을 읽는
+/// 화면이 문단 구분을 살려 그릴 수 있게 하려는 것이다.
+fn join_paragraphs(lines: &[&str]) -> String {
+    lines
         .split(|line| line.trim().is_empty())
         .map(|paragraph| {
             paragraph
@@ -11721,9 +11789,9 @@ mod report_surface_tests {
         CONTROL_DIRECTORY, GROUP_QA_DECISION_SCHEMA, QA_BASE_DIRECTORY, RUNTIME_DIRECTORY,
     };
     use crate::domain::project::{
-        SchemaCompatibility, WorkGroupDisplayStatus, WorkGroupQaMode, WorkGroupQaOutcome,
-        WorkGroupQaScenario, WorkGroupQaSubmission, WorkGroupQaSubmissionEntry,
-        WorkGroupQaSubmissionStatus,
+        SchemaCompatibility, WorkGroupConfigurationIssue, WorkGroupDisplayStatus, WorkGroupQaMode,
+        WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission, WorkGroupQaSubmissionEntry,
+        WorkGroupQaSubmissionStatus, WorkGroupSummary,
     };
     use crate::infrastructure::heartbeat_condition::condition_script_path;
     use crate::infrastructure::reservation_helper::reservation_helper_path;
@@ -12937,6 +13005,394 @@ mod report_surface_tests {
                 .display_status,
             WorkGroupDisplayStatus::ConfigurationError
         );
+    }
+
+    /// 여섯 표시 상태를 각각 만드는 기능 문서 집합이다. `unresolved`가 있으면 기능 문서에
+    /// `configuration_unresolved_revision`을 그 값으로 적는다.
+    fn work_group_state_fixture(
+        state: WorkGroupDisplayStatus,
+        unresolved: Option<u32>,
+    ) -> (TempDir, String) {
+        let (root, directory) = match state {
+            WorkGroupDisplayStatus::Developing => work_group_fixture("todo", "active", "user"),
+            WorkGroupDisplayStatus::Blocked => work_group_fixture("blocked", "active", "user"),
+            WorkGroupDisplayStatus::PreparingStalled => {
+                work_group_fixture("verified", "preparing", "user")
+            }
+            _ => work_group_fixture("verified", "active", "user"),
+        };
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        if state == WorkGroupDisplayStatus::Completed {
+            fs::write(
+                workflow_root.join("decisions/GROUP-QA-DONE.md"),
+                "---\nschema: workflow-labs/group-qa-decision@1\nid: GROUP-QA-DONE\ngroup_id: GROUP-DECISION-1\ngroup_revision: 1\noutcome: confirmed\nrequest_id: request-done\ncreated_by: user\ncreated_at: 2026-08-14T01:00:00Z\n---\n\n확인을 마쳤다.\n",
+            )
+            .expect("confirmed group decision");
+        }
+        // 구성 확인 필요는 작업 연결이 어긋난 기능으로 만든다. 앞선 분기가 걸러 내는 작업 상태를
+        // 쓰지 않으므로 판정이 반드시 구성 확인 필요 자리까지 내려온다.
+        if state == WorkGroupDisplayStatus::ConfigurationError {
+            let task_path = workflow_root.join("tasks/TASK-1.md");
+            let task = fs::read_to_string(&task_path)
+                .expect("task")
+                .replace("work_group_revision: 1", "work_group_revision: 2");
+            fs::write(task_path, task).expect("mismatched task revision");
+        }
+        if let Some(revision) = unresolved {
+            rewrite_group(root.path(), &directory, |source| {
+                source.replace(
+                    "revision: 1\n",
+                    &format!("revision: 1\nconfiguration_unresolved_revision: {revision}\n"),
+                )
+            });
+        }
+        (root, directory)
+    }
+
+    fn rewrite_group(project_root: &Path, directory: &str, rewrite: impl Fn(String) -> String) {
+        let path = project_root
+            .join(".workflow")
+            .join(directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let source = fs::read_to_string(&path).expect("group document");
+        fs::write(&path, rewrite(source)).expect("rewrite group document");
+    }
+
+    fn first_work_group(project_root: &Path) -> WorkGroupSummary {
+        let summary = FileSystemProjectRepository
+            .inspect(project_root)
+            .expect("inspect project");
+        assert_eq!(
+            summary.workflows[0].items.work_groups.len(),
+            1,
+            "기능이 목록에서 빠지면 안 된다"
+        );
+        summary.workflows[0].items.work_groups[0].clone()
+    }
+
+    /// C1. 판단 표시가 없거나 다른 구성 버전을 가리키면 여섯 상태가 모두 이 변경 전과 같이 나온다.
+    /// C6. 구성 확인 필요가 아닌 상태에서는 사유 목록이 비어 있다.
+    #[test]
+    fn work_group_status_is_unchanged_without_a_matching_unresolved_revision() {
+        for state in [
+            WorkGroupDisplayStatus::QaReady,
+            WorkGroupDisplayStatus::Developing,
+            WorkGroupDisplayStatus::Blocked,
+            WorkGroupDisplayStatus::PreparingStalled,
+            WorkGroupDisplayStatus::Completed,
+            WorkGroupDisplayStatus::ConfigurationError,
+        ] {
+            for unresolved in [None, Some(2)] {
+                let (root, _) = work_group_state_fixture(state, unresolved);
+                let group = first_work_group(root.path());
+                assert_eq!(
+                    group.display_status, state,
+                    "{state:?}가 판단 표시 {unresolved:?}에서 달라졌다"
+                );
+                if state == WorkGroupDisplayStatus::ConfigurationError {
+                    assert_eq!(
+                        group.configuration_issues,
+                        vec![WorkGroupConfigurationIssue::TaskLinkMismatch]
+                    );
+                } else {
+                    assert!(
+                        group.configuration_issues.is_empty(),
+                        "{state:?}는 사유를 담지 않는다"
+                    );
+                }
+            }
+        }
+    }
+
+    /// C2. 판단 표시가 현재 구성 버전과 같고 판정이 구성 확인 필요 자리이면 사람 판단 필요로 답한다.
+    /// 같은 표시가 있어도 다른 상태로 답할 자리이면 그 상태를 그대로 답한다.
+    #[test]
+    fn matching_unresolved_revision_answers_human_judgment_required() {
+        let (root, _) =
+            work_group_state_fixture(WorkGroupDisplayStatus::ConfigurationError, Some(1));
+        let group = first_work_group(root.path());
+        assert_eq!(
+            group.display_status,
+            WorkGroupDisplayStatus::HumanJudgmentRequired
+        );
+        assert_eq!(
+            group.configuration_issues,
+            vec![WorkGroupConfigurationIssue::TaskLinkMismatch]
+        );
+
+        for state in [
+            WorkGroupDisplayStatus::QaReady,
+            WorkGroupDisplayStatus::Developing,
+            WorkGroupDisplayStatus::Blocked,
+            WorkGroupDisplayStatus::PreparingStalled,
+            WorkGroupDisplayStatus::Completed,
+        ] {
+            let (root, _) = work_group_state_fixture(state, Some(1));
+            let group = first_work_group(root.path());
+            assert_eq!(
+                group.display_status, state,
+                "{state:?}는 판단 표시가 있어도 그대로 나온다"
+            );
+            assert!(group.configuration_issues.is_empty());
+        }
+    }
+
+    /// 구성 오류 사유 하나씩을 만드는 기능 문서를 준비한다.
+    fn configuration_issue_fixture(issue: WorkGroupConfigurationIssue) -> (TempDir, String) {
+        let qa_mode = if issue == WorkGroupConfigurationIssue::AutomaticScenarioPresent {
+            "automatic"
+        } else {
+            "user"
+        };
+        // 알 수 없는 작업 상태는 앞선 분기가 걸러 내지 않으므로 끝나지 않은 작업으로 남는다.
+        let task_status = if issue == WorkGroupConfigurationIssue::TaskNotVerified {
+            "archived"
+        } else {
+            "verified"
+        };
+        let (root, directory) = work_group_fixture(task_status, "active", qa_mode);
+        let workflow_root = root.path().join(".workflow").join(&directory);
+        match issue {
+            WorkGroupConfigurationIssue::MetadataInvalid => {
+                rewrite_group(root.path(), &directory, |source| {
+                    source.replace("status: active", "status: 준비")
+                });
+            }
+            WorkGroupConfigurationIssue::TasksMissing => {
+                fs::remove_file(workflow_root.join("tasks/TASK-1.md")).expect("remove task");
+            }
+            WorkGroupConfigurationIssue::TaskLinkMismatch => {
+                let task_path = workflow_root.join("tasks/TASK-1.md");
+                let task = fs::read_to_string(&task_path)
+                    .expect("task")
+                    .replace("work_group_revision: 1", "work_group_revision: 2");
+                fs::write(task_path, task).expect("mismatched task revision");
+            }
+            WorkGroupConfigurationIssue::UserScenarioUnusable => {
+                rewrite_group(root.path(), &directory, |source| {
+                    source
+                        .split("### QA-01")
+                        .next()
+                        .expect("scenario boundary")
+                        .to_owned()
+                });
+            }
+            WorkGroupConfigurationIssue::AutomaticScenarioPresent => {
+                rewrite_group(root.path(), &directory, |source| {
+                    format!(
+                        "{source}\n### QA-01 · 결과 확인\n\n저장을 누르면 완료 안내가 보인다.\n"
+                    )
+                });
+            }
+            WorkGroupConfigurationIssue::TaskNotVerified => {}
+        }
+        (root, directory)
+    }
+
+    /// C3. 구성 확인 필요로 답할 때 해당하는 사유가 여섯 값 가운데 제 값으로 담긴다.
+    #[test]
+    fn each_configuration_condition_reports_its_own_issue() {
+        for issue in [
+            WorkGroupConfigurationIssue::MetadataInvalid,
+            WorkGroupConfigurationIssue::TasksMissing,
+            WorkGroupConfigurationIssue::TaskLinkMismatch,
+            WorkGroupConfigurationIssue::UserScenarioUnusable,
+            WorkGroupConfigurationIssue::AutomaticScenarioPresent,
+            WorkGroupConfigurationIssue::TaskNotVerified,
+        ] {
+            let (root, _) = configuration_issue_fixture(issue);
+            let group = first_work_group(root.path());
+            assert_eq!(
+                group.display_status,
+                WorkGroupDisplayStatus::ConfigurationError,
+                "{issue:?}는 구성 확인 필요로 판정돼야 한다"
+            );
+            assert_eq!(group.configuration_issues, vec![issue]);
+        }
+    }
+
+    /// C4. 두 조건에 함께 해당하면 사유 목록이 둘을 각각 담는다. 하나로 합치지 않는다.
+    #[test]
+    fn two_configuration_conditions_are_reported_separately() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        fs::remove_file(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("tasks/TASK-1.md"),
+        )
+        .expect("remove task");
+        rewrite_group(root.path(), &directory, |source| {
+            source.replace("status: active", "status: 준비")
+        });
+
+        let group = first_work_group(root.path());
+        assert_eq!(
+            group.display_status,
+            WorkGroupDisplayStatus::ConfigurationError
+        );
+        assert_eq!(
+            group.configuration_issues,
+            vec![
+                WorkGroupConfigurationIssue::MetadataInvalid,
+                WorkGroupConfigurationIssue::TasksMissing,
+            ]
+        );
+    }
+
+    /// C5. 사유가 하나도 없으면 목록은 비고, 상태와 요약의 나머지 값은 그대로 나온다.
+    #[test]
+    fn a_group_without_any_issue_keeps_the_rest_of_its_summary() {
+        let (root, _) = work_group_fixture("verified", "active", "user");
+        let group = first_work_group(root.path());
+
+        assert!(group.configuration_issues.is_empty());
+        assert_eq!(group.display_status, WorkGroupDisplayStatus::QaReady);
+        assert_eq!(group.id, "GROUP-DECISION-1");
+        assert_eq!(group.title, "사용자 기능");
+        assert_eq!(group.revision, 1);
+        assert_eq!(group.description, "화면으로 확인한다.");
+        assert_eq!(group.scenarios.len(), 1);
+        assert_eq!(group.human_judgment_note, "");
+    }
+
+    /// C7. 사람 판단 절이 있으면 그 본문이 요약에 실리고, 없으면 빈 값이다. 그 절이 있어도 기능
+    /// 설명과 확인 절차 판독은 달라지지 않는다.
+    #[test]
+    fn human_judgment_note_is_read_without_changing_the_other_sections() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let baseline = first_work_group(root.path());
+        assert_eq!(baseline.human_judgment_note, "");
+
+        rewrite_group(root.path(), &directory, |source| {
+            source.replace(
+                "\n### QA-01",
+                "\n## 사람의 판단이 필요한 이유\n\n확인 절차를 사용자 행동으로 바꿀 방법을\n찾지 못했다.\n\n기능을 접을지 정해 달라.\n\n### QA-01",
+            )
+        });
+
+        let group = first_work_group(root.path());
+        assert_eq!(
+            group.human_judgment_note,
+            "확인 절차를 사용자 행동으로 바꿀 방법을 찾지 못했다.\n\n기능을 접을지 정해 달라."
+        );
+        assert_eq!(group.description, baseline.description);
+        assert_eq!(group.scenarios, baseline.scenarios);
+        assert_eq!(group.display_status, baseline.display_status);
+    }
+
+    /// C8. 구성 오류로 판정하는 조건이 이 변경 전과 같다. 사유 목록이 비어 있다는 것과 구성 확인
+    /// 필요·사람 판단 필요가 아니라는 것이 모든 기능에서 서로 같은 뜻이다.
+    #[test]
+    fn configuration_error_conditions_are_unchanged() {
+        for (root, _) in [
+            work_group_fixture("verified", "active", "user"),
+            work_group_fixture("verified", "active", "automatic"),
+        ] {
+            let group = first_work_group(root.path());
+            assert!(
+                !matches!(
+                    group.display_status,
+                    WorkGroupDisplayStatus::ConfigurationError
+                        | WorkGroupDisplayStatus::HumanJudgmentRequired
+                ),
+                "조건을 채운 기능이 구성 확인 필요로 판정되면 안 된다"
+            );
+            assert!(group.configuration_issues.is_empty());
+        }
+
+        for issue in [
+            WorkGroupConfigurationIssue::MetadataInvalid,
+            WorkGroupConfigurationIssue::TasksMissing,
+            WorkGroupConfigurationIssue::TaskLinkMismatch,
+            WorkGroupConfigurationIssue::UserScenarioUnusable,
+            WorkGroupConfigurationIssue::AutomaticScenarioPresent,
+            WorkGroupConfigurationIssue::TaskNotVerified,
+        ] {
+            let (root, _) = configuration_issue_fixture(issue);
+            let group = first_work_group(root.path());
+            assert_eq!(
+                group.display_status,
+                WorkGroupDisplayStatus::ConfigurationError
+            );
+            assert!(!group.configuration_issues.is_empty());
+        }
+    }
+
+    /// C9. 품질 확인 제출은 사용자 QA 대기에서만 통과한다. 사람 판단 필요 기능은 작업이 모두
+    /// 끝나 있어도 지금과 같은 거절로 끝난다.
+    #[test]
+    fn human_judgment_required_group_cannot_be_submitted_for_qa() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        rewrite_group(root.path(), &directory, |source| {
+            let without_scenario = source
+                .split("### QA-01")
+                .next()
+                .expect("scenario boundary")
+                .to_owned();
+            without_scenario.replace(
+                "revision: 1\n",
+                "revision: 1\nconfiguration_unresolved_revision: 1\n",
+            )
+        });
+
+        let group = first_work_group(root.path());
+        assert_eq!(
+            group.display_status,
+            WorkGroupDisplayStatus::HumanJudgmentRequired
+        );
+        assert_eq!(
+            group.configuration_issues,
+            vec![WorkGroupConfigurationIssue::UserScenarioUnusable]
+        );
+        assert!(matches!(
+            FileSystemProjectRepository.submit_work_group_qa(
+                root.path(),
+                &group_submission(&directory, WorkGroupQaOutcome::Confirmed)
+            ),
+            Err(ProjectError::WorkGroupNotAwaitingQa)
+        ));
+    }
+
+    /// C10. 확인 절차를 사용자 행동으로 인정받게 고치면 같은 식별자와 같은 구성 버전을 유지한 채
+    /// 사용자 QA 대기로 바뀐다. 판단 표시가 남아 있어도 판정이 그 자리에 이르지 않기 때문이다.
+    #[test]
+    fn fixing_the_scenario_returns_the_group_to_qa_ready() {
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        rewrite_group(root.path(), &directory, |source| {
+            source
+                .replace(
+                    "revision: 1\n",
+                    "revision: 1\nconfiguration_unresolved_revision: 1\n",
+                )
+                .replace(
+                    "설정 화면에서 저장을 누르면 완료 안내가 보인다.",
+                    "```\nnpm run check\n```",
+                )
+        });
+
+        let blocked = first_work_group(root.path());
+        assert_eq!(
+            blocked.display_status,
+            WorkGroupDisplayStatus::HumanJudgmentRequired
+        );
+        assert_eq!(
+            blocked.configuration_issues,
+            vec![WorkGroupConfigurationIssue::UserScenarioUnusable]
+        );
+
+        rewrite_group(root.path(), &directory, |source| {
+            source.replace(
+                "```\nnpm run check\n```",
+                "설정 화면에서 저장을 누르면 완료 안내가 보인다.",
+            )
+        });
+
+        let fixed = first_work_group(root.path());
+        assert_eq!(fixed.display_status, WorkGroupDisplayStatus::QaReady);
+        assert_eq!(fixed.id, blocked.id);
+        assert_eq!(fixed.revision, blocked.revision);
+        assert!(fixed.configuration_issues.is_empty());
     }
 
     #[test]

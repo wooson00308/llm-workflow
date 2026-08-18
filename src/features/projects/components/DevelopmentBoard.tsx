@@ -503,7 +503,7 @@ function buildWorkGroupLanes(
 }
 
 function workGroupStatusPriority(status: WorkGroupDisplayStatus) {
-  return ["rework", "preparing_stalled", "configuration_error", "blocked", "preparing", "developing", "qa_ready", "automatic_completed", "completed"].indexOf(status);
+  return ["human_judgment_required", "rework", "preparing_stalled", "configuration_error", "blocked", "preparing", "developing", "qa_ready", "automatic_completed", "completed"].indexOf(status);
 }
 
 function workGroupStatusLabel(status: WorkGroupDisplayStatus) {
@@ -517,6 +517,7 @@ function workGroupStatusLabel(status: WorkGroupDisplayStatus) {
     qa_ready: "사용자 QA 대기",
     automatic_completed: "완료",
     configuration_error: "구성 확인 필요",
+    human_judgment_required: "사람 판단 필요",
   }[status];
 }
 
