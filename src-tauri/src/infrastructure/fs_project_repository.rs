@@ -3396,8 +3396,74 @@ fn scenario_is_user_safe(scenario: &WorkGroupQaScenario) -> bool {
         && scenario_describes_user_observable_flow(&scenario.body)
 }
 
+/// 확인 동선 낱말 대조에 쓰는 글자 조각이다. 한글 음절은 초성·중성·종성으로 풀고, 한글이 아닌
+/// 글자는 풀지 않고 그대로 담는다. 초성과 종성을 다른 변형으로 구분해 두어야 "창"의 종성 ㅇ이
+/// "차이"의 초성 ㅇ과 같은 조각으로 읽히지 않는다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SyllablePart {
+    Initial(u32),
+    Medial(u32),
+    Final(u32),
+    Other(char),
+}
+
+const HANGUL_SYLLABLE_FIRST: u32 = 0xAC00;
+const HANGUL_SYLLABLE_LAST: u32 = 0xD7A3;
+const HANGUL_MEDIAL_COUNT: u32 = 21;
+const HANGUL_FINAL_COUNT: u32 = 28;
+
+fn decompose_hangul(text: &str) -> Vec<SyllablePart> {
+    let mut parts = Vec::new();
+    for character in text.chars() {
+        let code = character as u32;
+        if (HANGUL_SYLLABLE_FIRST..=HANGUL_SYLLABLE_LAST).contains(&code) {
+            let index = code - HANGUL_SYLLABLE_FIRST;
+            let syllable_span = HANGUL_MEDIAL_COUNT * HANGUL_FINAL_COUNT;
+            parts.push(SyllablePart::Initial(index / syllable_span));
+            parts.push(SyllablePart::Medial(
+                index % syllable_span / HANGUL_FINAL_COUNT,
+            ));
+            let final_index = index % HANGUL_FINAL_COUNT;
+            if final_index != 0 {
+                parts.push(SyllablePart::Final(final_index));
+            }
+        } else {
+            parts.push(SyllablePart::Other(character));
+        }
+    }
+    parts
+}
+
+/// 어미가 달라진 형태를 같은 낱말로 읽는 대조다. 낱말은 본문의 글자 경계에서 시작해 조각이 끊기지
+/// 않고 이어져야 하고, 낱말이 끝나는 글자에 종성만 남았을 때 같은 낱말로 인정한다. 중성이 남으면
+/// 다른 낱말이므로 인정하지 않는다. 그래서 "보이"는 "보인다"에 걸리고 "창"은 "차이"에 걸리지 않는다.
+fn contains_token_ignoring_ending(text_parts: &[SyllablePart], token: &str) -> bool {
+    let token_parts = decompose_hangul(token);
+    if token_parts.is_empty() || text_parts.len() < token_parts.len() {
+        return false;
+    }
+    (0..=text_parts.len() - token_parts.len()).any(|start| {
+        matches!(
+            text_parts[start],
+            SyllablePart::Initial(_) | SyllablePart::Other(_)
+        ) && text_parts[start..start + token_parts.len()] == token_parts[..]
+            && !matches!(
+                text_parts.get(start + token_parts.len()),
+                Some(SyllablePart::Medial(_))
+            )
+    })
+}
+
+/// 낱말 대조는 두 단계다. 지금까지 하던 글자열 포함 검사를 먼저 그대로 하고, 그것이 걸리지 않을
+/// 때만 어미 변화를 견디는 대조를 덧붙인다. 앞 단계를 그대로 두었으므로 지금 인정되던 문장은
+/// 변경 뒤에도 인정된다.
+fn scenario_mentions_token(lowered: &str, text_parts: &[SyllablePart], token: &str) -> bool {
+    lowered.contains(token) || contains_token_ignoring_ending(text_parts, token)
+}
+
 fn scenario_describes_user_observable_flow(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
+    let parts = decompose_hangul(&lowered);
     let mentions_surface = [
         "화면",
         "페이지",
@@ -3442,7 +3508,7 @@ fn scenario_describes_user_observable_flow(text: &str) -> bool {
         "field",
     ]
     .iter()
-    .any(|token| lowered.contains(token));
+    .any(|token| scenario_mentions_token(&lowered, &parts, token));
     let mentions_action = [
         "누르",
         "눌",
@@ -3475,7 +3541,7 @@ fn scenario_describes_user_observable_flow(text: &str) -> bool {
         "drag",
     ]
     .iter()
-    .any(|token| lowered.contains(token));
+    .any(|token| scenario_mentions_token(&lowered, &parts, token));
     let mentions_visible_result = [
         "보여",
         "보이",
@@ -3494,6 +3560,12 @@ fn scenario_describes_user_observable_flow(text: &str) -> bool {
         "삭제",
         "선택되어",
         "그대로",
+        "적혀",
+        "열리",
+        "나오",
+        "바뀌",
+        "같아지",
+        "남아",
         "visible",
         "appears",
         "shows",
@@ -3511,7 +3583,7 @@ fn scenario_describes_user_observable_flow(text: &str) -> bool {
         "removed",
     ]
     .iter()
-    .any(|token| lowered.contains(token));
+    .any(|token| scenario_mentions_token(&lowered, &parts, token));
     mentions_surface && mentions_action && mentions_visible_result
 }
 
@@ -12055,6 +12127,138 @@ mod report_surface_tests {
                 .work_groups[0]
                 .display_status,
             WorkGroupDisplayStatus::ConfigurationError
+        );
+    }
+
+    /// 어미가 달라진 형태를 같은 낱말로 읽는 대조를 화면·행동·결과 세 목록에서 각각 확인한다.
+    /// 목록마다 그 목록만 어미 변화로 채우고 나머지 둘은 지금까지의 글자열 포함 검사로 채워서,
+    /// 한 목록에만 대조가 붙은 구현이면 그 목록의 확인이 떨어지게 했다.
+    #[test]
+    fn scenario_words_accept_inflected_endings_in_all_three_lists() {
+        // 결과 조건: 완료 조건 C1의 네 형태.
+        for result_sentence in [
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 보인다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 보이고 이전 값은 지워진다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 보입니다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 보였다.",
+        ] {
+            assert!(
+                scenario_describes_user_observable_flow(result_sentence),
+                "결과 서술이 인정되지 않았다: {result_sentence}"
+            );
+        }
+
+        // 결과 조건: 완료 조건 C3의 열 가지 서술.
+        for result_sentence in [
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 보인다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 나타난다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 표시된다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 적혀 있다.",
+            "설정 화면에서 저장 버튼을 누르면 상세 자리가 열린다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 나온다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 바뀐다.",
+            "설정 화면에서 저장 버튼을 누르면 두 값이 같아진다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 남아 있다.",
+            "설정 화면에서 저장 버튼을 누르면 최근 값이 사라진다.",
+        ] {
+            assert!(
+                scenario_describes_user_observable_flow(result_sentence),
+                "결과 서술이 인정되지 않았다: {result_sentence}"
+            );
+        }
+        // 결과 낱말이 하나도 없으면 화면과 행동이 갖추어져도 인정되지 않는다.
+        assert!(!scenario_describes_user_observable_flow(
+            "설정 화면에서 저장 버튼을 누르면 다음 단계로 넘어간다."
+        ));
+
+        // 행동 조건: "켜"가 "켠다"에 걸린다. 나머지 두 조건은 글자열 포함 검사로 채웠다.
+        assert!(scenario_describes_user_observable_flow(
+            "설정 화면에서 알림을 켠다. 그러면 완료 안내가 표시된다."
+        ));
+        assert!(!scenario_describes_user_observable_flow(
+            "설정 화면에서 알림을 본다. 그러면 완료 안내가 표시된다."
+        ));
+
+        // 화면 조건: "카드"가 "카든"에 걸린다. 나머지 두 조건은 글자열 포함 검사로 채웠다.
+        assert!(scenario_describes_user_observable_flow(
+            "요약 카든 눌러서 상세 내용이 표시된다."
+        ));
+        assert!(!scenario_describes_user_observable_flow(
+            "요약 눌러서 상세 내용이 표시된다."
+        ));
+    }
+
+    /// 넓힌 대조가 글자 경계를 지키는지 확인한다. 낱말이 끝나는 글자에 중성이 남으면 다른 낱말이다.
+    /// 화면 낱말만 경계 사례로 두고 행동과 결과는 갖추어 두어서, 경계가 무너지면 판정이 참으로
+    /// 뒤집히게 했다. 완료 조건 C8이다.
+    #[test]
+    fn inflection_tolerant_matching_keeps_syllable_boundaries() {
+        assert!(!scenario_describes_user_observable_flow(
+            "값의 차이를 눌러 결과가 보인다."
+        ));
+        assert!(scenario_describes_user_observable_flow(
+            "작은 창을 눌러 결과가 보인다."
+        ));
+        assert!(!scenario_describes_user_observable_flow(
+            "애매한 값을 눌러 결과가 보인다."
+        ));
+        assert!(scenario_describes_user_observable_flow(
+            "앱을 눌러 결과가 보인다."
+        ));
+    }
+
+    /// GROUP-070의 확인 동선 본문을 한 글자도 고치지 않고 넣었을 때 세 조건을 모두 만족하고,
+    /// 그 본문을 담은 사용자 확인 모드 기능이 사용자 QA 대기로 서는지 확인한다. 완료 조건 C4다.
+    #[test]
+    fn group_070_walkthrough_reaches_user_qa_ready() {
+        let walkthrough = concat!(
+            "1. 실행 환경 새 버전이 함께 실린 앱 배포물로 앱을 올린 뒤 앱을 열고 에이전트 화면을 연다.\n",
+            "   > 화면이 열리고 실행 환경 자리가 보인다.\n",
+            "2. 실행 환경 자리에서 앱에 포함된 버전과 설치된 버전을 나란히 읽는다. 곧바로 갈려 있으면 잠시 뒤 다시 읽는다.\n",
+            "   > 두 값이 같아진다. 앱을 올린 것만으로 설치된 버전이 새 버전을 따라왔다.\n",
+            "3. 실행 환경 상태 문구와 자동 배정 서비스 자리를 읽는다.\n",
+            "   > 실행 환경이 정상이라고 적혀 있고, 자동 배정이 연결 필요나 복구 필요로 남아 있지 않다.\n",
+            "4. 상태 문구가 아직 복구나 재시작이 필요하다고 말하면 그 자리의 복구 계획 버튼을 누른다. 이미 정상이면 이 단계와 다음 단계를 건너뛴다.\n",
+            "   > 확인 창이 열리고 무엇을 하려는지가 적혀 있다. 창이 열리지 않거나 내용이 없는 계획이 나오는 일은 없다.\n",
+            "5. 확인 창에서 적용을 누른 뒤 실행 환경 상태를 다시 읽는다.\n",
+            "   > 적용이 끝나고 상태가 정상으로 바뀐다. 설치 절차를 손으로 다시 밟지 않았다.\n",
+            "6. 프로젝트 하나에서 자동 배정이 새 실행을 집어 가는지 확인한다.\n",
+            "   > 앱을 올리기 전과 같이 자동 배정이 동작한다."
+        );
+        let title = "앱을 새 버전으로 올린 뒤 실행 환경이 되살아나는지 확인하기";
+
+        assert!(!contains_internal_qa_instruction(title));
+        assert!(!contains_internal_qa_instruction(walkthrough));
+        assert!(scenario_describes_user_observable_flow(walkthrough));
+        assert!(scenario_is_user_safe(&WorkGroupQaScenario {
+            id: "QA-01".to_owned(),
+            title: title.to_owned(),
+            body: walkthrough.to_owned(),
+        }));
+
+        let (root, directory) = work_group_fixture("verified", "active", "user");
+        let group_path = root
+            .path()
+            .join(".workflow")
+            .join(&directory)
+            .join("groups/GROUP-DECISION-1.md");
+        let group = fs::read_to_string(&group_path)
+            .expect("group")
+            .replace("QA-01 · 결과 확인", &format!("QA-01 · {title}"))
+            .replace(
+                "설정 화면에서 저장을 누르면 완료 안내가 보인다.",
+                walkthrough,
+            );
+        fs::write(group_path, group).expect("GROUP-070 walkthrough");
+        assert_eq!(
+            FileSystemProjectRepository
+                .inspect(root.path())
+                .expect("GROUP-070 walkthrough group")
+                .workflows[0]
+                .items
+                .work_groups[0]
+                .display_status,
+            WorkGroupDisplayStatus::QaReady
         );
     }
 
