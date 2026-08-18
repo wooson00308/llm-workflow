@@ -18,7 +18,7 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 29;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 30;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
 pub(crate) const ARCHITECT_RULES_VERSION: u32 = 20;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 22;
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 29
+rules_version: 30
 ---
 
 # LLM Workflow agent protocol
@@ -188,6 +188,18 @@ Write that judgement into the report. What you took over, what you discarded, an
 When something you discard is a test, say so plainly and say why it was the dead session's mistake. Removing a wrong test somebody else added and deleting a test that stands in the way of a passing run are different acts, and the report is where a reader tells them apart. The prohibition in `.workflow/rules/roles/developer.md` is untouched by a takeover.
 
 This obligation is the same for every role that can take a claim over. It is written here once, and the role contracts point at this section instead of restating it.
+
+### Reading the record of a run that ended without a report
+
+Start that judgement from the record instead of from a guess. The app writes one file per such run under `.workflow/.runtime/silent-runs/`, naming the target document, the role, when the run started and ended, and why it was cut off. Read that directory before you decide what to keep.
+
+A record that names your target says the run that held it ended without leaving a result. Do not read the residue it left as the output of a session that finished its work: a commit on the isolated branch, a half-written document, and a task still sitting in `in_progress` are all unfinished until you have shown otherwise by reading them.
+
+Finding no record is the ordinary case and stops nothing. A run that ended before this record existed has none, and neither does a session that ran outside this project. So absence is not evidence that the previous session finished normally, and a takeover never treats it as one: what is there still has to be read.
+
+Write what the check returned into the session report. Whether you found a record, what it said if you did, and how it moved the line between what you kept and what you discarded must all be readable from that one report.
+
+These files are app-owned exactly as §2 says of everything under `.workflow/.runtime/`. An agent session reads them and does nothing else to them: it never creates one, never edits one, and never deletes one, whatever it concludes about the run they describe.
 
 ### Runtime reservation handoff
 
@@ -1479,7 +1491,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1501,7 +1513,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1546,7 +1558,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
@@ -1570,7 +1582,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1605,7 +1617,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1647,7 +1659,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1681,7 +1693,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
@@ -1712,7 +1724,7 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 29);
+        assert_eq!(WORKFLOW_RULES_VERSION, 30);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 20);
         assert_eq!(DEVELOPER_RULES_VERSION, 22);
@@ -1768,7 +1780,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1777,6 +1789,25 @@ mod tests {
         assert!(rules.contains("must be readable from that one report alone"));
         assert!(rules.contains("When something you discard is a test"));
         assert!(rules.contains("This obligation is the same for every role"));
+
+        // 보고 없이 끝난 실행 기록을 인수 판단의 출발점으로 삼게 하는 절.
+        assert!(rules.contains("### Reading the record of a run that ended without a report"));
+        assert!(rules.contains("one file per such run under `.workflow/.runtime/silent-runs/`"));
+        assert!(rules.contains("ended without leaving a result"));
+        assert!(rules.contains(
+            "Do not read the residue it left as the output of a session that finished its work"
+        ));
+        assert!(rules.contains("Finding no record is the ordinary case and stops nothing"));
+        assert!(
+            rules.contains("absence is not evidence that the previous session finished normally")
+        );
+        assert!(rules.contains("Write what the check returned into the session report"));
+        assert!(
+            rules.contains("how it moved the line between what you kept and what you discarded")
+        );
+        // 이 기록은 앱이 쓰고 세션은 읽기만 한다.
+        assert!(rules.contains("These files are app-owned exactly as §2 says"));
+        assert!(rules.contains("it never creates one, never edits one, and never deletes one"));
 
         // §5는 상태가 바뀌지 않는 인수도 항목을 남기게 하고, 인수 전용 `kind`는 여전히 없다.
         assert!(rules.contains(
@@ -1849,7 +1880,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -1953,7 +1984,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(architect.contains("rules_version: 20"));
         assert!(developer.contains("rules_version: 22"));
         assert!(planner.contains("rules_version: 12"));
@@ -2086,7 +2117,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(developer.contains("rules_version: 22"));
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 20"));
@@ -2176,7 +2207,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("### The structured summary"));
 
         // 네 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·전후·위험으로 끝난다.
@@ -2284,7 +2315,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2386,7 +2417,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2417,7 +2448,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 29"));
+        assert!(rules.contains("rules_version: 30"));
         assert!(rules.contains("`history`"));
         assert!(architect.contains("rules_version: 20"));
         assert!(developer.contains("rules_version: 22"));
