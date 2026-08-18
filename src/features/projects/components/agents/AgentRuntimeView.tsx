@@ -3,8 +3,10 @@ import type {
   AgentProjectConsent,
   AgentProviderDiagnosis,
   AgentRuntimeActions,
+  AgentRuntimeApplication,
   AgentRuntimeOperation,
   AgentRuntimeState,
+  AgentStageResult,
   ProjectSummary,
 } from "../../domain/types";
 import { bundledRuntimeIsNewer } from "../../application/useProjectWorkspace";
@@ -112,6 +114,7 @@ interface Props {
 export function AgentRuntimeView({ actions, project, projectName, state }: Props) {
   const [directAssignOpen, setDirectAssignOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [applicationOpen, setApplicationOpen] = useState(false);
   const [enableConfirmOpen, setEnableConfirmOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const readiness = readinessOf(state);
@@ -248,7 +251,10 @@ export function AgentRuntimeView({ actions, project, projectName, state }: Props
       {advancedOpen && (
         <AdvancedDrawer actions={actions} onClose={() => setAdvancedOpen(false)} projectName={currentProject.name} readiness={readiness} state={state} />
       )}
-      {state.plan && <RuntimePlanDialog actions={actions} state={state} />}
+      {state.plan && <RuntimePlanDialog actions={actions} onApplied={() => setApplicationOpen(true)} state={state} />}
+      {applicationOpen && state.application && (
+        <RuntimeApplicationDialog application={state.application} onClose={() => setApplicationOpen(false)} readiness={readiness} />
+      )}
     </section>
   );
 }
@@ -330,6 +336,7 @@ function AdvancedDrawer({ actions, onClose, projectName, readiness, state }: {
   readiness: Readiness;
   state: AgentRuntimeState;
 }) {
+  const [applicationOpen, setApplicationOpen] = useState(false);
   const providerAttention = state.policy?.providers.some((provider) => provider.status !== "ready") ?? false;
   const migrationRequired = readiness.title === "자동 배정 서비스 전환 필요";
   useDismissOnEscape(onClose);
@@ -339,10 +346,13 @@ function AdvancedDrawer({ actions, onClose, projectName, readiness, state }: {
         <header><div><p className="eyebrow">ADVANCED</p><h2>고급 설정</h2><small>{projectName}</small></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
         {state.policy && <AgentRoleSettings busy={state.reading} executionAllowed={state.policy.executionAllowed} onSave={actions.save} saveError={state.saveError} saving={state.saving} snapshot={state.policy} />}
         {state.policy && <ConsentSettings actions={actions} consent={state.policy.consent} state={state} />}
-        <details open={readiness.tone !== "ready"}><summary>실행 환경</summary><div className="agent-secondary-content"><p>{readiness.detail}</p>{readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}<RuntimeReleaseRow actions={actions} state={state} /></div></details>
+        <details open={readiness.tone !== "ready"}><summary>실행 환경</summary><div className="agent-secondary-content"><p>{readiness.detail}</p>{readiness.operation && <button className="secondary-button agent-compact-action" onClick={() => void actions.plan(readiness.operation!)} type="button">{readiness.actionLabel}</button>}{state.application && <button className="secondary-button agent-compact-action" onClick={() => setApplicationOpen(true)} type="button">마지막 적용 결과 보기</button>}<RuntimeReleaseRow actions={actions} state={state} /></div></details>
         <details open={providerAttention}><summary>실행 도구</summary><ul className="agent-provider-list">{state.policy?.providers.map((provider) => <li key={provider.provider}><ProviderRow diagnosis={provider} /></li>)}</ul></details>
         <details open={migrationRequired || state.migration !== null || state.migrationError !== null}><summary>기존 설정 이전</summary><div className="agent-secondary-content"><p>앱이 관리하던 역할 잡은 중지하고, 기존 외부 서비스 파일은 그대로 보존한 채 새 자동 배정 서비스로 전환합니다. 검증에 실패하면 역할 잡과 서비스를 원래대로 복구합니다.</p><button className="secondary-button agent-compact-action" disabled={state.migrationBusy} onClick={() => void actions.previewMigration()} type="button">전환할 설정 확인</button>{state.migrationError && <p className="agent-error">{state.migrationError}</p>}{state.migration && <div className="agent-migration-preview"><strong>전환할 역할 설정</strong><ul>{Object.entries(state.migration.proposed.roles).map(([role, value]) => <li key={role}>{roleName(role)} · {value.provider} · 최대 {value.maxParallel}명</li>)}</ul><div className="agent-plan-actions"><button onClick={() => actions.dismissMigration()} type="button">취소</button><button className="stamp-button" onClick={() => void actions.applyMigration()} type="button">검증하고 전환</button></div></div>}</div></details>
       </aside>
+      {applicationOpen && state.application && (
+        <RuntimeApplicationDialog application={state.application} onClose={() => setApplicationOpen(false)} readiness={readiness} />
+      )}
     </div>
   );
 }
@@ -419,7 +429,7 @@ function RuntimeReleaseRow({ actions, state }: { actions: AgentRuntimeActions; s
   );
 }
 
-function RuntimePlanDialog({ actions, state }: { actions: AgentRuntimeActions; state: AgentRuntimeState }) {
+function RuntimePlanDialog({ actions, onApplied, state }: { actions: AgentRuntimeActions; onApplied(): void; state: AgentRuntimeState }) {
   useDismissOnEscape(actions.cancelPlan);
   const plan = state.plan!;
   return (
@@ -445,7 +455,95 @@ function RuntimePlanDialog({ actions, state }: { actions: AgentRuntimeActions; s
         )}
         {state.planError && <p className="agent-error">{humanRuntimeMessage(state.planError)}</p>}
         {state.applyError && <p className="agent-error">{humanRuntimeMessage(state.applyError)}</p>}
-        <footer><button className="secondary-button" onClick={() => actions.cancelPlan()} type="button">취소</button><button className="stamp-button" disabled={state.applying} onClick={() => void actions.apply()} type="button">{state.applying ? "적용 중" : "적용"}</button></footer>
+        <footer><button className="secondary-button" onClick={() => actions.cancelPlan()} type="button">취소</button><button className="stamp-button" disabled={state.applying} onClick={() => void actions.apply().then((applied) => { if (applied) onApplied(); })} type="button">{state.applying ? "적용 중" : "적용"}</button></footer>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * 실행 환경이 돌려준 단계 이름의 사용자 언어. 계약이 정한 여섯 개만 이름으로 옮기고 나머지는
+ * 확인하지 못한 단계로 접는다. 실행 환경이 나중에 단계를 더해도 앱이 그 이름을 알 수 없으므로,
+ * 모르는 값을 그대로 화면에 내보내지 않는다.
+ */
+const STAGE_NAMES: Record<string, string> = {
+  manifest_verification: "설치 파일 검증",
+  version_install: "버전 설치",
+  launcher_switch: "실행기 전환",
+  service_transition: "서비스 연결",
+  running_version_check: "실행 중 버전 확인",
+  unrecognized: "확인하지 못한 단계",
+};
+
+function stageName(stage: string) {
+  return STAGE_NAMES[stage] ?? "확인하지 못한 단계";
+}
+
+/** 단계 상태의 표시 구분. 아는 두 값만 완료와 건너뜀으로 두고, 모르는 값은 실패로 다룬다. */
+function stageTone(status: string): "done" | "skipped" | "failed" {
+  return status === "ok" ? "done" : status === "skipped" ? "skipped" : "failed";
+}
+
+function stageStateLabel(status: string) {
+  return { done: "완료", skipped: "건너뜀", failed: "실패" }[stageTone(status)];
+}
+
+/** 단계에 함께 보여줄 사유. 실패한 단계는 사유가 실려 오지 않아도 자리를 비우지 않는다. */
+function stageReason(stage: AgentStageResult) {
+  if (stage.detail) return humanRuntimeMessage(stage.detail);
+  return stageTone(stage.status) === "failed" ? "사유를 확인하지 못했습니다." : null;
+}
+
+/** 적용 하나의 전체 결과. 실패한 단계가 없고 결과 값이 성공일 때만 성공으로 본다. */
+export function applicationVerdict(application: AgentRuntimeApplication) {
+  const stages = application.result.stages;
+  const failed = stages.filter((stage) => stageTone(stage.status) === "failed");
+  if (failed.length === 0 && application.result.result === "success") return "success" as const;
+  if (failed.length > 0 && failed.length < stages.length) return "partial" as const;
+  return "failed" as const;
+}
+
+const VERDICT_MESSAGES = {
+  success: "적용한 단계를 모두 마쳤습니다.",
+  partial: "일부 단계가 실패했습니다. 아래에서 어느 단계가 왜 실패했는지 확인해 주세요.",
+  failed: "적용에 실패했습니다. 아래에서 실패한 단계와 사유를 확인해 주세요.",
+};
+
+/**
+ * 적용 결과 화면. 적용을 막 마친 자리와 고급 설정의 다시 열기 입구가 같은 화면을 쓴다.
+ *
+ * 적용이 끝나자마자 창이 닫히던 동안에는 서비스 연결만 실패한 적용과 전부 성공한 적용이 사용자
+ * 눈에 똑같았다. 결과를 여기서 읽고 사용자가 직접 닫는다.
+ */
+function RuntimeApplicationDialog({ application, onClose, readiness }: {
+  application: AgentRuntimeApplication;
+  onClose(): void;
+  readiness: Readiness;
+}) {
+  useDismissOnEscape(onClose);
+  const stages = application.result.stages;
+  const detail = application.result.detail;
+  const verdict = applicationVerdict(application);
+  // 실행 환경이 정상이 아닌 채로 남았을 때 그 상태를 만든 단계. 여럿이면 처음 실패한 단계를 쓴다.
+  const blockingStage = readiness.tone === "ready" ? null : stages.find((stage) => stageTone(stage.status) === "failed") ?? null;
+  return (
+    <div className="agent-overlay">
+      <section aria-label="실행 환경 적용 결과" aria-modal="true" className="agent-dialog" role="dialog">
+        <header><div><p className="eyebrow">RUNTIME</p><h2>실행 환경 적용 결과</h2></div><button aria-label="닫기" onClick={onClose} type="button">×</button></header>
+        <p className={`agent-runtime-application-verdict tone-${verdict}`}>{VERDICT_MESSAGES[verdict]}</p>
+        {detail && <p className="agent-dialog-note">{humanRuntimeMessage(detail)}</p>}
+        <ul className="agent-runtime-application-stages">
+          {stages.map((stage, index) => (
+            <li key={`${stage.stage}-${index}`}>
+              <div><strong>{stageName(stage.stage)}</strong><span className={`tone-${stageTone(stage.status)}`}>{stageStateLabel(stage.status)}</span></div>
+              {stageReason(stage) && <p>{stageReason(stage)}</p>}
+            </li>
+          ))}
+        </ul>
+        {blockingStage && (
+          <p className="agent-detail-message">{stageName(blockingStage.stage)} 단계가 실패해 실행 환경이 아직 {readiness.title} 상태로 남았습니다.</p>
+        )}
+        <footer><button className="stamp-button" onClick={onClose} type="button">닫기</button></footer>
       </section>
     </div>
   );

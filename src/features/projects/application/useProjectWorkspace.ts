@@ -885,7 +885,9 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
   const applyAgentRuntimePlan = useCallback(async () => {
     const pending = agentRuntime.plan;
     if (!pending) return false;
-    setAgentRuntime((current) => ({ ...current, applying: true, applyError: null }));
+    // 이전 적용 결과는 새 적용이 시작되는 이 자리에서 지운다. 예외로 끝난 적용 뒤에 고급 설정의
+    // 다시 열기 입구가 지난 적용의 결과를 지금 결과인 것처럼 보여주지 않게 하는 자리다.
+    setAgentRuntime((current) => ({ ...current, applying: true, applyError: null, application: null }));
     try {
       const application =
         pending.kind === "install"

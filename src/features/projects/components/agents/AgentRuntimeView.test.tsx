@@ -6,8 +6,10 @@ import type {
   AgentRolePolicy,
   AgentRunSummary,
   AgentRuntimeActions,
+  AgentRuntimeApplication,
   AgentRuntimeInspection,
   AgentRuntimeState,
+  AgentStageResult,
   ProjectSummary,
 } from "../../domain/types";
 import { humanRuntimeMessage } from "./AgentRunDashboard";
@@ -1317,5 +1319,135 @@ describe("앱 밖 세션 표시", () => {
     expect(within(section).getAllByRole("listitem")).toHaveLength(11);
     fireEvent.click(within(section).getByRole("button", { name: "접기" }));
     expect(within(section).getAllByRole("listitem")).toHaveLength(8);
+  });
+});
+
+describe("AgentRuntimeView 실행 환경 적용 결과", () => {
+  const installPlan = {
+    planId: "plan-1", bundledVersion: "0.9.0", target: "macos-universal",
+    versionDirectory: "/runtime/versions/0.9.0", launcher: "/runtime/bin/heartbeat",
+    alreadyInstalled: false, installedVersion: "0.8.3", serviceTransitionRequired: true,
+    service, serviceAction: "register" as const,
+  };
+
+  function stage(name: string, status: string, detail: string | null = null): AgentStageResult {
+    return { stage: name, status, detail };
+  }
+
+  function application(stages: AgentStageResult[], result: string, detail: string | null = null): AgentRuntimeApplication {
+    return {
+      kind: "install",
+      result: { planId: "plan-1", result, installedVersion: "0.9.0", versionDirectory: "/runtime/versions/0.9.0", stages, detail },
+    };
+  }
+
+  function unregistered() {
+    const runtime = inspection();
+    runtime.status!.service = { ...service, registered: false };
+    return runtime;
+  }
+
+  // 결과 화면은 저절로 열리지 않으므로, 검사도 사용자와 같은 입구로만 연다.
+  function openFromDrawer(current: AgentRuntimeState) {
+    renderView(current);
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "고급 설정" })).getByRole("button", { name: "마지막 적용 결과 보기" }));
+    return screen.getByRole("dialog", { name: "실행 환경 적용 결과" });
+  }
+
+  it("적용을 마치면 확인 창이 단계별 결과 화면으로 바뀐다", async () => {
+    renderView(state({
+      plan: { kind: "install", plan: installPlan },
+      application: application(
+        [stage("version_install", "ok"), stage("launcher_switch", "ok"), stage("service_transition", "failed", "service_register_failed")],
+        "partial_success",
+      ),
+    }));
+
+    fireEvent.click(within(screen.getByRole("dialog", { name: "실행 환경 변경 확인" })).getByRole("button", { name: "적용" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "실행 환경 적용 결과" });
+    const rows = within(dialog).getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent("버전 설치");
+    expect(rows[0]).toHaveTextContent("완료");
+    expect(rows[1]).toHaveTextContent("실행기 전환");
+    expect(rows[1]).toHaveTextContent("완료");
+    expect(rows[2]).toHaveTextContent("서비스 연결");
+    expect(rows[2]).toHaveTextContent("실패");
+    expect(dialog).toHaveTextContent("일부 단계가 실패했습니다");
+  });
+
+  it("적용이 예외로 실패하면 결과 화면을 열지 않는다", async () => {
+    const runtimeActions = actions({ apply: vi.fn().mockResolvedValue(false) });
+    renderView(state({ plan: { kind: "install", plan: installPlan }, applyError: "service_register_failed" }), runtimeActions);
+
+    fireEvent.click(within(screen.getByRole("dialog", { name: "실행 환경 변경 확인" })).getByRole("button", { name: "적용" }));
+
+    await waitFor(() => expect(runtimeActions.apply).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog", { name: "실행 환경 적용 결과" })).not.toBeInTheDocument();
+  });
+
+  it("실패한 단계의 사유를 사용자 언어로 옮겨 보여준다", () => {
+    const reason = 'provider error: {"code":"service_register_failed"}';
+    const dialog = openFromDrawer(state({ application: application([stage("service_transition", "failed", reason)], "failed") }));
+
+    expect(dialog).toHaveTextContent(humanRuntimeMessage(reason));
+    expect(within(dialog).queryByText(/provider error|\{"code"/)).not.toBeInTheDocument();
+  });
+
+  it("사유가 실려 오지 않은 실패 단계에도 사유를 확인하지 못했다고 적는다", () => {
+    const dialog = openFromDrawer(state({ application: application([stage("launcher_switch", "failed")], "failed") }));
+
+    expect(dialog).toHaveTextContent("사유를 확인하지 못했습니다.");
+  });
+
+  it("모두 완료한 적용은 성공으로 알리고 실패 문구를 만들지 않는다", () => {
+    const dialog = openFromDrawer(state({
+      application: application(
+        [stage("version_install", "ok"), stage("launcher_switch", "ok"), stage("service_transition", "ok")],
+        "success",
+      ),
+    }));
+
+    expect(dialog).toHaveTextContent("적용한 단계를 모두 마쳤습니다.");
+    expect(dialog).not.toHaveTextContent("실패");
+    expect(dialog).not.toHaveTextContent("남았습니다");
+  });
+
+  it("적용 뒤에도 남은 실행 환경 상태와 그 상태를 만든 단계를 한 문장으로 알린다", () => {
+    const dialog = openFromDrawer(state({
+      inspection: unregistered(),
+      application: application(
+        [stage("version_install", "ok"), stage("service_transition", "failed", "service_register_failed")],
+        "partial_success",
+      ),
+    }));
+
+    expect(dialog).toHaveTextContent("서비스 연결 단계가 실패해 실행 환경이 아직 자동 배정 서비스 연결 필요 상태로 남았습니다.");
+  });
+
+  it("고급 설정의 실행 환경 자리에서 마지막 적용 결과를 다시 연다", () => {
+    const dialog = openFromDrawer(state({
+      application: application([stage("service_transition", "failed", "service_register_failed")], "failed", "설치본은 놓였지만 남은 단계가 있습니다"),
+    }));
+
+    expect(dialog).toHaveTextContent("설치본은 놓였지만 남은 단계가 있습니다");
+    expect(dialog).toHaveTextContent("서비스 연결");
+    expect(dialog).toHaveTextContent(humanRuntimeMessage("service_register_failed"));
+  });
+
+  it("마지막 적용 결과가 없으면 다시 열기 입구를 만들지 않는다", () => {
+    renderView();
+
+    fireEvent.click(screen.getByRole("button", { name: "고급 설정" }));
+
+    expect(within(screen.getByRole("dialog", { name: "고급 설정" })).queryByRole("button", { name: "마지막 적용 결과 보기" })).not.toBeInTheDocument();
+  });
+
+  it("화면을 처음 그린 것만으로는 결과 화면이 열리지 않는다", () => {
+    renderView(state({ application: application([stage("version_install", "ok")], "success") }));
+
+    expect(screen.queryByRole("dialog", { name: "실행 환경 적용 결과" })).not.toBeInTheDocument();
   });
 });

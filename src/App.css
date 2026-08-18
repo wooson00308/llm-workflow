@@ -118,6 +118,15 @@
 .agent-runtime-plan-summary li { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; font-size: 13px; }
 .agent-runtime-plan-summary li + li { border-top: 1px solid var(--line); }
 .agent-runtime-plan-summary span { color: var(--muted); text-align: right; }
+.agent-runtime-application-verdict { margin: 0; font-size: 14px; font-weight: 700; }
+.agent-runtime-application-verdict.tone-partial, .agent-runtime-application-verdict.tone-failed { color: #9c4b3f; }
+.agent-runtime-application-stages { list-style: none; margin: 14px 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
+.agent-runtime-application-stages li { padding: 10px 12px; font-size: 13px; }
+.agent-runtime-application-stages li + li { border-top: 1px solid var(--line); }
+.agent-runtime-application-stages li > div { display: flex; justify-content: space-between; gap: 16px; }
+.agent-runtime-application-stages span { color: var(--muted); text-align: right; }
+.agent-runtime-application-stages span.tone-failed { color: #9c4b3f; }
+.agent-runtime-application-stages p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .agent-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .agent-drawer-backdrop { justify-items: end; }
 .agent-detail-drawer { width: min(430px, 100%); height: 100%; overflow: auto; padding: 22px; border-left: 1px solid var(--line); background: var(--paper); box-shadow: -16px 0 50px #0005; }

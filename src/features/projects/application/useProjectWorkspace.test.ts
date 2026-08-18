@@ -1492,6 +1492,63 @@ describe("useProjectWorkspace 에이전트 실행", () => {
     unmount();
   });
 
+  it("적용 결과를 상태에 남기고 이어지는 실행 환경 조회가 지우지 않는다", async () => {
+    const gateway = gatewayFor();
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+
+    await act(() => result.current.agentRuntimeActions.plan("install"));
+    await act(() => result.current.agentRuntimeActions.apply());
+
+    expect(result.current.agentRuntime.application).toEqual({
+      kind: "install",
+      result: agentInstallApplication,
+    });
+
+    // 조회 주기가 결과를 덮으면 화면을 다녀온 사용자가 자기 적용의 결과를 잃는다.
+    await act(() => result.current.agentRuntimeActions.refresh());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+    expect(result.current.agentRuntime.application).toEqual({
+      kind: "install",
+      result: agentInstallApplication,
+    });
+    unmount();
+  });
+
+  it("적용이 예외로 실패하면 지난 적용 결과가 남지 않는다", async () => {
+    const applyAgentRuntimeInstall = vi
+      .fn()
+      .mockResolvedValueOnce(agentInstallApplication)
+      .mockRejectedValue(new Error("service_register_failed"));
+    const gateway = gatewayFor({ applyAgentRuntimeInstall });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.reading).toBe(false));
+
+    await act(() => result.current.agentRuntimeActions.plan("install"));
+    await act(() => result.current.agentRuntimeActions.apply());
+    expect(result.current.agentRuntime.application).not.toBeNull();
+
+    await act(() => result.current.agentRuntimeActions.plan("install"));
+    let applied: boolean | undefined;
+    await act(async () => {
+      applied = await result.current.agentRuntimeActions.apply();
+    });
+
+    expect(applied).toBe(false);
+    expect(result.current.agentRuntime.application).toBeNull();
+    unmount();
+  });
+
   it("실행 집합이 변하면 프로젝트 스냅샷을 조용히 다시 읽는다", async () => {
     // 파일 감시가 신호를 놓쳐도 배정 대기·세션 표시가 실행 목록과 어긋난 채 남지 않기 위한
     // 보험이다. 같은 실행 집합이 반복 조회되는 동안에는 다시 읽지 않는다.
