@@ -12,13 +12,14 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const RESERVATION_HELPER_STEM: &str = "wf-reserve";
 const RESERVATION_HELPER_LABEL: &str = "예약 헬퍼";
 const VERSION_PREFIX: &str = "# reservation_helper_version:";
-pub(crate) const RESERVATION_HELPER_VERSION: u32 = 5;
+pub(crate) const RESERVATION_HELPER_VERSION: u32 = 6;
 
 const RESERVATION_HELPER_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# reservation_helper_version: 5
+# reservation_helper_version: 6
 # LLM Workflow runtime reservation helper.
 # Usage: sh .workflow/rules/wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>
+# Usage: sh .workflow/rules/wf-reserve.sh wait-integration <target-id> <lease-id>
 set -u
 
 role="${2:-}"
@@ -47,6 +48,7 @@ reclaim_note=""
 
 usage() {
   echo "usage: wf-reserve.sh acquire <planner|architect|developer> <agent> <minutes>" >&2
+  echo "       wf-reserve.sh wait-integration <target-id> <lease-id>" >&2
   exit 2
 }
 
@@ -96,6 +98,33 @@ write_isolation_record() { # $1=준비 단계 이름
 
 record_field() { # $1=준비 기록 경로 $2=키
   sed -n "s/^$2: *//p" "$1" 2>/dev/null | head -1
+}
+
+# 격리 검사를 끝내고도 실제 충돌 때문에 통합을 미루고 끝나는 세션이 그 사실을 남기는 자리.
+# 판정 세 곳이 읽는 값은 단계와 기준 커밋 둘뿐이므로 그 두 줄만 다시 쓰고 나머지 줄은 값과 순서
+# 그대로 옮긴다. 준비 시각은 회수 순서 판정이 읽으므로 이 호출로 갱신하지 않는다.
+# 기준 커밋은 인자로 받지 않고 공유 작업 공간에서 직접 조회한다. 호출자가 넘긴 값을 그대로 믿으면
+# 격리 사본의 기준이 공유 기준 자리에 적혀 판정이 영영 풀리지 않는 기록이 만들어진다.
+# 반환값이 그대로 종료 코드가 된다. 0=성공, 5=lease 불일치, 1=그 밖의 실패.
+mark_integration_waiting() { # $1=대상 $2=lease
+  record="$isolation_root/$1.yml"
+  # 준비 기록이 없으면 만들지 않는다. 격리 사본이 준비된 적 없는 작업에는 이 표시가 붙지 않는다.
+  [ -f "$record" ] || return 1
+  [ "$(record_field "$record" lease_id)" = "$2" ] || return 5
+  head_commit=$(git rev-parse HEAD 2>/dev/null) || return 1
+  [ -n "$head_commit" ] || return 1
+  # 검사를 모두 통과한 뒤에야 쓴다. 임시 파일에 온전한 본문을 만들고 나서 옮기므로, 어느 단계에서
+  # 실패해도 기록은 호출 전 그대로 남는다. 임시 이름은 `.yml`로 끝나지 않아 기록을 훑는 어느
+  # 경로에도 걸리지 않는다.
+  record_tmp="$record.tmp"
+  awk -v base="$head_commit" '
+    /^base_commit: / { print "base_commit: " base; seen_base = 1; next }
+    /^step: / { print "step: integration_waiting"; seen_step = 1; next }
+    { print }
+    END { if (!(seen_base && seen_step)) exit 1 }
+  ' "$record" >"$record_tmp" 2>/dev/null || { rm -f "$record_tmp" >/dev/null 2>&1; return 1; }
+  mv -f "$record_tmp" "$record" 2>/dev/null || { rm -f "$record_tmp" >/dev/null 2>&1; return 1; }
+  return 0
 }
 
 dir_kib() {
@@ -259,6 +288,14 @@ prepare_isolation() {
   }
 }
 
+# 명령 갈래는 첫 인자로 가른다. acquire의 인자 개수와 순서, 출력, 종료 코드는 그대로다.
+if [ "${1:-}" = wait-integration ]; then
+  [ "$#" -eq 3 ] || usage
+  case "$2" in ''|*[!A-Za-z0-9_-]*) usage ;; esac
+  case "$3" in ''|*[!A-Za-z0-9_-]*) usage ;; esac
+  mark_integration_waiting "$2" "$3"
+  exit $?
+fi
 [ "${1:-}" = acquire ] && [ "$#" -eq 4 ] || usage
 case "$role" in planner|architect|developer) ;; *) usage ;; esac
 case "$agent" in ''|*[!A-Za-z0-9_.@-]*) usage ;; esac
@@ -323,8 +360,9 @@ const RESERVATION_HELPER_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow runtime reservation helper.
 # managed_by: workflow-labs
-# reservation_helper_version: 5
+# reservation_helper_version: 6
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-reserve.ps1 acquire <role> <agent> <minutes>
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-reserve.ps1 wait-integration <target-id> <lease-id>
 param(
   [string]$Command = '',
   [string]$Role = '',
@@ -355,6 +393,7 @@ $reclaimNote = ''
 
 function Stop-Usage() {
   [Console]::Error.WriteLine('usage: wf-reserve.ps1 acquire <planner|architect|developer> <agent> <minutes>')
+  [Console]::Error.WriteLine('       wf-reserve.ps1 wait-integration <target-id> <lease-id>')
   exit 2
 }
 
@@ -426,6 +465,46 @@ function Get-RecordField([string]$RecordPath, [string]$Key) {
     return $line.Substring($Key.Length + 2).Trim()
   } catch {
     return ''
+  }
+}
+
+# 격리 검사를 끝내고도 실제 충돌 때문에 통합을 미루고 끝나는 세션이 그 사실을 남기는 자리.
+# 판정 세 곳이 읽는 값은 단계와 기준 커밋 둘뿐이므로 그 두 줄만 다시 쓰고 나머지 줄은 값과 순서
+# 그대로 옮긴다. 준비 시각은 회수 순서 판정이 읽으므로 이 호출로 갱신하지 않는다.
+# 기준 커밋은 인자로 받지 않고 공유 작업 공간에서 직접 조회한다. 호출자가 넘긴 값을 그대로 믿으면
+# 격리 사본의 기준이 공유 기준 자리에 적혀 판정이 영영 풀리지 않는 기록이 만들어진다.
+# 반환값이 그대로 종료 코드가 된다. 0=성공, 5=lease 불일치, 1=그 밖의 실패.
+function Set-IntegrationWaiting([string]$Target, [string]$LeaseId) {
+  # 상대 경로는 .NET의 현재 디렉터리를 따라가 PowerShell의 위치와 갈릴 수 있다. 준비 기록을 쓰는
+  # 자리와 같게 절대 경로로 만든다.
+  $record = Join-Path (Get-Location).Path (Join-Path $isolationRoot ($Target + '.yml'))
+  # 준비 기록이 없으면 만들지 않는다. 격리 사본이 준비된 적 없는 작업에는 이 표시가 붙지 않는다.
+  if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { return 1 }
+  if ((Get-RecordField $record 'lease_id') -cne $LeaseId) { return 5 }
+  $head = Invoke-Git @('rev-parse', 'HEAD')
+  if ($head.Code -ne 0) { return 1 }
+  $headCommit = $head.Output.Trim()
+  if ($headCommit.Length -eq 0) { return 1 }
+  # 검사를 모두 통과한 뒤에야 쓴다. 두 줄을 모두 찾지 못하면 한 바이트도 바꾸지 않는다.
+  try {
+    $lines = [System.IO.File]::ReadAllText($record) -split "`n"
+    $seenBase = $false
+    $seenStep = $false
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+      if ($lines[$index].StartsWith('base_commit: ', [System.StringComparison]::Ordinal)) {
+        $lines[$index] = "base_commit: $headCommit"
+        $seenBase = $true
+      } elseif ($lines[$index].StartsWith('step: ', [System.StringComparison]::Ordinal)) {
+        $lines[$index] = 'step: integration_waiting'
+        $seenStep = $true
+      }
+    }
+    if (-not ($seenBase -and $seenStep)) { return 1 }
+    # 기록은 도구가 파싱하는 데이터라 BOM 없이 LF로 쓴다. 준비 기록을 쓰는 자리와 같은 방법이다.
+    [System.IO.File]::WriteAllText($record, ($lines -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    return 0
+  } catch {
+    return 1
   }
 }
 
@@ -611,6 +690,15 @@ function Initialize-Isolation([string]$Target, [string]$LeaseId) {
   return $true
 }
 
+# 명령 갈래는 첫 인자로 가른다. acquire의 인자 개수와 순서, 출력, 종료 코드는 그대로다.
+# 두 번째와 세 번째 위치 인자는 셸 본문과 같은 자리이며, 이 명령에서는 대상 id와 lease id다.
+if ($Command -ceq 'wait-integration') {
+  if ($Role -notmatch '^[A-Za-z0-9_-]+$') { Stop-Usage }
+  if ($Agent -notmatch '^[A-Za-z0-9_-]+$') { Stop-Usage }
+  if ($Minutes.Length -gt 0) { Stop-Usage }
+  $waitResult = Set-IntegrationWaiting $Role $Agent
+  exit $waitResult
+}
 if ($Command -cne 'acquire') { Stop-Usage }
 if ($Role -cnotin @('planner', 'architect', 'developer')) { Stop-Usage }
 if ($Agent -notmatch '^[A-Za-z0-9_.@-]+$') { Stop-Usage }
@@ -802,6 +890,35 @@ mod tests {
             0
         );
         (root, control)
+    }
+
+    /// 공유 작업 공간의 기준을 한 커밋 앞으로 옮긴다. 스테이지에 올린 파일만 커밋하므로, 다른
+    /// 추적 파일에 남은 미커밋 변경은 그대로 남는다.
+    fn commit_tracked_file(project_root: &Path, name: &str, contents: &str) -> String {
+        fs::write(project_root.join(name), contents).expect("tracked file");
+        assert_eq!(run_git(project_root, &["add", name]).0, 0);
+        assert_eq!(
+            run_git(
+                project_root,
+                &[
+                    "-c",
+                    "user.email=agent@workflow-labs.test",
+                    "-c",
+                    "user.name=workflow-labs",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    name,
+                ],
+            )
+            .0,
+            0
+        );
+        run_git(project_root, &["rev-parse", "HEAD"])
+            .1
+            .trim()
+            .to_owned()
     }
 
     fn write_task(control: &Path, id: &str) {
@@ -1469,6 +1586,198 @@ mod tests {
         assert!(stderr.contains("failed_step=finished"), "summary: {stderr}");
     }
 
+    /// 통합을 기다리며 끝나는 세션이 남기는 표시. 기록에서 단계와 기준 커밋만 바뀌고, 기준 커밋은
+    /// 호출 시점에 공유 작업 공간에서 다시 조회한 값이다(SPEC-064 A1).
+    #[test]
+    fn wait_integration_marks_the_step_and_rewrites_only_the_shared_base() {
+        let (root, control) = git_project();
+        write_task(&control, "TASK-001");
+        let (code, stdout, stderr) =
+            run_reservation(root.path(), &["acquire", "developer", "dispatcher-a", "30"]);
+        assert_eq!(code, 0, "reservation stderr: {stderr}");
+        let reservation: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("developer reservation JSON");
+        let lease_id = reservation["leaseId"]
+            .as_str()
+            .expect("lease id")
+            .to_owned();
+        let record_path = control.join(".runtime/isolation/TASK-001.yml");
+        let before = fs::read_to_string(&record_path).expect("record before");
+        // 사본을 준비한 뒤 공유 기준이 앞으로 나갔다. 명령이 기준을 다시 조회해야만 이 값이 적힌다.
+        let moved_head = commit_tracked_file(root.path(), "note.txt", "moved\n");
+        assert!(!before.contains(&format!("base_commit: {moved_head}")));
+
+        let (wait_code, wait_stdout, wait_stderr) =
+            run_reservation(root.path(), &["wait-integration", "TASK-001", &lease_id]);
+
+        assert_eq!(wait_code, 0, "wait stderr: {wait_stderr}");
+        assert!(wait_stdout.is_empty());
+        let after = fs::read_to_string(&record_path).expect("record after");
+        assert!(after.ends_with('\n'));
+        let before_lines: Vec<&str> = before.lines().collect();
+        let after_lines: Vec<&str> = after.lines().collect();
+        assert_eq!(before_lines.len(), after_lines.len(), "record: {after}");
+        // 관리 표기 주석부터 준비 시각까지, 두 줄 밖의 값과 순서가 호출 전과 같아야 한다.
+        for (before_line, after_line) in before_lines.iter().zip(after_lines.iter()) {
+            let expected = if before_line.starts_with("step: ") {
+                "step: integration_waiting".to_owned()
+            } else if before_line.starts_with("base_commit: ") {
+                format!("base_commit: {moved_head}")
+            } else {
+                (*before_line).to_owned()
+            };
+            assert_eq!(*after_line, expected, "record: {after}");
+        }
+    }
+
+    /// 표시가 붙은 작업은 기다리는 이유가 그대로인 동안 다시 예약되지 않고, 공유 작업 공간이
+    /// 깨끗해지면 명령을 다시 부르지 않아도 후보로 돌아온다(SPEC-064 A3, A4).
+    #[test]
+    fn a_task_waiting_for_integration_returns_once_the_shared_workspace_is_clean() {
+        let (root, control) = git_project();
+        write_task(&control, "TASK-001");
+        seed_record(
+            &control,
+            "TASK-001",
+            "lease-wait",
+            "ready",
+            "2026-08-01T00:00:00Z",
+        );
+        fs::write(root.path().join("README.md"), "uncommitted\n").expect("dirty tracked file");
+
+        assert_eq!(
+            run_reservation(root.path(), &["wait-integration", "TASK-001", "lease-wait"]).0,
+            0
+        );
+        let (blocked_code, blocked_stdout, _) =
+            run_reservation(root.path(), &["acquire", "developer", "dispatcher-a", "30"]);
+        let leased_while_waiting = control.join(".runtime/leases/TASK-001.yml").exists();
+        // 사용자가 충돌하던 미커밋 변경을 정리했다. 표시는 다시 건드리지 않는다.
+        fs::write(root.path().join("README.md"), "base\n").expect("clean tracked file");
+        let (open_code, open_stdout, open_stderr) =
+            run_reservation(root.path(), &["acquire", "developer", "dispatcher-a", "30"]);
+
+        assert_ne!(blocked_code, 0);
+        assert!(blocked_stdout.is_empty());
+        assert!(
+            !leased_while_waiting,
+            "the waiting task must not be claimed"
+        );
+        assert_eq!(open_code, 0, "reservation stderr: {open_stderr}");
+        let reopened: serde_json::Value =
+            serde_json::from_str(open_stdout.trim()).expect("reopened reservation JSON");
+        assert_eq!(reopened["targetId"], "TASK-001");
+    }
+
+    /// 미커밋 변경이 남아 있어도 공유 기준이 앞으로 나가면 그 작업은 다시 후보가 된다(SPEC-064 A5).
+    #[test]
+    fn a_task_waiting_for_integration_returns_once_the_shared_base_moves() {
+        let (root, control) = git_project();
+        write_task(&control, "TASK-001");
+        seed_record(
+            &control,
+            "TASK-001",
+            "lease-wait",
+            "ready",
+            "2026-08-01T00:00:00Z",
+        );
+        fs::write(root.path().join("README.md"), "uncommitted\n").expect("dirty tracked file");
+
+        assert_eq!(
+            run_reservation(root.path(), &["wait-integration", "TASK-001", "lease-wait"]).0,
+            0
+        );
+        let (blocked_code, blocked_stdout, _) =
+            run_reservation(root.path(), &["acquire", "developer", "dispatcher-a", "30"]);
+        // 미커밋 변경은 그대로 두고 공유 기준만 옮긴다. 표시는 다시 건드리지 않는다.
+        commit_tracked_file(root.path(), "note.txt", "moved\n");
+        let (open_code, open_stdout, open_stderr) =
+            run_reservation(root.path(), &["acquire", "developer", "dispatcher-a", "30"]);
+
+        assert_ne!(blocked_code, 0);
+        assert!(blocked_stdout.is_empty());
+        assert_eq!(open_code, 0, "reservation stderr: {open_stderr}");
+        let reopened: serde_json::Value =
+            serde_json::from_str(open_stdout.trim()).expect("reopened reservation JSON");
+        assert_eq!(reopened["targetId"], "TASK-001");
+        assert!(
+            !run_git(
+                root.path(),
+                &["status", "--porcelain", "--untracked-files=no"]
+            )
+            .1
+            .trim()
+            .is_empty(),
+            "the shared workspace must still hold the uncommitted change"
+        );
+    }
+
+    /// 기록의 lease를 갖지 않은 호출은 기록을 한 바이트도 바꾸지 않는다(SPEC-064 A6).
+    #[test]
+    fn wait_integration_refuses_a_lease_that_does_not_own_the_record() {
+        let (root, control) = git_project();
+        seed_record(
+            &control,
+            "TASK-001",
+            "lease-owner",
+            "ready",
+            "2026-08-01T00:00:00Z",
+        );
+        let record_path = control.join(".runtime/isolation/TASK-001.yml");
+        let before = fs::read(&record_path).expect("record before");
+
+        let (code, stdout, _) = run_reservation(
+            root.path(),
+            &["wait-integration", "TASK-001", "lease-other"],
+        );
+
+        assert_eq!(code, 5);
+        assert!(stdout.is_empty());
+        assert_eq!(fs::read(&record_path).expect("record after"), before);
+    }
+
+    /// 격리 사본이 준비된 적 없는 대상에는 표시가 붙지 않는다. 기록도 그 상위 디렉터리도 새로
+    /// 만들지 않는다(SPEC-064 A7).
+    #[test]
+    fn wait_integration_never_creates_a_record_for_an_unprepared_target() {
+        let (root, control) = git_project();
+
+        let (code, stdout, _) =
+            run_reservation(root.path(), &["wait-integration", "TASK-404", "lease-wait"]);
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(!control.join(".runtime/isolation").exists());
+    }
+
+    /// 인자 개수가 틀렸거나 문자 집합을 벗어난 호출은 종료 코드 2로 끝나고 기록을 바꾸지
+    /// 않는다(SPEC-064 A8).
+    #[test]
+    fn wait_integration_rejects_malformed_arguments() {
+        let (root, control) = git_project();
+        seed_record(
+            &control,
+            "TASK-001",
+            "lease-wait",
+            "ready",
+            "2026-08-01T00:00:00Z",
+        );
+        let record_path = control.join(".runtime/isolation/TASK-001.yml");
+        let before = fs::read(&record_path).expect("record before");
+
+        for arguments in [
+            vec!["wait-integration", "TASK-001"],
+            vec!["wait-integration", "TASK-001", "lease-wait", "30"],
+            vec!["wait-integration", "TASK-001/../TASK-002", "lease-wait"],
+            vec!["wait-integration", "TASK-001", "lease wait"],
+        ] {
+            let (code, stdout, _) = run_reservation(root.path(), &arguments);
+            assert_eq!(code, 2, "arguments: {arguments:?}");
+            assert!(stdout.is_empty(), "arguments: {arguments:?}");
+        }
+        assert_eq!(fs::read(&record_path).expect("record after"), before);
+    }
+
     /// PowerShell 본문은 macOS·Linux에서 실행할 수 없으므로, 두 본문이 같은 계약을 담는지
     /// 필드 이름과 분기 조건을 나란히 비교해 확인한다.
     #[test]
@@ -1505,6 +1814,10 @@ mod tests {
             "prepared_at: ",
             "step: ",
             "failed:worktree",
+            // 통합 대기 명령은 표기와 기록 값과 lease 불일치 코드가 두 본문에서 같아야 한다.
+            "wait-integration <target-id> <lease-id>",
+            "step: integration_waiting",
+            "return 5",
             "failed:record",
             "worktree",
             "isolated working copy prepared at",
@@ -1544,6 +1857,8 @@ mod tests {
         assert!(RESERVATION_HELPER_PS1.contains("contractVersion = 2"));
         assert!(RESERVATION_HELPER_SH.contains(r#"[ "$role" = developer ]"#));
         assert!(RESERVATION_HELPER_PS1.contains("$Role -ceq 'developer'"));
+        assert!(RESERVATION_HELPER_SH.contains(r#"[ "${1:-}" = wait-integration ]"#));
+        assert!(RESERVATION_HELPER_PS1.contains("$Command -ceq 'wait-integration'"));
     }
 
     #[test]
@@ -1603,7 +1918,7 @@ mod tests {
         assert!(helper.is_file());
         assert!(fs::read_to_string(&helper)
             .expect("reservation helper")
-            .contains("# reservation_helper_version: 5"));
+            .contains("# reservation_helper_version: 6"));
         let other = control.join("rules").join(if cfg!(windows) {
             "wf-reserve.sh"
         } else {
@@ -1613,7 +1928,7 @@ mod tests {
         fs::write(&other, foreign).expect("other platform helper");
         install_reservation_helper(&control).expect("current platform install");
         assert_eq!(fs::read_to_string(other).expect("other helper"), foreign);
-        assert_eq!(RESERVATION_HELPER_VERSION, 5);
+        assert_eq!(RESERVATION_HELPER_VERSION, 6);
     }
 
     #[test]
@@ -1623,7 +1938,7 @@ mod tests {
         let future = fs::read_to_string(&helper)
             .expect("reservation helper")
             .replace(
-                "# reservation_helper_version: 5",
+                "# reservation_helper_version: 6",
                 "# reservation_helper_version: 999",
             );
         fs::write(&helper, &future).expect("future helper");
