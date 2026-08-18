@@ -2,13 +2,13 @@
 schema: workflow-labs/work-group@1
 id: GROUP-071
 title: 실행 도구 사용 한도에 걸린 동안 배정을 멈추고 대기 상태를 보여주기
-status: preparing
+status: active
 revision: 1
 qa_mode: automatic
 source_spec_id: SPEC-071
 source_decision_id: DECISION-B5002A63
 created_at: 2026-08-18T09:26:41Z
-updated_at: 2026-08-18T09:40:00Z
+updated_at: 2026-08-18T09:50:30Z
 ---
 
 # 실행 도구 사용 한도에 걸린 동안 배정을 멈추고 대기 상태를 보여주기
