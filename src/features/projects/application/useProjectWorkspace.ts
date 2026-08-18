@@ -200,6 +200,7 @@ const emptyAgentRuntime: AgentRuntimeState = {
   logError: null,
   logWatchRunId: null,
   runReports: {},
+  runAudits: {},
   reportView: null,
   diagnosticExport: null,
 };
@@ -335,6 +336,36 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway],
   );
 
+  /**
+   * 끝난 실행들이 보고서를 남겼는지 한 번에 묻는다. 목록이 표시를 그리려면 상세를 열기 전에 판정이
+   * 있어야 하므로, 실행 하나씩 읽는 보고서 목록과 달리 실행 목록을 읽을 때마다 함께 받아 둔다.
+   */
+  const auditAgentRunReports = useCallback(
+    async (path: string, runs: AgentRunSummary[]) => {
+      const finished = runs.filter(
+        (run) => !["reserved", "queued", "running", "paused"].includes(run.state),
+      );
+      try {
+        // 답이 온 실행만 판정을 갖는다. 이번 답에 없는 실행의 자리를 남겨 두면 이미 사라진 실행의
+        // 판정이 화면에 남는다.
+        const results = finished.length > 0 ? await gateway.auditRunReports(path, finished) : [];
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) => ({
+          ...current,
+          runAudits: Object.fromEntries(results.map((result) => [result.runId, result.verdict])),
+        }));
+      } catch {
+        // 판정을 받아 오지 못한 것은 보고 없음이 아니다. 직전에 받아 둔 값을 지금의 사실로 남기면
+        // 이미 끝난 판정이 새 실행의 표시가 된다.
+        if (activeProjectPath.current !== path) return;
+        setAgentRuntime((current) =>
+          Object.keys(current.runAudits).length === 0 ? current : { ...current, runAudits: {} },
+        );
+      }
+    },
+    [gateway],
+  );
+
   /** 런타임의 영속 큐를 읽는다. 프로젝트를 바꾸면 늦게 온 이전 응답은 버린다. */
   const readAgentRuns = useCallback(
     async (path: string, projectId: string, silent = false) => {
@@ -350,6 +381,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
           queueReading: false,
           queueError: queue.unavailable,
         }));
+        await auditAgentRunReports(path, queue.runs);
       } catch (reason) {
         if (activeProjectPath.current !== path) return;
         setAgentRuntime((current) => ({
@@ -359,7 +391,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
         }));
       }
     },
-    [gateway],
+    [auditAgentRunReports, gateway],
   );
 
   const planAgentRun = useCallback(

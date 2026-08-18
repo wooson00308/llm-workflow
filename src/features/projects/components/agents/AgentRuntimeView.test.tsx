@@ -107,7 +107,7 @@ function state(overrides: Partial<AgentRuntimeState> = {}): AgentRuntimeState {
     queue: { projectId: "prj_1", paused: false, runs: [], errors: [], providers: [], unavailable: null },
     queueReading: false, queueError: null, pausing: false, cancelPreview: null, cancelResult: null,
     retryPreview: null, controllingRunId: null, controlError: null, logs: {}, readingLogRunId: null, logError: null,
-    logWatchRunId: null, runReports: {}, reportView: null, diagnosticExport: null,
+    logWatchRunId: null, runReports: {}, runAudits: {}, reportView: null, diagnosticExport: null,
     ...overrides,
   };
 }
@@ -652,10 +652,11 @@ describe("AgentRuntimeView run reports", () => {
       renderView(state({
         queue: queueOf([run("run-1", "succeeded", "TASK-2"), run("run-2", "succeeded", "TASK-1")]),
         runReports: { "run-2": [report] },
+        runAudits: { "run-1": "silent" },
       }));
 
       const drawer = openDetail("후속 작업");
-      expect(within(drawer).queryByText("결과 보고서")).not.toBeInTheDocument();
+      expect(cardValue(drawer, "결과 보고서")).toHaveTextContent("이 실행은 결과 보고서를 남기지 않았습니다.");
       expect(within(drawer).queryByText(report.title)).not.toBeInTheDocument();
     });
   });
@@ -748,6 +749,100 @@ describe("AgentRuntimeView run reports", () => {
       fireEvent.keyDown(window, { key: "Escape" });
       expect(runtimeActions.closeReport).toHaveBeenCalled();
       expect(screen.getByRole("complementary", { name: "에이전트 상세" })).toBeInTheDocument();
+    });
+  });
+});
+
+describe("AgentRuntimeView silent runs", () => {
+  it("marks a run that ended without a report in the recent list and in the full history", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({
+        queue: queueOf([run("run-1", "succeeded", "TASK-2"), run("run-2", "succeeded", "TASK-1")]),
+        runAudits: { "run-1": "silent", "run-2": "reported" },
+      }));
+
+      const recent = screen.getByRole("region", { name: "최근 종료" });
+      expect(within(recent).getByText("후속 작업").closest("button")).toHaveTextContent("보고서 없음");
+      expect(within(recent).getByText("조종석 HUD 구현").closest("button")).not.toHaveTextContent("보고서 없음");
+
+      fireEvent.click(within(recent).getByRole("button", { name: "전체 기록" }));
+      const history = screen.getByRole("dialog", { name: "전체 실행 기록" });
+      expect(within(history).getByText("후속 작업").closest(".agent-history-row")).toHaveTextContent("보고서 없음");
+      expect(within(history).getByText("조종석 HUD 구현").closest(".agent-history-row")).not.toHaveTextContent("보고서 없음");
+    });
+  });
+
+  it("keeps the mark when an earlier session already left a report on the same target", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({
+        queue: queueOf([run("run-1", "succeeded", "TASK-2")]),
+        runReports: { "run-1": [report] },
+        runAudits: { "run-1": "silent" },
+      }));
+
+      const recent = screen.getByRole("region", { name: "최근 종료" });
+      expect(within(recent).getByText("후속 작업").closest("button")).toHaveTextContent("보고서 없음");
+
+      // 판정이 먼저다. 앞선 세션의 보고서가 목록에 남아 있어도 이번 실행의 보고서로 세지 않는다.
+      const drawer = openDetail("후속 작업");
+      expect(cardValue(drawer, "결과 보고서")).toHaveTextContent("이 실행은 결과 보고서를 남기지 않았습니다.");
+      expect(within(drawer).queryByRole("button", { name: report.title })).not.toBeInTheDocument();
+    });
+  });
+
+  it("leaves a run without a target and a cancelled run unmarked", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({
+        queue: queueOf([
+          { ...run("run-1", "succeeded", "TASK-2"), targetId: null },
+          run("run-2", "cancelled", "TASK-1"),
+        ]),
+        runAudits: { "run-1": "not_applicable", "run-2": "not_applicable" },
+      }));
+
+      const recent = screen.getByRole("region", { name: "최근 종료" });
+      expect(within(recent).queryByText("보고서 없음")).not.toBeInTheDocument();
+    });
+  });
+
+  it("says the run left no report and that the reason behind it is unverified", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({
+        queue: queueOf([run("run-1", "succeeded", "TASK-2")]),
+        runAudits: { "run-1": "silent" },
+      }));
+
+      const drawer = openDetail("후속 작업");
+      expect(cardValue(drawer, "결과 보고서")).toHaveTextContent("이 실행은 결과 보고서를 남기지 않았습니다.");
+      expect(cardValue(drawer, "사유")).toHaveTextContent("끊긴 이유를 확인하지 못했습니다");
+    });
+  });
+
+  it("shows a recorded reason in everyday language and never the raw code", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({
+        queue: queueOf([{ ...run("run-1", "failed", "TASK-2"), reason: "model_unavailable" }]),
+        runAudits: { "run-1": "silent" },
+      }));
+
+      const drawer = openDetail("후속 작업");
+      expect(cardValue(drawer, "사유")).toHaveTextContent("선택한 모델을 현재 계정에서 사용할 수 없습니다");
+      expect(drawer).not.toHaveTextContent("model_unavailable");
+    });
+  });
+
+  it("adds no mark and says the check did not conclude when the verdict is unknown", () => {
+    withClock("2026-08-11T01:00:00Z", () => {
+      renderView(state({
+        queue: queueOf([run("run-1", "succeeded", "TASK-2")]),
+        runAudits: { "run-1": "unknown" },
+      }));
+
+      const recent = screen.getByRole("region", { name: "최근 종료" });
+      expect(within(recent).queryByText("보고서 없음")).not.toBeInTheDocument();
+
+      const drawer = openDetail("후속 작업");
+      expect(cardValue(drawer, "결과 보고서")).toHaveTextContent("결과 보고서가 있는지 확인하지 못했습니다.");
     });
   });
 });

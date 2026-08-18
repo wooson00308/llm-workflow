@@ -518,6 +518,7 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
       .fn()
       .mockResolvedValue('{"bundleVersion":"1","runId":"run-1"}'),
     listRunReports: vi.fn().mockResolvedValue([]),
+    auditRunReports: vi.fn().mockResolvedValue([]),
     readReport: vi.fn().mockResolvedValue({
       summary: { fileName: "REPORT-TASK-1-DEV.md", title: "구현 보고서" },
       body: "# 구현 보고서\n",
@@ -1721,6 +1722,61 @@ describe("useProjectWorkspace 에이전트 실행", () => {
 
     expect(result.current.agentRuntime.runReports["run-1"]).toBeUndefined();
     expect(result.current.agentRuntime.runReports["run-2"]).toHaveLength(1);
+    unmount();
+  });
+
+  it("실행 목록을 읽으면 끝난 실행의 판정을 이어서 조회해 실행 식별자별로 담는다", async () => {
+    const runs = [runOf("run-1", "TASK-1"), { ...runOf("run-2", "TASK-2"), state: "running" as const, finishedAt: null }];
+    const inspectAgentRuns = vi.fn().mockResolvedValue({
+      projectId: project.projectId,
+      paused: false,
+      runs,
+      errors: [],
+      providers: [],
+      unavailable: null,
+    });
+    const auditRunReports = vi
+      .fn()
+      .mockResolvedValue([{ runId: "run-1", verdict: "silent", recorded: true }]);
+    const gateway = gatewayFor({ auditRunReports, inspectAgentRuns });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+    await act(() => result.current.openFolder());
+
+    // 판정을 묻는 대상은 끝난 실행뿐이다. 진행 중인 실행은 아직 답이 있을 수 없다.
+    await waitFor(() =>
+      expect(auditRunReports).toHaveBeenCalledWith(project.rootPath, [runs[0]]),
+    );
+    await waitFor(() => expect(result.current.agentRuntime.runAudits["run-1"]).toBe("silent"));
+    expect(result.current.agentRuntime.runAudits["run-2"]).toBeUndefined();
+    unmount();
+  });
+
+  it("판정 조회가 실패하면 그 실행의 판정 자리를 비우고 직전 값을 남기지 않는다", async () => {
+    const inspectAgentRuns = vi.fn().mockResolvedValue({
+      projectId: project.projectId,
+      paused: false,
+      runs: [runOf("run-1", "TASK-1")],
+      errors: [],
+      providers: [],
+      unavailable: null,
+    });
+    const auditRunReports = vi
+      .fn()
+      .mockResolvedValueOnce([{ runId: "run-1", verdict: "silent", recorded: true }])
+      .mockRejectedValue(new Error("판정을 읽지 못했습니다"));
+    const gateway = gatewayFor({ auditRunReports, inspectAgentRuns });
+    const recentStore = storeStub();
+    const { result, unmount } = renderHook(() =>
+      useProjectWorkspace({ gateway, recentStore }),
+    );
+    await act(() => result.current.openFolder());
+    await waitFor(() => expect(result.current.agentRuntime.runAudits["run-1"]).toBe("silent"));
+
+    await act(() => result.current.agentRuntimeActions.refreshRuns());
+    expect(result.current.agentRuntime.runAudits["run-1"]).toBeUndefined();
     unmount();
   });
 

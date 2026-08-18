@@ -32,6 +32,7 @@ import type {
   ProjectGateway,
   ProjectSummary,
   ReportDocument,
+  RunReportAuditResult,
   SaveCustomRulesRequest,
   SaveCustomRulesResult,
   SpecDocument,
@@ -148,6 +149,12 @@ export const tauriProjectGateway: ProjectGateway = {
       targetId,
       resultPrefix,
     });
+  },
+
+  // 실행 행을 그대로 넘긴다. 어떤 실행이 보고서를 남겼는지는 백엔드가 판정하므로 이 계층은 값을
+  // 고르거나 파일 이름을 만들지 않는다.
+  auditRunReports(path, runs) {
+    return invoke<RunReportAuditResult[]>("audit_run_reports", { path, runs });
   },
 
   readReport(path, workflowDirectory, fileName) {

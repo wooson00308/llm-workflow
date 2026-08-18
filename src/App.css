@@ -64,6 +64,9 @@
 .agent-state-dot.state-failed, .agent-state-dot.state-recovery_required { background: #d65d5d; }
 .agent-state-dot.state-succeeded { background: #6395d0; }
 .agent-role-chip { min-width: 54px; padding: 4px 7px; border-radius: 7px; background: #f4f3ed; color: var(--muted); font-size: 11px; text-align: center; }
+/* 보고 없이 끝난 실행 표시. 줄 구조를 바꾸지 않도록 보조 텍스트 줄 안에 서고, 색과 함께 문구를
+   읽히게 해서 목록을 훑는 동안 눈에 들어온다. */
+.agent-silent-chip { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; background: #f6e7dc; color: #8a4f2e; font-size: 11px; font-weight: 650; }
 .agent-row-chevron { color: var(--muted); font-size: 20px; }
 .agent-plain-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 8px 16px; }
 .agent-plain-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }

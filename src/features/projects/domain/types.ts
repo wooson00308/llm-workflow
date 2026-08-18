@@ -1133,6 +1133,12 @@ export interface ProjectGateway {
     targetId: string | null,
     resultPrefix: string | null,
   ): Promise<WorkflowReportSummary[]>;
+  /**
+   * 끝난 실행마다 그 실행이 결과 보고서를 남겼는지 백엔드에 묻는다. 넘기는 것은 열린 프로젝트
+   * 경로와 실행 기록이 이미 싣고 있는 실행 값들뿐이고, 화면은 파일 이름이나 경로를 만들어 넘기지
+   * 않는다. 판정은 실행 하나마다 하나씩 돌아온다.
+   */
+  auditRunReports(path: string, runs: AgentRunSummary[]): Promise<RunReportAuditResult[]>;
   /** 보고서 하나의 읽기 전용 본문. 파일 이름은 위 목록이 준 값을 그대로 쓴다. */
   readReport(
     path: string,
@@ -1612,6 +1618,21 @@ export interface AgentRunSummary {
 }
 
 /**
+ * 실행 하나가 결과 보고서를 남겼는지에 대한 백엔드의 판정. 실행 상태와 따로 매긴 값이라 상태가
+ * 완료여도 보고서를 찾지 못했으면 보고 없음이 온다. 확신이 서지 않는 경우는 모두 확인 불가이고,
+ * 앱은 확인 실패를 보고 누락으로 올리지 않는다.
+ */
+export type RunReportVerdict = "reported" | "silent" | "unknown" | "not_applicable";
+
+/** 실행 하나의 판정 결과. */
+export interface RunReportAuditResult {
+  runId: string;
+  verdict: RunReportVerdict;
+  /** 보고 누락 기록이 프로젝트 안에 남아 있는지. 기록은 백엔드가 남기고 화면은 읽기만 한다. */
+  recorded: boolean;
+}
+
+/**
  * 시작하지 못하고 기다리게 된 역할 하나. 실행 실패가 아니라 대기라서 실행 행도 오류 기록도 남지
  * 않으므로, 사용자가 이유를 아는 길은 이 값뿐이다.
  */
@@ -1784,6 +1805,12 @@ export interface AgentRuntimeState {
    * 카드에 남지 않게 하기 위해서다.
    */
   runReports: Record<string, WorkflowReportSummary[]>;
+  /**
+   * 실행 식별자별 보고서 판정. 끝난 실행 전부를 한 번에 물어 받은 값이라 상세를 열지 않아도 목록이
+   * 읽을 수 있다. 판정을 받아 오지 못한 실행은 열쇠 자체가 없으며, 화면은 그 자리를 확인된 사실로
+   * 읽지 않는다.
+   */
+  runAudits: Record<string, RunReportVerdict>;
   /** 지금 열어 둔 보고서. 닫으면 null이다. */
   reportView: AgentReportView | null;
   /** 마지막으로 고른 진단 자료 내보내기 하나. 고른 적이 없으면 null이다. */

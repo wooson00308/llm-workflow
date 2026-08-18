@@ -8,6 +8,7 @@ import type {
   AgentRuntimeActions,
   AgentRuntimeState,
   ProjectSummary,
+  RunReportVerdict,
 } from "../../domain/types";
 import type { RunSignal, RunSignalKind, ToolCategory } from "../../domain/runActivity";
 import {
@@ -250,7 +251,7 @@ export function AgentRunDashboard({
               <li key={run.runId}>
                 <button onClick={() => setSelectedRun(run)} type="button">
                   <span className={`agent-state-dot state-${run.state}`} aria-hidden="true" />
-                  <span className="agent-session-copy"><strong>{titleOf(run.targetId, itemMap)}</strong><small>{roleLabels[run.role] ?? run.role} · {reasonLabel(run.reason, run.state)}</small></span>
+                  <span className="agent-session-copy"><strong>{titleOf(run.targetId, itemMap)}</strong><small>{silentRun(state.runAudits, run.runId) && <span className="agent-silent-chip">{SILENT_RUN_LABEL}</span>}{roleLabels[run.role] ?? run.role} · {reasonLabel(run.reason, run.state)}</small></span>
                   <time>{finishedDuration(run.startedAt, run.finishedAt)}</time>
                 </button>
               </li>
@@ -277,7 +278,7 @@ export function AgentRunDashboard({
           state={state}
         />
       )}
-      {historyOpen && <HistoryDrawer itemMap={itemMap} onClose={() => setHistoryOpen(false)} runs={runs.filter((run) => !activeStates.has(run.state))} />}
+      {historyOpen && <HistoryDrawer audits={state.runAudits} itemMap={itemMap} onClose={() => setHistoryOpen(false)} runs={runs.filter((run) => !activeStates.has(run.state))} />}
       {state.cancelPreview && <CancelDialog actions={actions} state={state} />}
       {state.retryPreview && <RetryDialog actions={actions} state={state} />}
     </div>
@@ -378,6 +379,9 @@ function DetailDrawer({ actions, itemMap, onClose, project, queueItem, run, stat
   );
   // 이 실행의 자리에 있는 목록만 쓴다. 자리가 비어 있으면 다른 실행의 목록으로 메우지 않는다.
   const reports = runId ? state.runReports[runId] ?? [] : [];
+  // 판정을 받아 오지 못한 실행은 열쇠 자체가 없다. 그 자리를 판정 하나로 메우지 않는다.
+  const verdict = runId ? state.runAudits[runId] : undefined;
+  const links = Boolean(workflowDirectory) && reports.length > 0;
 
   return (
     <>
@@ -392,18 +396,27 @@ function DetailDrawer({ actions, itemMap, onClose, project, queueItem, run, stat
               <div><dt>시작</dt><dd>{clockLabel(run.startedAt)}</dd></div>
               <div><dt>{run.finishedAt ? "소요" : "경과"}</dt><dd>{run.finishedAt ? finishedDuration(run.startedAt, run.finishedAt) : runningDuration(run.startedAt)}</dd></div>
               <div><dt>상태</dt><dd>{stateLabels[run.state]}</dd></div>
-              <div><dt>사유</dt><dd>{run.reason ? reasonLabel(run.reason, run.state) : "기록 없음"}</dd></div>
+              {/* 보고 없이 끝난 실행에서는 사유가 비어 있는 것 자체가 사용자가 알아야 할 사실이다.
+                  값이 있으면 지금 있는 변환을 그대로 지나고, 없으면 원인을 지어내지 않는다(R-09). */}
+              <div><dt>사유</dt><dd>{run.reason ? reasonLabel(run.reason, run.state) : verdict === "silent" ? "끊긴 이유를 확인하지 못했습니다" : "기록 없음"}</dd></div>
               <div><dt>도구 사용</dt><dd>{activity ? <ToolUsage counts={activity.usage} total={activity.toolTotal} /> : "모름"}</dd></div>
               <div><dt>마지막 활동</dt><dd>{activity ? clockLabel(activity.lastActivityAt) : "모름"}</dd></div>
-              {workflowDirectory && reports.length > 0 && (
+              {/* 보고서가 없다는 사실을 항목이 사라지는 방식으로 말하지 않는다(R-08). 판정이 먼저이고
+                  바로가기는 그 다음이다. 판정 대상이 아니거나 아직 판정을 받아 오지 못한 실행에서는
+                  없는 사실을 문장으로 만들지 않고 지금처럼 자리를 비운다. */}
+              {(verdict === "silent" || verdict === "unknown" || links) && (
                 <div><dt>결과 보고서</dt><dd>
-                  <ul className="agent-report-links">
-                    {reports.map((report) => (
-                      <li key={report.fileName}>
-                        <button className="agent-text-button" onClick={() => void actions.openReport(workflowDirectory, report)} type="button">{report.title}</button>
-                      </li>
-                    ))}
-                  </ul>
+                  {verdict === "silent" ? "이 실행은 결과 보고서를 남기지 않았습니다."
+                    : verdict === "unknown" ? "결과 보고서가 있는지 확인하지 못했습니다."
+                    : (
+                      <ul className="agent-report-links">
+                        {reports.map((report) => (
+                          <li key={report.fileName}>
+                            <button className="agent-text-button" onClick={() => void actions.openReport(workflowDirectory!, report)} type="button">{report.title}</button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                 </dd></div>
               )}
               <div><dt>실행 ID</dt><dd>{run.runId}</dd></div>
@@ -507,7 +520,8 @@ function SignalRow({ signal }: { signal: RunSignal }) {
   );
 }
 
-function HistoryDrawer({ itemMap, onClose, runs }: {
+function HistoryDrawer({ audits, itemMap, onClose, runs }: {
+  audits: Record<string, RunReportVerdict>;
   itemMap: Map<string, NamedWorkflowItem>;
   onClose(): void;
   runs: AgentRunSummary[];
@@ -517,7 +531,7 @@ function HistoryDrawer({ itemMap, onClose, runs }: {
     <div className="agent-drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <aside aria-label="전체 실행 기록" aria-modal="true" className="agent-detail-drawer" role="dialog">
         <header><div><p className="eyebrow">HISTORY</p><h2>전체 실행 기록</h2></div><button aria-label="닫기" autoFocus onClick={onClose} type="button">×</button></header>
-        {runs.length > 0 ? <ul className="agent-session-list agent-history-list">{runs.map((run) => <li key={run.runId}><div className="agent-history-row"><span className={`agent-state-dot state-${run.state}`} aria-hidden="true" /><span className="agent-session-copy"><strong>{titleOf(run.targetId, itemMap)}</strong><small>{roleLabels[run.role] ?? run.role} · {reasonLabel(run.reason, run.state)}</small></span><time>{finishedDuration(run.startedAt, run.finishedAt)}</time></div></li>)}</ul> : <p className="agent-dialog-note">아직 종료된 실행이 없습니다.</p>}
+        {runs.length > 0 ? <ul className="agent-session-list agent-history-list">{runs.map((run) => <li key={run.runId}><div className="agent-history-row"><span className={`agent-state-dot state-${run.state}`} aria-hidden="true" /><span className="agent-session-copy"><strong>{titleOf(run.targetId, itemMap)}</strong><small>{silentRun(audits, run.runId) && <span className="agent-silent-chip">{SILENT_RUN_LABEL}</span>}{roleLabels[run.role] ?? run.role} · {reasonLabel(run.reason, run.state)}</small></span><time>{finishedDuration(run.startedAt, run.finishedAt)}</time></div></li>)}</ul> : <p className="agent-dialog-note">아직 종료된 실행이 없습니다.</p>}
       </aside>
     </div>
   );
@@ -692,6 +706,11 @@ function nextCheckLabel(state: AgentRuntimeState) { const next = state.queue?.au
 function runningDuration(startedAt: string | null) { if (!startedAt) return "시작 중"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)); return seconds < 60 ? "1분 미만" : `${Math.floor(seconds / 60)}분`; }
 function finishedDuration(startedAt: string | null, finishedAt: string | null) { if (!startedAt || !finishedAt) return "시간 기록 없음"; const seconds = Math.max(0, Math.floor((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)); return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분`; }
 function exclusionLabel(reasons: string[]) { if (reasons.some((reason) => /no.?target/.test(reason))) return "지금은 배정할 작업이 없습니다."; if (reasons.includes("limit_reached")) return "현재 실행 자리가 모두 사용 중입니다."; if (reasons.includes("model_unavailable")) return "선택한 모델을 현재 계정에서 사용할 수 없습니다."; return "현재 안전 조건을 충족하지 않습니다."; }
+// 목록에서 보고 없이 끝난 실행에 붙는 짧은 문구. 색만으로 말하지 않도록 문구를 함께 놓는다(R-07).
+const SILENT_RUN_LABEL = "보고서 없음";
+// 보고 없음으로 확정된 실행에만 표시가 붙는다. 확인 불가와 판정 대상 아님, 아직 판정을 받아 오지
+// 못한 실행은 확정된 사실이 아니므로 정상 완료와 같이 조용히 남는다(R-06).
+function silentRun(audits: Record<string, RunReportVerdict>, runId: string) { return audits[runId] === "silent"; }
 function reasonLabel(reason: string | null, state: string) { if (!reason) return stateLabels[state as AgentRunStatus] ?? state; if (/model_unavailable/.test(reason)) return "선택한 모델을 현재 계정에서 사용할 수 없습니다"; if (/no.?target/.test(reason)) return "새 작업을 기다리는 중"; if (/limit/.test(reason)) return "실행 자리가 모두 사용 중입니다"; if (/login|auth/.test(reason)) return "실행 도구 로그인이 필요합니다"; return humanRuntimeMessage(reason); }
 function clockLabel(value: string | null) { if (!value) return "기록 없음"; const parsed = Date.parse(value); return Number.isNaN(parsed) ? "기록 없음" : new Date(parsed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 function idleLabel(lastActivityAt: string | null) { const seconds = idleSeconds(lastActivityAt, Date.now()); return seconds === null ? "확인 필요" : `${Math.floor(seconds / 60)}분째 조용함`; }
