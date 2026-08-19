@@ -23,6 +23,7 @@ use crate::infrastructure::project_instructions::{
     PLANNER_RULES_VERSION, WORKFLOW_RULES_VERSION,
 };
 use crate::infrastructure::project_write_lock::{ProjectWriteLock, ProjectWriteLockError};
+use crate::infrastructure::status_helper::STATUS_HELPER;
 
 #[derive(Debug, Error)]
 pub enum ManagedProjectAssetsError {
@@ -618,7 +619,7 @@ fn preflight(
     project_root: &Path,
     control_root: &Path,
 ) -> Result<Preflight, ManagedProjectAssetsError> {
-    let mut plans = Vec::with_capacity(8);
+    let mut plans = Vec::with_capacity(9);
     let mut conflicts = Vec::new();
     let mut unexpected = Vec::new();
 
@@ -653,6 +654,23 @@ fn preflight(
             "condition_script",
             "조건 스크립트",
             CONDITION_SCRIPT.version,
+            &mut conflicts,
+            &mut unexpected,
+        ),
+    }
+    match STATUS_HELPER.plan_install(control_root) {
+        Ok(plan) => {
+            let mut plan: AssetPlan = plan.into();
+            // 조건 스크립트와 같은 이유로 여기서 식별자를 덮어 쓴다. 공용 스크립트 계획의 기본
+            // 식별자는 선점 헬퍼용이다.
+            plan.id = "status_helper";
+            plans.push(plan);
+        }
+        Err(error) => classify_script_failure(
+            error,
+            "status_helper",
+            "상태 조회 도구",
+            STATUS_HELPER.version,
             &mut conflicts,
             &mut unexpected,
         ),
@@ -897,6 +915,12 @@ fn retry_required_result() -> ManagedAssetSyncResult {
             Some(CONDITION_SCRIPT.version),
             &reason,
         ),
+        retry_asset(
+            "status_helper",
+            "상태 조회 도구",
+            Some(STATUS_HELPER.version),
+            &reason,
+        ),
     ];
     sort_assets(&mut assets);
     ManagedAssetSyncResult {
@@ -927,7 +951,7 @@ fn retry_asset(
 }
 
 fn sort_assets(assets: &mut [ManagedAssetState]) {
-    const ORDER: [&str; 8] = [
+    const ORDER: [&str; 9] = [
         "workflow_rules",
         "planner_rules",
         "architect_rules",
@@ -936,6 +960,7 @@ fn sort_assets(assets: &mut [ManagedAssetState]) {
         "claude_entry",
         "claim_helper",
         "condition_script",
+        "status_helper",
     ];
     assets.sort_by_key(|asset| {
         ORDER
@@ -980,7 +1005,8 @@ mod tests {
         append_rollback_context, finish_managed_project_asset_install,
         synchronize_managed_project_assets, synchronize_with_before_commit, synchronize_with_hooks,
         ManagedProjectAssetsError, RollbackOutcome, ARCHITECT_RULES_VERSION, CLAIM_HELPER,
-        CONDITION_SCRIPT, DEVELOPER_RULES_VERSION, PLANNER_RULES_VERSION, WORKFLOW_RULES_VERSION,
+        CONDITION_SCRIPT, DEVELOPER_RULES_VERSION, PLANNER_RULES_VERSION, STATUS_HELPER,
+        WORKFLOW_RULES_VERSION,
     };
     use crate::domain::project::{
         ManagedAssetRollbackFailure, ManagedAssetRollbackRecovery, ManagedAssetStatus,
@@ -989,6 +1015,7 @@ mod tests {
     use crate::infrastructure::claim_helper::claim_helper_path;
     use crate::infrastructure::heartbeat_condition::condition_script_path;
     use crate::infrastructure::project_write_lock::ProjectWriteLock;
+    use crate::infrastructure::status_helper::status_helper_path;
 
     fn roots() -> (tempfile::TempDir, std::path::PathBuf) {
         let root = tempdir().expect("root");
@@ -1039,7 +1066,7 @@ mod tests {
         let result = synchronize_managed_project_assets(root.path(), &control).expect("sync");
 
         assert_eq!(result.status, ManagedAssetSyncStatus::Updated);
-        assert_eq!(result.assets.len(), 8);
+        assert_eq!(result.assets.len(), 9);
         let versions = result
             .assets
             .iter()
@@ -1080,12 +1107,28 @@ mod tests {
                     CONDITION_SCRIPT.version,
                     CONDITION_SCRIPT.version,
                 ),
+                (
+                    "status_helper",
+                    STATUS_HELPER.version,
+                    STATUS_HELPER.version,
+                ),
             ]
         );
         assert!(root.path().join("AGENTS.md").is_file());
         assert!(root.path().join("CLAUDE.md").is_file());
         assert!(claim_helper_path(&control).is_file());
         assert!(condition_script_path(&control).is_file());
+        assert!(status_helper_path(&control).is_file());
+        let position = |id: &str| result.assets.iter().position(|asset| asset.id == id);
+        assert_eq!(
+            position("status_helper"),
+            position("condition_script").map(|index| index + 1),
+            "상태 조회 도구는 조건 스크립트 다음 자리다"
+        );
+        assert_eq!(
+            result.assets[position("status_helper").expect("status helper asset")].label,
+            "상태 조회 도구"
+        );
     }
 
     #[test]
@@ -1765,11 +1808,18 @@ mod tests {
             synchronize_managed_project_assets(root.path(), &control).expect("retry result");
 
         assert_eq!(result.status, ManagedAssetSyncStatus::RetryRequired);
-        assert_eq!(result.assets.len(), 8);
+        assert_eq!(result.assets.len(), 9);
         assert!(result
             .assets
             .iter()
             .all(|asset| asset.status == ManagedAssetStatus::RetryRequired));
+        let status_helper = result
+            .assets
+            .iter()
+            .find(|asset| asset.id == "status_helper")
+            .expect("잠금 경합 목록에도 상태 조회 도구가 있다");
+        assert_eq!(status_helper.label, "상태 조회 도구");
+        assert_eq!(status_helper.provided_version, Some(STATUS_HELPER.version));
     }
 
     #[test]
