@@ -47,6 +47,12 @@ function workflow(groups: WorkGroupSummary[]): WorkflowSummary {
   };
 }
 
+/** 저장소의 긴 기능 소개와 같은 형태: 문단이 여럿이고 문장이 넷이다. */
+const longIntro = [
+  "품질 확인 목록의 기능 카드에는 기능 소개의 첫 문장 하나만 실립니다.",
+  "지금은 소개 문단이 세 줄까지 잘려 나옵니다. 잘린 자리까지 읽어도 기능이 무엇인지 알기 어렵습니다. 그래서 사용자는 카드를 읽지 않고 지나칩니다.",
+].join("\n\n");
+
 function recordedResult() {
   return {
     summary: { rootPath: "/tmp", initialized: true, projectId: "p", name: "P", compatibility: "current" as const, activeLeases: [], workflows: [] },
@@ -205,6 +211,39 @@ describe("QaWorkbench work-group flow", () => {
     expect(browserQaReviewDraftStore.load("feature--wf-1", "GROUP-A", 2)).not.toBeNull();
     // 실패해도 플로우 화면에 그대로 남는다.
     expect(screen.getByRole("region", { name: "확인 플로우" })).toBeInTheDocument();
+  });
+
+  it("puts only the first sentence of the intro on a queue card", () => {
+    const view = render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group({ description: longIntro })])} />);
+
+    const goal = within(screen.getByRole("region", { name: "지금 확인할 기능" })).getByText(/기능 카드에는/);
+    expect(goal).toHaveClass("qa-queue-goal");
+    expect(goal.textContent).toBe("품질 확인 목록의 기능 카드에는 기능 소개의 첫 문장 하나만 실립니다.");
+    expect(view.container.textContent).not.toContain("지금은");
+  });
+
+  it("leaves a one-sentence intro on the card exactly as it came down", () => {
+    const view = render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group()])} />);
+
+    expect(view.container.querySelector(".qa-queue-goal")?.textContent).toBe("결제 화면의 카드 등록 단계를 줄였습니다.");
+  });
+
+  it("draws the title alone when the feature has no intro", () => {
+    const view = render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group({ description: "" })])} />);
+
+    const ready = screen.getByRole("region", { name: "지금 확인할 기능" });
+    expect(within(ready).getByRole("button", { name: /카드 등록 흐름/ })).toBeInTheDocument();
+    expect(view.container.querySelector(".qa-queue-goal")).toBeNull();
+  });
+
+  it("keeps the whole intro on the opened feature header", async () => {
+    const user = userEvent.setup();
+    const view = render(<QaWorkbench onSubmit={vi.fn().mockResolvedValue(null)} workflow={workflow([group({ description: longIntro })])} />);
+
+    await user.click(screen.getByRole("button", { name: /카드 등록 흐름/ }));
+
+    // 문단 구분까지 그대로다. 화면은 이 값을 `white-space: pre-line`으로 그린다.
+    expect(view.container.querySelector(".qa-feature-goal")?.textContent).toBe(longIntro);
   });
 
   it("opens a named group directly and returns to the queue", () => {

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkGroupSummary, WorkflowSummary } from "../../domain/types";
+import { featureIntroLead } from "../../domain/featureIntro";
 import { browserQaReviewDraftStore } from "../../infrastructure/browserQaReviewDraftStore";
 import { GroupAttentionNote } from "../DevelopmentBoard";
 import { QaFlowReview } from "./QaFlowReview";
@@ -76,17 +77,22 @@ export function QaWorkbench({ initialFeatureKey = null, onSubmit, workflow }: Pr
             <header><h2>지금 확인할 기능</h2><p>기능을 구성하는 모든 작업이 끝났습니다.</p></header>
             {ready.length > 0 ? (
               <ul className="qa-queue-list">
-                {ready.map((group) => (
-                  <li key={group.id}>
-                    <button className="qa-queue-row" onClick={() => setOpenedKey(group.id)} type="button">
-                      <span className="qa-queue-main">
-                        <span className="qa-queue-title">{group.title}</span>
-                        {group.description && <span className="qa-queue-goal">{group.description}</span>}
-                      </span>
-                      <span className="qa-queue-state">{startedKeys.has(group.id) ? "계속" : "시작"}</span>
-                    </button>
-                  </li>
-                ))}
+                {ready.map((group) => {
+                  // 카드에는 소개의 첫 문장만 싣는다. 소개 전체는 시작을 눌러 열린 확인 화면의
+                  // 머리말과 완료 기록 화면이 그대로 보여준다(SPEC-075 R1·R5).
+                  const lead = featureIntroLead(group.description);
+                  return (
+                    <li key={group.id}>
+                      <button className="qa-queue-row" onClick={() => setOpenedKey(group.id)} type="button">
+                        <span className="qa-queue-main">
+                          <span className="qa-queue-title">{group.title}</span>
+                          {lead && <span className="qa-queue-goal">{lead}</span>}
+                        </span>
+                        <span className="qa-queue-state">{startedKeys.has(group.id) ? "계속" : "시작"}</span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             ) : <p className="qa-queue-empty">지금 확인할 기능이 없습니다.</p>}
           </section>

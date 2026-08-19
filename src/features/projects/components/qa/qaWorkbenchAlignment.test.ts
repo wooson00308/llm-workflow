@@ -38,11 +38,14 @@ describe("품질 확인 작업대 레이아웃", () => {
     expect(markdown.get("margin")).toBe("0");
   });
 
-  it("기능 소개는 대기열 카드에서 세 줄로 끊기고 열린 화면에서는 문단째로 보인다", () => {
+  it("기능 소개는 대기열 카드에서 두 줄로 끊기고 열린 화면에서는 문단째로 보인다", () => {
     // 카드 높이를 기능마다 같게 만드는 것이 목적이라, 대기열 쪽만 줄 수를 막는다 (SPEC-066)
+    // 카드에 싣는 값이 소개 전체에서 첫 문장 하나로 좁아져 상한도 두 줄로 내렸다. 실측 첫 문장은
+    // 두 줄 안에 들어오므로, 남은 상한은 더 긴 문장이 들어와도 카드 높이가 무너지지 않게 하는
+    // 안전장치다 (SPEC-075 R2)
     const queueGoal = declarationsFrom(baseCss, ".qa-queue-goal", "QaWorkbench.css base rules");
     expect(queueGoal.get("display")).toBe("-webkit-box");
-    expect(queueGoal.get("-webkit-line-clamp")).toBe("3");
+    expect(queueGoal.get("-webkit-line-clamp")).toBe("2");
     expect(queueGoal.get("overflow")).toBe("hidden");
 
     const featureGoal = declarationsFrom(baseCss, ".qa-feature-goal", "QaWorkbench.css base rules");

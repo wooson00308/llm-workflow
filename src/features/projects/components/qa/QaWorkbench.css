@@ -13,7 +13,7 @@
 .qa-queue-row:hover { border-color: #b9cabd; }
 .qa-queue-main { min-width: 0; }
 .qa-queue-title { display: block; font-size: 14px; font-weight: 650; }
-.qa-queue-goal { display: -webkit-box; margin-top: 3px; overflow: hidden; color: #777a70; font-size: 12px; line-height: 1.55; word-break: keep-all; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.qa-queue-goal { display: -webkit-box; margin-top: 3px; overflow: hidden; color: #777a70; font-size: 12px; line-height: 1.55; word-break: keep-all; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .qa-queue-counts { display: block; color: #92968d; font-size: 11px; }
 .qa-queue-state { flex: 0 0 auto; padding: 7px 14px; border: 1px solid #b9cabd; border-radius: 999px; color: var(--green); font-size: 12px; font-weight: 700; }
 .qa-queue-section-upcoming .qa-queue-list { gap: 0; }
