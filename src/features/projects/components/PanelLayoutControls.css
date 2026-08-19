@@ -1,0 +1,63 @@
+/**
+ * 조작 요소 셋의 스타일. 격자 자체는 여기서 정하지 않고, 이 요소들이 서는 자리는 부르는 쪽이 정한다.
+ *
+ * 세로 바 폭 28px은 `domain/panelLayout`의 COLLAPSED_PANEL_WIDTH와 같은 값이며, 시험이 그 둘을 맞대어
+ * 확인한다. 핸들을 숨기는 980px도 같은 파일의 NARROW_WINDOW_WIDTH와 같은 값이다.
+ */
+
+.panel-resize-handle {
+  flex: none;
+  width: 5px;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.panel-resize-handle:hover { background: #dfddd5; }
+
+.panel-resize-handle:focus-visible { outline: 2px solid #7c9986; outline-offset: 1px; }
+
+.panel-collapse-button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #dfddd5;
+  border-radius: 6px;
+  color: #7f827a;
+  background: #fbfaf6;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.panel-collapse-button:hover { color: #4f554f; background: #f2f0e8; }
+
+.panel-collapsed-bar {
+  display: grid;
+  width: 28px;
+  height: 100%;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #dfddd5;
+  border-radius: 8px;
+  color: #7f827a;
+  background: #fbfaf6;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.panel-collapsed-bar:hover { color: #4f554f; background: #f2f0e8; }
+
+/* 좁은 창에서 위아래로 쌓이는 자리. 세로 바와 같은 두께를 높이로 옮긴다. */
+.panel-collapsed-bar-horizontal {
+  width: 100%;
+  height: 28px;
+}
+
+/* 이 폭 이하에서는 접기 버튼과 세로 바만 남는다 (SPEC-080 R13). */
+@media (max-width: 980px) {
+  .panel-resize-handle { display: none; }
+}
