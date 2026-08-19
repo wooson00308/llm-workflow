@@ -48,3 +48,29 @@ describe("DecisionSummaryBoard", () => {
     expect(screen.getByText("<script>window.bad = true</script>")).toBeInTheDocument();
   });
 });
+
+describe("DecisionSummaryBoard — 불릿형", () => {
+  it("바뀌는 것 행들을 지금·앞으로 라벨과 함께 그리고 전후 상자는 그리지 않는다", () => {
+    const { container } = render(
+      <DecisionSummaryBoard
+        summary={{
+          proposal: "세션 표시가 일하는 세션과 끊긴 세션을 구분한다.",
+          changes: [
+            { before: "신호만 뜸해도 경고 카드", after: "실행이 살아 있으면 온화한 표시" },
+            { whole: "카드마다 판단 근거 한 줄이 붙는다" },
+          ],
+          riskItems: ["화면이 실행 기록을 더 자주 읽는다"],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("바뀌는 것")).toBeInTheDocument();
+    expect(screen.getByText("신호만 뜸해도 경고 카드")).toBeInTheDocument();
+    expect(screen.getByText("실행이 살아 있으면 온화한 표시")).toBeInTheDocument();
+    expect(screen.getByText("카드마다 판단 근거 한 줄이 붙는다")).toBeInTheDocument();
+    expect(screen.getByText("화면이 실행 기록을 더 자주 읽는다")).toBeInTheDocument();
+    expect(container.querySelector(".decision-summary-compare")).toBeNull();
+    expect(screen.queryByText("현재")).toBeNull();
+    expect(screen.queryByText("변경 후")).toBeNull();
+  });
+});

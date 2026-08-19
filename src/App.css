@@ -513,6 +513,19 @@ svg { width: 20px; height: 20px; }
 .decision-summary-arrow { align-self: center; color: #8fa398; font-size: 18px; }
 .decision-summary-risk { justify-self: start; min-width: 0; max-width: 620px; padding: 12px 14px; border: 1px solid #ecd9c4; border-radius: 11px; background: #fff6ee; }
 .decision-summary-risk h3 { margin-bottom: 7px; color: #8a4f2e; }
+/* 불릿형(현행): 바뀌는 것은 행 단위다. 한 행이 한 변화이고, 행 안에서 지금과 앞으로가 마주 본다. */
+.decision-summary-changes { display: grid; min-width: 0; gap: 8px; }
+.decision-summary-changes > ul { display: grid; margin: 0; padding: 0; gap: 8px; list-style: none; }
+.decision-change-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: center; min-width: 0; padding: 11px 14px; border: 1px solid #e3e1d8; border-radius: 12px; background: #ffffff; }
+.decision-change-single { grid-template-columns: minmax(0, 1fr); }
+.decision-change-before, .decision-change-after { display: grid; min-width: 0; gap: 3px; }
+.decision-change-before > small, .decision-change-after > small { font-size: 10px; font-weight: 750; letter-spacing: .04em; color: #82867c; }
+.decision-change-after > small { color: var(--green); }
+.decision-change-row .markdown-body p { margin: 0; font-size: 14px; line-height: 1.55; }
+.decision-change-before .markdown-body p { color: #6c7066; }
+.decision-change-after .markdown-body p, .decision-change-single .markdown-body p { color: #333b34; }
+.decision-summary-risk-items { display: grid; margin: 0; padding: 0; gap: 5px; list-style: none; }
+.decision-summary-risk-items .markdown-body p { margin: 0; }
 /* 나머지 세 값도 제안과 같은 크기로 읽힌다. 크기 차이는 항목의 중요도로 오해된다(SPEC-076 R6). */
 .decision-summary-before .markdown-body p, .decision-summary-after .markdown-body p, .decision-summary-risk .markdown-body p { font-size: 15px; line-height: 1.65; }
 .markdown-body { max-width: 620px; margin: 0 auto; }

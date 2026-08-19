@@ -28,9 +28,25 @@ export interface SectionSplit {
  */
 export interface DecisionSummary {
   proposal: string;
-  current: string;
-  after: string;
+  /** 문단형(이전 규격): 현재·변경 후 한 쌍. 불릿형 문서에는 없다. */
+  current?: string;
+  after?: string;
+  /** 불릿형(현행 규격): 바뀌는 것 행들. 문단형 문서에는 없다. */
+  changes?: ChangeRow[];
+  /** 문단형의 비용과 위험. */
   risk?: string;
+  /** 불릿형의 비용과 위험. */
+  riskItems?: string[];
+}
+
+/**
+ * 바뀌는 것 한 행. "지금 → 앞으로" 짝이면 두 값이 오고, 화살표 없는 단독 변화면 `whole` 하나만
+ * 온다. 두 형태 밖의 행은 구조화 요약이 아니므로 이 값으로 만들어지지 않는다.
+ */
+export interface ChangeRow {
+  before?: string;
+  after?: string;
+  whole?: string;
 }
 
 /** 막힌 작업 문서가 명시한 현재 사유를 화면에서 그대로 사용할 수 있게 분리한 값이다. */
@@ -52,6 +68,7 @@ const BLOCKED_REASON_HEADING = "## 막힌 사유";
 const BLOCKED_REASON_MARKERS = ["- 막힌 지점: ", "- 필요한 해결: ", "- 재개 조건: ", "- 관련 대상: "] as const;
 const STRUCTURED_SUMMARY_HEADINGS = [
   "### 제안",
+  "### 바뀌는 것",
   "### 현재",
   "### 변경 후",
   "### 사용자 결과",
@@ -62,13 +79,21 @@ const STRUCTURED_SUMMARY_HEADINGS = [
 
 /** 제목 배열이 이 순서들 가운데 하나와 정확히 일치할 때만 구조화 요약으로 인정한다. */
 const ACCEPTED_HEADING_SEQUENCES: readonly (readonly string[])[] = [
-  // 현행 규격
+  // 현행 규격 — 바뀌는 것은 불릿 행으로만 온다.
+  ["### 제안", "### 바뀌는 것"],
+  ["### 제안", "### 바뀌는 것", "### 비용과 위험"],
+  // 이전 문단형 규격 — 문서는 유효하고, 보드는 전후 상자로 그대로 그린다.
   ["### 제안", "### 현재", "### 변경 후"],
   ["### 제안", "### 현재", "### 변경 후", "### 비용과 위험"],
   // 이전 일곱 항목 규격 — 문서는 유효하고, 보드는 공통 네 값만 읽는다.
   ["### 제안", "### 현재", "### 변경 후", "### 사용자 결과", "### 영향 범위", "### 결정 요청"],
   ["### 제안", "### 현재", "### 변경 후", "### 사용자 결과", "### 영향 범위", "### 비용과 위험", "### 결정 요청"],
 ];
+
+/** 바뀌는 것 불릿 개수의 허용 범위. 작성 규칙과 같은 값이다. */
+const CHANGE_BULLET_RANGE = { min: 1, max: 3 } as const;
+/** 불릿형 비용과 위험의 불릿 개수 허용 범위. */
+const RISK_BULLET_RANGE = { min: 1, max: 2 } as const;
 
 const MARKDOWN_HEADING_PATTERN = /^ {0,3}(#{1,6})\s/;
 
@@ -157,12 +182,74 @@ export function parseDecisionSummary(section: string | null): DecisionSummary | 
 
   const byHeading = new Map(parts.map((part) => [part.heading as string, part]));
   const proposal = partValue(byHeading.get("### 제안"));
+  if (!proposal) return null;
+
+  // 현행 불릿형: 바뀌는 것 행들과 불릿형 위험. 불릿 규격을 어기면 구조화 요약이 아니다.
+  if (byHeading.has("### 바뀌는 것")) {
+    const changes = changeRows(byHeading.get("### 바뀌는 것"));
+    if (changes === null) return null;
+    const riskPart = byHeading.get("### 비용과 위험");
+    if (riskPart) {
+      const riskItems = bulletValues(riskPart, RISK_BULLET_RANGE.min, RISK_BULLET_RANGE.max);
+      if (riskItems === null) return null;
+      return { proposal, changes, riskItems };
+    }
+    return { proposal, changes };
+  }
+
   const current = partValue(byHeading.get("### 현재"));
   const after = partValue(byHeading.get("### 변경 후"));
   const risk = partValue(byHeading.get("### 비용과 위험")) ?? undefined;
-  if (!proposal || !current || !after) return null;
+  if (!current || !after) return null;
 
   return { proposal, current, after, ...(risk ? { risk } : {}) };
+}
+
+/**
+ * 불릿만으로 이루어진 절에서 값들을 읽는다. 불릿이 아닌 줄이 섞이거나 개수가 범위를 벗어나면
+ * 구조화 요약이 아니므로 `null`이다.
+ */
+function bulletValues(part: SummaryPart | undefined, min: number, max: number) {
+  const lines = part?.lines.filter((line) => line.trim().length > 0);
+  if (!lines || lines.length < min || lines.length > max) return null;
+
+  const values: string[] = [];
+  for (const line of lines) {
+    if (!line.startsWith("- ")) return null;
+    const value = line.slice(2).trim();
+    if (!value) return null;
+    values.push(value);
+  }
+  return values;
+}
+
+/**
+ * 바뀌는 것 불릿들을 행 값으로 바꾼다. 화살표가 있는 행은 "지금 → 앞으로" 짝으로 읽고,
+ * 그때 붙는 "지금:"과 "앞으로:" 표지는 화면 라벨이 대신하므로 값에서 걷어 낸다.
+ */
+function changeRows(part: SummaryPart | undefined): ChangeRow[] | null {
+  const values = bulletValues(part, CHANGE_BULLET_RANGE.min, CHANGE_BULLET_RANGE.max);
+  if (values === null) return null;
+
+  const rows: ChangeRow[] = [];
+  for (const value of values) {
+    const split = value.indexOf(" → ");
+    if (split < 0) {
+      rows.push({ whole: value });
+      continue;
+    }
+    const before = stripLabel(value.slice(0, split), "지금:");
+    const after = stripLabel(value.slice(split + " → ".length), "앞으로:");
+    if (!before || !after) return null;
+    rows.push({ before, after });
+  }
+  return rows;
+}
+
+function stripLabel(value: string, label: string) {
+  const trimmed = value.trim();
+  const stripped = trimmed.startsWith(label) ? trimmed.slice(label.length).trim() : trimmed;
+  return stripped || null;
 }
 
 /**

@@ -400,3 +400,65 @@ describe("parseBlockedReason", () => {
     expect(parseBlockedReason(example)?.relatedTargets).toEqual(["TASK-100", "TASK-없는-작업", "외부 공급자 승인"]);
   });
 });
+
+describe("parseDecisionSummary — 불릿형(바뀌는 것)", () => {
+  const bulletSummary = (changes: string[], risks?: string[]) =>
+    [
+      HEADING, "",
+      "### 제안", "세션 표시가 일하는 세션과 끊긴 세션을 구분한다.", "",
+      "### 바뀌는 것", ...changes,
+      ...(risks ? ["", "### 비용과 위험", ...risks] : []),
+    ].join("\n");
+
+  it("화살표 행을 지금·앞으로 짝으로 읽고 표지는 걷어 낸다", () => {
+    const summary = parseDecisionSummary(
+      bulletSummary([
+        "- 지금: 신호만 뜸해도 경고 카드 → 앞으로: 실행이 살아 있으면 온화한 표시",
+        "- 카드마다 판단 근거 한 줄이 붙는다",
+      ]),
+    );
+
+    expect(summary?.proposal).toBe("세션 표시가 일하는 세션과 끊긴 세션을 구분한다.");
+    expect(summary?.changes).toEqual([
+      { before: "신호만 뜸해도 경고 카드", after: "실행이 살아 있으면 온화한 표시" },
+      { whole: "카드마다 판단 근거 한 줄이 붙는다" },
+    ]);
+    expect(summary?.current).toBeUndefined();
+    expect(summary?.riskItems).toBeUndefined();
+  });
+
+  it("불릿형 비용과 위험은 항목 배열로 온다", () => {
+    const summary = parseDecisionSummary(
+      bulletSummary(
+        ["- 지금: 전부 경고 → 앞으로: 근거 있는 세션만 경고"],
+        ["- 화면이 실행 기록을 더 자주 읽는다", "- 표시만 바꿔서 되돌리기 쉽다"],
+      ),
+    );
+
+    expect(summary?.riskItems).toEqual([
+      "화면이 실행 기록을 더 자주 읽는다",
+      "표시만 바꿔서 되돌리기 쉽다",
+    ]);
+    expect(summary?.risk).toBeUndefined();
+  });
+
+  it("불릿이 아닌 줄이 섞이면 구조화 요약이 아니다", () => {
+    expect(parseDecisionSummary(bulletSummary(["문단으로 쓴 설명이다."]))).toBeNull();
+  });
+
+  it("불릿이 세 개를 넘으면 구조화 요약이 아니다", () => {
+    expect(
+      parseDecisionSummary(bulletSummary(["- 하나", "- 둘", "- 셋", "- 넷"])),
+    ).toBeNull();
+  });
+
+  it("화살표 행의 한쪽이 비어 있으면 구조화 요약이 아니다", () => {
+    expect(parseDecisionSummary(bulletSummary(["- 지금: 경고 카드 → 앞으로:"]))).toBeNull();
+  });
+
+  it("비용과 위험 불릿이 두 개를 넘으면 구조화 요약이 아니다", () => {
+    expect(
+      parseDecisionSummary(bulletSummary(["- 하나"], ["- 갑", "- 을", "- 병"])),
+    ).toBeNull();
+  });
+});

@@ -18,7 +18,7 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 33;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 34;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
 pub(crate) const ARCHITECT_RULES_VERSION: u32 = 21;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 23;
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 33
+rules_version: 34
 ---
 
 # LLM Workflow agent protocol
@@ -410,36 +410,35 @@ Idea documents are outside this section. The user writes there too, so no obliga
 A specification and a development task written from here on carry the summary as a fixed set of sub-headings, in this order, each written exactly once:
 
 1. `### 제안`
-2. `### 현재`
-3. `### 변경 후`
-4. `### 비용과 위험` — optional
+2. `### 바뀌는 것`
+3. `### 비용과 위험` — optional
 
 - `### 제안` is one sentence: what this document wants to do.
-- `### 현재` and `### 변경 후` are the before/after pair the decision is made on. `### 변경 후` states the change and the benefit the user gets from it in the same breath — there is no separate benefit heading, so a paraphrase of the change written twice is a fault, not thoroughness.
-- `### 비용과 위험` is written only when there is a real cost or risk to name. It also carries the safety facts a decision-maker checks before stamping: what stays untouched, and whether the change can be undone. With nothing to name, the heading is left out entirely — it is never written empty.
+- `### 바뀌는 것` is one to three bullet lines and nothing else — a paragraph never stands in this section. Each bullet is one sentence naming one change the decision-maker would notice. Where the change is a before/after contrast, the bullet carries the pair in one line as `- 지금: … → 앞으로: …`; a change with no meaningful before stands alone as a single-sentence bullet.
+- `### 비용과 위험` is written only when there is a real cost or risk to name, as one or two bullet lines. The first bullet names the real cost or risk; the second names what stays untouched, how the change is undone, or what stays as it is when the document is not approved. With nothing to name, the heading is left out entirely — it is never written empty.
 - Every required heading carries a value. A heading standing over nothing is not a filled one.
 - A repeated heading, a changed order, a heading at another depth, or a sub-heading outside this list is not the structured form. Neither the app nor the writing role guesses at a near-miss heading or invents a value it was not given.
 - There is no request heading. The decision a specification asks for is always the same three stamps the app offers, and an open choice the writer could not settle means the document is not ready for review — settle it, or state the chosen default so a disagreeing user can send the document back. A development task asks the user for nothing.
 - An implementation report is outside this. Reports keep the plain summary defined above.
-- Summaries written under the earlier seven-heading form (with `### 사용자 결과`, `### 영향 범위`, and `### 결정 요청`) stay valid. The app keeps reading them; no session rewrites one except when it edits that document for its own reasons, and then it writes the current form.
+- Summaries written under the earlier paragraph form (`### 현재` and `### 변경 후` around a prose pair, at most three sentences each) stay valid, and so do summaries under the earlier seven-heading form (with `### 사용자 결과`, `### 영향 범위`, and `### 결정 요청`). The app keeps reading them; no session rewrites one except when it edits that document for its own reasons, and then it writes the current form.
 
-The ten-line limit above is not what bounds a structured summary, because its headings alone exceed ten lines. Each heading carries a sentence count instead: `### 제안` is one sentence, and `### 현재`, `### 변경 후`, and `### 비용과 위험` are at most three sentences each. A plain summary and a report summary keep the ten-line limit exactly as written above.
+The bullet is the unit because a paragraph hides how many changes it carries. The same three sentences that read as a wall inside one block read as three separate decisions when each stands on its own line, and the decision screen can lay a bulleted pair out as one row instead of pouring a paragraph into a narrow box (2026-08-19: with sentence caps alone, summaries still rendered as ten-line walls, and the decision-maker declined to judge them).
 
-The count is in sentences because a summary grows by gaining another sentence, not by any one sentence getting longer. Laying a character count over the sentence count would only split which of the two a writer checks first, so no character count is set here.
-
-Dates, quotations, how the investigation was carried out, and measurement tables belong in the document body, not in the summary. Without that, the sentence count would press the evidence into a single sentence, and the summary would come out shorter and harder to read than it was before.
-
-Three sentences hold everything `### 비용과 위험` has to carry. The first names the real cost or risk, the second names what stays untouched and how the change is undone, and the third names what stays as it is when the document is not approved:
+Dates, quotations, how the investigation was carried out, and measurement tables belong in the document body, not in the summary. Without that, the bullet form would press the evidence into the change lines, and the summary would come out denser and harder to read than it was before.
 
 ```markdown
+### 바뀌는 것
+
+- 지금: 신호만 뜸해도 경고 카드가 뜬다 → 앞으로: 실행이 살아 있으면 온화한 표시만 붙는다
+- 카드마다 그렇게 판단한 근거 한 줄이 붙는다
+
 ### 비용과 위험
 
-새 항목이 목록 위쪽을 차지하므로 기존 항목을 찾던 사용자는 한 번 더 스크롤한다.
-저장된 데이터와 결정 기록은 손대지 않으므로, 되돌리려면 이 화면의 표시 순서만 되돌리면 된다.
-승인되지 않으면 목록은 지금 순서 그대로 남는다.
+- 화면이 실행 활동 기록을 지금보다 자주 읽는다.
+- 표시만 바꾸므로 되돌리기 쉽고, 승인되지 않으면 지금 표시가 그대로 남는다.
 ```
 
-The sentence counts reach a specification and a development task alike, and an implementation report keeps the ten-line limit on its plain summary. Documents already written are not changed: the counts reach the documents written after these rules are installed.
+The bullet counts reach a specification and a development task alike, and an implementation report keeps the ten-line limit on its plain summary. Documents already written are not changed: the counts reach the documents written after these rules are installed.
 
 Everything under "What it must not contain" reaches structured values too. A value is Markdown text and nothing else: a document does not write HTML here, and the app builds no separate HTML copy, no summary cache, no image, no chart payload, no network call, and no model call out of this section. It reads the same body it already reads.
 
@@ -1533,7 +1532,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1555,7 +1554,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1600,7 +1599,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
@@ -1624,7 +1623,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1656,7 +1655,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(developer.contains("rules_version: 23"));
 
         // 표시를 남기는 경로가 헬퍼 호출 하나뿐임을 공통 규칙이 정한다.
@@ -1692,7 +1691,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1734,7 +1733,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1768,7 +1767,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
@@ -1799,7 +1798,7 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 33);
+        assert_eq!(WORKFLOW_RULES_VERSION, 34);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 21);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
@@ -1855,7 +1854,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1955,7 +1954,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -2059,7 +2058,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
@@ -2192,7 +2191,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 21"));
@@ -2282,15 +2281,14 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("### The structured summary"));
 
-        // 네 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·전후·위험으로 끝난다.
+        // 세 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·바뀌는 것·위험으로 끝난다.
         let headings = [
             "1. `### 제안`",
-            "2. `### 현재`",
-            "3. `### 변경 후`",
-            "4. `### 비용과 위험`",
+            "2. `### 바뀌는 것`",
+            "3. `### 비용과 위험`",
         ];
         let mut previous = 0;
         for heading in headings {
@@ -2301,19 +2299,23 @@ mod tests {
             previous = at;
         }
         assert_eq!(rules.matches("1. `### 제안`").count(), 1);
-        assert!(!rules.contains("5. `###"));
+        assert!(!rules.contains("4. `###"));
 
-        // 변경 후가 이득까지 담고, 별도의 결과·요청 항목은 없다.
-        assert!(rules.contains(
-            "states the change and the benefit the user gets from it in the same breath"
-        ));
+        // 바뀌는 것은 불릿만 허용하고, 전후 대비는 한 줄 짝으로 적는다.
+        assert!(rules.contains("one to three bullet lines and nothing else"));
+        assert!(rules.contains("a paragraph never stands in this section"));
+        assert!(rules.contains("- 지금: … → 앞으로: …"));
+        assert!(rules.contains("stands alone as a single-sentence bullet"));
         assert!(rules.contains("There is no request heading"));
         assert!(rules.contains("A development task asks the user for nothing"));
         assert!(rules.contains("A heading standing over nothing is not a filled one"));
 
-        // 선택 항목과 구조 불인정 조건. 위험 항목이 유지·되돌리기 사실을 흡수한다.
+        // 선택 항목과 구조 불인정 조건. 위험 항목이 유지·되돌리기 사실을 불릿으로 흡수한다.
         assert!(rules.contains("is written only when there is a real cost or risk to name"));
-        assert!(rules.contains("what stays untouched, and whether the change can be undone"));
+        assert!(rules.contains("as one or two bullet lines"));
+        assert!(rules.contains(
+            "names what stays untouched, how the change is undone, or what stays as it is when the document is not approved"
+        ));
         assert!(rules.contains("it is never written empty"));
         assert!(rules.contains(
             "A repeated heading, a changed order, a heading at another depth, or a sub-heading outside this list is not the structured form"
@@ -2324,44 +2326,36 @@ mod tests {
         assert!(rules.contains("A specification and a development task written from here on carry the summary as a fixed set of sub-headings"));
         assert!(rules.contains("An implementation report is outside this"));
 
-        // 이전 일곱 항목 문서는 그대로 유효하다.
-        assert!(rules.contains("Summaries written under the earlier seven-heading form"));
+        // 이전 문단형과 일곱 항목 문서는 그대로 유효하다.
+        assert!(rules.contains("Summaries written under the earlier paragraph form"));
+        assert!(rules.contains("at most three sentences each"));
+        assert!(rules.contains("`### 사용자 결과`, `### 영향 범위`, and `### 결정 요청`"));
 
-        // 열 줄 상한과의 충돌 해소. 분량은 이제 제목별 문장 수로 정해진다.
-        assert!(rules.contains("The ten-line limit above is not what bounds a structured summary"));
+        // 불릿이 단위인 이유와 실측 근거.
         assert!(rules.contains(
-            "`### 제안` is one sentence, and `### 현재`, `### 변경 후`, and `### 비용과 위험` are at most three sentences each"
+            "The bullet is the unit because a paragraph hides how many changes it carries"
         ));
+        assert!(rules.contains("the decision-maker declined to judge them"));
         assert!(!rules.contains("one short paragraph under each heading"));
-        assert!(rules.contains("A plain summary and a report summary keep the ten-line limit"));
-
-        // 상한을 문장 수로 정한 이유. 글자 수 상한은 규칙에 넣지 않는다.
-        assert!(rules.contains(
-            "The count is in sentences because a summary grows by gaining another sentence, not by any one sentence getting longer"
-        ));
-        assert!(rules.contains("so no character count is set here"));
 
         // 근거 서술의 자리는 요약이 아니라 본문이다.
         assert!(rules.contains(
             "Dates, quotations, how the investigation was carried out, and measurement tables belong in the document body, not in the summary"
         ));
-        assert!(rules.contains(
-            "the sentence count would press the evidence into a single sentence, and the summary would come out shorter and harder to read"
-        ));
+        assert!(rules.contains("the bullet form would press the evidence into the change lines"));
 
-        // 비용과 위험의 필수 사실 넷을 세 문장에 담는 예시.
+        // 두 절의 불릿 예시.
+        assert!(rules.contains("```markdown\n### 바뀌는 것\n"));
         assert!(rules.contains(
-            "The first names the real cost or risk, the second names what stays untouched and how the change is undone, and the third names what stays as it is when the document is not approved"
+            "- 지금: 신호만 뜸해도 경고 카드가 뜬다 → 앞으로: 실행이 살아 있으면 온화한 표시만 붙는다"
         ));
-        assert!(rules.contains("```markdown\n### 비용과 위험\n"));
         assert!(rules.contains(
-            "저장된 데이터와 결정 기록은 손대지 않으므로, 되돌리려면 이 화면의 표시 순서만 되돌리면 된다."
+            "- 표시만 바꾸므로 되돌리기 쉽고, 승인되지 않으면 지금 표시가 그대로 남는다."
         ));
-        assert!(rules.contains("승인되지 않으면 목록은 지금 순서 그대로 남는다."));
 
         // 적용 대상과 소급 여부.
         assert!(rules.contains(
-            "The sentence counts reach a specification and a development task alike, and an implementation report keeps the ten-line limit on its plain summary"
+            "The bullet counts reach a specification and a development task alike, and an implementation report keeps the ten-line limit on its plain summary"
         ));
         assert!(rules.contains(
             "Documents already written are not changed: the counts reach the documents written after these rules are installed"
@@ -2425,7 +2419,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2537,7 +2531,7 @@ mod tests {
         assert!(architect.contains("One session attempts one repair"));
 
         // 공통 규칙이 선택 필드와 본문 절을 적고, 둘 다 없는 기존 기능 문서도 그대로 유효하다.
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("the optional `configuration_unresolved_revision` field"));
         assert!(rules.contains("`configuration_unresolved_revision: 2`"));
         assert!(rules.contains(
@@ -2554,7 +2548,7 @@ mod tests {
         assert!(!developer.contains("configuration_unresolved_revision"));
 
         // 두 판 번호만 올랐고 나머지 둘은 그대로다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 33);
+        assert_eq!(WORKFLOW_RULES_VERSION, 34);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 21);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
@@ -2616,7 +2610,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2647,7 +2641,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 33"));
+        assert!(rules.contains("rules_version: 34"));
         assert!(rules.contains("`history`"));
         assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
