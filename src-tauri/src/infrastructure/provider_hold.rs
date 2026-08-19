@@ -54,8 +54,9 @@ struct HoldRecord {
 /// 한도 도달로 끝난 실행 하나를 보류 기록으로 남긴다.
 ///
 /// 다음 가운데 하나라도 해당하면 파일을 만들지 않는다. 쓸 수 없는 실행 도구 이름, 재개 시각을 정할
-/// 수 없는 행, 이미 지난 재개 시각, 그리고 같은 실행으로 이미 남긴 기록이다. 쓰기에 실패해도
-/// 오류를 올리지 않는다. 보류를 남기지 못한 것이 실행 목록 조회를 실패로 만들지는 않기 때문이다.
+/// 수 없는 행, 이미 지난 재개 시각, 같은 실행으로 이미 남긴 기록, 그리고 이미 걸려 있는 보류가 새로
+/// 정한 재개 시각보다 늦거나 같은 경우다. 쓰기에 실패해도 오류를 올리지 않는다. 보류를 남기지 못한
+/// 것이 실행 목록 조회를 실패로 만들지는 않기 때문이다.
 pub fn record(root: &Path, run: &RunSummary, now: DateTime<Utc>) {
     let Some(path) = hold_path(root, &run.provider) else {
         return;
@@ -66,8 +67,18 @@ pub fn record(root: &Path, run: &RunSummary, now: DateTime<Utc>) {
     if resume_at <= now {
         return;
     }
-    if read_record(&path).is_some_and(|record| record.run_id == run.run_id) {
-        return;
+    if let Some(existing) = read_record(&path) {
+        if existing.run_id == run.run_id {
+            return;
+        }
+        // 이미 걸려 있는 보류를 더 이른 시각으로 줄이지 않는다. 나중 실행이 해제 예정 시각을 싣지
+        // 못하면 추정값이 들어오는데, 그 값이 앞서 적힌 실제 해제 시각을 덮으면 보류가 실제보다 일찍
+        // 풀린다. 만료된 기록은 보류가 아니므로 이 비교의 대상이 아니고 새 값이 그 자리를 대신한다.
+        if parse_stamp(&existing.resume_at).is_some_and(|existing_resume_at| {
+            existing_resume_at > now && existing_resume_at >= resume_at
+        }) {
+            return;
+        }
     }
     let body = format!(
         "schema_version: {SCHEMA_VERSION}\nprovider: {}\nresume_at: {}\nresume_at_known: {}\nrecorded_at: {}\nrun_id: {}\n",
@@ -246,6 +257,19 @@ mod tests {
         }
     }
 
+    /// 실행 식별자만 다른 행. 같은 실행 재확인이 아니라 새 한도 종료를 만드는 자리에 쓴다.
+    fn run_as(
+        run_id: &str,
+        provider: &str,
+        finished_at: DateTime<Utc>,
+        resets_at: Option<String>,
+    ) -> RunSummary {
+        RunSummary {
+            run_id: run_id.to_owned(),
+            ..run(provider, finished_at, resets_at)
+        }
+    }
+
     fn body(root: &Path, provider: &str) -> String {
         fs::read_to_string(root.join("provider-holds").join(format!("{provider}.yml")))
             .expect("기록 파일")
@@ -308,6 +332,92 @@ mod tests {
         record(root.path(), &row, at + Duration::minutes(5));
 
         assert_eq!(body(root.path(), "claude"), first);
+    }
+
+    #[test]
+    fn an_earlier_resume_time_never_shortens_a_standing_hold() {
+        let root = tempdir().expect("root");
+        let at = now();
+        let resets_at = stamp(at + Duration::hours(5));
+
+        record(
+            root.path(),
+            &run_as("run-1", "claude", at, Some(resets_at)),
+            at,
+        );
+        let first = body(root.path(), "claude");
+        // 나중 실행이 해제 예정 시각을 싣지 못해 종료 한 시간 뒤라는 추정값을 낸다. 앞 기록의 실제
+        // 해제 시각이 더 늦으므로 기록이 그대로 남아야 한다.
+        let later = at + Duration::minutes(10);
+        record(root.path(), &run_as("run-2", "claude", later, None), later);
+
+        assert_eq!(body(root.path(), "claude"), first);
+        let hold = hold_for(root.path(), "claude", later).expect("보류");
+        assert_eq!(hold.resume_at, stamp(at + Duration::hours(5)));
+        assert!(hold.resume_at_known);
+    }
+
+    #[test]
+    fn an_estimated_hold_that_is_kept_stays_marked_as_an_estimate() {
+        let root = tempdir().expect("root");
+        let at = now();
+
+        record(root.path(), &run_as("run-1", "claude", at, None), at);
+        let first = body(root.path(), "claude");
+        // 나중 실행이 실어 온 실제 해제 시각이 추정값보다 이르다. 기획서가 고른 기본값대로 더 늦은
+        // 추정값을 유지하므로, 추정값이라는 구분도 함께 남는다.
+        record(
+            root.path(),
+            &run_as(
+                "run-2",
+                "claude",
+                at,
+                Some(stamp(at + Duration::minutes(30))),
+            ),
+            at,
+        );
+
+        assert_eq!(body(root.path(), "claude"), first);
+        let hold = hold_for(root.path(), "claude", at).expect("보류");
+        assert_eq!(hold.resume_at, stamp(at + Duration::hours(1)));
+        assert!(!hold.resume_at_known);
+    }
+
+    #[test]
+    fn a_later_resume_time_extends_the_hold() {
+        let root = tempdir().expect("root");
+        let at = now();
+        let later = stamp(at + Duration::hours(4));
+
+        record(
+            root.path(),
+            &run_as("run-1", "claude", at, Some(stamp(at + Duration::hours(2)))),
+            at,
+        );
+        record(
+            root.path(),
+            &run_as("run-2", "claude", at, Some(later.clone())),
+            at,
+        );
+
+        let hold = hold_for(root.path(), "claude", at).expect("보류");
+        assert_eq!(hold.resume_at, later);
+        assert!(body(root.path(), "claude").contains("run_id: run-2\n"));
+    }
+
+    #[test]
+    fn an_expired_record_gives_way_to_a_new_hold() {
+        let root = tempdir().expect("root");
+        let at = now();
+
+        record(root.path(), &run_as("run-1", "claude", at, None), at);
+        // 앞 기록의 해제 시각이 이미 지났으므로 보류가 아니다. 새 한도 종료가 그 자리를 대신한다.
+        let after = at + Duration::hours(2);
+        record(root.path(), &run_as("run-2", "claude", after, None), after);
+
+        let hold = hold_for(root.path(), "claude", after).expect("보류");
+        assert_eq!(hold.resume_at, stamp(after + Duration::hours(1)));
+        assert!(body(root.path(), "claude").contains("run_id: run-2\n"));
     }
 
     #[test]

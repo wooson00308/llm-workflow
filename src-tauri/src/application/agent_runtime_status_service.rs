@@ -6,10 +6,9 @@
 //! **로그는 cursor만 주고받는다.** 화면이 파일 경로를 보내지도 받지도 않으며, 런타임이 이미 민감정보를
 //! 제거한 이벤트만 온다. 앱은 그 이벤트를 다시 해석하지 않고 그대로 전달한다.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -394,31 +393,26 @@ fn bundle_event(value: &Value) -> BundleEvent {
     }
 }
 
-/// 실행 도구마다 사용 한도로 끝난 가장 늦은 실행 행 하나.
+/// 사용 한도로 끝난 실행 행 전부.
 ///
 /// 고르는 조건은 셋을 모두 만족하는 행이다. 종료 사유가 한도 도달 구분값이고, 상태가 끝난 상태이며,
 /// 종료 시각이 있다. 종료 시각을 읽지 못하는 행은 재개 시각을 정할 수 없으므로 고르지 않는다.
+///
+/// 실행 도구마다 한 행으로 줄이지 않는다. 같은 도구의 한도 종료가 여럿 보일 때 어느 행이 가장 늦은
+/// 해제 시각을 실었는지는 종료 시각으로 알 수 없어서, 늦게 끝난 행 하나만 보내면 먼저 끝난 행이 실어
+/// 온 더 늦은 해제 시각이 기록에 닿지 못한다. 어느 행을 남길지는 기록 쪽이 판정한다.
 fn usage_limit_ends(runs: &[RunSummary]) -> Vec<&RunSummary> {
-    let mut latest: BTreeMap<&str, (DateTime<Utc>, &RunSummary)> = BTreeMap::new();
-    for run in runs {
-        if !run.reached_usage_limit() || !run.state.is_finished() {
-            continue;
-        }
-        let Some(finished_at) = run
-            .finished_at
-            .as_deref()
-            .and_then(provider_hold::runtime_time)
-        else {
-            continue;
-        };
-        match latest.get(run.provider.as_str()) {
-            Some((chosen, _)) if *chosen >= finished_at => {}
-            _ => {
-                latest.insert(run.provider.as_str(), (finished_at, run));
-            }
-        }
-    }
-    latest.into_values().map(|(_, run)| run).collect()
+    runs.iter()
+        .filter(|run| {
+            run.reached_usage_limit()
+                && run.state.is_finished()
+                && run
+                    .finished_at
+                    .as_deref()
+                    .and_then(provider_hold::runtime_time)
+                    .is_some()
+        })
+        .collect()
 }
 
 /// 읽지 못한 상태. 실행 목록을 비우고 사유를 싣는다.
@@ -800,17 +794,19 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_usage_limit_row_of_each_provider_is_the_provider_hold_basis() {
+    fn the_latest_resume_time_of_each_provider_becomes_the_provider_hold() {
         let root = tempdir().expect("root");
         let at = Utc::now();
         let caller = queue(vec![
+            // 한 번의 확인에서 같은 도구의 한도 종료가 둘 보인다. 늦게 끝난 쪽이 해제 예정 시각을
+            // 싣지 않아 종료 한 시간 뒤라는 추정값을 내므로, 먼저 끝난 쪽의 실제 해제 시각이 남는다.
             ended(
                 "run-1",
                 "claude",
                 "failed",
                 json!(USAGE_LIMIT_REACHED),
                 json!(stamp(at - Duration::minutes(10))),
-                json!(stamp(at + Duration::hours(1))),
+                json!(stamp(at + Duration::hours(4))),
             ),
             ended(
                 "run-2",
@@ -818,14 +814,23 @@ mod tests {
                 "failed",
                 json!(USAGE_LIMIT_REACHED),
                 json!(stamp(at)),
-                json!(stamp(at + Duration::hours(4))),
+                Value::Null,
             ),
+            // 반대 순서로 도착해도 결과는 같고, 한 도구의 보류가 다른 도구의 보류를 만들지 않는다.
             ended(
                 "run-3",
                 "codex",
                 "failed",
                 json!(USAGE_LIMIT_REACHED),
                 json!(stamp(at - Duration::minutes(5))),
+                json!(stamp(at + Duration::hours(1))),
+            ),
+            ended(
+                "run-4",
+                "codex",
+                "failed",
+                json!(USAGE_LIMIT_REACHED),
+                json!(stamp(at)),
                 json!(stamp(at + Duration::hours(2))),
             ),
         ]);
@@ -848,6 +853,7 @@ mod tests {
                 ("codex", stamp(at + Duration::hours(2)).as_str()),
             ]
         );
+        assert!(snapshot.provider_holds[0].resume_at_known);
     }
 
     #[test]
