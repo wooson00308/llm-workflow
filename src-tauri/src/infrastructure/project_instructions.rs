@@ -18,7 +18,7 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 32;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 33;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
 pub(crate) const ARCHITECT_RULES_VERSION: u32 = 21;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 23;
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 32
+rules_version: 33
 ---
 
 # LLM Workflow agent protocol
@@ -423,7 +423,23 @@ A specification and a development task written from here on carry the summary as
 - An implementation report is outside this. Reports keep the plain summary defined above.
 - Summaries written under the earlier seven-heading form (with `### 사용자 결과`, `### 영향 범위`, and `### 결정 요청`) stay valid. The app keeps reading them; no session rewrites one except when it edits that document for its own reasons, and then it writes the current form.
 
-The ten-line limit above does not reach a structured summary, because the headings alone exceed it. Brevity comes from the shape instead: one short paragraph under each heading. A plain summary and a report summary keep the ten-line limit exactly as written above.
+The ten-line limit above is not what bounds a structured summary, because its headings alone exceed ten lines. Each heading carries a sentence count instead: `### 제안` is one sentence, and `### 현재`, `### 변경 후`, and `### 비용과 위험` are at most three sentences each. A plain summary and a report summary keep the ten-line limit exactly as written above.
+
+The count is in sentences because a summary grows by gaining another sentence, not by any one sentence getting longer. Laying a character count over the sentence count would only split which of the two a writer checks first, so no character count is set here.
+
+Dates, quotations, how the investigation was carried out, and measurement tables belong in the document body, not in the summary. Without that, the sentence count would press the evidence into a single sentence, and the summary would come out shorter and harder to read than it was before.
+
+Three sentences hold everything `### 비용과 위험` has to carry. The first names the real cost or risk, the second names what stays untouched and how the change is undone, and the third names what stays as it is when the document is not approved:
+
+```markdown
+### 비용과 위험
+
+새 항목이 목록 위쪽을 차지하므로 기존 항목을 찾던 사용자는 한 번 더 스크롤한다.
+저장된 데이터와 결정 기록은 손대지 않으므로, 되돌리려면 이 화면의 표시 순서만 되돌리면 된다.
+승인되지 않으면 목록은 지금 순서 그대로 남는다.
+```
+
+The sentence counts reach a specification and a development task alike, and an implementation report keeps the ten-line limit on its plain summary. Documents already written are not changed: the counts reach the documents written after these rules are installed.
 
 Everything under "What it must not contain" reaches structured values too. A value is Markdown text and nothing else: a document does not write HTML here, and the app builds no separate HTML copy, no summary cache, no image, no chart payload, no network call, and no model call out of this section. It reads the same body it already reads.
 
@@ -1517,7 +1533,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1539,7 +1555,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1584,7 +1600,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
@@ -1608,7 +1624,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1640,7 +1656,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(developer.contains("rules_version: 23"));
 
         // 표시를 남기는 경로가 헬퍼 호출 하나뿐임을 공통 규칙이 정한다.
@@ -1676,7 +1692,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1718,7 +1734,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1752,7 +1768,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
@@ -1783,7 +1799,7 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 32);
+        assert_eq!(WORKFLOW_RULES_VERSION, 33);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 21);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
@@ -1839,7 +1855,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1939,7 +1955,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -2043,7 +2059,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
@@ -2176,7 +2192,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
         assert!(architect.contains("rules_version: 21"));
@@ -2266,7 +2282,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("### The structured summary"));
 
         // 네 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·전후·위험으로 끝난다.
@@ -2311,10 +2327,45 @@ mod tests {
         // 이전 일곱 항목 문서는 그대로 유효하다.
         assert!(rules.contains("Summaries written under the earlier seven-heading form"));
 
-        // 열 줄 상한과의 충돌 해소.
-        assert!(rules.contains("The ten-line limit above does not reach a structured summary"));
-        assert!(rules.contains("one short paragraph under each heading"));
+        // 열 줄 상한과의 충돌 해소. 분량은 이제 제목별 문장 수로 정해진다.
+        assert!(rules.contains("The ten-line limit above is not what bounds a structured summary"));
+        assert!(rules.contains(
+            "`### 제안` is one sentence, and `### 현재`, `### 변경 후`, and `### 비용과 위험` are at most three sentences each"
+        ));
+        assert!(!rules.contains("one short paragraph under each heading"));
         assert!(rules.contains("A plain summary and a report summary keep the ten-line limit"));
+
+        // 상한을 문장 수로 정한 이유. 글자 수 상한은 규칙에 넣지 않는다.
+        assert!(rules.contains(
+            "The count is in sentences because a summary grows by gaining another sentence, not by any one sentence getting longer"
+        ));
+        assert!(rules.contains("so no character count is set here"));
+
+        // 근거 서술의 자리는 요약이 아니라 본문이다.
+        assert!(rules.contains(
+            "Dates, quotations, how the investigation was carried out, and measurement tables belong in the document body, not in the summary"
+        ));
+        assert!(rules.contains(
+            "the sentence count would press the evidence into a single sentence, and the summary would come out shorter and harder to read"
+        ));
+
+        // 비용과 위험의 필수 사실 넷을 세 문장에 담는 예시.
+        assert!(rules.contains(
+            "The first names the real cost or risk, the second names what stays untouched and how the change is undone, and the third names what stays as it is when the document is not approved"
+        ));
+        assert!(rules.contains("```markdown\n### 비용과 위험\n"));
+        assert!(rules.contains(
+            "저장된 데이터와 결정 기록은 손대지 않으므로, 되돌리려면 이 화면의 표시 순서만 되돌리면 된다."
+        ));
+        assert!(rules.contains("승인되지 않으면 목록은 지금 순서 그대로 남는다."));
+
+        // 적용 대상과 소급 여부.
+        assert!(rules.contains(
+            "The sentence counts reach a specification and a development task alike, and an implementation report keeps the ten-line limit on its plain summary"
+        ));
+        assert!(rules.contains(
+            "Documents already written are not changed: the counts reach the documents written after these rules are installed"
+        ));
 
         // 금지 조건과 표시 경계.
         assert!(rules.contains(
@@ -2374,7 +2425,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2486,7 +2537,7 @@ mod tests {
         assert!(architect.contains("One session attempts one repair"));
 
         // 공통 규칙이 선택 필드와 본문 절을 적고, 둘 다 없는 기존 기능 문서도 그대로 유효하다.
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("the optional `configuration_unresolved_revision` field"));
         assert!(rules.contains("`configuration_unresolved_revision: 2`"));
         assert!(rules.contains(
@@ -2503,7 +2554,7 @@ mod tests {
         assert!(!developer.contains("configuration_unresolved_revision"));
 
         // 두 판 번호만 올랐고 나머지 둘은 그대로다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 32);
+        assert_eq!(WORKFLOW_RULES_VERSION, 33);
         assert_eq!(PLANNER_RULES_VERSION, 12);
         assert_eq!(ARCHITECT_RULES_VERSION, 21);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
@@ -2565,7 +2616,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2596,7 +2647,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 32"));
+        assert!(rules.contains("rules_version: 33"));
         assert!(rules.contains("`history`"));
         assert!(architect.contains("rules_version: 21"));
         assert!(developer.contains("rules_version: 23"));
