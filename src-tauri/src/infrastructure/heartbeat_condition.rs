@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 24;
+const CONDITION_SCRIPT_VERSION: u32 = 25;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 24;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 24
+# condition_script_version: 25
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -35,6 +35,12 @@ set -u
 role="${1:-}"
 machine_output=0
 [ "${2:-}" = "--json" ] && machine_output=1
+# 상태 투영 모드(SPEC-084). 인자는 하나만 받으므로, 둘째 인자가 붙으면 이 값이 서지 않고 아래
+# 사용법 갈래로 떨어져 종료 코드 2로 끝난다. 사용법 문구와 사유 코드는 그 갈래 한 자리에만 있다.
+status_mode=0
+[ "$role" = status ] && [ -z "${2:-}" ] && status_mode=1
+dispatch_mode=$role
+[ "$role" = status ] && [ "$status_mode" -eq 0 ] && dispatch_mode=""
 machine_target=""
 machine_target_kind=""
 machine_candidates=""
@@ -44,6 +50,8 @@ isolation=".workflow/.runtime/isolation"
 # 돌면 판정 순간이 둘로 갈려 같은 실행 안에서 만료 판정이 어긋난다.
 leases_scanned=0
 active_leases=""
+# 상태 투영이 낼 lease 레코드. 역할 판정은 이 값을 읽지 않으므로 그 갈래에서는 빈 채로 남는다.
+status_lease_rows=""
 active_count=0
 # 단독 점유 상태(SPEC-065 R2·R3). 대표 작업이 비어 있으면 판정은 이 절이 생기기 전과 완전히 같다.
 solo_representative=""
@@ -200,11 +208,15 @@ provider_limit_waiting() { # $1=역할
   lease_unexpired "$hold_stamp" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
-[ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
-# 후보를 하나도 보기 전에 끝낸다. 대상이 있어도 그 실행 도구로는 세션을 시작할 수 없으므로, 대상을
-# 내주면 배정 주기가 즉시 실패할 세션을 계속 만든다. 기계 출력에서도 대상이 비어 나가 예약 헬퍼가
-# 예약하지 않는다.
-provider_limit_waiting "$role" && verdict provider-limit-wait 1
+# 두 관문은 배정을 멈추는 자리라 역할 판정에만 선다. 상태 투영은 배정하지 않고 지금 상태를
+# 그대로 옮기는 조회이므로, 마이그레이션 중에도 한도 대기 중에도 답한다(SPEC-084 R6).
+if [ "$status_mode" -eq 0 ]; then
+  [ -f ".workflow/.runtime/migration.lock" ] && verdict migration-lock 1
+  # 후보를 하나도 보기 전에 끝낸다. 대상이 있어도 그 실행 도구로는 세션을 시작할 수 없으므로, 대상을
+  # 내주면 배정 주기가 즉시 실패할 세션을 계속 만든다. 기계 출력에서도 대상이 비어 나가 예약 헬퍼가
+  # 예약하지 않는다.
+  provider_limit_waiting "$role" && verdict provider-limit-wait 1
+fi
 
 # 유효한(미만료) lease가 있으면 0. 파일이 없거나 시각을 읽을 수 없으면 1.
 # 기획자·아키텍트 분기가 쓴다. 개발자 분기는 후보마다 이 함수를 부르는 대신 scan_leases가 모아 둔
@@ -557,6 +569,102 @@ scan_decisions() { # $1=워크플로우 경로 $2=찾는 outcome 값 $3=1이면 
   ' "$@"
 }
 
+# 기획서 디렉터리와 결정 디렉터리를 한 번에 훑어 기획서마다 "id<TAB>표시 상태"를 낸다.
+# 상태 투영만 부른다. 어휘는 draft, user_review, approved, revision_requested, rejected 다섯이고
+# 값은 앱의 두 자리를 그대로 따른다 — 파일에 적힌 상태를 계약 안의 두 값으로 정규화한 뒤,
+# 그 기획서의 최신 사용자 결정이 있으면 그 결과값이 덮어쓴다(fs_project_repository.rs의
+# normalize_spec_status와 workflow_items).
+#
+# 최신 결정을 고르는 후보 조건이 scan_decisions의 표와 다르므로 훑기를 따로 둔다. 저쪽 표는
+# 스키마와 created_by만 보지만, 앱이 세는 결정은 id·spec_id가 있고 outcome이 계약 안의 세 값인
+# 것뿐이다. 저쪽 표를 그대로 쓰면 outcome이 계약 밖인 결정 하나가 그 기획서의 유효한 최신 결정을
+# 가려, 스크립트와 앱의 답이 갈라진다. 세 역할의 판정을 건드리지 않는 자리이기도 하다.
+#
+# 동률 처리는 앱과 같다. 앱은 파일 이름 오름차순으로 읽으며 created_at이 같으면 나중 것으로
+# 덮어쓰므로, created_at이 같을 때는 파일 이름이 큰 결정이 이긴다. 순회 순서에 기대지 않으려고
+# (created_at, 파일 이름) 쌍의 최댓값으로 같은 답을 만든다. LC_ALL=C는 그 비교를 앱의 바이트
+# 순서와 맞춘다.
+scan_status_specs() { # $1=워크플로우 경로
+  scan_sdir="$1"specs/
+  scan_ddir="$1"decisions/
+  set --
+  scan_any=0
+  for f in "$scan_sdir"*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && { set -- "$@" "$f"; scan_any=1; }
+  done
+  [ "$scan_any" -eq 0 ] && return 0
+  for f in "$scan_ddir"*.md; do
+    [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
+  done
+  LC_ALL=C awk -v sdir="$scan_sdir" -v ddir="$scan_ddir" '
+    FILENAME != prev {
+      prev = FILENAME
+      base = FILENAME; sub(/^.*\//, "", base)
+      kind = 0
+      if (index(FILENAME, sdir) == 1) {
+        kind = 1; sn++
+        s_id[sn] = ""; s_status[sn] = ""
+        s_stem[sn] = base; sub(/\.md$/, "", s_stem[sn])
+        got_id = 0; got_status = 0
+      } else if (index(FILENAME, ddir) == 1) {
+        kind = 2; dn++
+        d_file[dn] = base
+        d_id[dn] = ""; d_spec[dn] = ""; d_out[dn] = ""; d_by[dn] = ""; d_at[dn] = ""
+        d_schema[dn] = 0
+        got_id = 0; got_spec = 0; got_out = 0; got_by = 0; got_at = 0
+      }
+    }
+    {
+      if (kind == 1) {
+        if (!got_id && index($0, "id:") == 1) {
+          got_id = 1; v = substr($0, 4); sub(/^ */, "", v); s_id[sn] = v
+        }
+        if (!got_status && index($0, "status:") == 1) {
+          got_status = 1; v = substr($0, 8); sub(/^ */, "", v); s_status[sn] = v
+        }
+      } else if (kind == 2) {
+        if (!got_id && index($0, "id:") == 1) {
+          got_id = 1; v = substr($0, 4); sub(/^ */, "", v); d_id[dn] = v
+        }
+        if (!got_spec && index($0, "spec_id:") == 1) {
+          got_spec = 1; v = substr($0, 9); sub(/^ */, "", v); d_spec[dn] = v
+        }
+        if (!got_out && index($0, "outcome:") == 1) {
+          got_out = 1; v = substr($0, 9); sub(/^ */, "", v); d_out[dn] = v
+        }
+        if (!got_by && index($0, "created_by:") == 1) {
+          got_by = 1; v = substr($0, 12); sub(/^ */, "", v); d_by[dn] = v
+        }
+        if (!got_at && index($0, "created_at:") == 1) {
+          got_at = 1; v = substr($0, 12); sub(/^ */, "", v); d_at[dn] = v
+        }
+        if (index($0, "schema: workflow-labs/decision@1") == 1) d_schema[dn] = 1
+      }
+    }
+    END {
+      for (i = 1; i <= dn; i++) {
+        if (!d_schema[i] || d_by[i] != "user") continue
+        if (d_id[i] == "" || d_spec[i] == "") continue
+        if (d_out[i] != "approved" && d_out[i] != "revision_requested" &&
+            d_out[i] != "rejected") continue
+        k = d_spec[i]
+        if (!(k in latest_at) ||
+            (d_at[i] "") > (latest_at[k] "") ||
+            ((d_at[i] "") == (latest_at[k] "") && d_file[i] > latest_file[k])) {
+          latest_at[k] = d_at[i]; latest_file[k] = d_file[i]; latest_out[k] = d_out[i]
+        }
+      }
+      for (i = 1; i <= sn; i++) {
+        sid = s_id[i] != "" ? s_id[i] : s_stem[i]
+        st = s_status[i] != "" ? s_status[i] : "draft"
+        if (st != "draft" && st != "user_review") st = "draft"
+        if (sid in latest_out) st = latest_out[sid]
+        print sid "\t" st
+      }
+    }
+  ' "$@"
+}
+
 # 작업 그룹 하나를 "id<TAB>status<TAB>revision<TAB>source decision<TAB>source spec<TAB>
 # source QA decision"으로 낸다. 선택 필드를 마지막에 두는 것은 POSIX read가 인접한 공백 IFS
 # 구분자를 접기 때문이다. 아키텍트 분기는 중단된 preparing 그룹과 승인 분해 여부를 함께 판단하고,
@@ -617,8 +725,14 @@ scan_work_groups() { # $1=워크플로우 경로
 # 출력은 "id<TAB>출처 승인<TAB>출처 확인 결정"이고 구성 확인 필요인 기능만 낸다. 아키텍트가
 # 문서로는 고칠 수 없다고 남긴 기능(configuration_unresolved_revision이 현재 구성 버전과 같은
 # 기능)은 사람 판단 필요로 갈라지므로 여기서 내지 않는다.
-scan_configuration_errors() { # $1=워크플로우 경로
+# 두 번째 인자가 status이면 구성 확인 필요만 내는 대신 기능마다 표시 상태를 낸다. 판정 사슬은
+# 그대로이고, 지금 continue로 버리는 가지에서 그 가지의 이름을 함께 내보낼 뿐이다. 투영 모드가
+# 아니면 조건식도 출력도 이 절이 생기기 전과 같다.
+# 준비 중과 준비 중단을 가르는 선점 조회는 미만료 lease 목록을 봐야 하므로, scan_leases가 모아 둔
+# 목록을 환경 변수로 넘긴다. awk -v는 값의 이스케이프를 해석하는데 이 목록의 구분자가 개행이다.
+scan_configuration_errors() { # $1=워크플로우 경로 $2=status이면 표시 상태 투영
   conf_wf=$1
+  conf_proj=${2:-}
   set --
   scan_any=0
   for f in "$conf_wf"groups/*.md; do
@@ -631,8 +745,22 @@ scan_configuration_errors() { # $1=워크플로우 경로
   for f in "$conf_wf"decisions/*.md; do
     [ -f "$f" ] && [ -r "$f" ] && set -- "$@" "$f"
   done
-  LC_ALL=C awk -v gdir="${conf_wf}groups/" -v tdir="${conf_wf}tasks/" \
+  WF_STATUS_LEASES="$active_leases" LC_ALL=C awk -v proj="$conf_proj" \
+    -v gdir="${conf_wf}groups/" -v tdir="${conf_wf}tasks/" \
     -v ddir="${conf_wf}decisions/" '
+    # 표시 상태 한 줄. 구성 버전은 앱과 같이 계약 밖 값을 0으로 접은 뒤의 값이고, 확인 방식도
+    # 계약 밖 값을 user로 접은 뒤의 값이다.
+    function emit_status(gid, st, rev, qa_mode) {
+      print gid "\t" st "\t" sprintf("%.0f", rev) "\t" qa_mode
+    }
+    # 앱은 기능 id, 승인 결정 id, 확인 결정 id 가운데 하나를 잡은 미만료 lease를 선점으로 본다.
+    function group_claimed(gid, dec, qa,   list) {
+      list = ENVIRON["WF_STATUS_LEASES"]
+      if (index(list, "\n" gid "\n") > 0) return 1
+      if (dec != "" && index(list, "\n" dec "\n") > 0) return 1
+      if (qa != "" && index(list, "\n" qa "\n") > 0) return 1
+      return 0
+    }
     function ord_init(  i) { for (i = 1; i < 256; i++) byte_code[sprintf("%c", i)] = i }
     # UTF-8 바이트열을 코드포인트 배열로 푼다. 한글 낱말 대조가 음절 단위로 이루어져야 하므로
     # 바이트가 아니라 코드포인트가 필요하다. LC_ALL=C로 돌리는 것은 substr가 바이트를 세게 하려는
@@ -1060,12 +1188,34 @@ scan_configuration_errors() { # $1=워크플로우 경로
         }
         key = gid SUBSEP sprintf("%.0f", grev)
         latest = (key in gsel) ? d_out[gsel[key]] : ""
-        if (latest == "confirmed") continue
-        if (assigned > 0 && !link_bad && legacy_all) continue
-        if (latest == "revision_requested") continue
-        if (status == "preparing") continue
-        if (blocked) continue
-        if (developing) continue
+        if (latest == "confirmed") {
+          if (proj != "") emit_status(gid, "completed", grev, mode)
+          continue
+        }
+        if (assigned > 0 && !link_bad && legacy_all) {
+          if (proj != "") emit_status(gid, "completed", grev, mode)
+          continue
+        }
+        if (latest == "revision_requested") {
+          if (proj != "") emit_status(gid, "rework", grev, mode)
+          continue
+        }
+        if (status == "preparing") {
+          if (proj != "") {
+            emit_status(gid,
+              group_claimed(gid, g_dec[gi], g_qa[gi]) ? "preparing" : "preparing_stalled",
+              grev, mode)
+          }
+          continue
+        }
+        if (blocked) {
+          if (proj != "") emit_status(gid, "blocked", grev, mode)
+          continue
+        }
+        if (developing) {
+          if (proj != "") emit_status(gid, "developing", grev, mode)
+          continue
+        }
         issues = 0
         if (!structural) issues = 1
         if (assigned == 0) issues = 1
@@ -1080,9 +1230,21 @@ scan_configuration_errors() { # $1=워크플로우 경로
         }
         if (mode == "automatic" && g_scen[gi] > 0) issues = 1
         if (not_verified) issues = 1
-        if (!issues) continue
+        if (!issues) {
+          if (proj != "") {
+            emit_status(gid, mode == "user" ? "qa_ready" : "automatic_completed", grev, mode)
+          }
+          continue
+        }
         if (g_unres[gi] ~ /^[0-9]+$/ && (g_unres[gi] + 0) <= 4294967295 &&
-            (g_unres[gi] + 0) == grev) continue
+            (g_unres[gi] + 0) == grev) {
+          if (proj != "") emit_status(gid, "human_judgment_required", grev, mode)
+          continue
+        }
+        if (proj != "") {
+          emit_status(gid, "configuration_error", grev, mode)
+          continue
+        }
         print gid "\t" g_dec[gi] "\t" g_qa[gi]
       }
     }
@@ -1262,6 +1424,14 @@ scan_leases() {
     lease_unexpired "$exp" "$now" || continue
     active_leases="$active_leases$lid$nl"
     active_count=$((active_count + 1))
+    # 역할 값은 상태 투영만 쓴다. 역할 판정에서 lease마다 sed를 한 번 더 부르면 문서 수에
+    # 비례하던 프로세스 수가 그만큼 되살아난다(SPEC-041).
+    # 공백뿐인 역할은 적히지 않은 것과 같게 본다. 앱의 lease 요약이 같은 값을 비운다.
+    if [ "$status_mode" -eq 1 ]; then
+      lrole=$(sed -n 's/^role: *//p' "$l" | head -1 | tr -d '"'\''')
+      case "$lrole" in *[![:space:]]*) : ;; *) lrole="" ;; esac
+      status_lease_rows="$status_lease_rows$lid	$exp	$lrole$nl"
+    fi
   done
 }
 
@@ -1635,9 +1805,49 @@ collect_solo_state() {
   return 0
 }
 
-collect_solo_state
+# 단독 점유 상태는 역할 판정이 대상을 고를 때만 쓴다. 상태 투영은 대상을 고르지 않는다.
+[ "$status_mode" -eq 1 ] || collect_solo_state
 
-case "$role" in
+case "$dispatch_mode" in
+status)
+  # 조회 전용 갈래. 후보 훑기도 대상 선택도 하지 않고, 세 역할의 판정을 하나도 부르지 않는다.
+  # 표준 출력에 레코드만 내고 판정 사유 한 줄을 내지 않는다. 진단이 필요하면 표준 오류로 간다.
+  # 파일을 만들거나 고치거나 지우지 않고 git도 부르지 않는다(SPEC-084).
+  # 읽지 못한 문서는 훑기가 조용히 건너뛴다. 세 역할의 판정이 쓰는 것과 같은 규칙이라, 이 갈래에서
+  # 읽기 실패가 종료 코드로 드러나는 자리는 없다. 계약이 정한 1은 그 자리를 비워 둔 값이다.
+  scan_leases
+  for wf in .workflow/*/; do
+    [ -d "$wf" ] || continue
+    wfname=${wf#.workflow/}
+    wfname=${wfname%/}
+    if [ -d "${wf}specs" ]; then
+      spec_rows=$(scan_status_specs "$wf")
+      while IFS='	' read -r sid sstatus; do
+        [ -n "$sid" ] || continue
+        printf 'spec\t%s\t%s\t%s\n' "$wfname" "$sid" "$sstatus"
+      done <<STATUS_SPEC_ROWS
+$spec_rows
+STATUS_SPEC_ROWS
+    fi
+    if [ -d "${wf}groups" ]; then
+      group_rows=$(scan_configuration_errors "$wf" status)
+      while IFS='	' read -r ggid gstatus grevision gmode; do
+        [ -n "$ggid" ] || continue
+        printf 'group\t%s\t%s\t%s\t%s\t%s\n' "$wfname" "$ggid" "$gstatus" "$grevision" "$gmode"
+      done <<STATUS_GROUP_ROWS
+$group_rows
+STATUS_GROUP_ROWS
+    fi
+  done
+  # 역할은 비어 있을 수 있어 줄 끝에 있다. 읽는 차례가 저장한 차례이고, 출력만 계약 차례로 낸다.
+  while IFS='	' read -r lid lexp lrole; do
+    [ -n "$lid" ] || continue
+    printf 'lease\t%s\t%s\t%s\n' "$lid" "$lrole" "$lexp"
+  done <<STATUS_LEASE_ROWS
+$status_lease_rows
+STATUS_LEASE_ROWS
+  exit 0
+  ;;
 planner)
   for wf in .workflow/*/; do
     # 두 조회가 이 목록 하나를 본다. 워크플로우마다 specs/를 한 번만 훑는다.
@@ -1865,7 +2075,7 @@ const CONDITION_SCRIPT_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 24
+# condition_script_version: 25
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -1895,6 +2105,12 @@ $script:machineCandidates = @()
 # verdict is exactly what it was before the solo clause existed.
 $script:soloRepresentative = $null
 $script:soloOtherLeases = $false
+# The status projection mode (SPEC-084). It takes one argument only, so a second one leaves this
+# false and the call falls through to the usage branch below, the one place that spells the usage
+# text and the reason code.
+$script:statusMode = ($Role -ceq 'status') -and ($Output.Length -eq 0) -and ($args.Count -eq 0)
+$dispatchMode = $Role
+if (($Role -ceq 'status') -and (-not $script:statusMode)) { $dispatchMode = '' }
 
 # Reads a file as lines. An unreadable file reads as empty, which is what "grep -s" does.
 function Get-Lines([string]$Path) {
@@ -1964,6 +2180,28 @@ function Test-Leased([string]$Id) {
   $path = Join-Path $leases ($Id + '.yml')
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
   return (Test-StampAhead (Get-Value (Get-Lines $path) 'expires_at'))
+}
+
+# Every unexpired lease, with the role and the expiry stamp beside the target id. Only the status
+# projection reads this: the role judgement reads a lease through Test-Leased one target at a time,
+# and adding a second read per file there would put back the per-document process count SPEC-041
+# removed. The target id is the file stem, which is what every other lease lookup in this body uses.
+# A role of nothing but blanks reads as no role, exactly as the app's lease summary empties it.
+function Get-ActiveLeases() {
+  if (-not (Test-Path -LiteralPath $leases -PathType Container)) { return @() }
+  $rows = @()
+  foreach ($file in @(Get-ChildItem -LiteralPath $leases -Filter '*.yml' -File `
+      -ErrorAction SilentlyContinue | Sort-Object -Property Name -CaseSensitive)) {
+    $lines = Get-Lines $file.FullName
+    $expires = (Get-Value $lines 'expires_at').Replace([string][char]34, '').Replace(
+      [string][char]39, '')
+    if (-not (Test-StampAhead $expires)) { continue }
+    $leaseRole = (Get-Value $lines 'role').Replace([string][char]34, '').Replace(
+      [string][char]39, '')
+    if ($leaseRole.Trim().Length -eq 0) { $leaseRole = '' }
+    $rows += [pscustomobject]@{ Id = $file.BaseName; Role = $leaseRole; Expires = $expires }
+  }
+  return @($rows)
 }
 
 # True while the provider this role uses is waiting out a usage limit (SPEC-071 R-05, R-09). The
@@ -2857,7 +3095,67 @@ function Get-LatestLegacyTaskQaOutcomes([string]$Root) {
 # Groups whose display status is a configuration error, in glob order. A group the architect has
 # already marked as beyond a document fix carries configuration_unresolved_revision for the current
 # revision; that one is the user's turn, not this branch's target.
-function Get-ConfigurationErrorGroups([string]$Root) {
+# One row per specification, "id" and the display status the app would show. The twin of the shell
+# body's scan_status_specs. The five words are draft, user_review, approved, revision_requested and
+# rejected: the status written in the file is folded to the two contract values, and the latest
+# user decision for that specification then overwrites it.
+#
+# The candidate set for "latest" is not the one Get-DecisionCandidates keeps. That one filters on
+# the schema line and created_by alone, while the app counts a decision only when it carries an id,
+# a spec_id, and one of the three contract outcomes. Reusing it would let one out-of-contract
+# decision hide the valid latest one for that specification, and the two answers would part.
+#
+# Ties follow the app. It reads decisions in file name order and overwrites on an equal created_at,
+# so the larger file name wins. Comparing the pair instead of relying on the walk order reaches the
+# same answer without depending on the order at all.
+function Get-StatusSpecRows([string]$Root) {
+  $decisions = @()
+  foreach ($path in (Get-Documents $Root 'decisions')) {
+    $lines = Get-Lines $path
+    if (-not (Test-Match $lines '^schema: workflow-labs/decision@1')) { continue }
+    if ((Get-Value $lines 'created_by') -cne 'user') { continue }
+    $id = Get-Value $lines 'id'
+    $spec = Get-Value $lines 'spec_id'
+    $outcome = Get-Value $lines 'outcome'
+    if ($id.Length -eq 0 -or $spec.Length -eq 0) { continue }
+    if ($outcome -cne 'approved' -and $outcome -cne 'revision_requested' -and
+        $outcome -cne 'rejected') { continue }
+    $decisions += [pscustomobject]@{
+      Spec = $spec
+      Outcome = $outcome
+      CreatedAt = Get-Value $lines 'created_at'
+      File = [System.IO.Path]::GetFileName($path)
+    }
+  }
+  $latest = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
+  foreach ($decision in $decisions) {
+    if (-not $latest.ContainsKey($decision.Spec)) { $latest[$decision.Spec] = $decision; continue }
+    $held = $latest[$decision.Spec]
+    $order = [string]::CompareOrdinal($decision.CreatedAt, $held.CreatedAt)
+    if ($order -gt 0 -or ($order -eq 0 -and
+        [string]::CompareOrdinal($decision.File, $held.File) -gt 0)) {
+      $latest[$decision.Spec] = $decision
+    }
+  }
+  $rows = @()
+  foreach ($path in (Get-Documents $Root 'specs')) {
+    $lines = Get-Lines $path
+    $id = Get-Value $lines 'id'
+    if ($id.Length -eq 0) { $id = [System.IO.Path]::GetFileNameWithoutExtension($path) }
+    $status = Get-Value $lines 'status'
+    if ($status.Length -eq 0) { $status = 'draft' }
+    if ($status -cne 'draft' -and $status -cne 'user_review') { $status = 'draft' }
+    if ($latest.ContainsKey($id)) { $status = $latest[$id].Outcome }
+    $rows += [pscustomobject]@{ Id = $id; Status = $status }
+  }
+  return @($rows)
+}
+
+# With $Projection the rows carry every group and its display status instead of only the ones that
+# answer configuration error. The verdict chain is untouched: each branch that drops a group now
+# names that branch on the way out. Without it the conditions and the rows are what they were.
+function Get-ConfigurationErrorGroups([string]$Root, [bool]$Projection = $false,
+    [string[]]$ActiveLeaseIds = @()) {
   $invariant = [System.Globalization.CultureInfo]::InvariantCulture
   $latestGroupQa = Get-LatestGroupQaOutcomes $Root
   $legacyTaskQa = Get-LatestLegacyTaskQaOutcomes $Root
@@ -2928,12 +3226,49 @@ function Get-ConfigurationErrorGroups([string]$Root) {
     $key = $id + [char]31 + $revision.ToString($invariant)
     $latest = ''
     if ($latestGroupQa.ContainsKey($key)) { $latest = $latestGroupQa[$key] }
-    if ($latest -ceq 'confirmed') { continue }
-    if ($assigned -gt 0 -and (-not $linkBad) -and $legacyAll) { continue }
-    if ($latest -ceq 'revision_requested') { continue }
-    if ($status -ceq 'preparing') { continue }
-    if ($blocked) { continue }
-    if ($developing) { continue }
+    if ($latest -ceq 'confirmed') {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'completed'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($assigned -gt 0 -and (-not $linkBad) -and $legacyAll) {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'completed'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($latest -ceq 'revision_requested') {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'rework'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($status -ceq 'preparing') {
+      if ($Projection) {
+        # The app counts a group as claimed while an unexpired lease holds the group id, the source
+        # approval, or the source QA decision.
+        $claimed = ($ActiveLeaseIds -ccontains $id) -or
+          ($decision.Length -gt 0 -and $ActiveLeaseIds -ccontains $decision) -or
+          ($sourceQa.Length -gt 0 -and $ActiveLeaseIds -ccontains $sourceQa)
+        $preparingStatus = 'preparing_stalled'
+        if ($claimed) { $preparingStatus = 'preparing' }
+        $rows += [pscustomobject]@{ Id = $id; Status = $preparingStatus; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($blocked) {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'blocked'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($developing) {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'developing'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
 
     $issues = $false
     if (-not $structural) { $issues = $true }
@@ -2950,12 +3285,26 @@ function Get-ConfigurationErrorGroups([string]$Root) {
     }
     if ($mode -ceq 'automatic' -and $parsed.Scenarios.Count -gt 0) { $issues = $true }
     if ($notVerified) { $issues = $true }
-    if (-not $issues) { continue }
+    if (-not $issues) {
+      if ($Projection) {
+        $readyStatus = 'automatic_completed'
+        if ($mode -ceq 'user') { $readyStatus = 'qa_ready' }
+        $rows += [pscustomobject]@{ Id = $id; Status = $readyStatus; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
 
     $unresolvedText = Get-Value $lines 'configuration_unresolved_revision'
     [uint32]$unresolved = 0
     if ($unresolvedText -cmatch '^[0-9]+$' -and
         [uint32]::TryParse($unresolvedText, [ref]$unresolved) -and $unresolved -eq $revision) {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'human_judgment_required'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($Projection) {
+      $rows += [pscustomobject]@{ Id = $id; Status = 'configuration_error'; Revision = $revision; Mode = $mode }
       continue
     }
     $rows += [pscustomobject]@{ Id = $id; Decision = $decision; SourceQa = $sourceQa }
@@ -3077,22 +3426,51 @@ function Get-SoloRepresentative() {
   return $null
 }
 
-if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
-  Write-Verdict 'migration-lock' 1
+# Both gates stop an assignment, so they stand in front of the role verdicts alone. The status
+# projection assigns nothing and only carries out the state as it stands, so it answers during a
+# migration and during a usage limit hold alike (SPEC-084 R6).
+if (-not $script:statusMode) {
+  if (Test-Path -LiteralPath '.workflow/.runtime/migration.lock' -PathType Leaf) {
+    Write-Verdict 'migration-lock' 1
+  }
+
+  # Stands before a single candidate is read. A target would only start a session that fails at once
+  # for the same reason, so the answer carries no target and the reservation helper reserves nothing.
+  if (Test-ProviderLimitWaiting $Role) {
+    Write-Verdict 'provider-limit-wait' 1
+  }
+
+  # The solo run state is read only where a role verdict picks a target. The projection picks none.
+  $script:soloRepresentative = Get-SoloRepresentative
+  if ($null -ne $script:soloRepresentative) {
+    $script:soloOtherLeases = Test-OtherLeaseExists $script:soloRepresentative
+  }
 }
 
-# Stands before a single candidate is read. A target would only start a session that fails at once
-# for the same reason, so the answer carries no target and the reservation helper reserves nothing.
-if (Test-ProviderLimitWaiting $Role) {
-  Write-Verdict 'provider-limit-wait' 1
-}
-
-$script:soloRepresentative = Get-SoloRepresentative
-if ($null -ne $script:soloRepresentative) {
-  $script:soloOtherLeases = Test-OtherLeaseExists $script:soloRepresentative
-}
-
-switch -CaseSensitive ($Role) {
+switch -CaseSensitive ($dispatchMode) {
+  'status' {
+    # The read-only branch. It walks no candidates, picks no target, and calls none of the three
+    # role verdicts. stdout carries records and no verdict reason line; diagnostics go to stderr.
+    # It creates, edits and removes nothing, and calls no git (SPEC-084).
+    # An unreadable document is skipped in silence, the same rule the three role verdicts use, so
+    # no read failure surfaces as an exit code here. The 1 the contract names is that empty seat.
+    $activeLeases = @(Get-ActiveLeases)
+    $activeLeaseIds = @($activeLeases | ForEach-Object { $_.Id })
+    foreach ($root in (Get-WorkflowRoots)) {
+      $workflowName = [System.IO.Path]::GetFileName($root)
+      foreach ($row in @(Get-StatusSpecRows $root)) {
+        [Console]::Out.WriteLine("spec`t$workflowName`t$($row.Id)`t$($row.Status)")
+      }
+      foreach ($row in @(Get-ConfigurationErrorGroups $root $true $activeLeaseIds)) {
+        [Console]::Out.WriteLine(
+          "group`t$workflowName`t$($row.Id)`t$($row.Status)`t$($row.Revision)`t$($row.Mode)")
+      }
+    }
+    foreach ($lease in $activeLeases) {
+      [Console]::Out.WriteLine("lease`t$($lease.Id)`t$($lease.Role)`t$($lease.Expires)")
+    }
+    exit 0
+  }
   'planner' {
     foreach ($root in (Get-WorkflowRoots)) {
       # Both lookups read this one list, gathered before the candidate loops, once for the whole
@@ -3382,6 +3760,16 @@ pub(crate) mod test_support {
         run_condition_with_arguments(project_root, &[role])
     }
 
+    /// 같은 명령에 환경 변수만 얹어 실행한다. 스크립트를 부르는 자리는 아래 한 곳 그대로다 —
+    /// 실행 방식이 갈라지면 이 헬퍼가 지키려는 대조가 뜻을 잃는다.
+    pub(crate) fn run_condition_with_environment(
+        project_root: &Path,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> ConditionRun {
+        run_condition_with_environment_inner(project_root, arguments, environment)
+    }
+
     /// 기존 판정의 표준 출력·종료 코드와 분리된, 런타임용 버전화 JSON 모드를 실행한다.
     pub(crate) fn run_machine_condition(project_root: &Path, role: &str) -> ConditionRun {
         run_condition_with_arguments(project_root, &[role, "--json"])
@@ -3393,6 +3781,14 @@ pub(crate) mod test_support {
     pub(crate) const TEST_HOME: &str = ".test-home";
 
     fn run_condition_with_arguments(project_root: &Path, arguments: &[&str]) -> ConditionRun {
+        run_condition_with_environment_inner(project_root, arguments, &[])
+    }
+
+    fn run_condition_with_environment_inner(
+        project_root: &Path,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> ConditionRun {
         let script = CONDITION_SCRIPT.relative_path();
         let mut command = if cfg!(windows) {
             let mut powershell = Command::new("powershell");
@@ -3409,6 +3805,7 @@ pub(crate) mod test_support {
             .current_dir(project_root)
             .env("HOME", project_root.join(TEST_HOME))
             .env("USERPROFILE", project_root.join(TEST_HOME))
+            .envs(environment.iter().copied())
             .output()
             .expect("run condition script");
         ConditionRun {
@@ -3456,7 +3853,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 24"));
+        assert!(script.contains("# condition_script_version: 25"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -3470,8 +3867,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 25",
             "# condition_script_version: 24",
-            "# condition_script_version: 23",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -3750,7 +4147,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 24보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 25보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -6943,5 +7340,568 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+/// SPEC-084 상태 투영 모드의 시험. 이 모드는 판정을 하지 않고 앱이 계산하는 표시 상태를 그대로
+/// 명령 밖으로 옮기므로, 시험의 중심은 "앱과 같은 값인가"다. 그래서 대조 시험이 스크립트와
+/// `FileSystemProjectRepository`를 같은 임시 루트에 함께 걸어 두 답을 맞춰 본다.
+#[cfg(test)]
+mod status_projection_tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::{tempdir, TempDir};
+
+    use super::test_support::{run_condition, run_condition_with_environment, ConditionRun};
+    use super::{CONDITION_SCRIPT_PS1, CONDITION_SCRIPT_SH};
+    use crate::domain::project::{ProjectSummary, WorkGroupDisplayStatus};
+    use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
+
+    /// 기능 표시 상태 열 가지의 이름. 스크립트가 내는 어휘와 앱 열거를 잇는 유일한 자리다.
+    fn group_word(status: WorkGroupDisplayStatus) -> &'static str {
+        match status {
+            WorkGroupDisplayStatus::Completed => "completed",
+            WorkGroupDisplayStatus::Rework => "rework",
+            WorkGroupDisplayStatus::Preparing => "preparing",
+            WorkGroupDisplayStatus::PreparingStalled => "preparing_stalled",
+            WorkGroupDisplayStatus::Blocked => "blocked",
+            WorkGroupDisplayStatus::Developing => "developing",
+            WorkGroupDisplayStatus::QaReady => "qa_ready",
+            WorkGroupDisplayStatus::AutomaticCompleted => "automatic_completed",
+            WorkGroupDisplayStatus::ConfigurationError => "configuration_error",
+            WorkGroupDisplayStatus::HumanJudgmentRequired => "human_judgment_required",
+        }
+    }
+
+    /// 등록까지 끝난 프로젝트 하나. 관리 자산이 함께 설치되므로 조건 스크립트도 이 시점의 본문이다.
+    fn project() -> (TempDir, PathBuf, String) {
+        let root = tempdir().expect("project root");
+        let summary = FileSystemProjectRepository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = summary.workflows[0].directory.clone();
+        let workflow = root.path().join(".workflow").join(&directory);
+        (root, workflow, directory)
+    }
+
+    fn write(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().expect("parent")).expect("parent directory");
+        fs::write(path, contents).expect("fixture document");
+    }
+
+    fn lease(root: &Path, id: &str, expires_at: &str, role: Option<&str>) {
+        let role_line = role
+            .map(|value| format!("role: {value}\n"))
+            .unwrap_or_default();
+        write(
+            &root.join(".workflow/.runtime/leases").join(format!("{id}.yml")),
+            &format!(
+                "schema_version: 1\nlease_id: lease-{id}\nagent: codex\n{role_line}task_id: {id}\nheartbeat_at: {expires_at}\nexpires_at: {expires_at}\n"
+            ),
+        );
+    }
+
+    /// 표준 출력을 레코드 종류별로 가른다. 필드 구분자는 탭 하나다.
+    fn records<'a>(run: &'a ConditionRun, kind: &str) -> Vec<Vec<&'a str>> {
+        run.stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .filter(|fields| fields.first() == Some(&kind))
+            .collect()
+    }
+
+    fn summary(root: &Path) -> ProjectSummary {
+        FileSystemProjectRepository
+            .inspect(root)
+            .expect("inspect project")
+    }
+
+    /// 경로마다 크기와 마지막 수정 시각을 담은 표. 상태 모드가 파일을 건드리지 않았음을 이 표의
+    /// 동일성으로 확인한다.
+    fn tree(root: &Path) -> BTreeMap<String, (u64, std::time::SystemTime)> {
+        let mut entries = BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            let Ok(read) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in read.flatten() {
+                let path = entry.path();
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    stack.push(path.clone());
+                }
+                entries.insert(
+                    path.strip_prefix(root)
+                        .expect("relative")
+                        .display()
+                        .to_string(),
+                    (
+                        metadata.len(),
+                        metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    ),
+                );
+            }
+        }
+        entries
+    }
+
+    /// C1. 인자 하나로 부르면 세 레코드 형식만 나오고 0으로 끝난다. 워크플로가 비어 있어도 같다.
+    #[test]
+    fn the_status_mode_answers_with_records_only_and_exits_zero() {
+        let (root, _workflow, directory) = project();
+
+        let empty = run_condition(root.path(), "status");
+        assert_eq!(empty.code, 0);
+        assert_eq!(empty.stdout, "");
+
+        write(
+            &root
+                .path()
+                .join(format!(".workflow/{directory}/specs/SPEC-001.md")),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: user_review\n---\n",
+        );
+        lease(
+            root.path(),
+            "SPEC-001",
+            "2099-01-01T00:00:00Z",
+            Some("planner"),
+        );
+
+        let run = run_condition(root.path(), "status");
+        assert_eq!(run.code, 0);
+        for line in run.stdout.lines().filter(|line| !line.is_empty()) {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            match fields.first() {
+                Some(&"spec") => assert_eq!(fields.len(), 4, "{line}"),
+                Some(&"group") => assert_eq!(fields.len(), 6, "{line}"),
+                Some(&"lease") => assert_eq!(fields.len(), 4, "{line}"),
+                _ => panic!("계약 밖 레코드가 나왔다: {line}"),
+            }
+        }
+        assert_eq!(
+            records(&run, "spec"),
+            vec![vec!["spec", directory.as_str(), "SPEC-001", "user_review"]]
+        );
+    }
+
+    /// C2·C3. 한 픽스처를 두 쪽이 함께 읽는다. 함께 표현하는 기획서와 기능의 상태값이 하나라도
+    /// 다르면 실패한다. 기능 표시 상태 열 가지가 모두 한 번씩 나오는 픽스처다.
+    #[test]
+    fn the_status_mode_projects_the_display_status_the_app_would_show() {
+        let (root, workflow, directory) = project();
+        let approved = "---\nschema: workflow-labs/decision@1\nid: DECISION-APPROVE\nspec_id: SPEC-APPROVED\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n";
+        write(&workflow.join("decisions/DECISION-APPROVE.md"), approved);
+
+        // 기획서 다섯 어휘. 파일 값과 결정이 각각 어디까지 답을 정하는지 함께 본다.
+        write(
+            &workflow.join("specs/SPEC-APPROVED.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-APPROVED\nstatus: user_review\n---\n",
+        );
+        write(
+            &workflow.join("specs/SPEC-WAITING.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-WAITING\nstatus: user_review\n---\n",
+        );
+        write(
+            &workflow.join("specs/SPEC-DRAFT.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-DRAFT\nstatus: draft\n---\n",
+        );
+        // 계약 밖 상태는 앱이 draft로 접는다.
+        write(
+            &workflow.join("specs/SPEC-ODD.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-ODD\nstatus: qa_waiting\n---\n",
+        );
+        write(
+            &workflow.join("specs/SPEC-SENTBACK.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-SENTBACK\nstatus: user_review\n---\n",
+        );
+        write(
+            &workflow.join("specs/SPEC-REJECTED.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-REJECTED\nstatus: user_review\n---\n",
+        );
+        // 승인이 먼저이고 수정 요청이 나중이다. 최신 결정이 답을 정한다.
+        write(
+            &workflow.join("decisions/DECISION-SENT-1.md"),
+            "---\nschema: workflow-labs/decision@1\nid: DECISION-SENT-1\nspec_id: SPEC-SENTBACK\noutcome: approved\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n",
+        );
+        write(
+            &workflow.join("decisions/DECISION-SENT-2.md"),
+            "---\nschema: workflow-labs/decision@1\nid: DECISION-SENT-2\nspec_id: SPEC-SENTBACK\noutcome: revision_requested\ncreated_by: user\ncreated_at: 2026-08-02T00:00:00Z\n---\n",
+        );
+        write(
+            &workflow.join("decisions/DECISION-REJECT.md"),
+            "---\nschema: workflow-labs/decision@1\nid: DECISION-REJECT\nspec_id: SPEC-REJECTED\noutcome: rejected\ncreated_by: user\ncreated_at: 2026-08-01T00:00:00Z\n---\n",
+        );
+
+        let group = |id: &str, status: &str, mode: &str, extra: &str| {
+            format!(
+                "---\nschema: workflow-labs/work-group@1\nid: {id}\ntitle: {id}\nstatus: {status}\nrevision: 1\nqa_mode: {mode}\nsource_spec_id: SPEC-APPROVED\nsource_decision_id: DECISION-APPROVE\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n{extra}---\n"
+            )
+        };
+        let task = |id: &str, group_id: &str, status: &str| {
+            format!(
+                "---\nschema: workflow-labs/task@1\nid: {id}\nstatus: {status}\nwork_group_id: {group_id}\nwork_group_revision: 1\nsource_spec_id: SPEC-APPROVED\nsource_decision_id: DECISION-APPROVE\n---\n"
+            )
+        };
+        let group_qa = |id: &str, group_id: &str, outcome: &str| {
+            format!(
+                "---\nschema: workflow-labs/group-qa-decision@1\nid: {id}\ngroup_id: {group_id}\ngroup_revision: 1\noutcome: {outcome}\nrequest_id: req-{group_id}\ncreated_by: user\ncreated_at: 2026-08-03T00:00:00Z\n---\n"
+            )
+        };
+
+        // 확정: 현재 구성 버전의 확인 결정이 확정이다.
+        write(
+            &workflow.join("groups/GROUP-101.md"),
+            &group("GROUP-101", "active", "automatic", ""),
+        );
+        write(
+            &workflow.join("tasks/TASK-101.md"),
+            &task("TASK-101", "GROUP-101", "verified"),
+        );
+        write(
+            &workflow.join("decisions/DECISION-QA-101.md"),
+            &group_qa("DECISION-QA-101", "GROUP-101", "confirmed"),
+        );
+        // 반려.
+        write(
+            &workflow.join("groups/GROUP-102.md"),
+            &group("GROUP-102", "active", "automatic", ""),
+        );
+        write(
+            &workflow.join("tasks/TASK-102.md"),
+            &task("TASK-102", "GROUP-102", "verified"),
+        );
+        write(
+            &workflow.join("decisions/DECISION-QA-102.md"),
+            &group_qa("DECISION-QA-102", "GROUP-102", "revision_requested"),
+        );
+        // 준비 중과 준비 중단. 같은 정의에 lease 하나만 걸었다 뺀 두 판이다.
+        write(
+            &workflow.join("groups/GROUP-103.md"),
+            &group("GROUP-103", "preparing", "automatic", ""),
+        );
+        write(
+            &workflow.join("groups/GROUP-104.md"),
+            &group("GROUP-104", "preparing", "automatic", ""),
+        );
+        lease(
+            root.path(),
+            "GROUP-103",
+            "2099-01-01T00:00:00Z",
+            Some("architect"),
+        );
+        // 막힘.
+        write(
+            &workflow.join("groups/GROUP-105.md"),
+            &group("GROUP-105", "active", "automatic", ""),
+        );
+        write(
+            &workflow.join("tasks/TASK-105.md"),
+            &task("TASK-105", "GROUP-105", "blocked"),
+        );
+        // 진행 중.
+        write(
+            &workflow.join("groups/GROUP-106.md"),
+            &group("GROUP-106", "active", "automatic", ""),
+        );
+        write(
+            &workflow.join("tasks/TASK-106.md"),
+            &task("TASK-106", "GROUP-106", "todo"),
+        );
+        // 확인 대기. 사용자 확인 모드이고 확인 절차가 사용자 행동으로 읽힌다.
+        let mut ready = group("GROUP-107", "active", "user", "");
+        ready.push_str("\n### QA-01 · 저장 확인\n\n설정 화면을 열고 저장 버튼을 누르면 저장 완료 메시지가 나타납니다.\n");
+        write(&workflow.join("groups/GROUP-107.md"), &ready);
+        write(
+            &workflow.join("tasks/TASK-107.md"),
+            &task("TASK-107", "GROUP-107", "verified"),
+        );
+        // 자동 완료.
+        write(
+            &workflow.join("groups/GROUP-108.md"),
+            &group("GROUP-108", "active", "automatic", ""),
+        );
+        write(
+            &workflow.join("tasks/TASK-108.md"),
+            &task("TASK-108", "GROUP-108", "verified"),
+        );
+        // 구성 확인 필요: 속한 작업이 하나도 없다.
+        write(
+            &workflow.join("groups/GROUP-109.md"),
+            &group("GROUP-109", "active", "automatic", ""),
+        );
+        // 사람 판단 필요: 같은 구성인데 아키텍트가 판단을 남겼다.
+        write(
+            &workflow.join("groups/GROUP-110.md"),
+            &group(
+                "GROUP-110",
+                "active",
+                "automatic",
+                "configuration_unresolved_revision: 1\n",
+            ),
+        );
+
+        let run = run_condition(root.path(), "status");
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        let project = summary(root.path());
+        let workflow_summary = project
+            .workflows
+            .iter()
+            .find(|item| item.directory == directory)
+            .expect("registered workflow");
+
+        // C2. 두 쪽이 함께 표현하는 기획서의 상태값을 맞춰 본다.
+        let spec_rows = records(&run, "spec");
+        assert!(!spec_rows.is_empty());
+        let mut compared_specs = 0;
+        for fields in &spec_rows {
+            assert_eq!(fields[1], directory);
+            let Some(item) = workflow_summary
+                .items
+                .specs
+                .iter()
+                .find(|spec| spec.id == fields[2])
+            else {
+                continue;
+            };
+            compared_specs += 1;
+            assert_eq!(fields[3], item.status, "기획서 {}", item.id);
+        }
+        assert_eq!(compared_specs, 6);
+        let words = spec_rows
+            .iter()
+            .map(|fields| fields[3])
+            .collect::<std::collections::BTreeSet<_>>();
+        for word in [
+            "draft",
+            "user_review",
+            "approved",
+            "revision_requested",
+            "rejected",
+        ] {
+            assert!(words.contains(word), "{word} 어휘가 픽스처에 없다");
+        }
+
+        // C3. 기능 표시 상태 열 가지가 모두 한 번씩 나오고, 앱 판정과 같다.
+        let group_rows = records(&run, "group");
+        let mut seen = std::collections::BTreeSet::new();
+        for fields in &group_rows {
+            assert_eq!(fields[1], directory);
+            let item = workflow_summary
+                .items
+                .work_groups
+                .iter()
+                .find(|group| group.id == fields[2])
+                .unwrap_or_else(|| panic!("앱이 모르는 기능 {}", fields[2]));
+            assert_eq!(
+                fields[3],
+                group_word(item.display_status),
+                "기능 {}",
+                item.id
+            );
+            assert_eq!(fields[4], item.revision.to_string(), "기능 {}", item.id);
+            seen.insert(fields[3].to_owned());
+        }
+        assert_eq!(group_rows.len(), 10);
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            vec![
+                "automatic_completed".to_owned(),
+                "blocked".to_owned(),
+                "completed".to_owned(),
+                "configuration_error".to_owned(),
+                "developing".to_owned(),
+                "human_judgment_required".to_owned(),
+                "preparing".to_owned(),
+                "preparing_stalled".to_owned(),
+                "qa_ready".to_owned(),
+                "rework".to_owned(),
+            ]
+        );
+    }
+
+    /// C4. 미만료 lease만 나온다. 만료된 것과 표기를 읽을 수 없는 것은 나오지 않는다.
+    #[test]
+    fn the_status_mode_lists_only_unexpired_leases() {
+        let (root, _workflow, _directory) = project();
+        lease(
+            root.path(),
+            "TASK-ALIVE",
+            "2099-01-01T00:00:00Z",
+            Some("developer"),
+        );
+        lease(root.path(), "TASK-NOROLE", "2099-01-01T00:00:00Z", None);
+        lease(
+            root.path(),
+            "TASK-GONE",
+            "2000-01-01T00:00:00Z",
+            Some("developer"),
+        );
+        lease(
+            root.path(),
+            "TASK-UNREADABLE",
+            "2099-01-01 00:00:00+09:00",
+            Some("developer"),
+        );
+
+        let run = run_condition(root.path(), "status");
+
+        assert_eq!(run.code, 0);
+        assert_eq!(
+            records(&run, "lease"),
+            vec![
+                vec!["lease", "TASK-ALIVE", "developer", "2099-01-01T00:00:00Z"],
+                vec!["lease", "TASK-NOROLE", "", "2099-01-01T00:00:00Z"],
+            ]
+        );
+    }
+
+    /// C5. 마이그레이션 락이 있어도 조회는 답한다. 같은 프로젝트에서 세 역할은 지금과 같이 끝난다.
+    #[test]
+    fn the_status_mode_answers_while_the_migration_lock_stands() {
+        let (root, workflow, directory) = project();
+        write(
+            &workflow.join("specs/SPEC-001.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\n---\n",
+        );
+        fs::create_dir_all(root.path().join(".workflow/.runtime")).expect("runtime root");
+        fs::write(root.path().join(".workflow/.runtime/migration.lock"), "").expect("lock");
+
+        let run = run_condition(root.path(), "status");
+        assert_eq!(run.code, 0);
+        assert_eq!(
+            records(&run, "spec"),
+            vec![vec!["spec", directory.as_str(), "SPEC-001", "draft"]]
+        );
+
+        for role in ["planner", "architect", "developer"] {
+            let blocked = run_condition(root.path(), role);
+            assert_eq!(blocked.code, 1, "{role}");
+            assert_eq!(blocked.reason(), "migration-lock", "{role}");
+        }
+    }
+
+    /// C6. 두 번째 인자가 붙으면 사용법 오류로 끝나고 레코드가 나오지 않는다.
+    #[test]
+    fn the_status_mode_rejects_a_second_argument() {
+        let (root, _workflow, _directory) = project();
+
+        for extra in ["--json", "extra"] {
+            let run = run_condition_with_environment(root.path(), &["status", extra], &[]);
+            assert_eq!(run.code, 2, "{extra}");
+            assert!(
+                records(&run, "spec").is_empty()
+                    && records(&run, "group").is_empty()
+                    && records(&run, "lease").is_empty(),
+                "{extra}: 레코드가 나왔다"
+            );
+        }
+    }
+
+    /// C9. 두 본문이 상태 모드의 출력 어휘를 글자 그대로 같게 적는다. 한쪽만 고치면 이 시험이 깨진다.
+    #[test]
+    fn both_bodies_spell_the_status_vocabulary_the_same_way() {
+        let vocabulary = [
+            "draft",
+            "user_review",
+            "approved",
+            "revision_requested",
+            "rejected",
+            "completed",
+            "rework",
+            "preparing",
+            "preparing_stalled",
+            "blocked",
+            "developing",
+            "qa_ready",
+            "automatic_completed",
+            "configuration_error",
+            "human_judgment_required",
+        ];
+        for word in vocabulary {
+            assert!(
+                CONDITION_SCRIPT_SH.contains(&format!("\"{word}\"")),
+                "sh 본문에 {word} 어휘가 없다"
+            );
+            assert!(
+                CONDITION_SCRIPT_PS1.contains(&format!("'{word}'")),
+                "PowerShell 본문에 {word} 어휘가 없다"
+            );
+        }
+        // 레코드 종류는 출력 줄의 첫 필드라 두 본문이 각자의 문자열 어법으로 적는다.
+        for tag in ["spec", "group", "lease"] {
+            assert!(
+                CONDITION_SCRIPT_SH.contains(&format!("'{tag}\\t")),
+                "sh 본문에 {tag} 레코드 줄이 없다"
+            );
+            assert!(
+                CONDITION_SCRIPT_PS1.contains(&format!("\"{tag}`t")),
+                "PowerShell 본문에 {tag} 레코드 줄이 없다"
+            );
+        }
+    }
+
+    /// C10. 상태 모드는 파일을 만들거나 고치거나 지우지 않고 git을 부르지 않는다.
+    #[test]
+    fn the_status_mode_writes_nothing_and_calls_no_git() {
+        let (root, workflow, _directory) = project();
+        write(
+            &workflow.join("specs/SPEC-001.md"),
+            "---\nschema: workflow-labs/spec@1\nid: SPEC-001\nstatus: draft\n---\n",
+        );
+        lease(
+            root.path(),
+            "TASK-ALIVE",
+            "2099-01-01T00:00:00Z",
+            Some("developer"),
+        );
+
+        let before = tree(root.path());
+        let run = git_denied_run(root.path());
+        let after = tree(root.path());
+
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        assert_eq!(before.len(), after.len(), "파일 수가 바뀌었다");
+        assert!(before == after, "상태 모드가 파일을 건드렸다");
+    }
+
+    /// git 실행을 가로채는 실행 경로에서 상태 모드를 한 번 돌린다. 가로채기를 세울 수 없는
+    /// 플랫폼에서는 평범하게 돌린다.
+    #[cfg(unix)]
+    fn git_denied_run(project_root: &Path) -> ConditionRun {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shim_root = project_root.join(".test-bin");
+        fs::create_dir_all(&shim_root).expect("shim root");
+        let marker = project_root.join(".test-git-called");
+        let shim = shim_root.join("git");
+        fs::write(
+            &shim,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("git shim");
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("shim mode");
+        let path = format!(
+            "{}:{}",
+            shim_root.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let run = run_condition_with_environment(project_root, &["status"], &[("PATH", &path)]);
+
+        assert!(!marker.is_file(), "상태 모드가 git을 불렀다");
+        fs::remove_file(&shim).expect("remove shim");
+        fs::remove_dir(&shim_root).expect("remove shim root");
+        run
+    }
+
+    #[cfg(not(unix))]
+    fn git_denied_run(project_root: &Path) -> ConditionRun {
+        run_condition(project_root, "status")
     }
 }
