@@ -1,6 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IdeaDocument, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import {
+  COLLAPSED_PANEL_WIDTH,
+  PANEL_KEYBOARD_STEP,
+  PANEL_LIMITS,
+  READING_WIDTH_MIN,
+} from "../domain/panelLayout";
 import { IdeaInbox } from "./IdeaInbox";
 
 const firstIdea: WorkflowItemSummary = { fileName: "IDEA-001.md", id: "IDEA-001", title: "빠른 기록", status: "inbox", updatedAt: "2026-07-30T00:00:00Z", excerpt: "떠오른 생각을 바로 기록한다." };
@@ -789,3 +795,138 @@ function expectDocumentInformation() {
   expect(preview.getByText(/^\d+월 \d+일$/)).toBeInTheDocument();
   expect(preview.getByText("IDEA-001.md")).toBeInTheDocument();
 }
+
+/**
+ * 아이디어 목록 패널의 리사이즈·접기와, 그것이 본문 읽기 폭에 닿는 자리 (SPEC-080 R1~R8, R12).
+ *
+ * 이 패널도 비율 배치라 스타일이 px를 정하지 않고, jsdom은 배치를 계산하지 않는다. 그래서 기준 너비를
+ * 재는 자리를 시험이 바꿔 끼워 넘긴다.
+ */
+describe("IdeaInbox 목록 패널 리사이즈와 접기", () => {
+  const LAYOUT_KEY = "workflow-labs.panel-layout.v1";
+  /** 목록 패널이 비율 배치로 그려져 있는 폭. 시험이 측정 자리를 대신 채워 넘기는 값이다. */
+  const BASELINE = 360;
+  const HANDLE = "아이디어 목록 너비 조절";
+
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    storage = stubStorage();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** 테스트 환경의 `localStorage`는 메서드가 없는 빈 객체다. 저장이 남는지 보려면 직접 세워야 한다. */
+  function stubStorage() {
+    const stored = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        stored.set(key, value);
+      },
+    });
+    return stored;
+  }
+
+  function inbox() {
+    return render(
+      <IdeaInbox
+        busy={false}
+        disabled={false}
+        measurePanelWidth={() => BASELINE}
+        onAdd={vi.fn().mockResolvedValue(true)}
+        onReadIdea={vi.fn().mockResolvedValue(documentFor(firstIdea, "본문"))}
+        workflow={workflow}
+      />,
+    );
+  }
+
+  /** 격자에 실린 폭 변수. 한 번도 조절하지 않았으면 빈 문자열이다. */
+  function gridWidth(container: HTMLElement) {
+    return container.querySelector<HTMLElement>(".idea-inbox-layout")!.style.getPropertyValue("--idea-list-width");
+  }
+
+  /** 본문 상자에 실린 읽기 폭 상한. 되찾은 폭이 없으면 빈 문자열이다. */
+  function readingWidth(container: HTMLElement) {
+    return container
+      .querySelector<HTMLElement>(".idea-preview-body")!
+      .style.getPropertyValue("--document-reading-width");
+  }
+
+  function handle() {
+    return screen.getByRole("separator", { name: HANDLE });
+  }
+
+  function dragTo(width: number) {
+    const grabbed = handle();
+    const moved = width - Number(grabbed.getAttribute("aria-valuenow"));
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 500 + moved });
+    fireEvent.pointerUp(window);
+  }
+
+  it("한 번도 조절하지 않으면 격자 변수도 읽기 폭 변수도 싣지 않는다", () => {
+    const { container } = inbox();
+
+    expect(gridWidth(container)).toBe("");
+    expect(readingWidth(container)).toBe("");
+    expect(storage.get(LAYOUT_KEY)).toBeUndefined();
+  });
+
+  it("목록 패널의 오른쪽 경계를 끌면 최소값과 최대값 사이에서 움직인다", () => {
+    const { container } = inbox();
+    const limits = PANEL_LIMITS.ideaList;
+
+    const grabbed = handle();
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 560 });
+    expect(gridWidth(container)).toBe(`${BASELINE + 60}px`);
+
+    fireEvent.pointerMove(window, { clientX: 1500 });
+    expect(gridWidth(container)).toBe(`${limits.maxWidth}px`);
+
+    fireEvent.pointerMove(window, { clientX: 0 });
+    expect(gridWidth(container)).toBe(`${limits.minWidth}px`);
+
+    fireEvent.pointerUp(window);
+    expect(JSON.parse(storage.get(LAYOUT_KEY) ?? "{}").ideaList)
+      .toEqual({ width: limits.minWidth, baselineWidth: BASELINE });
+  });
+
+  it("방향키는 한 걸음씩 움직이고 더블클릭은 비율 배치로 되돌린다", () => {
+    const { container } = inbox();
+
+    fireEvent.keyDown(handle(), { key: "ArrowRight" });
+    expect(gridWidth(container)).toBe(`${BASELINE + PANEL_KEYBOARD_STEP}px`);
+
+    fireEvent.doubleClick(handle());
+    expect(gridWidth(container)).toBe("");
+  });
+
+  it("목록 패널을 접으면 세로 바만 남고 다시 누르면 접기 직전 너비로 돌아온다", () => {
+    const { container } = inbox();
+    dragTo(420);
+
+    fireEvent.click(screen.getByRole("button", { name: "아이디어 목록 접기" }));
+
+    expect(gridWidth(container)).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+    expect(screen.queryByRole("separator", { name: HANDLE })).toBeNull();
+
+    const bar = screen.getByRole("button", { name: "아이디어 목록 펼치기" });
+    expect(bar).toHaveAttribute("title", "아이디어 목록 펼치기");
+    expect(bar.textContent).not.toContain("아이디어 목록");
+
+    fireEvent.click(bar);
+    expect(gridWidth(container)).toBe("420px");
+  });
+
+  it("본문의 읽기 폭 상한이 되찾은 폭만큼 오른다", () => {
+    const { container } = inbox();
+
+    dragTo(PANEL_LIMITS.ideaList.minWidth);
+
+    expect(readingWidth(container)).toBe(`${READING_WIDTH_MIN + (BASELINE - PANEL_LIMITS.ideaList.minWidth)}px`);
+  });
+});

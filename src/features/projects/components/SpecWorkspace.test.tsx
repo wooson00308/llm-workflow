@@ -1,7 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SpecDocument, TaskEvent, WorkGroupSummary, WorkflowItemSummary, WorkflowSummary } from "../domain/types";
+import {
+  COLLAPSED_PANEL_WIDTH,
+  PANEL_KEYBOARD_STEP,
+  PANEL_LIMITS,
+  READING_WIDTH_MAX,
+  READING_WIDTH_MIN,
+} from "../domain/panelLayout";
 import { SpecWorkspace } from "./SpecWorkspace";
 
 const document: SpecDocument = {
@@ -311,7 +318,13 @@ describe("SpecWorkspace", () => {
     }
     expect(onDecision).not.toHaveBeenCalled();
 
+    /*
+     * 목록에서 본문과 결정으로 이어지는 키보드 길. SPEC-080이 목록 패널의 리사이즈 핸들과 결정 패널의
+     * 접기 버튼을 이 사이에 세웠으므로 그 둘을 지나 간다. 확인하려는 것은 그 길이 끊기지 않는다는 것이다.
+     */
     screen.getByRole("button", { name: /SPEC-001/ }).focus();
+    await user.tab();
+    expect(screen.getByRole("separator", { name: "기획서 목록 너비 조절" })).toHaveFocus();
     await user.tab();
     const sourceToggle = screen.getByRole("button", { name: "원문 전문 보기" });
     expect(sourceToggle).toHaveFocus();
@@ -319,6 +332,8 @@ describe("SpecWorkspace", () => {
     expect(screen.getByRole("heading", { name: "결정권자 요약" })).toBeInTheDocument();
     expect(screen.getByText("원문 마지막에서 승인 범위를 다시 설명한다.")).toBeInTheDocument();
 
+    await user.tab();
+    expect(screen.getByRole("button", { name: "사용자 결정 접기" })).toHaveFocus();
     await user.tab();
     expect(screen.getByRole("button", { name: "승인 도장 찍기" })).toHaveFocus();
     await user.keyboard("{Enter}");
@@ -662,5 +677,266 @@ describe("SpecWorkspace attention notes", () => {
 
     const shown = view.container.textContent ?? "";
     for (const name of internalNames) expect(shown).not.toContain(name);
+  });
+});
+
+/**
+ * 문서 목록 패널과 결정 패널의 리사이즈·접기와, 그것이 본문 읽기 폭에 닿는 자리 (SPEC-080 R1~R12).
+ *
+ * 두 패널은 비율 배치라 스타일이 px를 정하지 않고, jsdom은 배치를 계산하지 않아 실제 측정이 0으로
+ * 나온다. 그래서 기준 너비를 재는 자리를 시험이 바꿔 끼워 넘긴다.
+ */
+describe("SpecWorkspace 패널 리사이즈와 접기", () => {
+  const LAYOUT_KEY = "workflow-labs.panel-layout.v1";
+  /** 두 패널이 비율 배치로 그려져 있는 폭. 시험이 측정 자리를 대신 채워 넘기는 값이다. */
+  const BASELINE = 240;
+  const LIST_HANDLE = "기획서 목록 너비 조절";
+  const DECISION_HANDLE = "사용자 결정 너비 조절";
+
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    storage = stubStorage();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resizeWindow(1024);
+  });
+
+  /** 테스트 환경의 `localStorage`는 메서드가 없는 빈 객체다. 저장이 남는지 보려면 직접 세워야 한다. */
+  function stubStorage() {
+    const stored = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        stored.set(key, value);
+      },
+    });
+    return stored;
+  }
+
+  /** jsdom의 창 폭을 바꾸고 크기 변경을 알린다. 그리는 너비 계산이 이 값을 읽는다. */
+  function resizeWindow(width: number) {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: width, writable: true });
+    fireEvent(window, new Event("resize"));
+  }
+
+  function workspace() {
+    return render(
+      <SpecWorkspace
+        busy={false}
+        document={document}
+        loading={false}
+        measurePanelWidth={() => BASELINE}
+        onDecision={vi.fn()}
+        onSelect={vi.fn()}
+        workflow={workflow}
+      />,
+    );
+  }
+
+  /** 격자에 실린 폭 변수. 한 번도 조절하지 않았으면 빈 문자열이다. */
+  function gridWidth(container: HTMLElement, name: string) {
+    return container.querySelector<HTMLElement>(".spec-workspace-layout")!.style.getPropertyValue(name);
+  }
+
+  /** 본문 상자에 실린 읽기 폭 상한. 되찾은 폭이 없으면 빈 문자열이다. */
+  function readingWidth(container: HTMLElement) {
+    return container.querySelector<HTMLElement>(".spec-paper")!.style.getPropertyValue("--document-reading-width");
+  }
+
+  function handle(name: string) {
+    return screen.getByRole("separator", { name });
+  }
+
+  /**
+   * 핸들을 잡고 목표 너비까지 끈다. 결정 패널의 핸들은 본문 오른쪽 경계에 서 있어 왼쪽으로 끌수록
+   * 넓어지므로 부호가 반대다.
+   */
+  function dragTo(name: string, width: number) {
+    const grabbed = handle(name);
+    const moved = width - Number(grabbed.getAttribute("aria-valuenow"));
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: name === DECISION_HANDLE ? 500 - moved : 500 + moved });
+    fireEvent.pointerUp(window);
+  }
+
+  function stored() {
+    return JSON.parse(storage.get(LAYOUT_KEY) ?? "{}");
+  }
+
+  it("한 번도 조절하지 않으면 격자 변수도 읽기 폭 변수도 싣지 않는다", () => {
+    const { container } = workspace();
+
+    expect(gridWidth(container, "--spec-list-width")).toBe("");
+    expect(gridWidth(container, "--spec-decision-width")).toBe("");
+    expect(readingWidth(container)).toBe("");
+    expect(storage.get(LAYOUT_KEY)).toBeUndefined();
+  });
+
+  it("문서 목록 패널의 오른쪽 경계를 끌면 최소값과 최대값 사이에서 움직인다", () => {
+    const { container } = workspace();
+    const limits = PANEL_LIMITS.specList;
+
+    const grabbed = handle(LIST_HANDLE);
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 560 });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${BASELINE + 60}px`);
+
+    fireEvent.pointerMove(window, { clientX: 1500 });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${limits.maxWidth}px`);
+
+    fireEvent.pointerMove(window, { clientX: 0 });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${limits.minWidth}px`);
+
+    fireEvent.pointerUp(window);
+    expect(stored().specList).toEqual({ width: limits.minWidth, baselineWidth: BASELINE });
+  });
+
+  it("결정 패널의 왼쪽 경계를 끌면 반대 방향으로 같은 한계 안에서 움직인다", () => {
+    const { container } = workspace();
+    const limits = PANEL_LIMITS.specDecision;
+
+    const grabbed = handle(DECISION_HANDLE);
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 440 });
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${BASELINE + 60}px`);
+
+    fireEvent.pointerMove(window, { clientX: 1500 });
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${limits.minWidth}px`);
+
+    fireEvent.pointerMove(window, { clientX: 0 });
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${limits.maxWidth}px`);
+    fireEvent.pointerUp(window);
+  });
+
+  it("핸들을 더블클릭하면 저장한 너비가 지워져 격자 규칙의 되돌림 값으로 돌아간다", () => {
+    const { container } = workspace();
+    dragTo(LIST_HANDLE, 320);
+    expect(gridWidth(container, "--spec-list-width")).toBe("320px");
+
+    fireEvent.doubleClick(handle(LIST_HANDLE));
+
+    expect(gridWidth(container, "--spec-list-width")).toBe("");
+    expect(stored().specList.width).toBeUndefined();
+    // 기준 너비는 남는다. 되찾은 폭을 잴 자리라 되돌림과 함께 지우면 다시 잴 근거가 사라진다.
+    expect(stored().specList.baselineWidth).toBe(BASELINE);
+  });
+
+  it("방향키는 한 걸음씩 움직이고 각자의 최소값과 최대값에서 멈춘다", () => {
+    const { container } = workspace();
+
+    fireEvent.keyDown(handle(LIST_HANDLE), { key: "ArrowRight" });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${BASELINE + PANEL_KEYBOARD_STEP}px`);
+    fireEvent.keyDown(handle(LIST_HANDLE), { key: "ArrowLeft" });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${BASELINE}px`);
+
+    // 결정 패널은 왼쪽 경계를 잡으므로 오른쪽 방향키가 좁히는 쪽이다.
+    fireEvent.keyDown(handle(DECISION_HANDLE), { key: "ArrowLeft" });
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${BASELINE + PANEL_KEYBOARD_STEP}px`);
+
+    dragTo(LIST_HANDLE, PANEL_LIMITS.specList.maxWidth);
+    fireEvent.keyDown(handle(LIST_HANDLE), { key: "ArrowRight" });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${PANEL_LIMITS.specList.maxWidth}px`);
+
+    dragTo(LIST_HANDLE, PANEL_LIMITS.specList.minWidth);
+    fireEvent.keyDown(handle(LIST_HANDLE), { key: "ArrowLeft" });
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${PANEL_LIMITS.specList.minWidth}px`);
+  });
+
+  it("두 패널을 모두 접으면 두 자리에 세로 바만 남고 다시 누르면 접기 직전 너비로 돌아온다", () => {
+    const { container } = workspace();
+    dragTo(LIST_HANDLE, 320);
+
+    fireEvent.click(screen.getByRole("button", { name: "기획서 목록 접기" }));
+    fireEvent.click(screen.getByRole("button", { name: "사용자 결정 접기" }));
+
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+    expect(screen.queryByRole("separator", { name: LIST_HANDLE })).toBeNull();
+
+    const bar = screen.getByRole("button", { name: "기획서 목록 펼치기" });
+    expect(bar).toHaveAttribute("title", "기획서 목록 펼치기");
+    expect(bar.textContent).not.toContain("기획서 목록");
+
+    fireEvent.click(bar);
+    expect(gridWidth(container, "--spec-list-width")).toBe("320px");
+
+    // 조절한 적이 없던 결정 패널은 저장한 너비가 없으므로 비율 배치로 돌아간다.
+    fireEvent.click(screen.getByRole("button", { name: "사용자 결정 펼치기" }));
+    expect(gridWidth(container, "--spec-decision-width")).toBe("");
+  });
+
+  it("읽기 폭 상한이 되찾은 폭만큼 오르고 860px에서 멈춘다", () => {
+    const { container } = workspace();
+
+    expect(readingWidth(container)).toBe("");
+
+    dragTo(LIST_HANDLE, PANEL_LIMITS.specList.minWidth);
+    expect(readingWidth(container)).toBe(`${READING_WIDTH_MIN + (BASELINE - PANEL_LIMITS.specList.minWidth)}px`);
+
+    fireEvent.click(screen.getByRole("button", { name: "기획서 목록 접기" }));
+    fireEvent.click(screen.getByRole("button", { name: "사용자 결정 접기" }));
+    expect(readingWidth(container)).toBe(`${READING_WIDTH_MAX}px`);
+  });
+
+  it("저장해 둔 너비와 접힘을 다음 실행의 첫 그리기에서 그대로 읽는다", () => {
+    storage.set(LAYOUT_KEY, JSON.stringify({ specList: { width: 320, baselineWidth: BASELINE } }));
+    expect(gridWidth(workspace().container, "--spec-list-width")).toBe("320px");
+
+    cleanup();
+    storage.set(
+      LAYOUT_KEY,
+      JSON.stringify({ specDecision: { width: 320, baselineWidth: BASELINE, collapsed: true } }),
+    );
+    expect(gridWidth(workspace().container, "--spec-decision-width")).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+  });
+
+  it("브라우저 저장소를 쓸 수 없어도 화면이 그려지고 드래그와 접기가 동작한다", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("접근 거부");
+      },
+      setItem: () => {
+        throw new Error("접근 거부");
+      },
+    });
+
+    const { container } = workspace();
+    expect(container.querySelector(".spec-workspace-layout")).toBeInTheDocument();
+
+    dragTo(LIST_HANDLE, 320);
+    expect(gridWidth(container, "--spec-list-width")).toBe("320px");
+
+    fireEvent.click(screen.getByRole("button", { name: "기획서 목록 접기" }));
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+  });
+
+  it("창이 좁으면 그리는 너비만 줄고 저장한 값은 그대로 남는다", () => {
+    const { container } = workspace();
+    dragTo(LIST_HANDLE, 300);
+    dragTo(DECISION_HANDLE, 300);
+
+    resizeWindow(600);
+    expect(gridWidth(container, "--spec-list-width")).toBe(`${PANEL_LIMITS.specList.minWidth}px`);
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${PANEL_LIMITS.specDecision.minWidth}px`);
+    expect(stored().specList.width).toBe(300);
+    expect(stored().specDecision.width).toBe(300);
+
+    resizeWindow(1024);
+    expect(gridWidth(container, "--spec-list-width")).toBe("300px");
+    expect(gridWidth(container, "--spec-decision-width")).toBe("300px");
+  });
+
+  it("창 폭 980px 이하에서 접힌 자리는 가로 막대가 되고 접기 버튼은 그대로 동작한다", () => {
+    resizeWindow(900);
+    const { container } = workspace();
+
+    fireEvent.click(screen.getByRole("button", { name: "사용자 결정 접기" }));
+
+    const bar = screen.getByRole("button", { name: "사용자 결정 펼치기" });
+    expect(bar).toHaveClass("panel-collapsed-bar-horizontal");
+    expect(gridWidth(container, "--spec-decision-width")).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
   });
 });

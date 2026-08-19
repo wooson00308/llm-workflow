@@ -49,9 +49,12 @@ describe("결정 보드 본문 조판", () => {
     // 줄 머리에 선 `.markdown-body` 규칙을 집기 위한 것이다.
     const reader = declarations("\n.markdown-body", cssText);
     const risk = declarations(".decision-summary-risk", cssText);
+    // 읽기 폭은 되찾은 폭만큼 오르는 변수가 되었다(SPEC-080 R8). 비교 상대는 그 변수의 되돌림 값이며,
+    // SPEC-076이 이 확인으로 지키려 한 "한 줄 길이가 본문과 같다"는 사실은 그 값에서 그대로 유지된다.
+    const fallback = /^var\(--document-reading-width, (.+)\)$/.exec(reader.get("max-width") ?? "")?.[1];
 
-    expect(risk.get("max-width")).toBe(reader.get("max-width"));
-    expect(reader.get("max-width")).toBe("620px");
+    expect(risk.get("max-width")).toBe(fallback);
+    expect(fallback).toBe("620px");
     expect(risk.get("justify-self")).toBe("start");
   });
 

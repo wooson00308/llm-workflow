@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "../../../shared/ui/Icon";
 import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
 import { FOLLOW_UP_LABEL, labelSpecDecisions, specDecisionLabel } from "../domain/specDecisionLabels";
@@ -10,16 +10,51 @@ import type {
   WorkflowItemSummary,
   WorkflowSummary,
 } from "../domain/types";
+import {
+  NARROW_WINDOW_WIDTH,
+  PANEL_LIMITS,
+  READING_WIDTH_MIN,
+  measureReclaimedWidth,
+  resolveReadingWidth,
+  resolveRenderedPanelWidths,
+} from "../domain/panelLayout";
+import {
+  browserPanelLayoutStore,
+  type PanelLayoutEntry,
+  type PanelLayoutState,
+} from "../infrastructure/browserPanelLayoutStore";
 import { GroupAttentionNote, taskColumns } from "./DevelopmentBoard";
 import { DocumentReader } from "./DocumentReader";
+import {
+  PanelCollapseButton,
+  PanelCollapsedBar,
+  PanelResizeHandle,
+} from "./PanelLayoutControls";
+import { SidebarLayoutContext } from "./WorkspaceShell";
 
 interface Props {
   busy: boolean;
   document: SpecDocument | null;
   loading: boolean;
+  /**
+   * 패널이 지금 그려져 있는 폭을 재는 자리. jsdom은 배치를 계산하지 않아 실제 측정이 0으로 나오므로,
+   * 시험이 이 자리를 바꿔 끼워 기준 너비를 확인한다.
+   */
+  measurePanelWidth?(element: HTMLElement): number;
   onDecision(outcome: SpecDecisionOutcome, comment: string): Promise<boolean>;
   onSelect(item: WorkflowItemSummary): void;
   workflow: WorkflowSummary;
+}
+
+/** 이 화면이 조절하는 두 패널. 저장소와 영역 표가 쓰는 식별자를 그대로 쓴다. */
+type DocumentPanel = "specList" | "specDecision";
+
+/** 조작 요소의 접근 이름과 툴팁이 이 값에서 나온다. */
+const SPEC_LIST_LABEL = "기획서 목록";
+const SPEC_DECISION_LABEL = "사용자 결정";
+
+function measureElementWidth(element: HTMLElement) {
+  return element.getBoundingClientRect().width;
 }
 
 type SpecFilter = "all" | "draft" | "user_review" | "decided";
@@ -55,6 +90,7 @@ export function SpecWorkspace({
   busy,
   document,
   loading,
+  measurePanelWidth = measureElementWidth,
   onDecision,
   onSelect,
   workflow,
@@ -89,6 +125,144 @@ export function SpecWorkspace({
       workflow.items.specs.find((item) => item.fileName === document?.summary.fileName)?.events ?? [],
     [document?.summary.fileName, workflow.items.specs],
   );
+
+  // 패널 배치. 저장소가 정본이고 이 상태는 화면을 다시 그리기 위한 사본이다. 저장 단위가 앱 전체라
+  // 이 화면이 다루지 않는 영역의 항목까지 함께 들고 저장한다.
+  const [panelLayout, setPanelLayout] = useState<PanelLayoutState>(() => browserPanelLayoutStore.load());
+  // 그리는 너비 계산과 좁은 창 판정이 창 폭을 읽는다. 창이 넓어지면 줄여 그리던 너비가 저장해 둔
+  // 값으로 돌아와야 하고, 다시 그리려면 폭이 바뀐 사실이 상태로 들어와야 한다.
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  // 아직 조절하지 않은 패널이 비율 배치로 그려져 있는 폭. 저장소에 기준 너비가 남기 전까지 여기서 든다.
+  const [measured, setMeasured] = useState<Partial<Record<DocumentPanel, number>>>({});
+  const listRef = useRef<HTMLElement>(null);
+  const decisionRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const readWidth = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", readWidth);
+    return () => window.removeEventListener("resize", readWidth);
+  }, []);
+
+  const listEntry = panelLayout.specList;
+  const decisionEntry = panelLayout.specDecision;
+  const listCollapsed = listEntry?.collapsed ?? false;
+  const decisionCollapsed = decisionEntry?.collapsed ?? false;
+
+  /*
+   * 기준 너비를 재는 자리 (SPEC-080 R8, R11). 이 화면의 두 패널은 비율 배치라 스타일이 px를 정하지
+   * 않으므로 화면에서 재는 수밖에 없다. 저장소에 기준 너비가 남은 뒤에는 그 값이 정본이라 다시 재지
+   * 않고, 접힌 동안에는 요소가 없어 재지 않는다. 값이 그대로면 같은 객체를 돌려 다시 그리지 않는다.
+   */
+  useLayoutEffect(() => {
+    setMeasured((previous) => {
+      let next = previous;
+      for (const [region, element] of [
+        ["specList", listRef.current],
+        ["specDecision", decisionRef.current],
+      ] as const) {
+        if (element === null || panelLayout[region]?.baselineWidth !== undefined) continue;
+        const width = measurePanelWidth(element);
+        if (width <= 0 || next[region] === width) continue;
+        next = { ...next, [region]: width };
+      }
+      return next;
+    });
+  });
+
+  const baselineWidths: Partial<Record<DocumentPanel, number>> = {
+    specList: listEntry?.baselineWidth ?? measured.specList,
+    specDecision: decisionEntry?.baselineWidth ?? measured.specDecision,
+  };
+
+  /*
+   * 그리는 px 너비. 조절하지도 접히지도 않은 패널은 값이 없고, 그때는 격자 규칙의 되돌림 값이 지금과
+   * 같은 비율 배치로 그린다. 창이 좁아 저장한 너비를 다 그릴 수 없을 때 값을 줄이는 것도, 접힌 동안
+   * 세로 바 폭을 돌려주는 것도 이 계산이 한다. 저장한 값은 그 사이 바뀌지 않는다.
+   */
+  const renderedWidths = resolveRenderedPanelWidths({
+    windowWidth,
+    storedWidths: {
+      ...(listEntry?.width === undefined ? {} : { specList: listEntry.width }),
+      ...(decisionEntry?.width === undefined ? {} : { specDecision: decisionEntry.width }),
+    },
+    collapsed: [
+      ...(listCollapsed ? (["specList"] as const) : []),
+      ...(decisionCollapsed ? (["specDecision"] as const) : []),
+    ],
+  });
+
+  const sidebarLayout = useContext(SidebarLayoutContext);
+  /*
+   * 본문이 되찾은 폭 (SPEC-080 R8). 사이드바와 이 화면의 두 패널이 함께 더해진다. 사이드바 값은
+   * 껍데기가 만들어 통로로 내려보낸 것이고, 껍데기 밖에서 이 화면만 그릴 때는 값이 없다.
+   */
+  const readingWidth = resolveReadingWidth(
+    measureReclaimedWidth([
+      ...(sidebarLayout === null ? [] : [sidebarLayout]),
+      {
+        baselineWidth: baselineWidths.specList,
+        renderedWidth: renderedWidths.specList,
+        collapsed: listCollapsed,
+      },
+      {
+        baselineWidth: baselineWidths.specDecision,
+        renderedWidth: renderedWidths.specDecision,
+        collapsed: decisionCollapsed,
+      },
+    ]),
+  );
+
+  /** 한 패널의 항목을 갈아 끼우고 같은 상태를 저장소에 남긴다. 저장 실패는 저장소가 삼킨다. */
+  function savePanel(region: DocumentPanel, entry: PanelLayoutEntry) {
+    const next: PanelLayoutState = { ...panelLayout, [region]: entry };
+    setPanelLayout(next);
+    browserPanelLayoutStore.save(next);
+  }
+
+  /*
+   * 처음 조작하는 순간의 기준 너비를 함께 남긴 항목. 이 패널이 얼마나 좁아졌는지 나중에 잴 자리가
+   * 된다. 아직 재지 못했으면 그 자리를 비워 둔다 — 재지 못한 값을 무엇으로 추정하면 읽기 폭이 근거
+   * 없이 넓어진다.
+   */
+  function withBaseline(region: DocumentPanel, entry: PanelLayoutEntry): PanelLayoutEntry {
+    const baselineWidth = entry.baselineWidth ?? baselineWidths[region];
+    return baselineWidth === undefined ? entry : { ...entry, baselineWidth };
+  }
+
+  /** 드래그와 방향키가 정한 너비. 들어오는 값은 조작 요소가 이미 한계 안으로 자른 값이다. */
+  function changeWidth(region: DocumentPanel, width: number) {
+    savePanel(region, withBaseline(region, { ...panelLayout[region], width }));
+  }
+
+  /** 더블클릭. 정해 둔 너비를 지워 격자 규칙의 되돌림 값으로 되돌린다 (SPEC-080 R3, R11). */
+  function resetWidth(region: DocumentPanel) {
+    const entry: PanelLayoutEntry = { ...panelLayout[region] };
+    delete entry.width;
+    savePanel(region, entry);
+  }
+
+  /*
+   * 접고 펴기. 펼칠 때 따로 너비를 되돌리지 않는다. 접는 동안에도 저장한 너비는 그대로 남아 있어,
+   * 접힘만 내리면 접기 직전에 그리던 너비가 그대로 다시 나온다. 조절한 적이 없던 패널은 저장한 너비가
+   * 없으므로 비율 배치로 돌아간다.
+   */
+  function collapsePanel(region: DocumentPanel, collapsed: boolean) {
+    savePanel(region, withBaseline(region, { ...panelLayout[region], collapsed }));
+  }
+
+  const layoutStyle = {
+    ...(renderedWidths.specList === undefined ? {} : { "--spec-list-width": `${renderedWidths.specList}px` }),
+    ...(renderedWidths.specDecision === undefined
+      ? {}
+      : { "--spec-decision-width": `${renderedWidths.specDecision}px` }),
+  } as CSSProperties;
+  // 되찾은 폭이 없으면 변수를 싣지 않는다. 스타일 규칙의 되돌림 값이 지금과 같은 620px을 그린다.
+  const readingStyle =
+    readingWidth === READING_WIDTH_MIN
+      ? undefined
+      : ({ "--document-reading-width": `${readingWidth}px` } as CSSProperties);
+  // 좁은 창에서는 두 영역이 위아래로 쌓이므로 접힌 자리가 가로 막대가 된다 (SPEC-080 R13).
+  const collapsedOrientation = windowWidth <= NARROW_WINDOW_WIDTH ? "horizontal" : "vertical";
 
   async function decide(outcome: SpecDecisionOutcome) {
     if (outcome !== "approved" && !comment.trim()) return;
@@ -130,10 +304,22 @@ export function SpecWorkspace({
         ))}
       </div>
 
-      <div className="spec-workspace-layout">
-        <aside className="spec-list-panel" aria-label="기획서 목록">
-          <header><strong>{filterLabel(filter)}</strong><small>{filtered.length}개 문서</small></header>
-          <div>
+      <div className="spec-workspace-layout" style={layoutStyle}>
+        {listCollapsed ? (
+          <aside className="spec-list-panel panel-collapsed-slot" aria-label={SPEC_LIST_LABEL}>
+            <PanelCollapsedBar
+              label={SPEC_LIST_LABEL}
+              onExpand={() => collapsePanel("specList", false)}
+              orientation={collapsedOrientation}
+            />
+          </aside>
+        ) : (
+        <aside className="spec-list-panel" aria-label={SPEC_LIST_LABEL} ref={listRef}>
+          <header>
+            <strong>{filterLabel(filter)}</strong><small>{filtered.length}개 문서</small>
+            <PanelCollapseButton label={SPEC_LIST_LABEL} onCollapse={() => collapsePanel("specList", true)} />
+          </header>
+          <div className="spec-list-items">
             {filtered.map((item) => (
               <button
                 aria-pressed={document?.summary.fileName === item.fileName}
@@ -152,7 +338,15 @@ export function SpecWorkspace({
               <div className="panel-empty compact"><Icon name="stamp" /><strong>해당 문서가 없습니다</strong><span>LLM이 기획서를 작성하면 여기에 나타납니다.</span></div>
             )}
           </div>
+          <PanelResizeHandle
+            label={SPEC_LIST_LABEL}
+            onReset={() => resetWidth("specList")}
+            onWidthChange={(width) => changeWidth("specList", width)}
+            region="specList"
+            width={renderedWidths.specList ?? baselineWidths.specList ?? PANEL_LIMITS.specList.minWidth}
+          />
         </aside>
+        )}
 
         <section className="spec-reader-panel">
           {loading && <div className="reader-loading">기획서를 불러오는 중…</div>}
@@ -172,7 +366,7 @@ export function SpecWorkspace({
                 specId={document.summary.id}
                 tasks={workflow.items.tasks}
               />
-              <article className="spec-paper embedded">
+              <article className="spec-paper embedded" style={readingStyle}>
                 {/* 문서가 바뀌면 다시 평문에서 시작한다. 이 자리는 문서만 갈아 끼우므로 `key`가 그 몫이다. */}
                 <DocumentReader body={document.body} key={document.summary.fileName} />
                 {recorded && (
@@ -190,8 +384,23 @@ export function SpecWorkspace({
           )}
         </section>
 
-        <aside className="decision-panel">
-          <p className="eyebrow">USER GATE</p>
+        {decisionCollapsed ? (
+          <aside className="decision-panel panel-collapsed-slot">
+            <PanelCollapsedBar
+              label={SPEC_DECISION_LABEL}
+              onExpand={() => collapsePanel("specDecision", false)}
+              orientation={collapsedOrientation}
+            />
+          </aside>
+        ) : (
+        <aside className="decision-panel" ref={decisionRef}>
+          <div className="decision-panel-heading">
+            <p className="eyebrow">USER GATE</p>
+            <PanelCollapseButton
+              label={SPEC_DECISION_LABEL}
+              onCollapse={() => collapsePanel("specDecision", true)}
+            />
+          </div>
           <h2>사용자 결정</h2>
           {!document && <p className="decision-help">기획서를 선택하면 승인·수정 요청·폐기 도구가 활성화됩니다.</p>}
           {document && awaitingDecision && !commentDecision && (
@@ -291,7 +500,16 @@ export function SpecWorkspace({
             </div>
           )}
           {document && <SpecDecisionHistory events={decisionEvents} />}
+          <PanelResizeHandle
+            grabSide="left"
+            label={SPEC_DECISION_LABEL}
+            onReset={() => resetWidth("specDecision")}
+            onWidthChange={(width) => changeWidth("specDecision", width)}
+            region="specDecision"
+            width={renderedWidths.specDecision ?? baselineWidths.specDecision ?? PANEL_LIMITS.specDecision.minWidth}
+          />
         </aside>
+        )}
       </div>
     </section>
   );
