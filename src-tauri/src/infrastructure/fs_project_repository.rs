@@ -478,9 +478,13 @@ impl FileSystemProjectRepository {
         // 여기서만 `unwrap_or_default()`를 쓴다. 이 경로에는 마이그레이션 차단 같은 안전 판정이
         // 걸려 있지 않고, lease를 못 읽었다고 아이디어 전문이 통째로 안 열리는 편이 더 나쁘다.
         let leases = read_active_leases(&control_root).unwrap_or_default();
+        // 참조 판정과 재작성 선점 판정이 같은 결정 목록을 봐야 두 경로의 답이 갈리지 않는다
+        // (SPEC-082 R12).
+        let decisions = read_spec_decisions(&workflow_root);
         derive_idea_states(
             std::slice::from_mut(&mut summary),
-            &spec_references(&workflow_root, &read_spec_decisions(&workflow_root)),
+            &spec_references(&workflow_root, &decisions),
+            &decisions,
             &leases,
         );
         Ok(IdeaDocument { summary, body })
@@ -2727,7 +2731,7 @@ fn workflow_items(
         }
     }
     let mut ideas = read_markdown_summaries(&workflow_root.join("ideas"), "inbox");
-    derive_idea_states(&mut ideas, &references, leases);
+    derive_idea_states(&mut ideas, &references, decisions, leases);
     merge_qa_decision_events(qa_events, &mut tasks);
     (
         WorkflowItems {
@@ -3891,6 +3895,10 @@ struct SpecReference {
     /// 최신 결정이 `rejected`인가. 반려는 계약이 정한 종료 상태이므로, 이 값이 참인 기획서는
     /// 더 갈 곳이 없다(SPEC-018 R6). 결정이 없으면 거짓이다.
     is_rejected: bool,
+    /// 프론트매터의 `source_decision_id` 원문. 수정 요청 결정을 원천으로 삼는 재작성 기획서만
+    /// 이 값을 적고 첫 기획서는 적지 않으므로, 아이디어 판정이 이 값 하나로 재작성을 가른다
+    /// (SPEC-082 R3). 결정 기록을 읽지 않는다.
+    source_decision_id: Option<String>,
 }
 
 /// `source_idea_id`(옛 계약은 `source_idea`)를 가진 기획서만 모은다. 둘 다 없는 문서는
@@ -3925,6 +3933,7 @@ fn spec_reference(
         spec_id,
         is_draft,
         is_rejected,
+        source_decision_id: yaml_text(metadata, "source_decision_id"),
     })
 }
 
@@ -4010,19 +4019,48 @@ fn spec_references(workflow_root: &Path, decisions: &[SpecDecisionRecord]) -> Ve
 /// 아이디어 항목의 `status`와 `stalled_spec_ids`를 파생값으로 채운다.
 /// 목록 조회와 전문 읽기가 같은 결론을 내도록 두 경로가 이 함수만 부른다(SPEC-012 R7).
 ///
-/// 파일에 적힌 아이디어 `status`는 payload로 흘려보내지 않는다. 네 상태가 배타적이려면 판정이 네
-/// 경우 모두에 값을 써야 한다. 파일에 쓰지는 않는다 — 읽은 값을 화면에 그대로 흘리지 않을 뿐이다.
+/// 파일에 적힌 아이디어 `status`는 payload로 흘려보내지 않는다. 다섯 상태가 배타적이려면 판정이
+/// 모든 경우에 값을 써야 한다. 파일에 쓰지는 않는다 — 읽은 값을 화면에 그대로 흘리지 않을 뿐이다.
+///
+/// 결정 기록을 함께 받는 이유는 재작성 세션이 아이디어가 아니라 수정 요청 결정을 선점하기
+/// 때문이다. 그 lease가 무엇을 물고 있는지는 결정 문서를 봐야 알 수 있다(SPEC-082 R2).
 fn derive_idea_states(
     ideas: &mut [WorkflowItemSummary],
     references: &[SpecReference],
+    decisions: &[SpecDecisionRecord],
     leases: &[AgentLeaseSummary],
 ) {
     for idea in ideas {
         // 받은 목록이 이미 미만료 lease만 담고 있으므로 만료 판정은 하지 않는다.
         // `task_id`가 없는 lease는 무엇을 물고 있는지 말하지 않으므로 세지 않는다.
-        let preempted = leases
+        let idea_preempted = leases
             .iter()
             .any(|lease| lease.task_id.as_deref() == Some(idea.id.as_str()));
+        // 이 아이디어에서 나온 기획서를 되돌린 수정 요청 결정을 문 lease. 재작성 세션이 도는
+        // 동안 이 값이 참이고, 아이디어를 문 lease와 같은 무게로 선점이 된다(SPEC-082 R2, R5).
+        // `decisions`를 읽지 못한 조회는 빈 목록을 받으므로 이 판정만 사라진다(SPEC-082 R9).
+        let redraft_preempted = decisions.iter().any(|decision| {
+            decision.outcome == "revision_requested"
+                && references
+                    .iter()
+                    .any(|reference| {
+                        reference.idea_id == idea.id && reference.spec_id == decision.spec_id
+                    })
+                && leases
+                    .iter()
+                    .any(|lease| lease.task_id.as_deref() == Some(decision.id.as_str()))
+        });
+        let preempted = idea_preempted || redraft_preempted;
+        // 쓰다 만 재작성 기획서. 결정 기록을 보지 않고 프론트매터의 원천 하나로 가른다
+        // (SPEC-082 R3). 그래서 결정 디렉터리를 못 읽어도 이 판정은 그대로 답한다.
+        let redraft_spec = references.iter().any(|reference| {
+            reference.idea_id == idea.id
+                && reference.is_draft
+                && reference.source_decision_id.is_some()
+        });
+        // 첫 기획과 재작성이 같은 값으로 내려가지 않게 한다. 둘 다 성립하면 재작성이 이긴다
+        // (SPEC-082 R4).
+        let redrafting = redraft_preempted || redraft_spec;
         let mut drafts: Vec<String> = references
             .iter()
             .filter(|reference| reference.idea_id == idea.id && reference.is_draft)
@@ -4047,7 +4085,10 @@ fn derive_idea_states(
         } else if preempted || !drafts.is_empty() {
             // 반려가 섞여 있어도 아직 쓰는 중인 기획서가 있으면 종결이 아니다(SPEC-018 R6). 그래서
             // 이 가지가 종결보다 앞선다.
-            idea.status = "drafting".to_owned();
+            //
+            // `redrafting`이 참이면 선점이든 남은 `draft`든 이 가지로 들어온다. 재작성 lease는
+            // `preempted`를 참으로 만들고, 재작성 `draft` 기획서는 `drafts`에 들어가기 때문이다.
+            idea.status = if redrafting { "redrafting" } else { "drafting" }.to_owned();
             idea.stalled_spec_ids = if preempted { Vec::new() } else { drafts };
         } else if all_rejected {
             idea.status = "closed".to_owned();
@@ -6675,6 +6716,322 @@ mod tests {
         );
     }
 
+    /// 수정 요청 결정을 원천으로 삼는 재작성 기획서. 아이디어와 결정을 함께 가리키는 픽스처가
+    /// 지금까지 없었다. 실제 재작성 기획서가 두 값을 함께 적는 것은 이 저장소의 SPEC-015가 보인다.
+    fn write_rework_spec_for_idea(
+        root: &Path,
+        directory: &str,
+        spec_id: &str,
+        idea_id: &str,
+        decision_id: &str,
+        status: &str,
+    ) {
+        fs::write(
+            root.join(".workflow")
+                .join(directory)
+                .join("specs")
+                .join(format!("{spec_id}.md")),
+            format!(
+                "---\nschema: workflow-labs/spec@1\nid: {spec_id}\ntitle: {spec_id} 재작성 기획서\nstatus: {status}\nsource_idea_id: {idea_id}\nsource_decision_id: {decision_id}\ncreated_at: 2026-08-02T00:00:00Z\nupdated_at: 2026-08-02T00:00:00Z\n---\n\n재작성 내용이다.\n"
+            ),
+        )
+        .expect("write rework spec for idea");
+    }
+
+    /// 재작성 판정의 공통 픽스처. 아이디어 하나, 그 아이디어에서 나와 수정 요청을 받은 기획서
+    /// 하나, 그 수정 요청 결정 하나를 쓴다. 재작성 기획서와 lease는 시나리오마다 따로 더한다.
+    fn write_revision_requested_idea(
+        root: &Path,
+        directory: &str,
+        idea_id: &str,
+        spec_id: &str,
+        decision_id: &str,
+    ) {
+        write_idea_document(root, directory, idea_id, "inbox");
+        write_spec_for_idea(root, directory, spec_id, idea_id, "user_review");
+        write_decision(
+            root,
+            directory,
+            &format!("{decision_id}.md"),
+            &spec_decision(
+                decision_id,
+                spec_id,
+                "revision_requested",
+                "2026-08-02T00:00:00Z",
+            ),
+        );
+    }
+
+    // ── SPEC-082. 재작성 중인 아이디어 ─────────────────────────────────────────────────────
+    //
+    // 재작성 세션은 아이디어가 아니라 수정 요청 결정을 선점한다. 그 lease를 세지 않으면 정상으로
+    // 도는 세션 위에 중단 의심이 뜨고, 첫 기획과 재작성이 화면에서 같은 값으로 보인다.
+
+    // 재작성 기획서 문서가 아직 없어도 판정이 선다. 세션이 결정을 물었다는 사실만으로 충분하다.
+    #[test]
+    fn treats_an_idea_whose_revision_request_is_claimed_as_redrafting() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-001",
+            "SPEC-001",
+            "DECISION-001",
+        );
+        write_idea_lease(root.path(), "DECISION-001.yml", "DECISION-001", 5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("redrafting".to_owned(), Vec::new())
+        );
+    }
+
+    // lease가 끊긴 재작성. 상태는 재작성인 채로 중단 의심 근거에 남은 기획서가 담긴다.
+    #[test]
+    fn names_the_stalled_rework_spec_when_the_revision_request_is_not_claimed() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-001",
+            "SPEC-001",
+            "DECISION-001",
+        );
+        write_rework_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-002",
+            "IDEA-001",
+            "DECISION-001",
+            "draft",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("redrafting".to_owned(), vec!["SPEC-002".to_owned()])
+        );
+    }
+
+    // 같은 픽스처에 lease만 다시 넣는다. 결정을 문 lease가 아이디어를 문 lease와 같은 무게로
+    // 선점이 되므로 중단 의심이 꺼진다.
+    #[test]
+    fn counts_the_revision_request_lease_as_a_claim_over_the_rework_spec() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-001",
+            "SPEC-001",
+            "DECISION-001",
+        );
+        write_rework_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-002",
+            "IDEA-001",
+            "DECISION-001",
+            "draft",
+        );
+        write_idea_lease(root.path(), "DECISION-001.yml", "DECISION-001", 5);
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("redrafting".to_owned(), Vec::new())
+        );
+    }
+
+    // 첫 기획은 새 값에 물들지 않는다. 선점으로 도는 조합과 쓰다 만 조합 둘 다 예전 답 그대로다.
+    #[test]
+    fn keeps_a_first_drafting_idea_out_of_redrafting() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_idea_document(root.path(), &directory, "IDEA-001", "inbox");
+        write_idea_lease(root.path(), "IDEA-001.yml", "IDEA-001", 5);
+        write_idea_document(root.path(), &directory, "IDEA-002", "inbox");
+        write_spec_for_idea(root.path(), &directory, "SPEC-002", "IDEA-002", "draft");
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("drafting".to_owned(), Vec::new())
+        );
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-002"),
+            ("drafting".to_owned(), vec!["SPEC-002".to_owned()])
+        );
+    }
+
+    // 목록과 전문이 같은 결정 목록을 봐야 두 화면의 답이 갈리지 않는다.
+    #[test]
+    fn the_list_and_the_full_document_agree_on_a_redrafting_idea() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-001",
+            "SPEC-001",
+            "DECISION-001",
+        );
+        write_idea_lease(root.path(), "DECISION-001.yml", "DECISION-001", 5);
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-002",
+            "SPEC-002",
+            "DECISION-002",
+        );
+        write_rework_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-003",
+            "IDEA-002",
+            "DECISION-002",
+            "draft",
+        );
+
+        let inspected = repository.inspect(root.path()).expect("inspect");
+
+        for id in ["IDEA-001", "IDEA-002"] {
+            let document = repository
+                .read_idea(root.path(), &directory, &format!("{id}.md"))
+                .expect("read idea");
+            assert_eq!(
+                (
+                    document.summary.status.clone(),
+                    document.summary.stalled_spec_ids.clone()
+                ),
+                idea_state(&inspected, 0, id),
+                "{id}의 목록과 전문이 갈렸다"
+            );
+        }
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-001"),
+            ("redrafting".to_owned(), Vec::new())
+        );
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-002"),
+            ("redrafting".to_owned(), vec!["SPEC-003".to_owned()])
+        );
+    }
+
+    // 결정을 못 읽으면 lease 쪽 판정만 사라진다. 기획서 프론트매터만 보는 판정은 그대로 답한다.
+    #[test]
+    fn keeps_the_rework_draft_judgement_when_the_decision_directory_is_unreadable() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-001",
+            "SPEC-001",
+            "DECISION-001",
+        );
+        write_idea_lease(root.path(), "DECISION-001.yml", "DECISION-001", 5);
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-002",
+            "SPEC-002",
+            "DECISION-002",
+        );
+        write_rework_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-003",
+            "IDEA-002",
+            "DECISION-002",
+            "draft",
+        );
+        fs::remove_dir_all(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("decisions"),
+        )
+        .expect("drop decisions");
+
+        let inspected = repository
+            .inspect(root.path())
+            .expect("inspect without decisions");
+
+        assert_ne!(idea_state(&inspected, 0, "IDEA-001").0, "redrafting");
+        assert_eq!(
+            idea_state(&inspected, 0, "IDEA-002"),
+            ("redrafting".to_owned(), vec!["SPEC-003".to_owned()])
+        );
+    }
+
+    // 판정은 읽기다. 새 입력이 하나 늘어도 어떤 파일도 쓰이지 않는다.
+    #[test]
+    fn judging_a_redrafting_idea_writes_nothing() {
+        let root = tempdir().expect("temp project");
+        let repository = FileSystemProjectRepository;
+        let project = repository
+            .create_workflow(root.path(), "Feature")
+            .expect("create workflow");
+        let directory = project.workflows[0].directory.clone();
+        write_revision_requested_idea(
+            root.path(),
+            &directory,
+            "IDEA-001",
+            "SPEC-001",
+            "DECISION-001",
+        );
+        write_rework_spec_for_idea(
+            root.path(),
+            &directory,
+            "SPEC-002",
+            "IDEA-001",
+            "DECISION-001",
+            "draft",
+        );
+        write_idea_lease(root.path(), "DECISION-001.yml", "DECISION-001", 5);
+        let control_root = root.path().join(".workflow");
+        let before_times = file_snapshot(&control_root);
+        let before_contents = file_contents_snapshot(&control_root);
+
+        repository.inspect(root.path()).expect("first inspect");
+        repository.inspect(root.path()).expect("second inspect");
+
+        assert_eq!(file_snapshot(&control_root), before_times);
+        assert_eq!(file_contents_snapshot(&control_root), before_contents);
+    }
+
     #[test]
     fn reads_optional_task_due_date() {
         let root = tempdir().expect("temp project");
@@ -7330,6 +7687,29 @@ mod tests {
             );
             if metadata.is_dir() {
                 collect_modified_times(&path, entries);
+            }
+        }
+    }
+
+    /// 제어 디렉터리 아래 모든 파일의 내용. [`file_snapshot`]이 수정 시각만 보므로, 같은 시각에
+    /// 내용만 갈린 경우를 잡으려면 이 값을 함께 본다.
+    fn file_contents_snapshot(control_root: &Path) -> BTreeMap<String, Vec<u8>> {
+        let mut entries = BTreeMap::new();
+        collect_file_contents(control_root, &mut entries);
+        entries
+    }
+
+    fn collect_file_contents(directory: &Path, entries: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in fs::read_dir(directory).expect("directory listing") {
+            let path = entry.expect("directory entry").path();
+            let metadata = fs::symlink_metadata(&path).expect("entry metadata");
+            if metadata.is_dir() {
+                collect_file_contents(&path, entries);
+            } else {
+                entries.insert(
+                    path.display().to_string(),
+                    fs::read(&path).expect("file contents"),
+                );
             }
         }
     }

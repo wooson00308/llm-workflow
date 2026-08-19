@@ -223,8 +223,10 @@ pub struct WorkflowItemSummary {
     pub id: String,
     pub title: String,
     /// 문서의 상태. 아이디어에서는 파일 값이 아니라 조회 시점 파생값이며 `inbox`·`drafting`·
-    /// `closed`·`adopted` 넷 중 하나다(SPEC-012 R1, SPEC-018 R6). `closed`는 참조 기획서가 모두
-    /// 반려로 끝난 경우다. 앱은 판정 결과를 아이디어 파일에 쓰지 않는다.
+    /// `redrafting`·`closed`·`adopted` 다섯 중 하나다(SPEC-012 R1, SPEC-018 R6, SPEC-082 R1).
+    /// `redrafting`은 사용자가 수정 요청으로 돌려보낸 기획서를 다시 받는 중인 경우이고 첫 기획을
+    /// 받는 `drafting`과 구분된다. `closed`는 참조 기획서가 모두 반려로 끝난 경우다. 앱은 판정
+    /// 결과를 아이디어 파일에 쓰지 않는다.
     pub status: String,
     pub updated_at: Option<String>,
     pub due_at: Option<String>,
@@ -240,9 +242,11 @@ pub struct WorkflowItemSummary {
     pub work_group_revision: Option<u32>,
     /// 그룹 QA 반려 뒤 만들어진 수정 작업이 답하는 그룹 QA 결정 id.
     pub source_qa_decision_id: Option<String>,
-    /// 중단 의심의 근거. 이 아이디어가 반영중인데 선점한 미만료 lease가 없을 때, 걸려 있는 `draft`
-    /// 기획서의 문서 id다. 문서 id 오름차순이며 그 조합이 아니면 비어 있다. 비어 있지 않다는 것과
-    /// 중단 의심은 같은 뜻이다(SPEC-012 R5). 기획서·개발 작업 항목에서는 항상 비어 있다.
+    /// 중단 의심의 근거. 이 아이디어가 반영중이거나 재반영중인데 선점한 미만료 lease가 없을 때,
+    /// 걸려 있는 `draft` 기획서의 문서 id다. 선점은 아이디어 id를 문 lease와, 이 아이디어에서 나온
+    /// 기획서의 수정 요청 결정 id를 문 lease를 같은 무게로 센다(SPEC-082 R5, R6). 문서 id
+    /// 오름차순이며 그 조합이 아니면 비어 있다. 비어 있지 않다는 것과 중단 의심은 같은 뜻이다
+    /// (SPEC-012 R5). 기획서·개발 작업 항목에서는 항상 비어 있다.
     pub stalled_spec_ids: Vec<String>,
     /// 문서에 일어난 사실. 시각 오름차순이다. 개발 작업은 상태 전이, 기획서는 사용자 결정이
     /// 실리고 아이디어는 항상 비어 있다. `kind`의 뜻은 문서 종류에 따라 다르다 — 기획서의
