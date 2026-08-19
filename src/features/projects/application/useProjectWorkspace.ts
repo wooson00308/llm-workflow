@@ -27,6 +27,8 @@ import type {
   SpecDecisionOutcome,
   TaskResumeOutcome,
   TaskRevisionRequestOutcome,
+  WorkGroupLifecycleOutcomeResult,
+  WorkGroupLifecycleRequest,
   WorkGroupQaSubmission,
   WorkGroupQaSubmissionResult,
   WorkflowReportSummary,
@@ -1665,6 +1667,30 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     [gateway, project],
   );
 
+  /**
+   * 작업 그룹 하나를 사용자 판단으로 폐기하거나 중단에서 되살린다. 실패 사유는 입력 영역이 그
+   * 자리에서 보여 줄 수 있도록 반환값에도 담고, 성공 응답의 프로젝트 요약은 즉시 반영한다.
+   */
+  const recordWorkGroupLifecycle = useCallback(
+    async (request: WorkGroupLifecycleRequest): Promise<WorkGroupLifecycleOutcomeResult> => {
+      if (!project) return { ok: false, message: "열린 프로젝트가 없습니다." };
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await gateway.recordWorkGroupLifecycle(project.rootPath, request);
+        setProject(result.summary);
+        return { ok: true, result };
+      } catch (reason) {
+        const message = messageFrom(reason);
+        setError(message);
+        return { ok: false, message };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [gateway, project],
+  );
+
   /** 현재 revision의 작업 그룹 전체에 사용자 결정 하나를 원자적으로 기록한다. */
   const submitWorkGroupQa = useCallback(
     async (submission: WorkGroupQaSubmission): Promise<WorkGroupQaSubmissionResult | null> => {
@@ -2145,6 +2171,7 @@ export function useProjectWorkspace({ gateway, recentStore }: Dependencies) {
     submitWorkGroupQa,
     resumeTask,
     recordTaskRevisionRequest,
+    recordWorkGroupLifecycle,
     decideSpec,
     agentRuntime,
     agentRuntimeActions,

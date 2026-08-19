@@ -12,6 +12,8 @@ import type {
   AgentRuntimeState,
   TaskDocument,
   SpecDocument,
+  WorkGroupLifecycleOutcomeResult,
+  WorkGroupLifecycleRequest,
   WorkGroupQaSubmission,
   WorkGroupQaSubmissionResult,
   WorkGroupSummary,
@@ -88,6 +90,7 @@ interface Props {
   ): Promise<TaskDocument | null>;
   /** 작업 그룹 revision 전체에 사용자 QA 결정 하나를 기록한다. */
   onWorkGroupQaSubmit?(submission: WorkGroupQaSubmission): Promise<WorkGroupQaSubmissionResult | null>;
+  onWorkGroupLifecycle?(request: WorkGroupLifecycleRequest): Promise<WorkGroupLifecycleOutcomeResult>;
   /**
    * 에이전트 화면의 상태와 조작. 주인이 작업 공간 훅이라 화면을 옮겨 다녀도 진행 표시가 남는다.
    * 선택인 것은 이 껍데기를 그리는 검사 리터럴이 아직 이 묶음을 모르기 때문이다.
@@ -212,6 +215,7 @@ export function WorkspaceShell({
   onReadSpec,
   onReadTask,
   onWorkGroupQaSubmit = async () => null,
+  onWorkGroupLifecycle = async () => ({ ok: false as const, message: "그룹 결정 통로가 연결되지 않았습니다." }),
   onRefresh,
   onSwitchProject,
 }: Props) {
@@ -790,6 +794,7 @@ export function WorkspaceShell({
               key={workflow.directory}
               onOpenQa={openQaFeature}
               onReadTask={(fileName) => onReadTask(workflow.directory, fileName)}
+              onWorkGroupLifecycle={onWorkGroupLifecycle}
               workflow={workflow}
             />
           )}
@@ -947,7 +952,7 @@ function ArchiveView({
     ["approved", "rejected"].includes(item.status),
   );
   const groups = workflow.items.workGroups.filter((group) =>
-    ["completed", "automatic_completed"].includes(group.displayStatus),
+    ["completed", "automatic_completed", "discarded"].includes(group.displayStatus),
   );
 
   // 두 종류의 기록을 하나의 시간순 이야기로 합친다. 쌓일수록 목록이 아니라 달력처럼 읽히게,
@@ -963,7 +968,7 @@ function ArchiveView({
     })),
     ...groups.map((group) => ({
       key: group.fileName,
-      kind: "group_completed" as const,
+      kind: (group.displayStatus === "discarded" ? "group_discarded" : "group_completed") as ArchiveRecord["kind"],
       title: group.title,
       meta: group.displayStatus === "completed" ? `${group.id} · 사용자 QA 승인` : group.id,
       at: group.updatedAt,
@@ -982,12 +987,12 @@ function ArchiveView({
     return (
       <section className="archive-view archive-group-detail">
         <button className="text-button qa-scope-back" onClick={() => setSelectedGroup(null)} type="button">← 기록으로 돌아가기</button>
-        <p className="qa-feature-kicker">기능 완료 기록</p>
+        <p className="qa-feature-kicker">{selectedGroup.displayStatus === "discarded" ? "기능 폐기 기록" : "기능 완료 기록"}</p>
         <h1>{selectedGroup.title}</h1>
         {selectedGroup.description && <p className="qa-feature-goal">{selectedGroup.description}</p>}
 
         <dl className="archive-group-facts">
-          <div><dt>완료 방식</dt><dd>{selectedGroup.displayStatus === "completed" ? "사용자 QA 승인" : "자동 완료"}</dd></div>
+          <div><dt>종결 방식</dt><dd>{selectedGroup.displayStatus === "completed" ? "사용자 QA 승인" : selectedGroup.displayStatus === "discarded" ? "사용자 폐기" : "자동 완료"}</dd></div>
           <div><dt>구성 버전</dt><dd>{selectedGroup.revision}</dd></div>
           <div><dt>마지막 갱신</dt><dd>{formatArchiveDate(selectedGroup.updatedAt)}</dd></div>
         </dl>
@@ -1069,7 +1074,7 @@ function ArchiveView({
 
 interface ArchiveRecord {
   key: string;
-  kind: "spec_approved" | "spec_rejected" | "group_completed";
+  kind: "spec_approved" | "spec_rejected" | "group_completed" | "group_discarded";
   title: string;
   meta: string;
   at: string | null;
@@ -1081,6 +1086,7 @@ const ARCHIVE_KIND_LABEL: Record<ArchiveRecord["kind"], string> = {
   spec_approved: "기획 승인",
   spec_rejected: "기획 폐기",
   group_completed: "기능 완료",
+  group_discarded: "기능 폐기",
 };
 
 function archiveTime(value: string | null) {

@@ -19,10 +19,11 @@ use crate::domain::project::{
     TaskResumeRecovery, TaskResumeRequest, TaskResumeResult, TaskResumeStatus, TaskRevisionRequest,
     TaskRevisionRequestInput, TaskRevisionRequestResult, TaskRevisionRequestStatus,
     TaskScopeDeclaration, TaskScopeStatus, WorkGroupConfigurationIssue, WorkGroupDisplayStatus,
-    WorkGroupQaMode, WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission,
-    WorkGroupQaSubmissionResult, WorkGroupQaSubmissionStatus, WorkGroupStatus, WorkGroupSummary,
-    WorkflowCounts, WorkflowEntry, WorkflowItemSummary, WorkflowItems, WorkflowManifest,
-    WorkflowReportSummary, WorkflowStatus, PROJECT_SCHEMA_VERSION,
+    WorkGroupLifecycleOutcome, WorkGroupLifecycleRequest, WorkGroupLifecycleResult,
+    WorkGroupLifecycleStatus, WorkGroupQaMode, WorkGroupQaOutcome, WorkGroupQaScenario,
+    WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkGroupQaSubmissionStatus,
+    WorkGroupStatus, WorkGroupSummary, WorkflowCounts, WorkflowEntry, WorkflowItemSummary,
+    WorkflowItems, WorkflowManifest, WorkflowReportSummary, WorkflowStatus, PROJECT_SCHEMA_VERSION,
 };
 #[cfg(test)]
 use crate::domain::project::{
@@ -99,6 +100,9 @@ const TASK_RESUME_SCHEMA: &str = "workflow-labs/task-resume@1";
 /// 사용자가 잘못 분해된 작업을 고쳐 달라고 남긴 요청 기록의 스키마(SPEC-055 R2). 기획서 결정·QA 결정·
 /// 재개 기록과 다른 식별자이므로 네 기록이 서로의 판정에 섞이지 않는다.
 const TASK_REVISION_REQUEST_SCHEMA: &str = "workflow-labs/task-revision-request@1";
+/// 사용자가 작업 그룹을 폐기하거나 중단에서 되살린 사실을 남기는 앱 소유 결정의 스키마. 그룹 QA
+/// 결정과 다른 식별자이므로 두 판정 어디에도 섞이지 않는다.
+const GROUP_LIFECYCLE_DECISION_SCHEMA: &str = "workflow-labs/group-lifecycle-decision@1";
 /// 확인 동선 절의 제목. 앱이 설치하는 개발자 계약이 고정한 문자열과 문자 단위로 같다. 이 파일은 그
 /// 문자열을 읽기만 하고 규칙 문언을 정하지 않는다(SPEC-056 R4).
 const TASK_WALKTHROUGH_HEADING: &str = "## 확인 동선";
@@ -153,6 +157,20 @@ pub enum ProjectError {
     WorkGroupQaCommentRequired,
     #[error("확인 항목 코멘트는 2,000자 이하여야 합니다.")]
     WorkGroupQaCommentTooLong,
+    #[error("폐기는 준비 중·활성·중단 그룹에, 되살리기는 중단 그룹에만 기록할 수 있습니다.")]
+    WorkGroupLifecycleInvalidState,
+    #[error("작업 그룹이 그사이 변경되었습니다. 문서를 다시 열어 확인한 뒤 제출해 주세요.")]
+    WorkGroupLifecycleStale,
+    #[error("외부 LLM이 이 그룹을 선점하고 있습니다. 선점이 끝난 뒤 다시 시도해 주세요.")]
+    WorkGroupLifecycleLeased,
+    #[error("폐기 사유를 입력해 주세요.")]
+    GroupDiscardReasonRequired,
+    #[error("그룹 결정 코멘트는 2,000자 이하여야 합니다.")]
+    GroupLifecycleCommentTooLong,
+    #[error("그룹 결정 요청 식별자를 입력해 주세요.")]
+    GroupLifecycleRequestIdRequired,
+    #[error("작업 그룹 문서의 프론트매터를 읽지 못해 결정을 기록하지 않았습니다.")]
+    GroupLifecycleUnreadable,
     #[error("막힌 상태인 개발 작업만 재개할 수 있습니다.")]
     TaskNotBlocked,
     #[error("작업 문서가 그사이 변경되었습니다. 문서를 다시 열어 확인한 뒤 재개해 주세요.")]
@@ -1004,6 +1022,44 @@ impl FileSystemProjectRepository {
                 read_active_leases(&control_root)?,
             ),
             request: recorded,
+        })
+    }
+
+    /// 사용자 판단으로 작업 그룹을 폐기하거나 중단에서 되살리고, 그 사실을 앱 소유 결정으로
+    /// 남긴다. 상태 전이와 결정 문서는 한 요청에서 함께 남으며, 하나만 남은 결과를 성공으로
+    /// 돌려주지 않는다. 폐기된 그룹의 남은 작업은 배정 자격에서 빠지고, 같은 승인에서 새 그룹이
+    /// 파생되지도 않는다.
+    pub fn record_work_group_lifecycle(
+        &self,
+        root: &Path,
+        request: &WorkGroupLifecycleRequest,
+    ) -> Result<WorkGroupLifecycleResult, ProjectError> {
+        validate_group_lifecycle(request)?;
+        let root = canonical_project_root(root)?;
+        let control_root = root.join(CONTROL_DIRECTORY);
+        let project = read_manifest(&control_root.join(PROJECT_MANIFEST))?;
+        validate_workflow_directories(&control_root, &project)?;
+        require_current_schema(project.schema_version)?;
+        // 관리 자산 설치가 스스로 쓰기 잠금을 잡으므로 이 명령의 잠금보다 앞에 둔다.
+        install_all_managed_project_assets(&root, &control_root)?;
+        let workflow_root =
+            registered_workflow_root(&control_root, &project, &request.workflow_directory)?;
+
+        let (status, group_id) = {
+            let _lock = ProjectWriteLock::acquire(&control_root)?;
+            record_one_group_lifecycle(&control_root, &workflow_root, request)?
+        };
+
+        Ok(WorkGroupLifecycleResult {
+            status,
+            summary: summary_from_manifest(
+                &root,
+                project,
+                SchemaCompatibility::Current,
+                read_active_leases(&control_root)?,
+            ),
+            group_id,
+            outcome: request.outcome,
         })
     }
 
@@ -2365,6 +2421,177 @@ fn resume_one_task(
     }
 }
 
+fn validate_group_lifecycle(request: &WorkGroupLifecycleRequest) -> Result<(), ProjectError> {
+    let comment = request.comment.trim();
+    if request.outcome == WorkGroupLifecycleOutcome::Discarded && comment.is_empty() {
+        return Err(ProjectError::GroupDiscardReasonRequired);
+    }
+    if comment.chars().count() > 2_000 {
+        return Err(ProjectError::GroupLifecycleCommentTooLong);
+    }
+    if request.request_id.trim().is_empty() {
+        return Err(ProjectError::GroupLifecycleRequestIdRequired);
+    }
+    Ok(())
+}
+
+/// 같은 요청 식별자의 생애 결정이 이미 남아 있는지 본다. 결정 디렉터리에서 이 스키마의 문서만
+/// 읽으므로 기획서 결정·QA 결정과 섞이지 않는다.
+fn group_lifecycle_recorded(workflow_root: &Path, group_id: &str, request_id: &str) -> bool {
+    let Ok(entries) = fs::read_dir(workflow_root.join("decisions")) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let normalized = contents.replace("\r\n", "\n");
+        let (metadata, _) = split_frontmatter(&normalized);
+        let metadata = match metadata.as_ref() {
+            Some(value) => value,
+            None => continue,
+        };
+        if yaml_text(Some(metadata), "schema").as_deref() != Some(GROUP_LIFECYCLE_DECISION_SCHEMA) {
+            continue;
+        }
+        if yaml_text(Some(metadata), "group_id").as_deref() == Some(group_id)
+            && yaml_text(Some(metadata), "request_id").as_deref() == Some(request_id)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 그룹 프론트매터의 상태와 갱신 시각만 바꾼다. 그룹 문서에는 이력 목록이 없으므로 나머지는 한
+/// 줄도 고치지 않는다.
+fn update_group_status_frontmatter(
+    source: &str,
+    next_status: &str,
+    updated_at: &str,
+) -> Result<String, ProjectError> {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let normalized = source.replace("\r\n", "\n");
+    let Some(rest) = normalized.strip_prefix("---\n") else {
+        return Err(ProjectError::GroupLifecycleUnreadable);
+    };
+    let Some(frontmatter_end) = rest.find("\n---\n") else {
+        return Err(ProjectError::GroupLifecycleUnreadable);
+    };
+    let frontmatter = &rest[..frontmatter_end];
+    let body = &rest[frontmatter_end + "\n---\n".len()..];
+    let mut saw_status = false;
+    let mut lines = Vec::new();
+    for line in frontmatter.lines() {
+        if line.starts_with("status:") {
+            lines.push(format!("status: {next_status}"));
+            saw_status = true;
+        } else if line.starts_with("updated_at:") {
+            lines.push(format!("updated_at: {updated_at}"));
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if !saw_status {
+        return Err(ProjectError::GroupLifecycleUnreadable);
+    }
+    Ok(format!("---\n{}\n---\n{body}", lines.join("\n")).replace('\n', newline))
+}
+
+/// 쓰기 잠금 아래의 판정과 기록. 판정에 걸리면 어떤 파일도 쓰지 않는다.
+///
+/// 판정 순서는 재개 기록과 같다. 같은 요청 식별자의 기록이 이미 있으면 그것을 그대로 돌려주고,
+/// 그다음 상태와 최신성과 선점을 확인한 뒤에 결정 문서와 그룹 문서를 이 순서로 쓴다. 그룹 문서
+/// 교체가 실패하면 방금 만든 결정 문서를 되돌린다.
+fn record_one_group_lifecycle(
+    control_root: &Path,
+    workflow_root: &Path,
+    request: &WorkGroupLifecycleRequest,
+) -> Result<(WorkGroupLifecycleStatus, String), ProjectError> {
+    let group_path = safe_markdown_file(&workflow_root.join("groups"), &request.file_name)?;
+    let contents = fs::read_to_string(&group_path)?;
+    let normalized = contents.replace("\r\n", "\n");
+    let (metadata, _) = split_frontmatter(&normalized);
+    let metadata = metadata.ok_or(ProjectError::GroupLifecycleUnreadable)?;
+    if yaml_text(Some(&metadata), "schema").as_deref() != Some(WORK_GROUP_SCHEMA) {
+        return Err(ProjectError::GroupLifecycleUnreadable);
+    }
+    let group_id =
+        yaml_text(Some(&metadata), "id").ok_or(ProjectError::GroupLifecycleUnreadable)?;
+    let status = yaml_text(Some(&metadata), "status").unwrap_or_default();
+    let revision = yaml_u32(Some(&metadata), "revision").unwrap_or_default();
+    let updated_at = yaml_text(Some(&metadata), "updated_at").unwrap_or_default();
+    let source_decision_id = yaml_text(Some(&metadata), "source_decision_id").unwrap_or_default();
+    let source_qa_decision_id = yaml_text(Some(&metadata), "source_qa_decision_id");
+
+    if group_lifecycle_recorded(workflow_root, &group_id, request.request_id.trim()) {
+        return Ok((WorkGroupLifecycleStatus::AlreadyRecorded, group_id));
+    }
+    let allowed = match request.outcome {
+        WorkGroupLifecycleOutcome::Discarded => {
+            matches!(status.as_str(), "preparing" | "active" | "suspended")
+        }
+        WorkGroupLifecycleOutcome::Revived => status == "suspended",
+    };
+    if !allowed {
+        return Err(ProjectError::WorkGroupLifecycleInvalidState);
+    }
+    if updated_at != request.expected_updated_at {
+        return Err(ProjectError::WorkGroupLifecycleStale);
+    }
+    // 그룹 문서를 쓰는 세션의 lease는 그룹 id, 출처 승인, 출처 QA 결정 셋 중 하나로 잡힌다.
+    // 작업 id의 lease는 막지 않는다 — 그 세션은 작업 문서만 쓰고, 폐기 뒤에는 자격 판정이 그
+    // 그룹의 작업을 더 내밀지 않는다.
+    let leases = lease_ids(control_root);
+    if leases.contains(&group_id)
+        || (!source_decision_id.is_empty() && leases.contains(&source_decision_id))
+        || source_qa_decision_id
+            .as_ref()
+            .is_some_and(|id| leases.contains(id))
+    {
+        return Err(ProjectError::WorkGroupLifecycleLeased);
+    }
+
+    let created_at = Utc::now().to_rfc3339();
+    let (outcome_value, next_status) = match request.outcome {
+        WorkGroupLifecycleOutcome::Discarded => ("discarded", "discarded"),
+        WorkGroupLifecycleOutcome::Revived => ("revived", "active"),
+    };
+    let decision_id = format!("GROUP-LC-{}", compact_uuid()[..8].to_uppercase());
+    let decision_path = workflow_root
+        .join("decisions")
+        .join(format!("{decision_id}.md"));
+    let decision = format!(
+        "---\nschema: {GROUP_LIFECYCLE_DECISION_SCHEMA}\nid: {decision_id}\ngroup_id: {}\ngroup_revision: {revision}\noutcome: {outcome_value}\nrequest_id: {}\ncreated_by: user\ncreated_at: {created_at}\n---\n\n{}\n",
+        yaml_scalar(&group_id),
+        yaml_scalar(request.request_id.trim()),
+        request.comment.trim()
+    );
+    let updated = update_group_status_frontmatter(&contents, next_status, &created_at)?;
+
+    // 결정 문서를 먼저 만들고 그룹 문서를 교체한다. 교체가 실패하면 되돌릴 것이 방금 만든 파일
+    // 하나뿐이라 사용자 문서를 다시 쓰다 깨뜨릴 자리가 없다.
+    write_text_atomically(&decision_path, &decision)?;
+    let Err(error) = write_text_atomically(&group_path, &updated) else {
+        return Ok((WorkGroupLifecycleStatus::Recorded, group_id));
+    };
+    match fs::remove_file(&decision_path) {
+        Ok(()) => Err(error),
+        Err(removal) => Err(ProjectError::Persist(format!(
+            "{error}; 결정 문서 되돌리기도 실패했습니다({removal}): {}",
+            decision_path.display()
+        ))),
+    }
+}
+
 fn validate_task_revision_request(request: &TaskRevisionRequestInput) -> Result<(), ProjectError> {
     let reason = request.reason.trim();
     if reason.is_empty() {
@@ -3170,6 +3397,8 @@ fn parse_work_group(
     let (status, status_valid) = match yaml_text(Some(metadata), "status").as_deref() {
         Some("preparing") => (WorkGroupStatus::Preparing, true),
         Some("active") => (WorkGroupStatus::Active, true),
+        Some("suspended") => (WorkGroupStatus::Suspended, true),
+        Some("discarded") => (WorkGroupStatus::Discarded, true),
         _ => (WorkGroupStatus::Active, false),
     };
     let (qa_mode, qa_mode_valid) = match yaml_text(Some(metadata), "qa_mode").as_deref() {
@@ -3239,7 +3468,13 @@ fn parse_work_group(
         .filter(|decision| decision.outcome == "revision_requested")
         .map(|decision| decision.id.clone())
         .or(declared_source_qa_decision_id);
-    let display_status = if latest_decision.is_some_and(|decision| decision.outcome == "confirmed")
+    // 중단·폐기는 문서 상태가 곧 화면 상태다. 확인 결정·작업 상태·구성 이슈보다 앞에서 답해야
+    // 중단된 그룹이 구성 확인 필요로 접혀 아키텍트를 다시 소환하는 일이 없다.
+    let display_status = if status == WorkGroupStatus::Discarded {
+        WorkGroupDisplayStatus::Discarded
+    } else if status == WorkGroupStatus::Suspended {
+        WorkGroupDisplayStatus::Suspended
+    } else if latest_decision.is_some_and(|decision| decision.outcome == "confirmed")
         || (task_revisions_valid
             && assigned_tasks
                 .iter()
@@ -3317,6 +3552,7 @@ fn parse_work_group(
         scenarios,
         configuration_issues,
         human_judgment_note: parse_work_group_section(&body, "## 사람의 판단이 필요한 이유"),
+        suspension_reason: parse_work_group_section(&body, "## 중단 사유"),
         qa_base_commit,
     })
 }
@@ -4041,11 +4277,9 @@ fn derive_idea_states(
         // `decisions`를 읽지 못한 조회는 빈 목록을 받으므로 이 판정만 사라진다(SPEC-082 R9).
         let redraft_preempted = decisions.iter().any(|decision| {
             decision.outcome == "revision_requested"
-                && references
-                    .iter()
-                    .any(|reference| {
-                        reference.idea_id == idea.id && reference.spec_id == decision.spec_id
-                    })
+                && references.iter().any(|reference| {
+                    reference.idea_id == idea.id && reference.spec_id == decision.spec_id
+                })
                 && leases
                     .iter()
                     .any(|lease| lease.task_id.as_deref() == Some(decision.id.as_str()))
@@ -12169,9 +12403,10 @@ mod report_surface_tests {
         CONTROL_DIRECTORY, GROUP_QA_DECISION_SCHEMA, QA_BASE_DIRECTORY, RUNTIME_DIRECTORY,
     };
     use crate::domain::project::{
-        SchemaCompatibility, WorkGroupConfigurationIssue, WorkGroupDisplayStatus, WorkGroupQaMode,
-        WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission, WorkGroupQaSubmissionEntry,
-        WorkGroupQaSubmissionStatus, WorkGroupSummary,
+        SchemaCompatibility, WorkGroupConfigurationIssue, WorkGroupDisplayStatus,
+        WorkGroupLifecycleOutcome, WorkGroupLifecycleRequest, WorkGroupLifecycleStatus,
+        WorkGroupQaMode, WorkGroupQaOutcome, WorkGroupQaScenario, WorkGroupQaSubmission,
+        WorkGroupQaSubmissionEntry, WorkGroupQaSubmissionStatus, WorkGroupStatus, WorkGroupSummary,
     };
     use crate::infrastructure::heartbeat_condition::condition_script_path;
     use crate::infrastructure::reservation_helper::reservation_helper_path;
@@ -13659,6 +13894,239 @@ mod report_surface_tests {
         assert_eq!(group.description, baseline.description);
         assert_eq!(group.scenarios, baseline.scenarios);
         assert_eq!(group.display_status, baseline.display_status);
+    }
+
+    /// 중단은 문서 상태가 곧 화면 상태다. 미완 작업이 있어도 구성 확인 필요로 접히지 않아야
+    /// 아키텍트가 다시 소환되지 않는다.
+    #[test]
+    fn a_suspended_group_answers_from_its_status_and_carries_the_reason() {
+        let (root, directory) = work_group_fixture("todo", "suspended", "user");
+        rewrite_group(root.path(), &directory, |source| {
+            source.replace(
+                "\n### QA-01",
+                "\n## 중단 사유\n\n요구가 이미 다른 저장소에서 병합되어 남은 작업이 무효다.\n\n### QA-01",
+            )
+        });
+
+        let group = first_work_group(root.path());
+        assert_eq!(group.status, WorkGroupStatus::Suspended);
+        assert_eq!(group.display_status, WorkGroupDisplayStatus::Suspended);
+        assert!(group.configuration_issues.is_empty());
+        assert_eq!(
+            group.suspension_reason,
+            "요구가 이미 다른 저장소에서 병합되어 남은 작업이 무효다."
+        );
+    }
+
+    #[test]
+    fn a_discarded_group_is_terminal_on_screen_regardless_of_its_tasks() {
+        let (root, _) = work_group_fixture("todo", "discarded", "user");
+
+        let group = first_work_group(root.path());
+        assert_eq!(group.status, WorkGroupStatus::Discarded);
+        assert_eq!(group.display_status, WorkGroupDisplayStatus::Discarded);
+        assert!(group.configuration_issues.is_empty());
+    }
+
+    fn lifecycle_request(
+        directory: &str,
+        outcome: WorkGroupLifecycleOutcome,
+        comment: &str,
+        request_id: &str,
+    ) -> WorkGroupLifecycleRequest {
+        WorkGroupLifecycleRequest {
+            workflow_directory: directory.to_owned(),
+            file_name: "GROUP-DECISION-1.md".to_owned(),
+            outcome,
+            comment: comment.to_owned(),
+            expected_updated_at: "2026-08-14T00:00:00Z".to_owned(),
+            request_id: request_id.to_owned(),
+        }
+    }
+
+    fn lifecycle_decision_files(project_root: &Path, directory: &str) -> Vec<String> {
+        let decisions = project_root
+            .join(".workflow")
+            .join(directory)
+            .join("decisions");
+        let mut names: Vec<String> = fs::read_dir(decisions)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with("GROUP-LC-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn discarding_an_active_group_writes_one_decision_and_flips_the_status() {
+        let (root, directory) = work_group_fixture("todo", "active", "user");
+
+        let result = FileSystemProjectRepository
+            .record_work_group_lifecycle(
+                root.path(),
+                &lifecycle_request(
+                    &directory,
+                    WorkGroupLifecycleOutcome::Discarded,
+                    "요구가 이미 다른 경로로 반영되었다.",
+                    "lifecycle-1",
+                ),
+            )
+            .expect("discard");
+
+        assert_eq!(result.status, WorkGroupLifecycleStatus::Recorded);
+        assert_eq!(result.group_id, "GROUP-DECISION-1");
+        assert_eq!(result.outcome, WorkGroupLifecycleOutcome::Discarded);
+        let group = first_work_group(root.path());
+        assert_eq!(group.status, WorkGroupStatus::Discarded);
+        let decisions = lifecycle_decision_files(root.path(), &directory);
+        assert_eq!(decisions.len(), 1);
+        let decision = fs::read_to_string(
+            root.path()
+                .join(".workflow")
+                .join(&directory)
+                .join("decisions")
+                .join(&decisions[0]),
+        )
+        .expect("decision document");
+        assert!(decision.contains("schema: workflow-labs/group-lifecycle-decision@1"));
+        assert!(decision.contains("group_id: GROUP-DECISION-1"));
+        assert!(decision.contains("outcome: discarded"));
+        assert!(decision.contains("created_by: user"));
+        assert!(decision.contains("요구가 이미 다른 경로로 반영되었다."));
+    }
+
+    /// 같은 요청 식별자의 재시도는 두 번째 결정을 만들지 않는다. 멱등 판정이 상태·최신성 판정보다
+    /// 앞이라, 이미 폐기된 그룹에 대한 재시도도 오류가 아니라 기존 성공이다.
+    #[test]
+    fn a_lifecycle_retry_returns_the_recorded_decision_without_a_second_file() {
+        let (root, directory) = work_group_fixture("todo", "active", "user");
+        let request = lifecycle_request(
+            &directory,
+            WorkGroupLifecycleOutcome::Discarded,
+            "요구가 이미 다른 경로로 반영되었다.",
+            "lifecycle-1",
+        );
+        FileSystemProjectRepository
+            .record_work_group_lifecycle(root.path(), &request)
+            .expect("discard");
+
+        let retry = FileSystemProjectRepository
+            .record_work_group_lifecycle(root.path(), &request)
+            .expect("retry");
+
+        assert_eq!(retry.status, WorkGroupLifecycleStatus::AlreadyRecorded);
+        assert_eq!(lifecycle_decision_files(root.path(), &directory).len(), 1);
+    }
+
+    #[test]
+    fn reviving_a_suspended_group_returns_it_to_active() {
+        let (root, directory) = work_group_fixture("todo", "suspended", "user");
+
+        let result = FileSystemProjectRepository
+            .record_work_group_lifecycle(
+                root.path(),
+                &lifecycle_request(
+                    &directory,
+                    WorkGroupLifecycleOutcome::Revived,
+                    "",
+                    "revive-1",
+                ),
+            )
+            .expect("revive");
+
+        assert_eq!(result.status, WorkGroupLifecycleStatus::Recorded);
+        assert_eq!(
+            first_work_group(root.path()).status,
+            WorkGroupStatus::Active
+        );
+        let decisions = lifecycle_decision_files(root.path(), &directory);
+        assert_eq!(decisions.len(), 1);
+    }
+
+    #[test]
+    fn lifecycle_guards_refuse_bad_states_reasons_staleness_and_leases() {
+        // 되살리기는 중단 그룹에만 기록한다.
+        let (root, directory) = work_group_fixture("todo", "active", "user");
+        let error = FileSystemProjectRepository
+            .record_work_group_lifecycle(
+                root.path(),
+                &lifecycle_request(
+                    &directory,
+                    WorkGroupLifecycleOutcome::Revived,
+                    "",
+                    "revive-1",
+                ),
+            )
+            .expect_err("revive an active group");
+        assert!(matches!(
+            error,
+            ProjectError::WorkGroupLifecycleInvalidState
+        ));
+
+        // 폐기 사유는 비울 수 없다.
+        let error = FileSystemProjectRepository
+            .record_work_group_lifecycle(
+                root.path(),
+                &lifecycle_request(
+                    &directory,
+                    WorkGroupLifecycleOutcome::Discarded,
+                    "  ",
+                    "discard-1",
+                ),
+            )
+            .expect_err("discard without a reason");
+        assert!(matches!(error, ProjectError::GroupDiscardReasonRequired));
+
+        // 화면이 읽은 갱신 시각과 다르면 기록하지 않는다.
+        let mut stale = lifecycle_request(
+            &directory,
+            WorkGroupLifecycleOutcome::Discarded,
+            "사유",
+            "discard-2",
+        );
+        stale.expected_updated_at = "2000-01-01T00:00:00Z".to_owned();
+        let error = FileSystemProjectRepository
+            .record_work_group_lifecycle(root.path(), &stale)
+            .expect_err("stale read");
+        assert!(matches!(error, ProjectError::WorkGroupLifecycleStale));
+
+        // 그룹을 잡은 미만료 lease가 있으면 거절한다.
+        let leases = root
+            .path()
+            .join(".workflow")
+            .join(".runtime")
+            .join("leases");
+        fs::create_dir_all(&leases).expect("leases root");
+        fs::write(
+            leases.join("GROUP-DECISION-1.yml"),
+            format!(
+                "schema_version: 1\nlease_id: lease-1\nagent: other\ntask_id: GROUP-DECISION-1\nheartbeat_at: 2026-08-01T00:00:00Z\nexpires_at: {}\n",
+                (chrono::Utc::now() + chrono::Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%SZ")
+            ),
+        )
+        .expect("lease");
+        let error = FileSystemProjectRepository
+            .record_work_group_lifecycle(
+                root.path(),
+                &lifecycle_request(
+                    &directory,
+                    WorkGroupLifecycleOutcome::Discarded,
+                    "사유",
+                    "discard-3",
+                ),
+            )
+            .expect_err("leased group");
+        assert!(matches!(error, ProjectError::WorkGroupLifecycleLeased));
+        assert!(lifecycle_decision_files(root.path(), &directory).is_empty());
+        assert_eq!(
+            first_work_group(root.path()).status,
+            WorkGroupStatus::Active
+        );
     }
 
     /// C8. 구성 오류로 판정하는 조건이 이 변경 전과 같다. 사유 목록이 비어 있다는 것과 구성 확인

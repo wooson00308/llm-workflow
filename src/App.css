@@ -753,6 +753,8 @@ button.task-lane-qa-entry:hover { background: #e0d4ee; }
 button.task-lane-qa-entry:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .task-lane-signal.group-status-completed,
 .task-lane-signal.group-status-automatic_completed { color: #286042; background: #dfeee4; }
+.task-lane-signal.group-status-suspended { color: #6a4f7d; background: #ece2f2; }
+.task-lane-signal.group-status-discarded { color: #6f6f6a; background: #e8e7e1; }
 .task-lane-hidden { margin: 0; color: #a0a39a; font-size: 11px; }
 
 /* 사용자 차례가 아닌 기능에 붙는 설명. 알약은 이 앱에서 입구 표시라서, 처리를 요구하지 않는 이
@@ -767,6 +769,17 @@ button.task-lane-qa-entry:focus-visible { outline: 2px solid var(--green); outli
 .group-attention-judgment { margin-top: 2px; white-space: pre-line; }
 .group-attention-judgment b { display: block; color: #55594f; font-weight: 650; }
 .task-lane > .group-attention { margin: 0 3px 10px; }
+
+/* 그룹 폐기·되살리기 입구. 중단 그룹에서는 결정 폼이 바로 서고, 진행 중 그룹에서는 접힌 한 줄만
+   남아 실수로 누르기 어렵다. */
+.task-lane-lifecycle-entry { margin: 0 3px 10px; font-size: 11px; }
+.task-lane-lifecycle { display: grid; gap: 8px; margin: 0 3px 10px; padding: 10px 12px; border: 1px solid #e0dcd2; border-radius: 10px; background: #fbfaf6; }
+.task-lane-lifecycle-comment { display: grid; gap: 4px; font-size: 11px; color: #6c7068; }
+.task-lane-lifecycle-comment textarea { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; resize: vertical; }
+.task-lane-lifecycle-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.task-lane-lifecycle-actions .secondary-button { padding: 8px 13px; font-size: 12px; }
+.task-lane-lifecycle-message { margin: 0; color: #8b3c3c; font-size: 11px; }
+.archive-kind.kind-group_discarded { color: #6f6f6a; background: #e8e7e1; }
 .spec-task-counts > .group-attention { flex-basis: 100%; }
 .task-lane-toggle { padding: 4px 9px; border: 1px solid #dbdad1; border-radius: 999px; color: #888b83; background: var(--paper); font-size: 11px; font-weight: 700; cursor: pointer; }
 /* `.task-board`의 min-width가 950px이라 좁은 창에서 레인 테두리 밖으로 열이 빠져나간다. 레인 안에서

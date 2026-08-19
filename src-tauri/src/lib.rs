@@ -32,6 +32,7 @@ pub fn run() {
             commands::projects::submit_work_group_qa,
             commands::projects::resume_task,
             commands::projects::record_task_revision_request,
+            commands::projects::record_work_group_lifecycle,
             commands::projects::migrate_project,
             commands::heartbeat::inspect_integrations,
             commands::heartbeat::install_heartbeat_jobs,

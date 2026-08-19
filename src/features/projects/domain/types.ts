@@ -157,7 +157,11 @@ export type SpecDecisionOutcome =
   | "revision_requested"
   | "rejected";
 
-export type WorkGroupDocumentStatus = "preparing" | "active";
+export type WorkGroupDocumentStatus =
+  | "preparing"
+  | "active"
+  | "suspended"
+  | "discarded";
 
 /** 작업 그룹 문서와 현재 작업·결정·lease를 함께 읽어 백엔드가 파생한 사용자 표시 상태. */
 export type WorkGroupDisplayStatus =
@@ -170,7 +174,9 @@ export type WorkGroupDisplayStatus =
   | "qa_ready"
   | "automatic_completed"
   | "configuration_error"
-  | "human_judgment_required";
+  | "human_judgment_required"
+  | "suspended"
+  | "discarded";
 
 /**
  * 구성 확인 필요·사람 판단 필요로 판정하게 만든 조건 하나. 백엔드가 상태와 함께 내려주며 화면은
@@ -220,6 +226,10 @@ export interface WorkGroupSummary {
    */
   humanJudgmentNote?: string;
   /**
+   * 아키텍트가 `## 중단 사유` 절에 남긴 근거 글. 그 절이 없으면 빈 문자열이다.
+   */
+  suspensionReason?: string;
+  /**
    * 이 그룹과 구성 버전의 품질 확인이 대상으로 삼는 기준 커밋. 이 요약을 읽은 시점의 값이며,
    * Git 작업 트리가 아니면 null이다. 확인 화면은 결과를 고를 때 이 값을 임시 결정과 함께 저장한다.
    */
@@ -253,6 +263,32 @@ export interface WorkGroupQaSubmissionResult {
   groupRevision: number;
   outcome: WorkGroupQaOutcome;
   status: "recorded" | "already_recorded";
+}
+
+/** 작업 그룹 생애 결정. 폐기는 준비 중·활성·중단 그룹의 종결, 되살리기는 중단 그룹의 복귀다. */
+export type WorkGroupLifecycleOutcome = "discarded" | "revived";
+
+/**
+ * 작업 그룹 폐기·되살리기 요청. 화면이 읽은 값을 그대로 싣는다.
+ *
+ * `expectedUpdatedAt`은 사용자가 화면에서 확인한 그룹 갱신 시각이고 백엔드가 문자 단위로
+ * 대조한다. `requestId`는 같은 조작을 한 번만 기록하기 위한 값이라 재시도에서 같은 값을 보낸다.
+ */
+export interface WorkGroupLifecycleRequest {
+  workflowDirectory: string;
+  fileName: string;
+  outcome: WorkGroupLifecycleOutcome;
+  /** 사용자가 적은 사유. 폐기는 비울 수 없다. */
+  comment: string;
+  expectedUpdatedAt: string;
+  requestId: string;
+}
+
+export interface WorkGroupLifecycleResult {
+  status: "recorded" | "already_recorded";
+  summary: ProjectSummary;
+  groupId: string;
+  outcome: WorkGroupLifecycleOutcome;
 }
 
 /**
@@ -310,6 +346,10 @@ export type TaskRevisionRequestOutcome =
  */
 export type TaskResumeOutcome =
   | { ok: true; result: TaskResumeResult }
+  | { ok: false; message: string };
+
+export type WorkGroupLifecycleOutcomeResult =
+  | { ok: true; result: WorkGroupLifecycleResult }
   | { ok: false; message: string };
 
 export interface AgentLeaseSummary {
@@ -1194,6 +1234,14 @@ export interface ProjectGateway {
     path: string,
     request: TaskRevisionRequestInput,
   ): Promise<TaskRevisionRequestResult>;
+  /**
+   * 작업 그룹 하나를 사용자 판단으로 폐기하거나 중단에서 되살린다. 결정 문서와 그룹 상태 전이가
+   * 한 요청에서 함께 남는다. 사용자가 사유를 적고 확인한 자리에서만 부른다.
+   */
+  recordWorkGroupLifecycle(
+    path: string,
+    request: WorkGroupLifecycleRequest,
+  ): Promise<WorkGroupLifecycleResult>;
   migrate(path: string): Promise<ProjectSummary>;
   /** 연동 조회는 이 메서드 하나다. 연동이 늘어나도 메서드를 늘리지 않는다. */
   inspectIntegrations(path: string): Promise<IntegrationsSnapshot>;

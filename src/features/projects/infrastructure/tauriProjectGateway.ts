@@ -37,6 +37,8 @@ import type {
   SaveCustomRulesResult,
   SpecDocument,
   TaskDocument,
+  WorkGroupLifecycleRequest,
+  WorkGroupLifecycleResult,
   WorkGroupQaSubmission,
   WorkGroupQaSubmissionResult,
   TaskResumeRequest,
@@ -188,6 +190,10 @@ export const tauriProjectGateway: ProjectGateway = {
 
   recordTaskRevisionRequest(path, request: TaskRevisionRequestInput) {
     return invoke<TaskRevisionRequestResult>("record_task_revision_request", { path, request });
+  },
+
+  recordWorkGroupLifecycle(path, request: WorkGroupLifecycleRequest) {
+    return invoke<WorkGroupLifecycleResult>("record_work_group_lifecycle", { path, request });
   },
 
   migrate(path) {

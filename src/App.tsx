@@ -63,6 +63,7 @@ export default function App() {
       onReadSpec={workspace.readSpec}
       onReadTask={workspace.readTask}
       onWorkGroupQaSubmit={workspace.submitWorkGroupQa}
+      onWorkGroupLifecycle={workspace.recordWorkGroupLifecycle}
       onRefresh={workspace.refresh}
       onSwitchProject={workspace.closeProject}
     />

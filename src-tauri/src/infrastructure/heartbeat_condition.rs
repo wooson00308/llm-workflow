@@ -17,7 +17,7 @@ use crate::infrastructure::managed_script::{ManagedScript, ManagedScriptError, P
 pub const CONDITION_SCRIPT_STEM: &str = "wf-eligible";
 const CONDITION_SCRIPT_LABEL: &str = "조건 스크립트";
 const VERSION_PREFIX: &str = "# condition_script_version:";
-const CONDITION_SCRIPT_VERSION: u32 = 25;
+const CONDITION_SCRIPT_VERSION: u32 = 26;
 
 /// 설치할 조건 스크립트의 `sh` 구현. `#!/bin/sh` 다음 두 줄이 앱 관리 표기다.
 ///
@@ -26,7 +26,7 @@ const CONDITION_SCRIPT_VERSION: u32 = 25;
 /// 함께 고쳐야 한다.
 const CONDITION_SCRIPT_SH: &str = r#"#!/bin/sh
 # managed_by: workflow-labs
-# condition_script_version: 25
+# condition_script_version: 26
 # LLM Workflow 하트비트 조건 검사. 역할별 처리 가능한 대상이 있으면 0, 없으면 1을 반환한다.
 # 판정 사유는 표준 출력 첫 줄에 ASCII 코드 한 줄로 나간다.
 # 사용법: sh .workflow/rules/wf-eligible.sh planner|architect|developer [--json]  (프로젝트 루트에서 실행)
@@ -426,14 +426,14 @@ scan_refs() { # $1=문서 디렉터리 경로 $2=콜론까지 포함한 키
   awk -v key="$scan_key" '
     function emit_direct() {
       if (status == "blocked" && kind == "definition_error" && id != "") {
-        print "__WF_DIRECT__\t" id
+        print "__WF_DIRECT__\t" id "\t" group
       }
     }
     FILENAME != prev {
       emit_direct()
       prev = FILENAME
-      id = ""; status = ""; kind = ""
-      got_id = 0; got_status = 0; got_kind = 0
+      id = ""; status = ""; kind = ""; group = ""
+      got_id = 0; got_status = 0; got_kind = 0; got_group = 0
     }
     {
       if (!got_id && index($0, "id:") == 1) {
@@ -444,6 +444,9 @@ scan_refs() { # $1=문서 디렉터리 경로 $2=콜론까지 포함한 키
       }
       if (!got_kind && index($0, "blocked_kind:") == 1) {
         got_kind = 1; kind = substr($0, 14); sub(/^ */, "", kind)
+      }
+      if (!got_group && index($0, "work_group_id:") == 1) {
+        got_group = 1; group = substr($0, 15); sub(/^ */, "", group)
       }
     }
     index($0, key) > 0 {
@@ -1164,7 +1167,8 @@ scan_configuration_errors() { # $1=워크플로우 경로 $2=status이면 표시
         gid = g_id[gi] != "" ? g_id[gi] : g_stem[gi]
         rev_ok = (g_rev[gi] ~ /^[0-9]+$/ && (g_rev[gi] + 0) <= 4294967295)
         grev = rev_ok ? (g_rev[gi] + 0) : 0
-        status_ok = (g_status[gi] == "preparing" || g_status[gi] == "active")
+        status_ok = (g_status[gi] == "preparing" || g_status[gi] == "active" ||
+          g_status[gi] == "suspended" || g_status[gi] == "discarded")
         status = status_ok ? g_status[gi] : "active"
         mode_ok = (g_mode[gi] == "user" || g_mode[gi] == "automatic")
         mode = mode_ok ? g_mode[gi] : "user"
@@ -1188,6 +1192,16 @@ scan_configuration_errors() { # $1=워크플로우 경로 $2=status이면 표시
         }
         key = gid SUBSEP sprintf("%.0f", grev)
         latest = (key in gsel) ? d_out[gsel[key]] : ""
+        # 중단·폐기는 문서 상태가 곧 화면 상태다. 확인 결정과 구성 이슈보다 앞에서 답해야 중단된
+        # 기능이 구성 확인 필요로 접혀 아키텍트를 다시 소환하지 않는다. 앱 표시 사슬과 같은 차례다.
+        if (status == "discarded") {
+          if (proj != "") emit_status(gid, "discarded", grev, mode)
+          continue
+        }
+        if (status == "suspended") {
+          if (proj != "") emit_status(gid, "suspended", grev, mode)
+          continue
+        }
         if (latest == "confirmed") {
           if (proj != "") emit_status(gid, "completed", grev, mode)
           continue
@@ -1887,8 +1901,10 @@ REVISIONS
   done
   ;;
 architect)
-  # 그룹 표는 QA 반려 처리 여부, 중단된 preparing 복구, 승인 분해 여부가 함께 쓴다.
+  # 그룹 표는 QA 반려 처리 여부, 중단된 preparing 복구, 승인 분해 여부가 함께 쓴다. 중단·폐기
+  # 그룹의 일은 어느 갈래의 대상도 아니므로 그 집합을 여기서 함께 모은다.
   architect_group_rows=""
+  halted_group_rows="$nl"
   group_revision_rows=""
   revision_rows=""
   approval_rows=""
@@ -1905,6 +1921,9 @@ CONFIGURATION_SCAN_ROWS
     while IFS='	' read -r gid status revision source source_spec source_qa; do
       [ -n "$gid" ] && [ -n "$status" ] && [ -n "$revision" ] && [ -n "$source" ] || continue
       architect_group_rows="$architect_group_rows$wf	$gid	$status	$revision	$source	$source_spec	$source_qa$nl"
+      case "$status" in
+        suspended|discarded) halted_group_rows="$halted_group_rows$wf	$gid$nl" ;;
+      esac
     done <<GROUP_ROWS
 $groups
 GROUP_ROWS
@@ -1935,6 +1954,7 @@ ARCHITECT_DECISION_ROWS
   ordered_group_revision_rows=$(printf '%s' "$group_revision_rows" | LC_ALL=C sort)
   while IFS='	' read -r created rid wf gid revision; do
     [ -n "$created" ] && [ -n "$rid" ] && [ -n "$gid" ] && [ -n "$revision" ] && [ -n "$wf" ] || continue
+    case "$halted_group_rows" in *"$nl$wf	$gid$nl"*) continue ;; esac
     group_found=0
     while IFS='	' read -r gwf current_gid status current_revision source source_spec source_qa; do
       [ "$gwf" = "$wf" ] && [ "$current_gid" = "$gid" ] && [ "$current_revision" = "$revision" ] || continue
@@ -1976,6 +1996,10 @@ CONFIGURATION_ROWS
       if grep -qs "^id: *$tid$" "$f"; then task_file=$f; break; fi
     done
     [ -n "$task_file" ] || continue
+    task_group=$(sed -n 's/^work_group_id: *//p' "$task_file" | head -1)
+    if [ -n "$task_group" ]; then
+      case "$halted_group_rows" in *"$nl$wf	$task_group$nl"*) continue ;; esac
+    fi
     grep -Eqs '^status: (todo|blocked)$' "$task_file" || continue
     grep -qs "^revision_request_id: *$rid$" "$task_file" && continue
     case "$revision_task_ids" in *"$nl$tid$nl"*) ;; *) revision_task_ids="$revision_task_ids$tid$nl" ;; esac
@@ -1997,8 +2021,11 @@ ORDERED_REVISION_ROWS
 $task_scan
 TASK_SCAN
   done
-  while IFS='	' read -r wf tid; do
+  while IFS='	' read -r wf tid tgid; do
     [ -n "$wf" ] && [ -n "$tid" ] || continue
+    if [ -n "$tgid" ]; then
+      case "$halted_group_rows" in *"$nl$wf	$tgid$nl"*) continue ;; esac
+    fi
     case "$revision_task_ids" in *"$nl$tid$nl"*) continue ;; esac
     lease_blocks "$tid" && { note_candidate leased "$tid"; continue; }
     note_target "$tid" blocked_task
@@ -2075,7 +2102,7 @@ const CONDITION_SCRIPT_PS1: &str = concat!(
     "\u{feff}",
     r#"# LLM Workflow heartbeat condition check.
 # managed_by: workflow-labs
-# condition_script_version: 25
+# condition_script_version: 26
 # Exits 0 when the role has work, 1 when it does not, 2 for an unknown role.
 # The verdict reason goes to the first stdout line as a single ASCII code.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .workflow/rules/wf-eligible.ps1 <role> [--json]
@@ -3192,7 +3219,8 @@ function Get-ConfigurationErrorGroups([string]$Root, [bool]$Projection = $false,
     [uint32]$revision = 0
     if (-not ($revisionText -cmatch '^[0-9]+$' -and
         [uint32]::TryParse($revisionText, [ref]$revision))) { $revision = 0 }
-    $statusOk = ($status -ceq 'preparing' -or $status -ceq 'active')
+    $statusOk = ($status -ceq 'preparing' -or $status -ceq 'active' -or
+      $status -ceq 'suspended' -or $status -ceq 'discarded')
     if (-not $statusOk) { $status = 'active' }
     $modeOk = ($mode -ceq 'user' -or $mode -ceq 'automatic')
     if (-not $modeOk) { $mode = 'user' }
@@ -3226,6 +3254,21 @@ function Get-ConfigurationErrorGroups([string]$Root, [bool]$Projection = $false,
     $key = $id + [char]31 + $revision.ToString($invariant)
     $latest = ''
     if ($latestGroupQa.ContainsKey($key)) { $latest = $latestGroupQa[$key] }
+    # Suspension and discard answer from the document status alone, ahead of QA decisions and
+    # configuration issues, so a halted group never folds into configuration_error and summons
+    # the architect again. The app's display chain uses the same order.
+    if ($status -ceq 'discarded') {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'discarded'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
+    if ($status -ceq 'suspended') {
+      if ($Projection) {
+        $rows += [pscustomobject]@{ Id = $id; Status = 'suspended'; Revision = $revision; Mode = $mode }
+      }
+      continue
+    }
     if ($latest -ceq 'confirmed') {
       if ($Projection) {
         $rows += [pscustomobject]@{ Id = $id; Status = 'completed'; Revision = $revision; Mode = $mode }
@@ -3516,8 +3559,17 @@ switch -CaseSensitive ($dispatchMode) {
       $groupRevisions += @(Get-GroupQaRevisionRequests $root)
       $configurationErrors += @(Get-ConfigurationErrorGroups $root)
     }
+    # Work from a suspended or discarded group is no branch's target: suspension records that the
+    # direction went void, and discard is the user's closure. Keeping their QA rework, definition
+    # corrections, and blocked tasks assignable re-summons sessions onto a dead direction.
+    $haltedGroups = @($groups | Where-Object {
+      $_.Status -ceq 'suspended' -or $_.Status -ceq 'discarded'
+    })
     # User-facing group QA rework has priority over internal task-definition correction.
     foreach ($row in @($groupRevisions | Sort-Object -Property CreatedAt, Id -CaseSensitive)) {
+      if (@($haltedGroups | Where-Object {
+        $_.Root -ceq $row.Root -and $_.Id -ceq $row.Group
+      }).Count -gt 0) { continue }
       $group = @($groups | Where-Object {
         $_.Root -ceq $row.Root -and $_.Id -ceq $row.Group -and $_.Revision -ceq $row.Revision
       } | Select-Object -First 1)
@@ -3550,6 +3602,10 @@ switch -CaseSensitive ($dispatchMode) {
       $taskPath = Find-TaskFile $row.Root $row.Task
       if ($taskPath.Length -eq 0) { continue }
       $taskLines = Get-Lines $taskPath
+      $taskGroup = Get-Value $taskLines 'work_group_id'
+      if ($taskGroup.Length -gt 0 -and @($haltedGroups | Where-Object {
+        $_.Root -ceq $row.Root -and $_.Id -ceq $taskGroup
+      }).Count -gt 0) { continue }
       $status = Get-Value $taskLines 'status'
       if ($status -cne 'todo' -and $status -cne 'blocked') { continue }
       if ((Get-Value $taskLines 'revision_request_id') -ceq $row.Id) { continue }
@@ -3569,6 +3625,10 @@ switch -CaseSensitive ($dispatchMode) {
         if ((Get-Value $lines 'blocked_kind') -cne 'definition_error') { continue }
         $tid = Get-Value $lines 'id'
         if ($tid.Length -eq 0) { continue }
+        $taskGroup = Get-Value $lines 'work_group_id'
+        if ($taskGroup.Length -gt 0 -and @($haltedGroups | Where-Object {
+          $_.Root -ceq $root -and $_.Id -ceq $taskGroup
+        }).Count -gt 0) { continue }
         if ($revisionTasks -ccontains $tid) { continue }
         if (Test-Leased $tid) { Write-Candidate 'leased' $tid; continue }
         Write-Target $tid 'blocked_task'
@@ -3853,7 +3913,7 @@ mod tests {
         let script = fs::read_to_string(condition_script_path(&control)).expect("script");
         assert_eq!(script, CONDITION_SCRIPT.platform.body);
         assert!(script.contains("# managed_by: workflow-labs"));
-        assert!(script.contains("# condition_script_version: 25"));
+        assert!(script.contains("# condition_script_version: 26"));
         assert!(script.contains("migration.lock"));
         #[cfg(not(windows))]
         assert!(script.starts_with("#!/bin/sh\n"));
@@ -3867,8 +3927,8 @@ mod tests {
         let path = condition_script_path(&control);
         fs::create_dir_all(path.parent().expect("rules root")).expect("rules root");
         let previous = CONDITION_SCRIPT.platform.body.replace(
+            "# condition_script_version: 26",
             "# condition_script_version: 25",
-            "# condition_script_version: 24",
         );
         assert_ne!(previous, CONDITION_SCRIPT.platform.body);
         fs::write(&path, &previous).expect("previous version script");
@@ -4147,7 +4207,7 @@ mod tests {
         assert_eq!(
             downgrade.to_string(),
             format!(
-                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 25보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
+                "{}의 조건 스크립트 버전 999이 앱이 아는 버전 26보다 높아 덮어쓰지 않았습니다. 앱을 최신 버전으로 올린 뒤 다시 시도하세요.",
                 path.display()
             )
         );
@@ -5868,6 +5928,59 @@ mod tests {
             },
         },
         Scenario {
+            // 중단된 그룹의 일은 어느 역할의 대상도 아니다. 2026-08-20 아키텍트 반복 소환 루프의
+            // 재현 픽스처다 — 같은 작업이 그룹 중단 전에는 위 시나리오처럼 아키텍트 대상이다.
+            name: "아키텍트: 중단된 그룹의 definition_error 작업은 대상이 아니다",
+            roles: &["architect"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(
+                    control,
+                    "TASK-001",
+                    "blocked",
+                    Some("blocked_kind: definition_error"),
+                );
+                write_document(
+                    control,
+                    "groups",
+                    "GROUP-DEFAULT",
+                    "---\nschema: workflow-labs/work-group@1\nid: GROUP-DEFAULT\ntitle: 기본 그룹\nstatus: suspended\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n## 중단 사유\n\n요구가 이미 다른 경로로 반영되었다.\n",
+                );
+            },
+        },
+        Scenario {
+            name: "개발자: 중단된 그룹의 todo 작업은 대상이 아니다",
+            roles: &["developer"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "todo", None);
+                write_document(
+                    control,
+                    "groups",
+                    "GROUP-DEFAULT",
+                    "---\nschema: workflow-labs/work-group@1\nid: GROUP-DEFAULT\ntitle: 기본 그룹\nstatus: suspended\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n\n## 중단 사유\n\n요구가 이미 다른 경로로 반영되었다.\n",
+                );
+            },
+        },
+        Scenario {
+            // 폐기된 그룹도 분해된 그룹이다. 같은 승인에서 새 그룹이 다시 파생되지 않는다.
+            name: "아키텍트: 폐기된 그룹이 남은 승인은 재분해되지 않는다",
+            roles: &["architect"],
+            expected: 1,
+            reason: "no-target",
+            build: |control: &Path| {
+                write_task_document(control, "TASK-001", "verified", None);
+                write_document(
+                    control,
+                    "groups",
+                    "GROUP-DEFAULT",
+                    "---\nschema: workflow-labs/work-group@1\nid: GROUP-DEFAULT\ntitle: 기본 그룹\nstatus: discarded\nrevision: 1\nqa_mode: automatic\nsource_spec_id: SPEC-DEFAULT\nsource_decision_id: DECISION-DEFAULT\ncreated_at: 2026-08-01T00:00:00Z\nupdated_at: 2026-08-01T00:00:00Z\n---\n",
+                );
+            },
+        },
+        Scenario {
             // 죽은 기획 세션의 시그니처. 본문 한 줄 없는 `draft` 스켈레톤 하나가 아이디어를 판정에서
             // 영원히 지우던 자리가 여기서 열린다.
             name: "기획자: draft 기획서만 참조한 아이디어가 다시 열린다",
@@ -7372,6 +7485,8 @@ mod status_projection_tests {
             WorkGroupDisplayStatus::AutomaticCompleted => "automatic_completed",
             WorkGroupDisplayStatus::ConfigurationError => "configuration_error",
             WorkGroupDisplayStatus::HumanJudgmentRequired => "human_judgment_required",
+            WorkGroupDisplayStatus::Suspended => "suspended",
+            WorkGroupDisplayStatus::Discarded => "discarded",
         }
     }
 

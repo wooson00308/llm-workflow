@@ -430,6 +430,12 @@ function gatewayFor(overrides: Partial<ProjectGateway> = {}): ProjectGateway {
       summary: project,
       request: null,
     }),
+    recordWorkGroupLifecycle: vi.fn().mockResolvedValue({
+      status: "recorded",
+      summary: project,
+      groupId: "GROUP-DEFAULT",
+      outcome: "discarded",
+    }),
     inspectAgentRuntime: vi.fn().mockResolvedValue(agentInspection),
     planAgentRuntimeInstall: vi.fn().mockResolvedValue(agentInstallPlan),
     applyAgentRuntimeInstall: vi.fn().mockResolvedValue(agentInstallApplication),

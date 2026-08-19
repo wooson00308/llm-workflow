@@ -18,9 +18,9 @@ const MANAGED_END: &str = "<!-- workflow-labs:project-instructions:end -->";
 const RULES_SCHEMA: &str = "schema: workflow-labs/agent-rules@1";
 const ROLE_RULES_SCHEMA: &str = "schema: workflow-labs/agent-role@1";
 /// `WORKFLOW_RULES` 본문의 `rules_version`과 같은 값이어야 한다.
-pub(crate) const WORKFLOW_RULES_VERSION: u32 = 35;
+pub(crate) const WORKFLOW_RULES_VERSION: u32 = 36;
 pub(crate) const PLANNER_RULES_VERSION: u32 = 12;
-pub(crate) const ARCHITECT_RULES_VERSION: u32 = 21;
+pub(crate) const ARCHITECT_RULES_VERSION: u32 = 22;
 pub(crate) const DEVELOPER_RULES_VERSION: u32 = 23;
 
 const AGENTS_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
@@ -46,7 +46,7 @@ const CLAUDE_BLOCK: &str = r#"<!-- workflow-labs:project-instructions:start -->
 const WORKFLOW_RULES: &str = r#"---
 schema: workflow-labs/agent-rules@1
 managed_by: workflow-labs
-rules_version: 35
+rules_version: 36
 ---
 
 # LLM Workflow agent protocol
@@ -273,6 +273,8 @@ An architect creates one `workflow-labs/work-group@1` document under `groups/` f
 
 - A group records `id`, `source_spec_id`, `source_decision_id`, `status`, `revision`, `qa_mode`, `created_at`, and `updated_at`. `source_qa_decision_id` is added when a new revision answers a group QA rejection.
 - `status` is `preparing` while the architect writes the group and its tasks, and `active` only after that definition is complete. A stopped `preparing` group with no unexpired lease is architect recovery work; it is never replaced with another group.
+- `status: suspended` records an architect's judgement that continuing the group is void — its reason for existing disappeared outside the documents, most often because the change already shipped through another path. The same edit writes the body section `## 중단 사유`, in exactly those characters, stating the checkable evidence for that judgement. Work belonging to a suspended group is assigned to no role. Suspension is reversible and it is not a discard: only the user revives or discards a suspended group, and a session never moves a group out of `suspended`.
+- `status: discarded` is the user's closure. The app records it together with one `workflow-labs/group-lifecycle-decision@1` document under `decisions/`, carrying `group_id`, `group_revision`, `outcome` (`discarded` or `revived`), `request_id`, `created_by: user`, and `created_at`. An agent never writes or edits that decision or either status transition it drives. `discarded` is terminal for the group and for its specification: no session revives the group, derives another group from the same approval, or works on its tasks. A discarded direction returns only through a new user-created idea.
 - A `qa_mode: user` group carries one integrated user QA flow, written when the group is created — sections headed `### QA-01 · title` with consecutive identifiers, normally a single section that walks the user through the whole feature once. Each section says which screen to open, what the user does, and what visible result is correct in non-developer language. Sections never mirror individual tasks, and they contain no terminal command, package runner, repository instruction, or internal automated test procedure.
 - A `qa_mode: automatic` group contains no user walkthrough. When all of its tasks are verified, agent verification closes it without a user stamp.
 - Tasks refer to the group; the group never stores a copied member list. The current composition is derived from `work_group_id` and `work_group_revision` on task documents.
@@ -607,7 +609,7 @@ const ARCHITECT_RULES: &str = r#"---
 schema: workflow-labs/agent-role@1
 role: architect
 managed_by: workflow-labs
-rules_version: 21
+rules_version: 22
 ---
 
 # Project architect role
@@ -634,7 +636,7 @@ One of these must hold:
 - A work group is `preparing` and no unexpired lease covers its id, its source approval, or its source QA decision.
 - The latest app-owned specification decision is `approved` and no work group already references it.
 
-No unexpired lease may cover the selected QA decision, group, request, task, or approved specification target.
+No unexpired lease may cover the selected QA decision, group, request, task, or approved specification target. Work that belongs to a `suspended` or `discarded` group is never a target on any of these grounds.
 
 ## Choose in this order
 
@@ -680,6 +682,15 @@ A work group can sit in the configuration-error state the app reports: its own f
 - When the documents hold nothing you can repair, record that judgement instead of guessing at a repair. Write `configuration_unresolved_revision` into the group frontmatter with the same number as the group's current `revision`, write the body section `## 사람의 판단이 필요한 이유` — in exactly those characters — saying what the user has to judge, write the same judgement into your report under `reports/`, and leave the rest of the group as you found it.
 - While that field names the current `revision`, the same group is never selected as an automatic target again. A cause that sits outside the documents produces the same result however many sessions try it, and this is what keeps those retries from consuming the run budget. A later revision of the same group is a target again, because the documents changed.
 - One session attempts one repair. Do not claim the same target a second time to try again.
+
+## Suspend a group whose direction went void
+
+While handling any target that belongs to a work group, an architect who finds that the group's reason for existing has disappeared — the requirement already shipped through another path, or a fact outside the documents makes every remaining task pointless — suspends the group instead of writing another report that says only that.
+
+- Prove it from what a reader can check: name the shipped change, release, commit, or document that made the group void. A hunch is not a ground for suspension.
+- In one edit set the group's `status: suspended`, write the body section `## 중단 사유` — in exactly those characters — with that evidence, and update `updated_at`. Leave `revision`, the tasks, the decisions, and prior reports as they are.
+- Write the same judgement into your session report.
+- A suspended group leaves every assignment lane at once, its blocked tasks and QA rework included. Reviving or discarding it is the user's decision through the app: never move a group out of `suspended`, and never write `discarded`.
 
 ## Split for parallel safety
 
@@ -1543,7 +1554,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("revision_requested"));
         assert!(control.join("rules/roles/planner.md").is_file());
         assert!(control.join("rules/roles/architect.md").is_file());
@@ -1565,7 +1576,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("`history`"));
         for kind in [
             "created",
@@ -1587,7 +1598,7 @@ mod tests {
             "Do not write `qa_waiting`, `completed`, `revision_requested`, `resumed`, or `migrated_verified` entries."
         ));
         assert!(rules.contains("`resumed` never stands in for `in_progress`"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains("`history`"));
         assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("`history`"));
@@ -1610,11 +1621,11 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         assert!(rules.contains("Set `role` to the name of the role contract"));
         // 선점 절차 자체는 공통 규칙에만 적는다. 역할 계약은 그 절을 참조만 한다.
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
     }
@@ -1634,7 +1645,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("`wf-reserve` helper"));
         assert!(rules.contains("`targetId`, `leaseId`, `resultPrefix`"));
         assert!(rules.contains("`wf-claim renew <targetId> <leaseId> <minutes>`"));
@@ -1645,7 +1656,7 @@ mod tests {
         assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains("Runtime reservation handoff"));
         assert!(planner.contains("lowest unused three-digit number"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains("TASK-S<spec number>-<ordinal>"));
         assert!(
             architect.contains("A group recovery and a task correction preserve their identifiers")
@@ -1666,7 +1677,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(developer.contains("rules_version: 23"));
 
         // 표시를 남기는 경로가 헬퍼 호출 하나뿐임을 공통 규칙이 정한다.
@@ -1702,7 +1713,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         for subcommand in ["acquire", "renew", "release"] {
             assert!(
                 rules.contains(&format!("wf-claim.sh {subcommand}")),
@@ -1727,7 +1738,7 @@ mod tests {
         assert!(developer.contains("rules_version: 23"));
         assert!(developer.contains("`depends_on`"));
         assert!(developer.contains("status is `verified`"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains("Split for parallel safety"));
         assert!(architect.contains("`depends_on`"));
         assert!(planner.contains("rules_version: 12"));
@@ -1744,7 +1755,7 @@ mod tests {
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
         let planner = fs::read_to_string(control.join("rules/roles/planner.md")).expect("planner");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("`source_spec_id` for the specification being revised"));
         assert!(rules.contains("The decision id is the judgement key"));
         assert!(rules.contains("An expired lease does not hold its target"));
@@ -1778,14 +1789,14 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 표기와 판정 불가 처리는 공통 규칙 §6에 있다.
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("`scope_files: [src/a.rs, src/b.ts]`"));
         assert!(rules.contains("one flow sequence on a single line starting at column 0"));
         assert!(rules.contains("compared exactly as written"));
         assert!(rules.contains("cannot be judged"));
 
         // 아키텍트는 선언을 쓰고, `depends_on` 순서 규칙은 그대로 남는다.
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains("Write `scope_files` on every task you create"));
         assert!(architect.contains("Order every overlapping pair with `depends_on`"));
         assert!(architect.contains("The two devices do not replace each other"));
@@ -1809,9 +1820,9 @@ mod tests {
         assert!(!planner.contains("scope_files"));
 
         // 공통 규칙과 세 역할 계약은 각 파일의 실제 제공 버전을 사용한다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 35);
+        assert_eq!(WORKFLOW_RULES_VERSION, 36);
         assert_eq!(PLANNER_RULES_VERSION, 12);
-        assert_eq!(ARCHITECT_RULES_VERSION, 21);
+        assert_eq!(ARCHITECT_RULES_VERSION, 22);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
     }
 
@@ -1865,7 +1876,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 인수 의무는 공통 규칙 §4에 한 번만 있다. 잔여물의 두 종류와 보고 요구가 함께 있다.
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("### Taking over what a stopped session left"));
         assert!(rules.contains("what you keep, what you discard, and what you rewrite"));
         assert!(rules.contains(
@@ -1946,7 +1957,7 @@ mod tests {
         assert!(planner.contains("Never delete the document and never merge it"));
 
         // 아키텍트 계약은 이 기획서의 범위 밖이므로 본문도 버전도 그대로다.
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(!architect.contains("Taking over"));
     }
 
@@ -1965,7 +1976,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
 
         // 새 절은 맨 뒤에 덧붙는다. 기존 여덟 절의 번호가 하나도 움직이지 않아야
         // 두 계약 문서에 흩어진 `§` 참조가 그대로 유효하다.
@@ -2040,7 +2051,7 @@ mod tests {
         assert!(planner.contains("rules_version: 12"));
         assert!(planner.contains("what the user decides in this document"));
         assert!(planner.contains("what stays exactly as it is if it is not"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains("the change the user will meet, not the shape the code takes"));
 
         // 개발자 계약: 자동검증 보고와 그룹 경계 유지.
@@ -2069,8 +2080,8 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 셋만 오르고 기획자 계약은 그대로다.
-        assert!(rules.contains("rules_version: 35"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(rules.contains("rules_version: 36"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
 
@@ -2202,10 +2213,10 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 본문이 바뀐 계약 둘만 오르고 나머지 둘은 그대로다.
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(developer.contains("rules_version: 23"));
         assert!(planner.contains("rules_version: 12"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
 
         // 전이와 같은 편집에서 남기는 고정 절.
         assert!(rules.contains("### Recording why a task is blocked"));
@@ -2292,7 +2303,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("### The structured summary"));
 
         // 세 하위 제목이 이 순서로 한 번씩만 정의된다. 요약은 제안·바뀌는 것·위험으로 끝난다.
@@ -2401,7 +2412,7 @@ mod tests {
             "Write that summary in the structured form §8 defines, both for a new specification and for one rewritten after a revision request"
         ));
         assert!(planner.contains("what stays exactly as it is while this document is not approved"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains("Write that summary in the structured form §8 defines"));
         assert!(architect
             .contains("the closing heading names the automated result this task contributes to"));
@@ -2430,7 +2441,7 @@ mod tests {
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(
             rules.contains("## 9. Write Korean workflow documents in clear professional language")
         );
@@ -2481,7 +2492,7 @@ mod tests {
             developer.contains("changes, automated verification, risks, and architect handoffs")
         );
         assert!(planner.contains("rules_version: 12"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(developer.contains("rules_version: 23"));
     }
 
@@ -2501,7 +2512,7 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
 
         // 구성 확인 필요 기능이 아키텍트 대상이고, 선점이 걸린 기능은 대상이 아니다.
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(architect.contains(
             "A work group is in the configuration-error state the app reports, and no unexpired lease covers its id"
         ));
@@ -2551,7 +2562,7 @@ mod tests {
         assert!(architect.contains("One session attempts one repair"));
 
         // 공통 규칙이 선택 필드와 본문 절을 적고, 둘 다 없는 기존 기능 문서도 그대로 유효하다.
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("the optional `configuration_unresolved_revision` field"));
         assert!(rules.contains("`configuration_unresolved_revision: 2`"));
         assert!(rules.contains(
@@ -2568,9 +2579,9 @@ mod tests {
         assert!(!developer.contains("configuration_unresolved_revision"));
 
         // 두 판 번호만 올랐고 나머지 둘은 그대로다.
-        assert_eq!(WORKFLOW_RULES_VERSION, 35);
+        assert_eq!(WORKFLOW_RULES_VERSION, 36);
         assert_eq!(PLANNER_RULES_VERSION, 12);
-        assert_eq!(ARCHITECT_RULES_VERSION, 21);
+        assert_eq!(ARCHITECT_RULES_VERSION, 22);
         assert_eq!(DEVELOPER_RULES_VERSION, 23);
     }
 
@@ -2630,7 +2641,7 @@ mod tests {
         install_project_instructions(root.path(), &control).expect("upgrade instructions");
 
         let rules = fs::read_to_string(control.join("rules/workflow.md")).expect("rules");
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("role: <planner|architect|developer>"));
         validate_project_instructions(root.path(), &control)
             .expect("upgraded instructions must validate");
@@ -2661,9 +2672,9 @@ mod tests {
             fs::read_to_string(control.join("rules/roles/architect.md")).expect("architect");
         let developer =
             fs::read_to_string(control.join("rules/roles/developer.md")).expect("developer");
-        assert!(rules.contains("rules_version: 35"));
+        assert!(rules.contains("rules_version: 36"));
         assert!(rules.contains("`history`"));
-        assert!(architect.contains("rules_version: 21"));
+        assert!(architect.contains("rules_version: 22"));
         assert!(developer.contains("rules_version: 23"));
     }
 

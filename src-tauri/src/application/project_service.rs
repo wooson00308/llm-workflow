@@ -4,8 +4,8 @@ use crate::domain::project::{
     CustomRulesDocument, CustomRulesDraft, CustomRulesPreview, IdeaDocument,
     ManagedAssetSyncResult, ProjectSummary, SaveCustomRulesRequest, SaveCustomRulesResult,
     SpecDecisionOutcome, SpecDocument, TaskDocument, TaskResumeRequest, TaskResumeResult,
-    TaskRevisionRequestInput, TaskRevisionRequestResult, WorkGroupQaSubmission,
-    WorkGroupQaSubmissionResult,
+    TaskRevisionRequestInput, TaskRevisionRequestResult, WorkGroupLifecycleRequest,
+    WorkGroupLifecycleResult, WorkGroupQaSubmission, WorkGroupQaSubmissionResult,
 };
 use crate::infrastructure::fs_project_repository::{FileSystemProjectRepository, ProjectError};
 
@@ -120,6 +120,14 @@ impl ProjectService {
         request: &TaskResumeRequest,
     ) -> Result<TaskResumeResult, ProjectError> {
         self.repository.resume_task(root, request)
+    }
+
+    pub fn record_work_group_lifecycle(
+        &self,
+        root: &Path,
+        request: &WorkGroupLifecycleRequest,
+    ) -> Result<WorkGroupLifecycleResult, ProjectError> {
+        self.repository.record_work_group_lifecycle(root, request)
     }
 
     pub fn record_task_revision_request(

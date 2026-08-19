@@ -10,7 +10,8 @@ use crate::domain::project::{
     ManagedAssetSyncResult, ProjectSummary, ReportDocument, RunReportAudit, RunReportAuditResult,
     SaveCustomRulesRequest, SaveCustomRulesResult, SpecDecisionOutcome, SpecDocument, TaskDocument,
     TaskResumeRequest, TaskResumeResult, TaskRevisionRequestInput, TaskRevisionRequestResult,
-    WorkGroupQaSubmission, WorkGroupQaSubmissionResult, WorkflowReportSummary,
+    WorkGroupLifecycleRequest, WorkGroupLifecycleResult, WorkGroupQaSubmission,
+    WorkGroupQaSubmissionResult, WorkflowReportSummary,
 };
 use crate::infrastructure::fs_project_repository::FileSystemProjectRepository;
 
@@ -271,6 +272,17 @@ pub fn record_task_revision_request(
 ) -> Result<TaskRevisionRequestResult, String> {
     ProjectService::default()
         .record_task_revision_request(Path::new(&path), &request)
+        .map_err(|error| error.to_string())
+}
+
+/// 작업 그룹 폐기·되살리기. 사용자가 앱 화면에서 사유를 적고 누르는 조작만 이 명령에 도달한다.
+#[tauri::command]
+pub fn record_work_group_lifecycle(
+    path: String,
+    request: WorkGroupLifecycleRequest,
+) -> Result<WorkGroupLifecycleResult, String> {
+    ProjectService::default()
+        .record_work_group_lifecycle(Path::new(&path), &request)
         .map_err(|error| error.to_string())
 }
 

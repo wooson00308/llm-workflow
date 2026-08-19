@@ -251,6 +251,29 @@ fn judge_workflows(
     merged
 }
 
+/// 중단·폐기된 그룹의 일은 어느 역할의 대상도 아니다. 중단은 아키텍트가 진행이 무효하다고
+/// 기록한 것이고 폐기는 사용자의 종결이므로, 그 그룹에서 나온 QA 반려·정의 수정·blocked 교정을
+/// 계속 배정하면 무효한 방향으로 세션이 반복 소환된다(2026-08-20 실측: 같은 결론 보고서 8건).
+fn group_is_halted(items: &WorkflowItems, group_id: &str) -> bool {
+    items.work_groups.iter().any(|group| {
+        group.id == group_id
+            && matches!(
+                group.status,
+                WorkGroupStatus::Suspended | WorkGroupStatus::Discarded
+            )
+    })
+}
+
+fn task_group_is_halted(items: &WorkflowItems, task_id: &str) -> bool {
+    items.tasks.iter().any(|task| {
+        task.id == task_id
+            && task
+                .work_group_id
+                .as_deref()
+                .is_some_and(|group_id| group_is_halted(items, group_id))
+    })
+}
+
 /// 후보를 보는 차례. 스크립트는 디렉터리를 글롭 순서로 훑으므로 파일 이름 오름차순이 그 차례다.
 /// 목록 payload의 정렬(`updated_at` 내림차순)을 그대로 쓰면 두 판정의 대상이 갈라진다.
 fn by_file_name(items: &[WorkflowItemSummary]) -> Vec<&WorkflowItemSummary> {
@@ -363,6 +386,7 @@ fn architect_workflows_verdict(
             workflow
                 .group_qa_revision_requests
                 .iter()
+                .filter(move |request| !group_is_halted(workflow.items, &request.group_id))
                 .map(move |request| (workflow.directory, request))
         })
         .collect();
@@ -422,6 +446,7 @@ fn architect_workflows_verdict(
             workflow
                 .task_revision_requests
                 .iter()
+                .filter(move |request| !task_group_is_halted(workflow.items, &request.task_id))
                 .map(move |request| (workflow.directory, request))
         })
         .filter(|(_, request)| {
@@ -451,6 +476,13 @@ fn architect_workflows_verdict(
         let mut direct = RoleWorkVerdict::default();
         for task in by_file_name(&workflow.items.tasks) {
             if task.status != "blocked" || !workflow.definition_error_tasks.contains(&task.id) {
+                continue;
+            }
+            if task
+                .work_group_id
+                .as_deref()
+                .is_some_and(|group_id| group_is_halted(workflow.items, group_id))
+            {
                 continue;
             }
             if request_backed_tasks.contains(task.id.as_str()) {

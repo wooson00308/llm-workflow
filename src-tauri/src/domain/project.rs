@@ -269,6 +269,11 @@ pub struct TaskEvent {
 pub enum WorkGroupStatus {
     Preparing,
     Active,
+    /// 아키텍트가 진행이 무효함을 사유와 함께 기록한 상태. 배정에서 빠지고, 사용자가
+    /// 되살리거나 폐기한다.
+    Suspended,
+    /// 사용자가 폐기 도장으로 종결한 상태. 세션은 이 값을 쓰지 않는다.
+    Discarded,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +299,10 @@ pub enum WorkGroupDisplayStatus {
     /// 아키텍트가 문서 쪽에 고칠 곳이 없다고 판단해 그 판단을 기능 문서에 남긴 상태. 구성 확인
     /// 필요와 같은 자리에서 나오지만, 자동 처리가 끝난 뒤라 사용자 차례다.
     HumanJudgmentRequired,
+    /// 아키텍트가 중단한 상태 그대로. 사용자의 되살림이나 폐기를 기다린다.
+    Suspended,
+    /// 사용자가 폐기한 종결 상태.
+    Discarded,
 }
 
 /// 구성 확인 필요 또는 사람 판단 필요로 판정하게 만든 조건 하나. 화면이 문서를 다시 읽지 않고
@@ -348,6 +357,9 @@ pub struct WorkGroupSummary {
     /// 기능 문서의 `## 사람의 판단이 필요한 이유` 절 본문. 아키텍트가 사용자에게 무엇을 판단해
     /// 달라고 남긴 글이며, 절이 없으면 빈 문자열이다.
     pub human_judgment_note: String,
+    /// 기능 문서의 `## 중단 사유` 절 본문. 아키텍트가 진행이 무효하다고 판단한 근거이며, 절이
+    /// 없으면 빈 문자열이다. 중단·폐기 상태가 아니어도 남아 있는 원문을 그대로 싣는다.
+    pub suspension_reason: String,
     /// 이 그룹과 구성 버전의 품질 확인이 대상으로 삼는 기준 커밋 해시. 이 요약을 계산한 시점의
     /// 값이며 코드가 바뀌면 함께 갱신된다. 사용자가 확인한 코드 상태를 붙드는 일은 확인 화면이
     /// 맡고, 화면은 결과를 고를 때 읽은 이 값을 제출에 실어 보낸다. 프로젝트가 Git 작업 트리가
@@ -743,6 +755,48 @@ pub struct TaskResumeRecovery {
     pub created_paths: Vec<String>,
     pub reason: String,
     pub action: String,
+}
+
+/// 작업 그룹의 생애 결정. 폐기는 준비 중·활성·중단 그룹의 종결이고, 되살리기는 중단 그룹을
+/// 활성으로 되돌린다. 앱 UI의 사용자 조작만 이 결정을 만든다.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupLifecycleOutcome {
+    Discarded,
+    Revived,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupLifecycleRequest {
+    pub workflow_directory: String,
+    pub file_name: String,
+    pub outcome: WorkGroupLifecycleOutcome,
+    /// 사용자가 입력한 사유. 폐기는 비울 수 없고, 앱은 이 문장을 대신 지어내지 않는다.
+    pub comment: String,
+    /// 사용자가 화면에서 확인한 그룹 문서의 `updated_at` 원문. 문자 단위로 같아야 기록한다.
+    pub expected_updated_at: String,
+    /// 같은 결정을 한 번만 기록하기 위한 요청 식별자. 재시도는 같은 값을 다시 보낸다.
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupLifecycleStatus {
+    /// 결정 문서와 그룹 상태 전이가 함께 남았다.
+    Recorded,
+    /// 같은 요청 식별자의 결정이 이미 남아 있어 아무것도 새로 쓰지 않았다.
+    AlreadyRecorded,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGroupLifecycleResult {
+    pub status: WorkGroupLifecycleStatus,
+    /// 기록 뒤 다시 계산한 프로젝트 요약. 배정 자격 판정도 이 값에서 다시 나온다.
+    pub summary: ProjectSummary,
+    pub group_id: String,
+    pub outcome: WorkGroupLifecycleOutcome,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
 import { Icon } from "../../../shared/ui/Icon";
+import { useArmedConfirm } from "../../../shared/ui/useArmedConfirm";
 import { MarkdownBody } from "./MarkdownBody";
 import type {
   TaskDocument,
   WorkGroupConfigurationIssue,
   WorkGroupDisplayStatus,
+  WorkGroupLifecycleOutcomeResult,
+  WorkGroupLifecycleRequest,
   WorkGroupSummary,
   WorkflowItemSummary,
   WorkflowSummary,
@@ -70,6 +73,11 @@ const attentionNotices: Partial<Record<WorkGroupDisplayStatus, {
     owner: "사용자가 판단할 차례입니다.",
     userAction: "판단이 정해지기 전에는 이 기능이 다음 단계로 넘어가지 않습니다.",
   },
+  suspended: {
+    problem: "진행할 이유가 사라졌다고 아키텍트가 이 기능을 중단해 두었습니다.",
+    owner: "사용자가 결정할 차례입니다.",
+    userAction: "아래에서 다시 진행하거나 폐기해 주세요. 결정 전에는 AI가 이 기능을 건드리지 않습니다.",
+  },
 };
 
 /**
@@ -97,6 +105,7 @@ export function GroupAttentionNote({ group }: { group: WorkGroupSummary }) {
   // 사유를 못 만든 기능도 목록에서 사라지지 않게, 값이 없으면 사유 없이 상태와 처리 주체만 세운다.
   const issues = group.configurationIssues ?? [];
   const judgment = group.humanJudgmentNote?.trim() ?? "";
+  const suspension = group.displayStatus === "suspended" ? (group.suspensionReason?.trim() ?? "") : "";
 
   return (
     <div aria-label="상태 설명" className="group-attention" role="note">
@@ -110,6 +119,114 @@ export function GroupAttentionNote({ group }: { group: WorkGroupSummary }) {
       {judgment && (
         <p className="group-attention-judgment"><b>판단할 내용</b>{judgment}</p>
       )}
+      {suspension && (
+        <p className="group-attention-judgment"><b>중단 사유</b>{suspension}</p>
+      )}
+    </div>
+  );
+}
+
+function nextLifecycleRequestId() {
+  return `group-lifecycle-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * 그룹 폐기·되살리기 입구. 중단된 그룹은 사용자 결정 차례라 입력과 버튼을 바로 세우고, 진행 중인
+ * 그룹의 폐기는 실수로 누르기 어렵게 접힌 입구 뒤에 둔다. 두 조작 모두 2단계 확인을 거치고,
+ * 폐기는 사유 없이 제출할 수 없다.
+ */
+function WorkGroupLifecycleControls({ group, onLifecycle, workflowDirectory }: {
+  group: WorkGroupSummary;
+  onLifecycle(request: WorkGroupLifecycleRequest): Promise<WorkGroupLifecycleOutcomeResult>;
+  workflowDirectory: string;
+}) {
+  const suspended = group.status === "suspended";
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [requestId, setRequestId] = useState(nextLifecycleRequestId);
+  const [message, setMessage] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const discardConfirm = useArmedConfirm();
+  const reviveConfirm = useArmedConfirm();
+  if (!["preparing", "active", "suspended"].includes(group.status)) return null;
+  const trimmed = reason.trim();
+
+  async function submit(outcome: "discarded" | "revived") {
+    if (submitting) return;
+    setSubmitting(true);
+    setMessage(null);
+    const result = await onLifecycle({
+      workflowDirectory,
+      fileName: group.fileName,
+      outcome,
+      comment: trimmed,
+      expectedUpdatedAt: group.updatedAt,
+      requestId,
+    });
+    setSubmitting(false);
+    if (!result.ok) {
+      setMessage(result.message);
+      setRequestId(nextLifecycleRequestId());
+      return;
+    }
+    setReason("");
+    setRequestId(nextLifecycleRequestId());
+  }
+
+  if (!suspended && !open) {
+    return (
+      <p className="task-lane-lifecycle-entry">
+        <button className="text-button" onClick={() => setOpen(true)} type="button">이 기능 폐기…</button>
+      </p>
+    );
+  }
+
+  return (
+    <div aria-label="그룹 결정" className="task-lane-lifecycle" role="group">
+      <label className="task-lane-lifecycle-comment">
+        <span>{suspended ? "결정 사유 · 폐기에는 필수" : "폐기 사유 · 필수"}</span>
+        <textarea
+          onChange={(event) => {
+            setReason(event.target.value);
+            discardConfirm.disarm();
+            reviveConfirm.disarm();
+          }}
+          rows={2}
+          value={reason}
+        />
+      </label>
+      <div className="task-lane-lifecycle-actions">
+        {suspended && (
+          <button
+            className="secondary-button"
+            disabled={submitting}
+            onClick={() => reviveConfirm.fire(() => void submit("revived"))}
+            type="button"
+          >
+            {reviveConfirm.armed ? "한 번 더 누르면 다시 진행합니다" : "이 기능 다시 진행"}
+          </button>
+        )}
+        <button
+          className="secondary-button reject"
+          disabled={submitting || trimmed.length === 0}
+          onClick={() => discardConfirm.fire(() => void submit("discarded"))}
+          type="button"
+        >
+          {discardConfirm.armed ? "한 번 더 누르면 폐기합니다" : "이 기능 폐기"}
+        </button>
+        {!suspended && (
+          <button
+            className="text-button"
+            onClick={() => {
+              setOpen(false);
+              setMessage(null);
+              discardConfirm.disarm();
+            }}
+            type="button"
+          >닫기</button>
+        )}
+      </div>
+      {message && <p className="task-lane-lifecycle-message" role="status">{message}</p>}
     </div>
   );
 }
@@ -141,10 +258,11 @@ type ViewMode = (typeof viewModes)[number]["value"];
 interface Props {
   onOpenQa(groupId: string): void;
   onReadTask(fileName: string): Promise<TaskDocument | null>;
+  onWorkGroupLifecycle(request: WorkGroupLifecycleRequest): Promise<WorkGroupLifecycleOutcomeResult>;
   workflow: WorkflowSummary;
 }
 
-export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
+export function DevelopmentBoard({ onOpenQa, onReadTask, onWorkGroupLifecycle, workflow }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [laneGrouping, setLaneGrouping] = useState(true);
   const [query, setQuery] = useState("");
@@ -290,8 +408,10 @@ export function DevelopmentBoard({ onOpenQa, onReadTask, workflow }: Props) {
               onOpen={(item) => void openTask(item.fileName)}
               onOpenQa={onOpenQa}
               onToggleCollapsed={toggleLaneCollapsed}
+              onWorkGroupLifecycle={onWorkGroupLifecycle}
               statusFilter={statusFilter}
               visibleTasks={filteredTasks}
+              workflowDirectory={workflow.directory}
             />
           ) : (
             <BoardView
@@ -472,8 +592,10 @@ function WorkGroupLaneBoard({
   onOpen,
   onOpenQa,
   onToggleCollapsed,
+  onWorkGroupLifecycle,
   statusFilter,
   visibleTasks,
+  workflowDirectory,
 }: {
   allTasks: WorkflowItemSummary[];
   collapsed: Record<string, boolean>;
@@ -482,8 +604,10 @@ function WorkGroupLaneBoard({
   onOpen(item: WorkflowItemSummary): void;
   onOpenQa(groupId: string): void;
   onToggleCollapsed(key: string): void;
+  onWorkGroupLifecycle(request: WorkGroupLifecycleRequest): Promise<WorkGroupLifecycleOutcomeResult>;
   statusFilter: string;
   visibleTasks: WorkflowItemSummary[];
+  workflowDirectory: string;
 }) {
   // `groups`는 이미 끝난 그룹을 뺀 목록이다. 감춘 그룹 수와 안내는 화면 본체가 세 보기에 공통으로 붙인다.
   const lanes = useMemo(() => buildWorkGroupLanes(groups, allTasks, visibleTasks, hasFilters), [allTasks, groups, hasFilters, visibleTasks]);
@@ -526,6 +650,11 @@ function WorkGroupLaneBoard({
             </header>
             {/* 레인을 접어도 설명은 남긴다. 상세를 열지 않고 목록만 훑어도 갈리는 것이 이 자리다. */}
             <GroupAttentionNote group={lane.group} />
+            <WorkGroupLifecycleControls
+              group={lane.group}
+              onLifecycle={onWorkGroupLifecycle}
+              workflowDirectory={workflowDirectory}
+            />
             {!laneCollapsed && (
               <div className="task-lane-scroll">
                 {lane.items.length > 0 ? (
@@ -595,6 +724,8 @@ function workGroupStatusLabel(status: WorkGroupDisplayStatus) {
     automatic_completed: "완료",
     configuration_error: "구성 확인 필요",
     human_judgment_required: "사람 판단 필요",
+    suspended: "중단됨",
+    discarded: "폐기됨",
   }[status];
 }
 
@@ -773,7 +904,11 @@ function EmptyTasks() {
 
 /** 사용자 품질 확인을 통과했거나 자동 확인으로 닫힌 그룹. 두 상태 모두 사용자가 더 할 일이 없다. */
 function isFinishedWorkGroup(group: WorkGroupSummary) {
-  return group.displayStatus === "completed" || group.displayStatus === "automatic_completed";
+  return (
+    group.displayStatus === "completed" ||
+    group.displayStatus === "automatic_completed" ||
+    group.displayStatus === "discarded"
+  );
 }
 
 /**

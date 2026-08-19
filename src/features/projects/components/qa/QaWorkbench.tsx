@@ -171,5 +171,7 @@ function groupStatusLabel(status: WorkGroupSummary["displayStatus"]) {
     automatic_completed: "완료",
     configuration_error: "구성 확인 필요",
     human_judgment_required: "사람 판단 필요",
+    suspended: "중단됨",
+    discarded: "폐기됨",
   }[status];
 }
