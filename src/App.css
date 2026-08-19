@@ -242,8 +242,19 @@ svg { width: 20px; height: 20px; }
 .setup-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 30px; }
 
 /* App shell */
-.app-shell { height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); background: #f4f3ed; }
-.sidebar { min-height: 0; display: flex; flex-direction: column; padding: 18px 13px 13px; border-right: 1px solid #dbdad1; background: #ebeae3; }
+/* 첫 칸의 되돌림 값 250px은 `domain/panelLayout`의 사이드바 기본 너비와 같은 값이고, 시험이 그 둘을
+   맞대어 확인한다. 사용자가 너비를 정했거나 사이드바를 접었을 때만 `--sidebar-width`가 실린다. */
+.app-shell { height: 100vh; display: grid; grid-template-columns: var(--sidebar-width, 250px) minmax(0, 1fr); background: #f4f3ed; }
+.sidebar { position: relative; min-height: 0; display: flex; flex-direction: column; padding: 18px 13px 13px; border-right: 1px solid #dbdad1; background: #ebeae3; }
+/* 리사이즈 핸들은 오른쪽 경계에 겹쳐 세운다 (SPEC-080 R1). 세로 묶음의 항목으로 두면 메뉴 아래에 눕고,
+   경계가 아니라 사이드바 안쪽을 잡게 된다. */
+.sidebar > .panel-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; }
+/* 접힌 사이드바는 세로 바만 남긴다 (SPEC-080 R4). 안쪽 내용을 그리지 않으므로 여백과 경계선도 함께
+   걷어야 28px 자리를 세로 바가 그대로 채운다. */
+.sidebar-collapsed { padding: 0; border-right: 0; background: transparent; }
+/* 접기 버튼을 프로젝트 전환 버튼의 형제로 세우는 자리. 버튼 안에 버튼을 넣을 수 없어 줄을 하나 감싼다. */
+.sidebar-switcher-row { display: flex; align-items: center; gap: 4px; }
+.sidebar-switcher-row > .project-switcher { min-width: 0; flex: 1; }
 .project-switcher { display: flex; align-items: center; gap: 10px; padding: 7px; border: 0; border-radius: 12px; background: transparent; text-align: left; cursor: pointer; }
 .project-switcher:hover { background: rgba(255,255,255,.55); }
 .project-switcher > span:nth-child(2) { min-width: 0; flex: 1; }
@@ -1309,7 +1320,7 @@ button.task-lane-qa-entry:focus-visible { outline: 2px solid var(--green); outli
 @media (max-width: 980px) {
   .launch-shell { grid-template-columns: 1fr; overflow: auto; }
   .launch-hero, .recent-panel { min-height: 50vh; padding: 60px 9vw; }
-  .app-shell { grid-template-columns: 210px minmax(0, 1fr); }
+  .app-shell { grid-template-columns: var(--sidebar-width, 210px) minmax(0, 1fr); }
   .stage-grid { grid-template-columns: repeat(2, 1fr); }
   .search-button { min-width: 34px; width: 34px; }
   .search-button:not(svg), .search-button kbd { font-size: 0; }

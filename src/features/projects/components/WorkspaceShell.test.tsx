@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ComponentProps } from "react";
+import { useContext, type ComponentProps } from "react";
 import type {
   CustomRulesActions,
   CustomRulesState,
@@ -13,13 +13,37 @@ import type {
   WorkGroupSummary,
 } from "../domain/types";
 import type { AppUpdaterState } from "../../updater/domain/types";
-import { WorkspaceShell } from "./WorkspaceShell";
+import {
+  COLLAPSED_PANEL_WIDTH,
+  PANEL_KEYBOARD_STEP,
+  PANEL_LIMITS,
+} from "../domain/panelLayout";
+import { SidebarLayoutContext, WorkspaceShell } from "./WorkspaceShell";
 import { EXECUTION_NOTICE_FACTS } from "./agents/AgentRuntimeView";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+/**
+ * 사이드바 폭이 화면 컴포넌트 자리까지 닿는지 보기 위한 탐침. 받는 쪽 두 화면은 TASK-S080-04가
+ * 만들므로, 지금 확인할 수 있는 것은 그 자리에 선 컴포넌트가 읽는 값이다. 켜지 않은 동안에는 원래
+ * 화면을 그대로 그려 다른 시험이 실물 아이디어 화면을 그대로 본다.
+ */
+const probe = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock("./IdeaInbox", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./IdeaInbox")>();
+  return {
+    IdeaInbox: (props: ComponentProps<typeof actual.IdeaInbox>) =>
+      probe.enabled ? <SidebarLayoutProbe /> : <actual.IdeaInbox {...props} />,
+  };
+});
+
+function SidebarLayoutProbe() {
+  return <div data-testid="sidebar-layout">{JSON.stringify(useContext(SidebarLayoutContext))}</div>;
+}
 
 const project: ProjectSummary = {
   rootPath: "/projects/workflow-labs",
@@ -2180,5 +2204,250 @@ describe("WorkspaceShell 사이드 메뉴 변경 점", () => {
     expect(menuButton(/^아이디어/)).toBe(ideas);
     // 점이 없는 개발 메뉴의 접근 이름은 메뉴 이름 그대로다.
     expect(menuButton(/^개발/)).toHaveAccessibleName("개발");
+  });
+});
+
+describe("WorkspaceShell 사이드바 리사이즈와 접기", () => {
+  const LAYOUT_KEY = "workflow-labs.panel-layout.v1";
+  const limits = PANEL_LIMITS.sidebar;
+
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    storage = stubStorage();
+  });
+
+  afterEach(() => {
+    probe.enabled = false;
+    resizeWindow(1024);
+  });
+
+  /** jsdom의 창 폭을 바꾸고 크기 변경을 알린다. 그리는 너비 계산이 이 값을 읽는다. */
+  function resizeWindow(width: number) {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: width, writable: true });
+    fireEvent(window, new Event("resize"));
+  }
+
+  /** 껍데기에 실린 폭 변수. 한 번도 조절하지 않았으면 빈 문자열이다. */
+  function sidebarWidth(container: HTMLElement) {
+    return container.querySelector<HTMLElement>(".app-shell")!.style.getPropertyValue("--sidebar-width");
+  }
+
+  function handle() {
+    return screen.getByRole("separator", { name: "사이드바 너비 조절" });
+  }
+
+  /** 지금 너비에서 목표 너비까지 끈다. 시작 너비는 핸들이 알리고 있는 값에서 읽는다. */
+  function dragTo(width: number) {
+    const grabbed = handle();
+    const from = Number(grabbed.getAttribute("aria-valuenow"));
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 500 + (width - from) });
+    fireEvent.pointerUp(window);
+  }
+
+  function storedSidebar() {
+    return JSON.parse(storage.get(LAYOUT_KEY) ?? "{}").sidebar;
+  }
+
+  it("한 번도 조절하지 않으면 폭 변수를 싣지 않는다", () => {
+    const { container } = shell();
+
+    expect(sidebarWidth(container)).toBe("");
+    expect(storage.get(LAYOUT_KEY)).toBeUndefined();
+  });
+
+  it("오른쪽 경계를 끌면 최소값과 최대값 사이에서 움직이고 그 밖으로는 나가지 않는다", () => {
+    const { container } = shell();
+
+    const grabbed = handle();
+    fireEvent.pointerDown(grabbed, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 570 });
+    expect(sidebarWidth(container)).toBe("320px");
+
+    fireEvent.pointerMove(window, { clientX: 1500 });
+    expect(sidebarWidth(container)).toBe(`${limits.maxWidth}px`);
+
+    fireEvent.pointerMove(window, { clientX: 0 });
+    expect(sidebarWidth(container)).toBe(`${limits.minWidth}px`);
+
+    fireEvent.pointerUp(window);
+    expect(storedSidebar().width).toBe(limits.minWidth);
+  });
+
+  it("핸들을 더블클릭하면 저장한 너비가 지워져 스타일의 되돌림 값으로 돌아간다", () => {
+    const { container } = shell();
+    dragTo(320);
+    expect(sidebarWidth(container)).toBe("320px");
+
+    fireEvent.doubleClick(handle());
+
+    expect(sidebarWidth(container)).toBe("");
+    expect(storedSidebar().width).toBeUndefined();
+  });
+
+  it("방향키는 한 걸음씩 움직이고 최소값과 최대값에서 멈춘다", () => {
+    const { container } = shell();
+
+    fireEvent.keyDown(handle(), { key: "ArrowRight" });
+    expect(sidebarWidth(container)).toBe(`${limits.defaultWidth! + PANEL_KEYBOARD_STEP}px`);
+
+    fireEvent.keyDown(handle(), { key: "ArrowLeft" });
+    expect(sidebarWidth(container)).toBe(`${limits.defaultWidth}px`);
+
+    dragTo(limits.maxWidth);
+    fireEvent.keyDown(handle(), { key: "ArrowRight" });
+    expect(sidebarWidth(container)).toBe(`${limits.maxWidth}px`);
+
+    dragTo(limits.minWidth);
+    fireEvent.keyDown(handle(), { key: "ArrowLeft" });
+    expect(sidebarWidth(container)).toBe(`${limits.minWidth}px`);
+  });
+
+  it("접으면 안쪽 내용이 사라지고 세로 바만 남으며, 다시 누르면 접기 직전 너비가 돌아온다", () => {
+    const { container } = shell();
+    dragTo(320);
+
+    fireEvent.click(screen.getByRole("button", { name: "사이드바 접기" }));
+
+    expect(screen.queryByRole("navigation", { name: "주요 메뉴" })).toBeNull();
+    expect(sidebarWidth(container)).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+    expect(storedSidebar().collapsed).toBe(true);
+
+    const bar = screen.getByRole("button", { name: "사이드바 펼치기" });
+    expect(bar).toHaveAttribute("title", "사이드바 펼치기");
+    expect(bar.textContent).not.toContain("사이드바");
+
+    fireEvent.click(bar);
+
+    expect(screen.getByRole("navigation", { name: "주요 메뉴" })).toBeInTheDocument();
+    expect(sidebarWidth(container)).toBe("320px");
+  });
+
+  it("정한 너비는 여섯 화면을 옮겨 다녀도 그대로 남는다", () => {
+    const { container } = shell();
+    dragTo(320);
+
+    for (const menu of ["아이디어", "기획서", "개발", "품질 확인", "기록", "오늘"]) {
+      fireEvent.click(screen.getByRole("button", { name: menu }));
+      expect(sidebarWidth(container)).toBe("320px");
+    }
+  });
+
+  /*
+   * 접는 순간 메뉴가 사라지므로 접은 채로는 화면을 옮길 수 없다. 옮겨 간 화면에서 접었다 펴 보는 것이
+   * 사이드바가 화면 전환 분기 바깥에 서 있다는 사실을 확인하는 자리다.
+   */
+  it("옮겨 간 화면에서 접었다 펴도 정해 둔 너비가 그대로 돌아온다", () => {
+    const { container } = shell();
+    dragTo(320);
+    fireEvent.click(screen.getByRole("button", { name: "기록" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "사이드바 접기" }));
+    expect(sidebarWidth(container)).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+
+    fireEvent.click(screen.getByRole("button", { name: "사이드바 펼치기" }));
+    expect(sidebarWidth(container)).toBe("320px");
+  });
+
+  it("저장해 둔 너비와 접힘을 다음 실행의 첫 그리기에서 그대로 읽는다", () => {
+    storage.set(LAYOUT_KEY, JSON.stringify({ sidebar: { width: 320 } }));
+    expect(sidebarWidth(shell().container)).toBe("320px");
+
+    cleanup();
+    storage.set(LAYOUT_KEY, JSON.stringify({ sidebar: { width: 320, collapsed: true } }));
+    expect(sidebarWidth(shell().container)).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+  });
+
+  it("브라우저 저장소를 쓸 수 없어도 화면이 그려지고 드래그와 접기가 동작한다", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("접근 거부");
+      },
+      setItem: () => {
+        throw new Error("접근 거부");
+      },
+    });
+
+    const rendered = shell();
+    expect(rendered.container.querySelector(".app-shell")).toBeInTheDocument();
+
+    dragTo(320);
+    expect(sidebarWidth(rendered.container)).toBe("320px");
+
+    fireEvent.click(screen.getByRole("button", { name: "사이드바 접기" }));
+    expect(sidebarWidth(rendered.container)).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+  });
+
+  it("창이 좁으면 그리는 너비만 줄고 저장한 값은 그대로 남는다", () => {
+    const { container } = shell();
+    dragTo(limits.maxWidth);
+
+    resizeWindow(600);
+    expect(sidebarWidth(container)).toBe("260px");
+    expect(storedSidebar().width).toBe(limits.maxWidth);
+
+    resizeWindow(1024);
+    expect(sidebarWidth(container)).toBe(`${limits.maxWidth}px`);
+  });
+
+  it("창 폭 980px 이하에서도 접기 버튼은 그대로 동작한다", () => {
+    resizeWindow(900);
+    const { container } = shell();
+
+    fireEvent.click(screen.getByRole("button", { name: "사이드바 접기" }));
+
+    expect(screen.queryByRole("navigation", { name: "주요 메뉴" })).toBeNull();
+    expect(sidebarWidth(container)).toBe(`${COLLAPSED_PANEL_WIDTH}px`);
+  });
+
+  describe("화면 컴포넌트에 닿는 값", () => {
+    beforeEach(() => {
+      probe.enabled = true;
+    });
+
+    function readProbe() {
+      return JSON.parse(screen.getByTestId("sidebar-layout").textContent!);
+    }
+
+    function delivered() {
+      fireEvent.click(screen.getByRole("button", { name: "아이디어" }));
+      return readProbe();
+    }
+
+    it("조절하지 않은 사이드바는 기준 너비만 알리고 그리는 너비를 만들어 내지 않는다", () => {
+      shell();
+      expect(delivered()).toEqual({ baselineWidth: limits.defaultWidth, collapsed: false });
+    });
+
+    it("좁은 창의 기준 너비는 영역 표의 좁은 창 기본 너비다", () => {
+      resizeWindow(900);
+      shell();
+      expect(delivered()).toEqual({ baselineWidth: limits.narrowDefaultWidth, collapsed: false });
+    });
+
+    it("조절한 사이드바는 기준 너비와 지금 그리는 너비를 함께 알린다", () => {
+      storage.set(LAYOUT_KEY, JSON.stringify({ sidebar: { width: 320 } }));
+      shell();
+      expect(delivered()).toEqual({
+        baselineWidth: limits.defaultWidth,
+        renderedWidth: 320,
+        collapsed: false,
+      });
+    });
+
+    it("접힌 사이드바가 알리는 그리는 너비는 세로 바의 폭이다", () => {
+      storage.set(LAYOUT_KEY, JSON.stringify({ sidebar: { width: 320 } }));
+      shell();
+      // 접는 순간 메뉴가 사라지므로 화면을 먼저 열고 접는다. 탐침은 그대로 서 있다.
+      delivered();
+      fireEvent.click(screen.getByRole("button", { name: "사이드바 접기" }));
+
+      expect(readProbe()).toEqual({
+        baselineWidth: limits.defaultWidth,
+        renderedWidth: COLLAPSED_PANEL_WIDTH,
+        collapsed: true,
+      });
+    });
   });
 });

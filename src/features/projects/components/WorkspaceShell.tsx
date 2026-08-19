@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useEffect, useMemo, useState, type CSSProperties } from "react";
 import type {
   CustomRulesActions,
   CustomRulesState,
@@ -25,6 +25,17 @@ import {
   MENU_KEYS,
   browserMenuLastSeenStore,
 } from "../infrastructure/browserMenuLastSeenStore";
+import {
+  PANEL_LIMITS,
+  defaultPanelWidth,
+  resolveRenderedPanelWidths,
+  type PanelReclaimInput,
+} from "../domain/panelLayout";
+import {
+  browserPanelLayoutStore,
+  type PanelLayoutEntry,
+  type PanelLayoutState,
+} from "../infrastructure/browserPanelLayoutStore";
 import { UpdateControl } from "../../updater/components/UpdateControl";
 import { Icon } from "../../../shared/ui/Icon";
 import { AgentRuntimeView, ExecutionConsentDialog } from "./agents/AgentRuntimeView";
@@ -33,6 +44,11 @@ import { HelpView } from "./HelpView";
 import { IdeaComposer } from "./IdeaComposer";
 import { IdeaInbox } from "./IdeaInbox";
 import { MarkdownBody } from "./MarkdownBody";
+import {
+  PanelCollapseButton,
+  PanelCollapsedBar,
+  PanelResizeHandle,
+} from "./PanelLayoutControls";
 import { ProjectSearchDialog, type SearchItemKind } from "./ProjectSearchDialog";
 import { QaWorkbench } from "./qa/QaWorkbench";
 import { SettingsView } from "./SettingsView";
@@ -166,6 +182,18 @@ function NavChangeDot({ changed }: { changed: boolean }) {
   );
 }
 
+/** 사이드바를 가리키는 이름. 핸들과 접기 버튼과 세로 바의 접근 이름과 툴팁이 이 값에서 나온다. */
+const SIDEBAR_LABEL = "사이드바";
+
+/**
+ * 사이드바가 지금 차지하고 있는 자리 (SPEC-080 R8). 값 그대로 `measureReclaimedWidth`에 넣을 수 있는
+ * 모양이며, 기획서 화면과 아이디어 화면의 읽기 폭 계산이 TASK-S080-04에서 이것을 읽는다.
+ *
+ * props로 내려보내지 않은 것은 받는 두 화면 파일이 이 작업의 선언 범위 밖이기 때문이다. 그 파일들의
+ * props를 여기서 만들 수 없으므로, 값을 만드는 자리만 고쳐 통로를 세우는 방법이 이것뿐이다.
+ */
+export const SidebarLayoutContext = createContext<PanelReclaimInput | null>(null);
+
 export function WorkspaceShell({
   agentRuntime,
   agentRuntimeActions,
@@ -217,6 +245,12 @@ export function WorkspaceShell({
   // 지금 고른 워크플로우의 메뉴별 마지막 확인 시각. 저장소가 정본이고 이 상태는 화면을 다시 그리기
   // 위한 사본이다. 기록이 없는 메뉴는 키 자체가 없다.
   const [menuLastSeen, setMenuLastSeen] = useState<Record<string, string>>({});
+  // 패널 배치. 저장소가 정본이고 이 상태는 화면을 다시 그리기 위한 사본이다. 이 화면이 다루는 영역은
+  // 사이드바 하나지만, 저장 단위가 앱 전체라 다른 영역의 항목까지 함께 들고 저장한다.
+  const [panelLayout, setPanelLayout] = useState<PanelLayoutState>(() => browserPanelLayoutStore.load());
+  // 그리는 너비 계산이 창 폭을 받으므로 그 값을 상태로 둔다. 창이 넓어지면 줄여 그리던 너비가 저장해
+  // 둔 값으로 돌아와야 하고, 다시 그리려면 폭이 바뀐 사실이 상태로 들어와야 한다.
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
 
   const activeRuns = (agentRuntime?.queue?.runs ?? []).filter((run) =>
     ["reserved", "queued", "running", "paused"].includes(run.state),
@@ -281,6 +315,14 @@ export function WorkspaceShell({
     return () => window.removeEventListener("keydown", handleSearchShortcut);
   }, []);
 
+  useEffect(() => {
+    function handleResize() {
+      setWindowWidth(window.innerWidth);
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
   const workflow = useMemo(
     () => project.workflows.find((item) => item.directory === selectedDirectory),
     [project.workflows, selectedDirectory],
@@ -313,6 +355,69 @@ export function WorkspaceShell({
       ),
     [workflow, menuLastSeen],
   );
+
+  const sidebarEntry = panelLayout.sidebar;
+  const sidebarCollapsed = sidebarEntry?.collapsed ?? false;
+  /*
+   * 사이드바의 기준 너비. 조절하기 전에 그려지던 너비이며, 화면에서 재지 않고 영역 표에서 가져온다.
+   * 표가 사이드바에 기본 너비를 주므로 이 값은 비지 않는다.
+   */
+  const sidebarBaselineWidth = defaultPanelWidth("sidebar", windowWidth) ?? PANEL_LIMITS.sidebar.minWidth;
+  /*
+   * 지금 그리는 px 너비. 한 번도 조절하지 않고 접히지도 않았으면 값이 없고, 그때는 스타일 규칙의
+   * 되돌림 값이 사이드바를 그린다. 창이 좁아 저장한 너비를 다 그릴 수 없을 때 값을 줄이는 것도, 접힌
+   * 동안 28px을 돌려주는 것도 이 계산이 한다. 저장한 값은 그 사이 바뀌지 않는다.
+   */
+  const sidebarRenderedWidth = resolveRenderedPanelWidths({
+    windowWidth,
+    storedWidths: sidebarEntry?.width === undefined ? {} : { sidebar: sidebarEntry.width },
+    collapsed: sidebarCollapsed ? ["sidebar"] : [],
+  }).sidebar;
+  /** 핸들이 잡고 시작하는 너비. 아직 조절하지 않았으면 지금 그려지고 있는 기준 너비다. */
+  const sidebarWidth = sidebarRenderedWidth ?? sidebarBaselineWidth;
+
+  const sidebarLayout = useMemo<PanelReclaimInput>(
+    () => ({
+      baselineWidth: sidebarBaselineWidth,
+      renderedWidth: sidebarRenderedWidth,
+      collapsed: sidebarCollapsed,
+    }),
+    [sidebarBaselineWidth, sidebarCollapsed, sidebarRenderedWidth],
+  );
+
+  /** 사이드바 항목을 갈아 끼우고 같은 상태를 저장소에 남긴다. 저장 실패는 저장소가 삼킨다. */
+  function saveSidebarLayout(entry: PanelLayoutEntry) {
+    const next: PanelLayoutState = { ...panelLayout, sidebar: entry };
+    setPanelLayout(next);
+    browserPanelLayoutStore.save(next);
+  }
+
+  /*
+   * 드래그와 방향키가 정한 너비. 들어오는 값은 조작 요소가 이미 한계 안으로 자른 값이다. 처음
+   * 조작하는 순간의 기준 너비를 함께 남겨, 이 영역이 얼마나 좁아졌는지 나중에 잴 자리를 만든다.
+   */
+  function changeSidebarWidth(width: number) {
+    saveSidebarLayout({
+      ...sidebarEntry,
+      width,
+      baselineWidth: sidebarEntry?.baselineWidth ?? sidebarBaselineWidth,
+    });
+  }
+
+  /** 더블클릭. 정해 둔 너비를 지워 스타일 규칙의 되돌림 값으로 되돌린다 (SPEC-080 R3, R11). */
+  function resetSidebarWidth() {
+    const entry: PanelLayoutEntry = { ...sidebarEntry };
+    delete entry.width;
+    saveSidebarLayout(entry);
+  }
+
+  /*
+   * 접고 펴기. 펼칠 때 따로 너비를 되돌리지 않는다. 접는 동안에도 저장한 너비는 그대로 남아 있어,
+   * 접힘만 내리면 접기 직전에 그리던 너비가 그대로 다시 나온다.
+   */
+  function collapseSidebar(collapsed: boolean) {
+    saveSidebarLayout({ ...sidebarEntry, collapsed });
+  }
 
   /** 기능 하나를 지정해 품질 확인 작업대를 연다. 중간 화면을 거치지 않는다. */
   function openQaFeature(featureKey: string) {
@@ -415,14 +520,31 @@ export function WorkspaceShell({
     (agentRuntime?.policy?.policy.automationEnabled ?? false) &&
     runtimeConsent?.status === "required";
 
+  /*
+   * 한 번도 조절하지 않고 접히지도 않은 사이드바에는 변수를 싣지 않는다. 그래야 넓은 창에서 250px,
+   * 창 폭 980px 이하에서 210px이라는 지금 배치가 스타일 규칙의 되돌림 값으로 그대로 나온다.
+   */
+  const appShellStyle =
+    sidebarRenderedWidth === undefined
+      ? undefined
+      : ({ "--sidebar-width": `${sidebarRenderedWidth}px` } as CSSProperties);
+
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <button className="project-switcher" onClick={onSwitchProject}>
-          <span className="brand-mark tiny"><Icon name="workflow" /></span>
-          <span><strong>{project.name}</strong><small>프로젝트 전환</small></span>
-          <Icon className="chevron" name="chevron" />
-        </button>
+    <SidebarLayoutContext.Provider value={sidebarLayout}>
+    <main className="app-shell" style={appShellStyle}>
+      <aside className={sidebarCollapsed ? "sidebar sidebar-collapsed" : "sidebar"}>
+      {sidebarCollapsed ? (
+        <PanelCollapsedBar label={SIDEBAR_LABEL} onExpand={() => collapseSidebar(false)} />
+      ) : (
+        <>
+        <div className="sidebar-switcher-row">
+          <button className="project-switcher" onClick={onSwitchProject}>
+            <span className="brand-mark tiny"><Icon name="workflow" /></span>
+            <span><strong>{project.name}</strong><small>프로젝트 전환</small></span>
+            <Icon className="chevron" name="chevron" />
+          </button>
+          <PanelCollapseButton label={SIDEBAR_LABEL} onCollapse={() => collapseSidebar(true)} />
+        </div>
 
         {/* 세 묶음: 결정 허브(오늘) · 작업 흐름(아이디어→품질 확인) · 지난 일(기록·활동) */}
         <nav className="primary-nav" aria-label="주요 메뉴">
@@ -501,6 +623,16 @@ export function WorkspaceShell({
           <button className={`settings-link ${view === "help" ? "active" : ""}`} onClick={() => setView("help")}><Icon name="help" />도움말</button>
           <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" />설정</button>
         </div>
+
+        <PanelResizeHandle
+          label={SIDEBAR_LABEL}
+          onReset={resetSidebarWidth}
+          onWidthChange={changeSidebarWidth}
+          region="sidebar"
+          width={sidebarWidth}
+        />
+        </>
+      )}
       </aside>
 
       <section className="workspace">
@@ -734,6 +866,7 @@ export function WorkspaceShell({
       )}
 
     </main>
+    </SidebarLayoutContext.Provider>
   );
 }
 
