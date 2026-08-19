@@ -13,11 +13,14 @@ type IdeaBodyState =
   | { kind: "loaded"; body: string }
   | { kind: "failed" };
 
-type IdeaState = "inbox" | "drafting" | "closed" | "adopted";
+type IdeaState = "inbox" | "drafting" | "redrafting" | "closed" | "adopted";
 
 /** 백엔드가 파생해 실어 보낸 값이다. 화면이 판정을 다시 하지 않는다(SPEC-012 R6). */
 function ideaState(item: WorkflowItemSummary): IdeaState {
-  return item.status === "drafting" || item.status === "closed" || item.status === "adopted"
+  return item.status === "drafting" ||
+    item.status === "redrafting" ||
+    item.status === "closed" ||
+    item.status === "adopted"
     ? item.status
     : "inbox";
 }
@@ -25,6 +28,7 @@ function ideaState(item: WorkflowItemSummary): IdeaState {
 const stateLabels: Record<IdeaState, string> = {
   inbox: "수집됨",
   drafting: "반영중",
+  redrafting: "재반영중",
   closed: "종결",
   adopted: "채택",
 };
@@ -32,6 +36,7 @@ const stateLabels: Record<IdeaState, string> = {
 const stateIcons: Record<IdeaState, IconName> = {
   inbox: "idea",
   drafting: "refresh",
+  redrafting: "refresh",
   closed: "archive",
   adopted: "stamp",
 };
@@ -39,6 +44,7 @@ const stateIcons: Record<IdeaState, IconName> = {
 const statePillClasses: Record<IdeaState, string> = {
   inbox: "",
   drafting: "status-drafting",
+  redrafting: "status-redrafting",
   closed: "status-rejected",
   adopted: "status-approved",
 };
@@ -214,13 +220,13 @@ function IdeaPreview({
           <strong>중단 의심</strong>
           <span>
             이 아이디어를 선점한 세션이 없는데 작성 중이던 기획서가 남아 있습니다. 걸린 기획서:{" "}
-            {item.stalledSpecIds?.join(", ")}. 자동 처리로 다시 잡히지 않으므로 직접 확인해야 합니다.
+            {item.stalledSpecIds?.join(", ")}. 다음 기획자 세션이 이 문서를 이어받아 계속 작성합니다.
           </span>
         </p>
       )}
       {/*
-        중단 의심과 함께 뜨지 않는다. `stalledSpecIds`는 반영중에서만 채워지므로 두 조건은 배타적이고,
-        그래서 두 안내가 같은 자리·같은 모양을 나눠 쓴다(SPEC-018 R6).
+        중단 의심과 함께 뜨지 않는다. `stalledSpecIds`는 반영중과 재반영중에서만 채워지므로 종결과는
+        배타적이고, 그래서 두 안내가 같은 자리·같은 모양을 나눠 쓴다(SPEC-018 R6, SPEC-082 R6).
       */}
       {state === "closed" && (
         <p className="idea-stall-note">

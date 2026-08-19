@@ -8,6 +8,8 @@ const secondIdea: WorkflowItemSummary = { fileName: "IDEA-002.md", id: "IDEA-002
 const draftingIdea: WorkflowItemSummary = { fileName: "IDEA-003.md", id: "IDEA-003", title: "쓰는 중인 생각", status: "drafting", stalledSpecIds: [], updatedAt: "2026-08-01T00:00:00Z", excerpt: "기획서를 쓰고 있다." };
 const stalledIdea: WorkflowItemSummary = { fileName: "IDEA-004.md", id: "IDEA-004", title: "멈춘 생각", status: "drafting", stalledSpecIds: ["SPEC-013"], updatedAt: "2026-08-02T00:00:00Z", excerpt: "세션이 죽었다." };
 const closedIdea: WorkflowItemSummary = { fileName: "IDEA-005.md", id: "IDEA-005", title: "끝난 생각", status: "closed", stalledSpecIds: [], updatedAt: "2026-08-03T00:00:00Z", excerpt: "기획서가 모두 반려됐다." };
+const redraftingIdea: WorkflowItemSummary = { fileName: "IDEA-006.md", id: "IDEA-006", title: "다시 쓰는 생각", status: "redrafting", stalledSpecIds: [], updatedAt: "2026-08-04T00:00:00Z", excerpt: "수정 요청을 받아 다시 쓴다." };
+const stalledRedraftingIdea: WorkflowItemSummary = { fileName: "IDEA-007.md", id: "IDEA-007", title: "다시 쓰다 멈춘 생각", status: "redrafting", stalledSpecIds: ["SPEC-021"], updatedAt: "2026-08-05T00:00:00Z", excerpt: "재작성 세션이 죽었다." };
 
 const workflow: WorkflowSummary = {
   id: "wf_1",
@@ -98,7 +100,7 @@ describe("IdeaInbox", () => {
       />,
     );
 
-    const badge = () => within(screen.getByRole("article")).getByText(/^(수집됨|반영중|채택)$/);
+    const badge = () => within(screen.getByRole("article")).getByText(/^(수집됨|반영중|재반영중|채택)$/);
     expect(badge()).toHaveTextContent("수집됨");
 
     fireEvent.click(screen.getByRole("button", { name: /쓰는 중인 생각/ }));
@@ -144,7 +146,8 @@ describe("IdeaInbox", () => {
     const preview = within(screen.getByRole("article"));
     expect(preview.getByText("중단 의심")).toBeInTheDocument();
     expect(preview.getByText(/SPEC-013/)).toBeInTheDocument();
-    expect(preview.getByText(/직접 확인해야 합니다/)).toBeInTheDocument();
+    expect(preview.getByText(/다음 기획자 세션이 이 문서를 이어받아/)).toBeInTheDocument();
+    expect(screen.queryByText(/직접 확인해야 합니다/)).toBeNull();
   });
 
   it("lists every stalled specification", async () => {
@@ -249,6 +252,76 @@ describe("IdeaInbox", () => {
     expect(article.querySelector(".status-pill")).toHaveTextContent("채택");
     expect(screen.queryByText("종결")).toBeNull();
     expect(screen.queryByText(/새 아이디어로 요청해야 합니다/)).toBeNull();
+  });
+
+  it("tells a redrafting idea apart from a drafting one in the row and the preview", async () => {
+    render(
+      <IdeaInbox
+        busy={false}
+        disabled={false}
+        onAdd={vi.fn()}
+        onReadIdea={vi.fn().mockResolvedValue(documentFor(firstIdea, "본문"))}
+        workflow={withIdeas(firstIdea, draftingIdea, redraftingIdea)}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /다시 쓰는 생각/ });
+    expect(within(row).getByText("재반영중")).toBeInTheDocument();
+    expect(within(row).queryByText("반영중")).toBeNull();
+
+    fireEvent.click(row);
+    const badge = within(screen.getByRole("article")).getByText(
+      /^(수집됨|반영중|재반영중|채택)$/,
+    );
+    expect(badge).toHaveTextContent("재반영중");
+  });
+
+  it("gives the redrafting state its own colour hooks and the drafting icon", async () => {
+    render(
+      <IdeaInbox
+        busy={false}
+        disabled={false}
+        onAdd={vi.fn()}
+        onReadIdea={vi.fn().mockResolvedValue(documentFor(redraftingIdea, "본문"))}
+        workflow={withIdeas(draftingIdea, redraftingIdea)}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /다시 쓰는 생각/ });
+    expect(row.querySelector(".idea-list-icon")?.className).toContain("redrafting");
+    expect(row.querySelector(".idea-state-tag")?.className).toContain("redrafting");
+
+    // 아이콘이 반영중과 같은 회전 화살표인지는 그려진 도형을 맞대어 확인한다.
+    const shape = (title: RegExp) =>
+      screen.getByRole("button", { name: title }).querySelector(".idea-list-icon svg")
+        ?.innerHTML;
+    expect(shape(/다시 쓰는 생각/)).toBe(shape(/쓰는 중인 생각/));
+
+    fireEvent.click(row);
+    expect(
+      screen.getByRole("article").querySelector(".status-pill")?.className,
+    ).toContain("status-redrafting");
+  });
+
+  it("shows the stall warning beside the redrafting badge", async () => {
+    render(
+      <IdeaInbox
+        busy={false}
+        disabled={false}
+        onAdd={vi.fn()}
+        onReadIdea={vi.fn().mockResolvedValue(documentFor(stalledRedraftingIdea, "본문"))}
+        workflow={withIdeas(stalledRedraftingIdea)}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /다시 쓰다 멈춘 생각/ });
+    expect(within(row).getByText("재반영중")).toBeInTheDocument();
+    expect(within(row).getByText("중단 의심")).toBeInTheDocument();
+
+    const preview = within(screen.getByRole("article"));
+    expect(preview.getByText("재반영중")).toBeInTheDocument();
+    expect(preview.getByText("중단 의심")).toBeInTheDocument();
+    expect(preview.getByText(/SPEC-021/)).toBeInTheDocument();
   });
 
   it("reads an unknown state as the inbox state", async () => {

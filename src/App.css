@@ -409,6 +409,7 @@ svg { width: 20px; height: 20px; }
 .status-rejected, .status-blocked { color: #8a3f38; background: #f3dfdc; }
 .status-in_progress { color: #805415; background: #f5e7c9; }
 .status-qa_waiting, .status-drafting { color: #3f6184; background: #deeaf5; }
+.status-redrafting { color: #54508f; background: #e6e4f3; }
 
 /* Idea inbox */
 .idea-inbox-view .idea-composer { margin-top: 24px; }
@@ -426,6 +427,7 @@ svg { width: 20px; height: 20px; }
 .idea-list > button.active { border-color: #ccd8ce; background: #edf2ec; }
 .idea-list-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 9px; color: #9a6b3d; background: #f4e9d9; }
 .idea-list-icon.drafting { color: #3f6184; background: #deeaf5; }
+.idea-list-icon.redrafting { color: #54508f; background: #e6e4f3; }
 .idea-list-icon.adopted { color: #2c5c41; background: #e0ece2; }
 .idea-list-icon.closed { color: #8a3f38; background: #f3dfdc; }
 .idea-list-icon svg { width: 15px; }
@@ -433,6 +435,7 @@ svg { width: 20px; height: 20px; }
 .idea-list-tags { display: flex; gap: 4px; }
 .idea-state-tag { padding: 2px 6px; border-radius: 99px; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .idea-state-tag.drafting { color: #3f6184; background: #deeaf5; }
+.idea-state-tag.redrafting { color: #54508f; background: #e6e4f3; }
 .idea-state-tag.adopted { color: #286042; background: #dfeee4; }
 .idea-state-tag.closed { color: #8a3f38; background: #f3dfdc; }
 .idea-state-tag.stalled { color: #8a3f38; background: #f3dfdc; }

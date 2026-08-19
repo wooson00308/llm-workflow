@@ -41,7 +41,8 @@ export interface WorkflowItemSummary {
   title: string;
   /**
    * 문서의 상태. 아이디어에서는 파일 값이 아니라 조회 시점 파생값이며 `inbox`·`drafting`·
-   * `closed`·`adopted` 넷 중 하나다. `closed`는 참조 기획서가 모두 반려로 끝난 경우다. 앱은
+   * `redrafting`·`closed`·`adopted` 다섯 중 하나다. `redrafting`은 수정 요청으로 돌려보낸
+   * 기획서를 다시 쓰는 중인 경우이고, `closed`는 참조 기획서가 모두 반려로 끝난 경우다. 앱은
    * 판정 결과를 아이디어 파일에 쓰지 않는다.
    */
   status: string;
@@ -58,8 +59,10 @@ export interface WorkflowItemSummary {
   /** 그룹 QA 반려 뒤 만들어진 수정 작업이 어떤 결정을 근거로 하는지. */
   sourceQaDecisionId?: string | null;
   /**
-   * 중단 의심의 근거. 아이디어가 반영중인데 선점한 미만료 lease가 없을 때 걸려 있는 draft 기획서의
-   * 문서 id다. 비어 있지 않다는 것과 중단 의심은 같은 뜻이다. 기획서·개발 작업 항목에서는 비어 있다.
+   * 중단 의심의 근거. 아이디어가 반영중이거나 재반영중인데 선점한 미만료 lease가 없을 때 걸려 있는
+   * draft 기획서의 문서 id다. 선점에는 아이디어 id를 문 lease와, 그 아이디어에서 나온 기획서의 수정
+   * 요청 결정을 문 lease가 함께 들어간다(SPEC-082 R5). 비어 있지 않다는 것과 중단 의심은 같은
+   * 뜻이다. 기획서·개발 작업 항목에서는 비어 있다.
    */
   stalledSpecIds?: string[];
   /**
